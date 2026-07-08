@@ -27,6 +27,13 @@
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
 
+### Added
+
+- Added `/mcp refresh` to re-fetch tools from connected MCP servers without reconnecting ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
+### Fixed
+
+- Fixed MCP tools staying empty for the whole session when a server listed no tools during its warmup window, stale tools surviving after a server retired them, and an out-of-order `tools/list` response — or one from a process whose clock predates a backward system-time correction — caching a retired tool list for up to 30 days ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 ## [18.1.20] - 2026-09-13
 
 ### Added

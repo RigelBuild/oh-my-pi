@@ -4290,7 +4290,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//     `extensionRunner` so extensions loaded in that session receive frames.
 		//     Guarded only by `mcpManager` (see the second `if` below).
 		if (mcpManager && !options.mcpManager) {
-			mcpManager.setOnToolsChanged(async tools => {
+			// The install-time reconcile is awaited: `setOnToolsChanged` fires the
+			// handler against whatever the manager holds right now, and MCP
+			// discovery ran far enough upstream that a recovery re-list can already
+			// have replaced the snapshot this session was built from. Rebinding is
+			// asynchronous (registry swap plus a system-prompt rebuild), so
+			// returning before it settles would expose a session whose first prompt
+			// still carries the pre-recovery roster and prompt. Errors are already
+			// swallowed inside the handler, so this only orders startup.
+			await mcpManager.setOnToolsChanged(async tools => {
 				try {
 					await session.refreshMCPTools(tools);
 				} catch (error) {
