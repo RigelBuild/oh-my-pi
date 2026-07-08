@@ -67,10 +67,34 @@ export class MCPToolCache {
 
 		if (parsed.configHash !== currentHash) return null;
 
+		// An empty cached toolset is treated as a MISS. A gateway warming up (or
+		// any server mid-restart) can answer `tools/list` with a successful
+		// `[]`; caching that as authoritative for 30 days poisoned every later
+		// session. Returning null forces a live re-list instead — and self-heals
+		// any pre-fix poisoned entry on the next read.
+		if (parsed.tools.length === 0) return null;
+
 		return parsed.tools as MCPToolDefinition[];
 	}
 
 	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
+		// An empty `tools/list` must never leave a *stale* non-empty entry
+		// standing: if the server genuinely dropped its tools, a later slow-start
+		// (one whose live list misses the startup race) would load those obsolete
+		// tools from cache. So invalidate an existing entry — but never *create*
+		// an authoritative empty one (the transient warmup empty this PR fixes).
+		// Invalidation writes an already-expired empty row: `getCache`'s
+		// `expires_at > now` filter then misses it, `cleanExpiredCache` reaps it,
+		// and `get`'s empty-guard is a second line of defense for stores that
+		// ignore expiry. A server with nothing cached needs no write at all.
+		if (tools.length === 0) {
+			if (this.storage.getCache(cacheKey(serverName)) !== null) {
+				const emptyPayload: MCPToolCachePayload = { version: CACHE_VERSION, configHash: "", tools: [] };
+				this.storage.setCache(cacheKey(serverName), JSON.stringify(emptyPayload), 0);
+			}
+			return;
+		}
+
 		let configHash: string;
 		try {
 			configHash = await hashConfig(config);
