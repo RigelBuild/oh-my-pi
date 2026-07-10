@@ -442,6 +442,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	// time-derived rows (current-tool elapsed, retry countdown) cannot drift
 	// a committed byte on later rebuilds (theme epoch, image toggles).
 	#taskRenderNowMs = Date.now();
+	// One-way latch for a RUNNING renderless card whose spinner row has entered
+	// native scrollback: the animation is stopped so the committed copy carries
+	// the static `pending` glyph, not a frozen spinner frame (see
+	// #maybeFreezeCommittedSpinner).
+	#committedSpinnerFrozen = false;
 	// Set on each `render()` when the last painted pending shape must be
 	// replayed wholesale when the first result arrives. Reset gates key off
 	// these so a topology-changing update that lands before the shape reaches
@@ -826,6 +831,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// A detached task block that scrolled into native scrollback stops the
 		// instant it leaves the repaintable region.
 		if (this.#maybeFreezeBackgroundTask()) return;
+		// A running renderless card whose spinner row has committed to native
+		// scrollback: stop animating so the committed copy is static.
+		if (this.#maybeFreezeCommittedSpinner()) return;
 		this.#spinnerFrame = frame;
 		this.#renderState.spinnerFrame = frame;
 		this.#ui.requestComponentRender(this);
@@ -857,6 +865,33 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			this.#updateDisplay();
 			this.#ui.requestRender();
 		}
+		return true;
+	}
+
+	/**
+	 * Freeze a RUNNING renderless card's spinner once its rows have entered
+	 * immutable native scrollback. A generic-fallback card (no renderCall/
+	 * renderResult) paints an animated spinner frame; if that row scrolls
+	 * off-grid and commits while the card is still running, the frozen snapshot
+	 * bears a volatile animation glyph the later seal cannot retract — the
+	 * reported "renders twice, 2nd copy has a spinner" double. Stopping the
+	 * animation the moment the rows commit makes the committed copy carry the
+	 * static `pending` glyph instead. One-way, like the background-task freeze.
+	 * Returns whether the spinner was frozen this call.
+	 */
+	#maybeFreezeCommittedSpinner(): boolean {
+		if (this.#committedSpinnerFrozen) return true;
+		// Only the generic fallback paints a spinner into a committable row; a
+		// custom renderCall/renderResult pending state is a static label.
+		if (this.#tool?.renderCall || this.#tool?.renderResult) return false;
+		if (this.#toolName in toolRenderers) return false;
+		if (this.#liveRegion === undefined) return false;
+		// Still fully on-grid (no row committed yet): keep animating.
+		if (this.#liveRegion.isBlockUncommitted?.(this) ?? true) return false;
+		this.#committedSpinnerFrozen = true;
+		this.stopAnimation();
+		this.#updateDisplay();
+		this.#ui.requestRender();
 		return true;
 	}
 
