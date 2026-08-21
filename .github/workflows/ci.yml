@@ -847,3 +847,28 @@ jobs:
                   -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                   commit -m "omp ${{ needs.release_metadata.outputs.release-tag }}" -- Formula/omp.rb
               git push origin HEAD:main
+
+   # Branch-protection aggregator: a single check-run literally named `CI` so
+   # the `["CI"]` required-status-check on `main` has one stable context to pin.
+   # It re-runs nothing — it only `needs:` the jobs that constitute the PR gate
+   # (lint/type-check/web build, the TS test buckets, and install-method smoke),
+   # so it goes green iff every real PR-gate job passed. Pinned to `ubuntu-22.04`
+   # to match the PR runner the gate jobs use (never `omp-kata`, which is
+   # non-PR). The native build, cross-platform, and release jobs are skipped on
+   # pull_request and are deliberately excluded.
+   ci:
+      name: CI
+      runs-on: ubuntu-22.04
+      needs:
+         - check
+         - test_workspace
+         - test_coding_agent_singleton
+         - test_ts_native
+         - test_coding_agent_ui
+         - test_coding_agent_runtime
+         - test_coding_agent_native
+         - test_smoke
+         - install_methods
+      steps:
+         - name: All required CI jobs passed
+           run: echo "all required CI jobs passed"
