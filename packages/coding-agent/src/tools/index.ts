@@ -11,6 +11,7 @@ import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { checkRubyKernelAvailability } from "../eval/rb/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
+import type { RefreshResult, RefreshScope } from "../extensibility/reload";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -60,6 +61,7 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
+import { RefreshTool } from "./refresh";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
@@ -100,6 +102,7 @@ export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
 export * from "./read";
+export * from "./refresh";
 export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
@@ -186,6 +189,13 @@ export interface ToolSession {
 	skills?: readonly Skill[];
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
+	/**
+	 * Re-read frozen config surfaces (skills · rules · settings/model · MCP) from
+	 * disk into the live session without a restart. Backs the `refresh` tool and
+	 * `/refresh` command. Absent on sessions with no backing `AgentSession` (e.g.
+	 * the read-CLI harness).
+	 */
+	refresh?: (scope: RefreshScope) => Promise<RefreshResult>;
 	/** Pre-loaded prompt templates */
 	promptTemplates?: PromptTemplate[];
 	/** Pre-loaded rules (forwarded to subagents to skip re-discovery). */
@@ -456,6 +466,10 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	// Unconditional (unlike restart's `createIf`): refresh is always a valid
+	// command whose "unavailable" message when the session hook is unbound is
+	// itself the contract (OQ-9).
+	refresh: s => new RefreshTool(s),
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
