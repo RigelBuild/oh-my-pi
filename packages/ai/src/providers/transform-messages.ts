@@ -29,6 +29,40 @@ const enum ToolCallStatus {
  */
 const MAX_TOOL_CALL_ID_LENGTH = 64;
 
+/**
+ * Canonical key for pairing a tool result with its assistant tool call.
+ *
+ * The OpenAI Codex Responses API stores a tool result's id as a composite
+ * `<call_id>|<response_item_id>` (e.g. `call_ABC|fc_XYZ`), while the assistant
+ * `toolCall` that produced it carries the plain `call_ABC`. The two must pair,
+ * but a raw-string compare treats them as disjoint — the real result is never
+ * pulled into the call's window and the call is back-filled with a synthetic
+ * "No result provided" stub (SEA-1160). Keying both sides on the FIRST segment
+ * (the wire call_id — see `appendDuplicateSuffix` / `normalizeResponsesToolCallId`,
+ * which split on `|`) pairs them, while NOT collapsing two distinct parallel
+ * calls whose results happen to share a `response_item` (`fc_`) half.
+ *
+ * Pairing keys are used only for lookup; the messages' own ids are left intact
+ * so the provider encoder still receives the exact wire ids it expects.
+ *
+ * A valid wire call_id is non-empty, so the first segment is too; a degenerate
+ * `|itemId` (empty call half) is keyed on its full id rather than collapsing
+ * every such result onto one empty-string bucket.
+ *
+ * LOAD-BEARING INVARIANT: pairing correctness depends on the wire `call_id`
+ * being unique per distinct tool call. The Codex Responses wire guarantees this
+ * (distinct parallel calls carry distinct call_ids; only the `fc_` half varies),
+ * and genuine cross-turn id reuse is `_dup`-suffixed on the call_ segment by
+ * `deduplicateToolCallIds` (which this key preserves). Two DISTINCT calls sharing
+ * a call_ half with different item halves would collapse onto one key — but that
+ * shape is not producible by the wire; if a provider ever emits it, this needs a
+ * FIFO tiebreaker on the full id.
+ */
+function toolCallPairingKey(id: string): string {
+	const pipe = id.indexOf("|");
+	return pipe <= 0 ? id : id.slice(0, pipe);
+}
+
 function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
 	// Responses-family ids are composites (`callId|itemId`): the wire call_id is
 	// the FIRST segment (normalizeResponsesToolCallId splits on `|`), so the
@@ -62,11 +96,17 @@ function deduplicateToolCallIds(
 
 	return messages.map(msg => {
 		if (msg.role === "toolResult") {
-			const rewrites = pendingToolResultRewrites.get(msg.toolCallId);
+			// Pair on the call_ component: a composite result id
+			// (`call_X|fc_Y`) must find the rewrite enqueued under its assistant
+			// call's canonical id. Raw-string keying here misses the composite,
+			// so the `_dup` remap silently no-ops and a reused call_id's later
+			// result is dropped downstream (SEA-1160).
+			const key = toolCallPairingKey(msg.toolCallId);
+			const rewrites = pendingToolResultRewrites.get(key);
 			if (!rewrites || rewrites.length === 0) return msg;
 
 			const rewrite = rewrites.shift();
-			if (rewrites.length === 0) pendingToolResultRewrites.delete(msg.toolCallId);
+			if (rewrites.length === 0) pendingToolResultRewrites.delete(key);
 			if (rewrite) return { ...msg, toolCallId: rewrite.replacementId };
 			return msg;
 		}
@@ -90,6 +130,13 @@ function deduplicateToolCallIds(
 		const content = msg.content.map(block => {
 			if (block.type !== "toolCall") return block;
 
+			// Route all dedup bookkeeping by the call_ component so a plain
+			// assistant id and a composite result id (`call_X` / `call_X|fc_Y`)
+			// share one counter + rewrite queue. The `_dup` SUFFIX still lands on
+			// the full wire id via `appendDuplicateSuffix` (below) — only the
+			// KEYING is canonical, so emitted ids are unchanged.
+			const blockKey = toolCallPairingKey(block.id);
+
 			// Drop any pending rewrites carried over from a prior assistant turn
 			// for this id on its first appearance this turn. When a later turn
 			// re-emits the same id, the older duplicate call's expected result
@@ -97,15 +144,15 @@ function deduplicateToolCallIds(
 			// "No result provided" for it, and the upcoming real result(id) must
 			// route to one of THIS turn's calls. Without this guard the older
 			// `_dup` id would steal the next result.
-			if (!idsTouchedInTurn.has(block.id)) {
-				pendingToolResultRewrites.delete(block.id);
-				idsTouchedInTurn.add(block.id);
+			if (!idsTouchedInTurn.has(blockKey)) {
+				pendingToolResultRewrites.delete(blockKey);
+				idsTouchedInTurn.add(blockKey);
 			}
 
-			const previousCount = seenToolCallIds.get(block.id) ?? 0;
+			const previousCount = seenToolCallIds.get(blockKey) ?? 0;
 			if (previousCount === 0) {
-				seenToolCallIds.set(block.id, 1);
-				enqueueToolResultRewrite(block.id, undefined);
+				seenToolCallIds.set(blockKey, 1);
+				enqueueToolResultRewrite(blockKey, undefined);
 				return block;
 			}
 
@@ -115,7 +162,7 @@ function deduplicateToolCallIds(
 				`${duplicateSuffixPrefix}${duplicateIndex}`,
 				maxToolCallIdLength,
 			);
-			while (seenToolCallIds.has(replacementId)) {
+			while (seenToolCallIds.has(toolCallPairingKey(replacementId))) {
 				duplicateIndex += 1;
 				replacementId = appendDuplicateSuffix(
 					block.id,
@@ -123,9 +170,9 @@ function deduplicateToolCallIds(
 					maxToolCallIdLength,
 				);
 			}
-			seenToolCallIds.set(block.id, duplicateIndex + 1);
-			seenToolCallIds.set(replacementId, 1);
-			enqueueToolResultRewrite(block.id, { replacementId });
+			seenToolCallIds.set(blockKey, duplicateIndex + 1);
+			seenToolCallIds.set(toolCallPairingKey(replacementId), 1);
+			enqueueToolResultRewrite(blockKey, { replacementId });
 			contentChanged = true;
 			return { ...block, id: replacementId };
 		});
@@ -858,13 +905,14 @@ export function transformMessages<TApi extends Api>(
 		const msg = transformed[index];
 		if (msg.role === "toolResult") {
 			const entry: IndexedToolResult = { index, msg, consumed: false };
-			const entries = realToolResultsById.get(msg.toolCallId);
+			const key = toolCallPairingKey(msg.toolCallId);
+			const entries = realToolResultsById.get(key);
 			if (entries) entries.push(entry);
-			else realToolResultsById.set(msg.toolCallId, [entry]);
+			else realToolResultsById.set(key, [entry]);
 		}
 	}
 	const takeRealToolResult = (id: string, afterIndex: number): ToolResultMessage | undefined => {
-		const entries = realToolResultsById.get(id);
+		const entries = realToolResultsById.get(toolCallPairingKey(id));
 		if (!entries) return undefined;
 		for (const entry of entries) {
 			if (entry.consumed || entry.index <= afterIndex) continue;
@@ -883,7 +931,7 @@ export function transformMessages<TApi extends Api>(
 	for (const msg of transformed) {
 		if (msg.role !== "assistant") continue;
 		for (const block of msg.content) {
-			if (block.type === "toolCall") validToolUseIds.add(block.id);
+			if (block.type === "toolCall") validToolUseIds.add(toolCallPairingKey(block.id));
 		}
 	}
 
@@ -904,11 +952,12 @@ export function transformMessages<TApi extends Api>(
 	const flushPendingToolCalls = (timestamp: number): void => {
 		if (pendingToolCalls.length === 0) return;
 		for (const tc of pendingToolCalls) {
-			if (toolCallStatus.has(tc.id)) continue;
+			const statusKey = toolCallPairingKey(tc.id);
+			if (toolCallStatus.has(statusKey)) continue;
 			const realToolResult = takeRealToolResult(tc.id, pendingToolCallsStartIndex);
 			if (realToolResult) {
 				result.push(realToolResult);
-				toolCallStatus.set(tc.id, ToolCallStatus.Resolved);
+				toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 				continue;
 			}
 			result.push({
@@ -919,7 +968,7 @@ export function transformMessages<TApi extends Api>(
 				isError: true,
 				timestamp,
 			} as ToolResultMessage);
-			toolCallStatus.set(tc.id, ToolCallStatus.Resolved);
+			toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 		}
 		pendingToolCalls = [];
 	};
@@ -927,11 +976,12 @@ export function transformMessages<TApi extends Api>(
 	const flushPendingAbortedToolCalls = (): void => {
 		if (pendingAbortedTimestamp === undefined) return;
 		for (const tc of pendingAbortedToolCalls.values()) {
-			if (toolCallStatus.has(tc.id)) continue;
+			const statusKey = toolCallPairingKey(tc.id);
+			if (toolCallStatus.has(statusKey)) continue;
 			const realToolResult = takeRealToolResult(tc.id, pendingAbortedStartIndex);
 			if (realToolResult) {
 				result.push(realToolResult);
-				toolCallStatus.set(tc.id, ToolCallStatus.Resolved);
+				toolCallStatus.set(statusKey, ToolCallStatus.Resolved);
 				continue;
 			}
 			result.push({
@@ -942,7 +992,7 @@ export function transformMessages<TApi extends Api>(
 				isError: true,
 				timestamp: pendingAbortedTimestamp,
 			} as ToolResultMessage);
-			toolCallStatus.set(tc.id, ToolCallStatus.Aborted);
+			toolCallStatus.set(statusKey, ToolCallStatus.Aborted);
 		}
 		pendingAbortedToolCalls = new Map();
 		pendingAbortedTimestamp = undefined;
@@ -982,7 +1032,9 @@ export function transformMessages<TApi extends Api>(
 				// emitted immediately if available; otherwise synthesize aborted results
 				// before the next turn boundary.
 				result.push(msg);
-				pendingAbortedToolCalls = new Map(toolCalls.map(toolCall => [toolCall.id, toolCall] as const));
+				pendingAbortedToolCalls = new Map(
+					toolCalls.map(toolCall => [toolCallPairingKey(toolCall.id), toolCall] as const),
+				);
 				pendingAbortedTimestamp = assistantMsg.timestamp;
 				pendingAbortedStartIndex = i;
 				continue;
@@ -995,22 +1047,23 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
-			if (toolCallStatus.has(msg.toolCallId)) continue;
+			const resultKey = toolCallPairingKey(msg.toolCallId);
+			if (toolCallStatus.has(resultKey)) continue;
 
-			if (pendingAbortedToolCalls.has(msg.toolCallId)) {
-				pendingAbortedToolCalls.delete(msg.toolCallId);
-				toolCallStatus.set(msg.toolCallId, ToolCallStatus.Resolved);
+			if (pendingAbortedToolCalls.has(resultKey)) {
+				pendingAbortedToolCalls.delete(resultKey);
+				toolCallStatus.set(resultKey, ToolCallStatus.Resolved);
 				result.push(msg);
 				continue;
 			}
 
-			if (pendingToolCalls.some(tc => tc.id === msg.toolCallId)) {
-				toolCallStatus.set(msg.toolCallId, ToolCallStatus.Resolved);
+			if (pendingToolCalls.some(tc => toolCallPairingKey(tc.id) === resultKey)) {
+				toolCallStatus.set(resultKey, ToolCallStatus.Resolved);
 				result.push(msg);
 				continue;
 			}
 
-			if (!validToolUseIds.has(msg.toolCallId)) {
+			if (!validToolUseIds.has(resultKey)) {
 				// Orphan `tool_result`: the originating `tool_use` is not present in the
 				// transformed history (typically because handoff/compaction folded the
 				// assistant message into a summary string while the user-side result
@@ -1029,7 +1082,10 @@ export function transformMessages<TApi extends Api>(
 				//
 				// Drop the orphan silently in that case; the pending calls will be
 				// resolved in their own contiguous result window or at the next boundary.
-				if (pendingToolCalls.some(tc => !toolCallStatus.has(tc.id)) || pendingAbortedToolCalls.size > 0) {
+				if (
+					pendingToolCalls.some(tc => !toolCallStatus.has(toolCallPairingKey(tc.id))) ||
+					pendingAbortedToolCalls.size > 0
+				) {
 					continue;
 				}
 				// No pending tool-call window: safe to preserve the text payload so the
