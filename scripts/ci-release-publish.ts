@@ -475,6 +475,10 @@ if (import.meta.main) {
 		const publishNames: string[] = [];
 		for (const pkg of packages) {
 			const manifest = (await Bun.file(path.join(repoRoot, pkg.dir, "package.json")).json()) as PackageManifest;
+			// Match the set that actually publishes: publishPackage skips private
+			// manifests, so the guard must too, or a future private package could
+			// throw a false-positive collision that blocks the whole publish.
+			if (manifest.private) continue;
 			if (typeof manifest.name === "string") publishNames.push(manifest.name);
 			if (pkg.kind === "native") {
 				for (const target of LEAF_TARGETS) publishNames.push(`@oh-my-pi/pi-natives-${target.tag}`);
