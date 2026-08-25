@@ -109,6 +109,7 @@ import {
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
+import type { RefreshScope } from "./extensibility/reload";
 import {
 	loadSkills as loadSkillsInternal,
 	type Skill,
@@ -606,6 +607,50 @@ export interface CreateAgentSessionOptions {
 	 * requests, follows it), which is the right granularity for launch timing.
 	 */
 	onFirstChatDispatch?: () => void;
+
+	/**
+	 * Cooperative restart hook for embedded hosts. When the session (or its
+	 * host) calls {@link AgentSession.requestRestart}, OMP latches out new turns,
+	 * waits for the running turn to settle, flushes the session file to disk,
+	 * disposes the session, then invokes this callback with the data needed to
+	 * re-attach. The session is already disposed when this fires, so the host
+	 * re-opens the manager (`await SessionManager.open(sessionFile)`) and recreates
+	 * the session **through the same configured factory / options it used
+	 * originally**, substituting the reopened manager — re-passing this callback,
+	 * `onBeforeRefresh`, and all host options (cwd, agentDir, event bus, injected
+	 * settings). A bare `createAgentSession({ sessionManager })` drops every
+	 * option, so the recycled session would restart once and then never again, and
+	 * silently lose host config. Never create the replacement before this callback
+	 * (it cannot: the old session is gone) — that is the create-before-dispose
+	 * hazard OMP disposes first to avoid.
+	 *
+	 * Recycles ONLY this session (same loaded code); picking up a new OMP build is
+	 * a host-process-level operation, never triggered per-agent. Unset =>
+	 * `requestRestart()` refuses (restart unavailable).
+	 */
+	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
+
+	/**
+	 * Awaited at the top of `AgentSession.refresh(scope)`, before any config
+	 * surface is re-read. Gives an embedded host the chance to pull fresh
+	 * skills/rules/settings/MCP config and WRITE it to the disk paths the session
+	 * scans; the refresh then re-reads from disk as usual. Receives the scope so
+	 * the host pulls only what is being refreshed. Writes MUST be atomic across
+	 * the WHOLE scanned set, not merely per file: a `scope: "all"` pull stages
+	 * skills + rules + settings + MCP, and a per-file temp-then-rename leaves the
+	 * set torn if the host throws mid-way (file 1 renamed, file 2 not). Stage the
+	 * whole snapshot and activate it in one step (temp dir + single directory
+	 * rename / symlink flip), or carry a rollback that restores every path on
+	 * partial failure — so a mid-pull throw leaves the scanned paths untouched,
+	 * since a concurrent restart drains this refresh and a torn write would
+	 * otherwise be scanned by the replacement. Unset => no-op (existing behavior
+	 * unchanged). A rejection aborts the refresh.
+	 *
+	 * Refreshes skills/rules/settings/MCP only. New extension code is out of scope
+	 * for refresh — it is picked up on session recycle (the restart callback
+	 * re-runs `createAgentSession`, which re-runs extension discovery).
+	 */
+	onBeforeRefresh?: (scope: RefreshScope) => void | Promise<void>;
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
@@ -1591,26 +1636,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	}
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
-		"discoverTtsrRules",
-		async () => {
-			const { TtsrManager } = await import("./export/ttsr");
-			const ttsrSettings = settings.getGroup("ttsr");
-			const ttsrManager = new TtsrManager(ttsrSettings);
-			const rulesResult =
-				options.rules !== undefined
-					? { items: options.rules, warnings: undefined }
-					: await loadCapability<Rule>(ruleCapability.id, { cwd });
-			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-			});
-			if (existingSession.injectedTtsrRules.length > 0) {
-				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-			}
-			return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
-		},
-	);
+	// rulebookRules/alwaysApplyRules are `let` (not destructured `const`) so an in-session
+	// `refresh` can thread a reloaded roster into the `rebuildSystemPrompt` closure below
+	// via the `applyReloadedRoster` session callback.
+	let rulebookRules: Rule[] = [];
+	let alwaysApplyRules: Rule[] = [];
+	const { ttsrManager, allRules } = await logger.time("discoverTtsrRules", async () => {
+		const { TtsrManager } = await import("./export/ttsr");
+		const ttsrSettings = settings.getGroup("ttsr");
+		const ttsrManager = new TtsrManager(ttsrSettings);
+		const rulesResult =
+			options.rules !== undefined
+				? { items: options.rules, warnings: undefined }
+				: await loadCapability<Rule>(ruleCapability.id, { cwd });
+		const buckets = bucketRules(rulesResult.items, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+		});
+		rulebookRules = buckets.rulebookRules;
+		alwaysApplyRules = buckets.alwaysApplyRules;
+		if (existingSession.injectedTtsrRules.length > 0) {
+			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
+		}
+		return { ttsrManager, allRules: rulesResult.items };
+	});
 
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
@@ -1747,6 +1796,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			refreshSkills: () => session.refreshSkills(),
 			refresh: scope => session.refresh(scope),
+			// Bound only when the host wired onRestartRequested, so the restart tool
+			// can guard on the binding's presence (like refresh guards on session.refresh).
+			requestRestart: options.onRestartRequested ? () => session.requestRestart() : undefined,
 			rules: allRules,
 			eventBus,
 			outputSchema: options.outputSchema,
@@ -3556,6 +3608,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			// Thread a reloaded roster into this closure's `skills`/`rulebookRules`/
+			// `alwaysApplyRules` so an in-session `refresh` re-renders the advertised
+			// roster (the advertisement reads these locals, not the process globals).
+			applyReloadedRoster: roster => {
+				skills = [...roster.skills];
+				rulebookRules = roster.rulebookRules;
+				alwaysApplyRules = roster.alwaysApplyRules;
+			},
+			onRestartRequested: options.onRestartRequested,
+			onBeforeRefresh: options.onBeforeRefresh,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
