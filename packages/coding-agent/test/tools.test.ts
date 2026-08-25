@@ -2206,6 +2206,14 @@ function b() {
 		it("should auto-background at the threshold even with a longer timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const updates: string[] = [];
+			// The command blocks on this fifo rather than on a sleep, so it cannot
+			// finish before the threshold at any CPU load — the upper bound below
+			// is structural, not a margin. Same convention as the abort test's
+			// `started.promise` further down: gate on a real event, never a beat.
+			const fifoPath = path.join(testDir, "auto-bg-gate.fifo");
+			if (!createFifoOrSkip(fifoPath)) {
+				return;
+			}
 			const asyncJobManager = new AsyncJobManager({
 				onJobComplete: async (jobId, text) => {
 					deliveries.push({ jobId, text });
@@ -2215,9 +2223,31 @@ function b() {
 				new BashTool(
 					createTestToolSession(
 						testDir,
+						// The threshold must exceed process-startup jitter, and this
+						// test flaked on a loaded box at `thresholdMs: 10` with a 30ms
+						// command (~35% here, 17/20 on a busier one) because 10ms does
+						// not.
+						//
+						// `#waitForManagedBashJob` races `Bun.sleep(thresholdMs)`
+						// against completion; the timer path passes
+						// `job.getLatestText()` into `#buildBackgroundStartResult`,
+						// which skips the preview block when the trimmed text is empty
+						// (`bash.ts:706`, `:919`, `:581-582` at time of writing). So if
+						// the shell has not produced output yet, the result is the bare
+						// notice with no "start". Measured spawn-to-first-output, three
+						// independent probes: p50 7.7-10.5ms, p90 15.1-22.2ms, max
+						// 27.9ms. A 10ms threshold loses 7-10 times in 20; 100ms clears
+						// the worst observed startup by ~3.6x and never lost in 0/20.
+						//
+						// This is the ONLY timing margin left: the other half of the
+						// race (the command must outlast the threshold, or it finishes
+						// first and never backgrounds — that shape fails 10/10,
+						// deterministically) is held by the fifo above, not by a sleep.
+						// So raise the threshold if this ever tightens; there is no
+						// command duration left to widen.
 						Settings.isolated({
 							"bash.autoBackground.enabled": true,
-							"bash.autoBackground.thresholdMs": 10,
+							"bash.autoBackground.thresholdMs": 100,
 						}),
 						{
 							getSessionId: () => "test-session",
@@ -2230,7 +2260,7 @@ function b() {
 			const result = await autoBackgroundBashTool.execute(
 				"test-call-9-auto-running",
 				{
-					command: "printf 'start\\n'; sleep 0.03; printf 'done\\n'",
+					command: `printf 'start\\n'; cat ${shellEscape(fifoPath)}; printf 'done\\n'`,
 					timeout: 3_600,
 				},
 				undefined,
@@ -2250,6 +2280,19 @@ function b() {
 			const runningJob = asyncJobManager.getJob(jobId);
 			expect(runningJob?.status).toBe("running");
 			const updatesAtBackground = updates.slice();
+			// Snapshot taken — let the command finish. Closing the write end is what
+			// releases the `cat`; no bytes are needed.
+			//
+			// O_NONBLOCK is load-bearing, not tidiness. A blocking write to a fifo
+			// with no reader never returns, and if the shell died before reaching
+			// `cat` (spawn failure, OOM-kill) that is exactly the state here. The
+			// write is synchronous, so it pins the event loop and bun's own test
+			// timeout — which needs a timer tick to fire — cannot interrupt it: a
+			// 2s `testTimeout` around this call still ran 13s until killed
+			// externally. O_NONBLOCK turns that unbounded hang into an immediate
+			// ENXIO naming the real cause.
+			const fifoFd = fs.openSync(fifoPath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+			fs.closeSync(fifoFd);
 			await runningJob?.promise;
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
 			expect(deliveries).toHaveLength(1);
