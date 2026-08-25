@@ -10,6 +10,7 @@
   - `packages/coding-agent/src/extensibility/reload.ts` — `reloadSkillsAndRules(...)`, `REFRESH_SCOPES`, `RefreshScope`, `RefreshResult`.
   - `packages/coding-agent/src/capability/rule-buckets.ts` — `bucketRules(...)` splits discovered rules into TTSR / always-apply / rulebook.
   - `packages/coding-agent/src/slash-commands/builtin-registry.ts` — the `/refresh [scope]` human surface.
+  - `packages/coding-agent/src/session/acp-permission-gate.ts` — `refresh` is listed in `PERMISSION_REQUIRED_TOOLS` and given a `getPermissionIntent` branch (title `Refresh {scope}`, per-scope `cacheKey: "refresh:{scope}"`), so a connected ACP client is prompted for permission before refresh executes.
 
 ## Inputs
 
@@ -66,6 +67,7 @@ If the session exposes no `refresh` hook, `execute` returns `Refresh is unavaila
 ## Limits & Caps
 - Tool execution mode: `approval = "exec"`, `concurrency = "exclusive"`, `strict = true`, `loadMode = "discoverable"`.
 - `approval = "exec"`: refresh reconnects MCP (arbitrary subprocess exec) and mutates cross-session state, so `resolveApproval` prompts for it (exec tier outranks the `always-ask` / `write` mode caps) and it never auto-runs in those modes — only `yolo` (exec cap) auto-allows.
+- ACP permission gate: `refresh` is in `PERMISSION_REQUIRED_TOOLS` (`acp-permission-gate.ts`), so when an ACP client is connected it must approve the call via `getPermissionIntent`. The `cacheKey` is per-scope (`refresh:{scope}`), so an "always allow" on a benign scope (`skills`/`rules`/`settings`) never silently pre-approves `refresh("mcp")`/`refresh("all")`, which reconnect MCP (arbitrary subprocess exec). This is complementary to the exec-tier gate above: the exec tier governs in-process approval modes, the ACP gate is the ACP-client permission prompt.
 - The roster path is a no-op when the session has no TTSR manager.
 - The MCP path is a no-op when no process-global `MCPManager` exists.
 
