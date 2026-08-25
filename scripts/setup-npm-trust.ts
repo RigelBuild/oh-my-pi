@@ -38,6 +38,7 @@ import { $ } from "bun";
 import { LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
 import { compareVersions } from "../packages/utils/src/version.ts";
 import { packages } from "./ci-release-publish.ts";
+import { renamePackageName } from "./rigel-scope-rename.ts";
 
 const repoRoot = path.join(import.meta.dir, "..");
 const MIN_NPM = "11.16.0";
@@ -161,15 +162,20 @@ async function collectTargets(): Promise<{ names: string[]; repoFromManifest: st
 		const manifest = (await Bun.file(path.join(repoRoot, pkg.dir, "package.json")).json()) as ManifestShape;
 		if (manifest.private) continue;
 		repoFromManifest ??= parseRepo(manifest.repository);
-		if (typeof manifest.name === "string" && !seen.has(manifest.name)) {
-			seen.add(manifest.name);
-			names.push(manifest.name);
+		// The fork publishes under the Rigel scope; trust config targets the
+		// published names, not the on-repo `@oh-my-pi/*` workspace names.
+		if (typeof manifest.name === "string") {
+			const published = renamePackageName(manifest.name);
+			if (!seen.has(published)) {
+				seen.add(published);
+				names.push(published);
+			}
 		}
 		// Native leaves are generated per platform at release time; each is its
 		// own published package and needs its own trusted-publisher link.
 		if (pkg.kind === "native") {
 			for (const target of LEAF_TARGETS) {
-				const leaf = `@oh-my-pi/pi-natives-${target.tag}`;
+				const leaf = nativeLeafName(target.tag);
 				if (!seen.has(leaf)) {
 					seen.add(leaf);
 					names.push(leaf);
@@ -236,7 +242,9 @@ async function waitForPackageExists(name: string): Promise<boolean> {
 }
 
 function nativeLeafName(tag: string): string {
-	return `@oh-my-pi/pi-natives-${tag}`;
+	// Fork publishes leaves under the Rigel scope; trust config + placeholder
+	// publishes must target the published name.
+	return renamePackageName(`@oh-my-pi/pi-natives-${tag}`);
 }
 
 function nativeLeafTargetForPackage(name: string): NativeLeafTarget | null {
@@ -254,7 +262,7 @@ function placeholderManifest(name: string, target: NativeLeafTarget, repo: strin
 	return {
 		name,
 		version: PLACEHOLDER_VERSION,
-		description: `Placeholder for the ${target.tag} native addon of @oh-my-pi/pi-natives. The real binary is published during release.`,
+		description: `Placeholder for the ${target.tag} native addon of ${renamePackageName("@oh-my-pi/pi-natives")}. The real binary is published during release.`,
 		license: "MIT",
 		os: [target.os],
 		cpu: [target.cpu],
@@ -276,7 +284,7 @@ function placeholderReadme(name: string, target: NativeLeafTarget): string {
 	return [
 		`# ${name}`,
 		"",
-		`Placeholder package reserving the npm name for the \`${target.tag}\` native addon of \`@oh-my-pi/pi-natives\`.`,
+		`Placeholder package reserving the npm name for the \`${target.tag}\` native addon of \`${renamePackageName("@oh-my-pi/pi-natives")}\`.`,
 		"",
 		`This \`${PLACEHOLDER_VERSION}\` release ships no binary. The real, versioned platform addon is generated during release and installed as an optional dependency of the core package.`,
 		"",
