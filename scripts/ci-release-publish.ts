@@ -41,6 +41,7 @@ import {
 	LEAF_TARGETS,
 } from "../packages/natives/scripts/gen-npm-packages.ts";
 import { fixEmitExtensions } from "./fix-emit-extensions.ts";
+import { assertNoRenameCollisions, renameTarballScope } from "./rigel-scope-rename.ts";
 
 export interface PublishPackage {
 	dir: string;
@@ -369,7 +370,13 @@ async function packAndPublish(dir: string, name: string, version: string): Promi
 		}
 		const tarball = (await fs.readdir(packDir)).find(entry => entry.endsWith(".tgz"));
 		if (!tarball) throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
-		const packedTarball = await inspectPackedTarball(path.join(packDir, tarball));
+		const tarballPath = path.join(packDir, tarball);
+		// Fork-only: republish the resolved tarball under the `@rigelbuild/omp-*`
+		// scope (name, cross-package deps, shipped src specifiers). Applied after
+		// pack so `catalog:`/`workspace:` resolution and prepack still see the
+		// upstream names; `inspectPackedTarball` then reads the renamed identity.
+		await renameTarballScope(tarballPath);
+		const packedTarball = await inspectPackedTarball(tarballPath);
 		const tag = npmDistTag(packedTarball.version);
 		// Preflight the exact packed version so reruns skip deterministically.
 		// Fail open on lookup errors; only a confirmed published version may skip publishing.
@@ -463,6 +470,21 @@ if (import.meta.main) {
 	if (nativeLeafTag) {
 		await publishNativeLeafPackage(nativeLeafTag);
 	} else {
+		// Guard the non-injective scope rename: fail loudly before any publish if
+		// two upstream names would collapse onto one @rigelbuild target.
+		const publishNames: string[] = [];
+		for (const pkg of packages) {
+			const manifest = (await Bun.file(path.join(repoRoot, pkg.dir, "package.json")).json()) as PackageManifest;
+			// Match the set that actually publishes: publishPackage skips private
+			// manifests, so the guard must too, or a future private package could
+			// throw a false-positive collision that blocks the whole publish.
+			if (manifest.private) continue;
+			if (typeof manifest.name === "string") publishNames.push(manifest.name);
+			if (pkg.kind === "native") {
+				for (const target of LEAF_TARGETS) publishNames.push(`@oh-my-pi/pi-natives-${target.tag}`);
+			}
+		}
+		assertNoRenameCollisions(publishNames);
 		for (const pkg of packages) {
 			await publishPackage(pkg);
 		}
