@@ -2744,3 +2744,88 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 		expect(properties?.outputSchema).toBe(true);
 	});
 });
+
+describe("RIG-2806: never serialize a zero-body request over demotable history", () => {
+	// The live wedge: claude-opus over litellm resolves every thinking-emit
+	// compat flag false (requiresThinkingAsText / replayReasoningContent /
+	// requiresReasoningContentForToolCalls all false), so a thinking-only
+	// assistant turn is fully dropped. When that turn is the whole non-system
+	// history, convertMessages used to return only the system prompt — a valid
+	// 200 over an empty prompt tokenizes to 0 input tokens and loops silently.
+	function claudeLitellmModel(): Model<"openai-completions"> {
+		const {
+			compat: _r,
+			compatConfig,
+			...rest
+		} = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
+		return buildModel({
+			...rest,
+			id: "claude-opus-4-8",
+			name: "Claude Opus",
+			api: "openai-completions",
+			provider: "litellm",
+			reasoning: true,
+			compat: compatConfig,
+		} as ModelSpec<"openai-completions">);
+	}
+
+	function thinkingOnlyAssistant(): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "reasoning with no visible answer" }],
+			api: "openai-completions",
+			provider: "litellm",
+			model: "claude-opus-4-8",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+	}
+
+	it("recovers dropped thinking so a thinking-only history never ships an empty body", () => {
+		const model = claudeLitellmModel();
+		const messages = convertMessages(
+			model,
+			{ systemPrompt: ["you are a helpful assistant"], messages: [thinkingOnlyAssistant()] },
+			model.compat,
+		);
+		const nonSystem = messages.filter(m => m.role !== "system" && m.role !== "developer");
+		expect(nonSystem.length).toBeGreaterThan(0);
+		const assistant = nonSystem.find(m => m.role === "assistant");
+		expect(assistant).toBeDefined();
+		expect(typeof assistant?.content === "string" ? assistant.content.length : 0).toBeGreaterThan(0);
+	});
+
+	it("does not synthesize an assistant turn when real history already remains", () => {
+		const model = claudeLitellmModel();
+		const messages = convertMessages(
+			model,
+			{
+				systemPrompt: ["you are a helpful assistant"],
+				messages: [
+					{
+						role: "user",
+						content: "hello",
+						timestamp: Date.now(),
+					},
+					thinkingOnlyAssistant(),
+				],
+			},
+			model.compat,
+		);
+		// The user turn survives, so the safety net must not fire: exactly one
+		// user message, no synthesized assistant turn recovering the dropped
+		// thinking.
+		const users = messages.filter(m => m.role === "user");
+		expect(users).toHaveLength(1);
+		const assistants = messages.filter(m => m.role === "assistant");
+		expect(assistants).toHaveLength(0);
+	});
+});

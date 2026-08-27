@@ -148,6 +148,24 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 			}
 
 			flush();
+			// Fail-closed: the retry cap is exhausted and the completion is still a
+			// degenerate empty stop. Delivering the benign `done` terminal as-is
+			// lets the agent loop accept a 0-token no-op turn and idle silently —
+			// a wedge that survives `--resume` (RIG-2806). Surface it as a loud
+			// error terminal instead so the turn errors visibly. `rule://no-retries`:
+			// a swallowed empty completion is the fail-open pattern to reject. Gated
+			// on `isRetryableEmpty`, so `acceptEmptyResponse` callers are unaffected.
+			if (isRetryableEmpty && message !== undefined) {
+				const errored: AssistantMessage = {
+					...message,
+					stopReason: "error",
+					errorMessage:
+						"Provider returned an empty completion (no content, 0 generated tokens) " +
+						`after ${MAX_EMPTY_COMPLETION_RETRIES + 1} attempts.`,
+				};
+				outer.push({ type: "error", reason: "error", error: errored });
+				return;
+			}
 			if (terminal) {
 				outer.push(terminal);
 			} else if (!outer.done) {
