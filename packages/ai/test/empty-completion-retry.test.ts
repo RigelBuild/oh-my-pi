@@ -249,6 +249,29 @@ describe("withEmptyCompletionRetry", () => {
 		expect(result.content).toEqual([]);
 	});
 
+	it("does not relabel an aborted empty stop as a provider error", async () => {
+		// The narrow race the fail-closed block must spare: the caller has already
+		// aborted when a clean empty `done` arrives (stopReason "stop", no throw).
+		// The retry-if is skipped on `signal.aborted`, so control reaches the
+		// fail-closed block — which must deliver the benign terminal as-is, never
+		// dress an aborted turn up as a loud provider error.
+		const controller = new AbortController();
+		controller.abort();
+		let attempts = 0;
+		const stream = withEmptyCompletionRetry({}, CTX, { signal: controller.signal }, () => {
+			attempts++;
+			return emptyAttempt();
+		});
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(1);
+		expect(events.at(-1)?.type).toBe("done");
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+	});
+
 	it("discards buffered pre-content markers from a retried empty attempt", async () => {
 		let attempts = 0;
 		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async () => {} }, () => {

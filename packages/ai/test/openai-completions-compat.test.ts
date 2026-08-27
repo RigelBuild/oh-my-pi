@@ -2769,10 +2769,10 @@ describe("RIG-2806: never serialize a zero-body request over demotable history",
 		} as ModelSpec<"openai-completions">);
 	}
 
-	function thinkingOnlyAssistant(): AssistantMessage {
+	function thinkingOnlyAssistant(thinking = "reasoning with no visible answer"): AssistantMessage {
 		return {
 			role: "assistant",
-			content: [{ type: "thinking", thinking: "reasoning with no visible answer" }],
+			content: [{ type: "thinking", thinking }],
 			api: "openai-completions",
 			provider: "litellm",
 			model: "claude-opus-4-8",
@@ -2827,5 +2827,31 @@ describe("RIG-2806: never serialize a zero-body request over demotable history",
 		expect(users).toHaveLength(1);
 		const assistants = messages.filter(m => m.role === "assistant");
 		expect(assistants).toHaveLength(0);
+	});
+
+	it("recovers the last dropped turn's reasoning when several thinking-only turns are the whole history", () => {
+		const model = claudeLitellmModel();
+		const messages = convertMessages(
+			model,
+			{
+				systemPrompt: ["you are a helpful assistant"],
+				messages: [
+					thinkingOnlyAssistant("first buried reasoning"),
+					thinkingOnlyAssistant("second buried reasoning"),
+					thinkingOnlyAssistant("final buried reasoning"),
+				],
+			},
+			model.compat,
+		);
+		// All three assistant turns drop, leaving an empty body; the safety net
+		// recovers exactly one turn, carrying the LAST dropped reasoning (the
+		// most recent thought), not an earlier one.
+		const nonSystem = messages.filter(m => m.role !== "system" && m.role !== "developer");
+		const assistants = nonSystem.filter(m => m.role === "assistant");
+		expect(assistants).toHaveLength(1);
+		const content = typeof assistants[0]?.content === "string" ? assistants[0].content : "";
+		expect(content).toContain("final buried reasoning");
+		expect(content).not.toContain("first buried reasoning");
+		expect(content).not.toContain("second buried reasoning");
 	});
 });
