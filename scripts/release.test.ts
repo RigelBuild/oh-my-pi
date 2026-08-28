@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { bumpCanaryVersion, bumpVersion, resolveReleaseVersion, validateExplicitVersion } from "./release";
+import {
+	applyCargoWorkspaceVersion,
+	applyNativesSentinel,
+	applyPackageVersion,
+	bumpCanaryVersion,
+	bumpVersion,
+	resolveReleaseVersion,
+	validateExplicitVersion,
+} from "./release";
 
 describe("validateExplicitVersion", () => {
 	test("rejects malformed versions", () => {
@@ -115,5 +123,53 @@ describe("resolveReleaseVersion", () => {
 			version: "0.13.1-canary.1",
 			note: "Bumping canary version from v0.13.0 -> 0.13.1-canary.1",
 		});
+	});
+});
+
+describe("applyPackageVersion", () => {
+	test("rewrites the top-level version and leaves nested dependency ranges alone", () => {
+		const raw = `{\n\t"name": "@oh-my-pi/coding-agent",\n\t"version": "18.0.3",\n\t"dependencies": {\n\t\t"@oh-my-pi/ai": "18.0.3",\n\t\t"zod": "3.24.1"\n\t}\n}\n`;
+		const out = applyPackageVersion(raw, "18.0.4");
+		expect(out).toContain(`"version": "18.0.4"`);
+		// Dependency ranges are not `"version": "…"` keys, so they must survive.
+		expect(out).toContain(`"@oh-my-pi/ai": "18.0.3"`);
+		expect(out).toContain(`"zod": "3.24.1"`);
+	});
+});
+
+describe("applyCargoWorkspaceVersion", () => {
+	test("rewrites the line-anchored workspace version, not member crate lines", () => {
+		const raw = `[workspace]\nmembers = ["a"]\n\n[workspace.package]\nversion = "18.0.3"\nedition = "2024"\n`;
+		const out = applyCargoWorkspaceVersion(raw, "18.0.4");
+		expect(out).toContain(`\nversion = "18.0.4"\n`);
+		expect(out).toContain(`edition = "2024"`);
+	});
+
+	test("does not touch an indented version key (member crates use version.workspace)", () => {
+		const raw = `[package]\n  version = "0.1.0"\nversion = "18.0.3"\n`;
+		const out = applyCargoWorkspaceVersion(raw, "18.0.4");
+		expect(out).toContain(`  version = "0.1.0"`);
+		expect(out).toContain(`\nversion = "18.0.4"\n`);
+	});
+});
+
+describe("applyNativesSentinel", () => {
+	test("rewrites the sentinel token in its surrounding syntax", () => {
+		const raw = `#[napi(js_name = "__piNativesV18_0_3")]\npub fn sentinel() {}\n`;
+		expect(applyNativesSentinel(raw, "__piNativesV18_0_4")).toContain(`js_name = "__piNativesV18_0_4"`);
+	});
+
+	test("is idempotent when the token already matches", () => {
+		const raw = `export const __piNativesV18_0_4: () => void;\n`;
+		expect(applyNativesSentinel(raw, "__piNativesV18_0_4")).toBe(raw);
+	});
+
+	test("rewrites every occurrence in an index.js-shaped binding (global flag is load-bearing)", () => {
+		// packages/natives/native/index.js binds the export to its native source
+		// on one line, so the token appears twice and both must move.
+		const raw = `export const __piNativesV18_0_3 = nativeBindings.__piNativesV18_0_3;\n`;
+		const out = applyNativesSentinel(raw, "__piNativesV18_0_4");
+		expect(out).not.toContain("__piNativesV18_0_3");
+		expect(out.match(/__piNativesV18_0_4/g)).toHaveLength(2);
 	});
 });

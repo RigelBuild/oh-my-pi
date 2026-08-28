@@ -256,6 +256,38 @@ export function resolveReleaseVersion(versionOrBump: string, latestTag: string):
 	return { version: versionOrBump, note: `First release: no prior v* tag; releasing ${versionOrBump}` };
 }
 
+/**
+ * Rewrite the top-level `"version"` field in a package.json's raw text. The
+ * regex is global to mirror a whole-file find-replace, but every manifest we
+ * touch carries exactly one `"version"` key, so it rewrites that one line and
+ * leaves nested dependency ranges untouched.
+ */
+export function applyPackageVersion(content: string, version: string): string {
+	return content.replace(/"version": "[^"]+"/g, `"version": "${version}"`);
+}
+
+/**
+ * Rewrite the `[workspace.package]` `version` line in the root Cargo.toml. The
+ * `m` flag anchors `^` per line (the version key is not at file start), and
+ * member crates use `version.workspace = true` rather than a literal `version =`
+ * so this only ever matches the single workspace line.
+ */
+export function applyCargoWorkspaceVersion(content: string, version: string): string {
+	return content.replace(/^version = "[^"]+"/gm, `version = "${version}"`);
+}
+
+/**
+ * Rewrite the `__piNativesV…` version sentinel token wherever it appears. The
+ * global flag is load-bearing: `index.js` carries the token twice (the exported
+ * `const` binding and its `nativeBindings.__piNativesV…` source), so both must
+ * move together or the export binds to a symbol the new `.node` no longer
+ * exposes; `lib.rs` and `index.d.ts` carry it once. The token pattern is a bare
+ * identifier, so this rewrites it in place regardless of the surrounding syntax.
+ */
+export function applyNativesSentinel(content: string, sentinelName: string): string {
+	return content.replace(/__piNativesV[A-Za-z0-9_]+/g, sentinelName);
+}
+
 async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
 	// Validate explicit versions before any compare: the shared compareVersions
@@ -332,7 +364,10 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		publicPkgPaths.push(pkgPath);
 	}
 
-	await $`sd '"version": "[^"]+"' ${`"version": "${version}"`} ${publicPkgPaths}`;
+	for (const pkgPath of publicPkgPaths) {
+		const raw = await Bun.file(pkgPath).text();
+		await Bun.write(pkgPath, applyPackageVersion(raw, version));
+	}
 
 	// Verify
 	console.log("  Verifying versions:");
@@ -351,7 +386,10 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 
 	// 3. Update Rust workspace version
 	console.log(`Updating Rust workspace version to ${version}…`);
-	await $`sd '^version = "[^"]+"' ${`version = "${version}"`} Cargo.toml`;
+	{
+		const raw = await Bun.file("Cargo.toml").text();
+		await Bun.write("Cargo.toml", applyCargoWorkspaceVersion(raw, version));
+	}
 
 	// Verify
 	const cargoToml = await Bun.file("Cargo.toml").text();
@@ -388,7 +426,10 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		"packages/natives/native/index.d.ts",
 		"packages/natives/native/index.js",
 	];
-	await $`sd '__piNativesV[A-Za-z0-9_]+' ${sentinelName} ${sentinelFiles}`;
+	for (const sentinelPath of sentinelFiles) {
+		const raw = await Bun.file(sentinelPath).text();
+		await Bun.write(sentinelPath, applyNativesSentinel(raw, sentinelName));
+	}
 	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();
 	if (!libRs.includes(`js_name = "${sentinelName}"`)) {
 		console.error(
