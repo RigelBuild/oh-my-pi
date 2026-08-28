@@ -218,6 +218,44 @@ export function bumpCanaryVersion(current: string): string {
 	return `${major}.${minor}.${patch + 1}-canary.1`;
 }
 
+/**
+ * Resolve the version to release from the CLI arg and the latest `v*` tag.
+ *
+ * Pure: no git, no I/O. `versionOrBump` is a bump keyword or an explicit version
+ * already normalized by `validateExplicitVersion`. `latestTag` is the most recent
+ * `v*` tag, or `""` when the repo has none yet (first release on a fresh/reset
+ * fork). Throws when the request cannot be satisfied (a bump/canary with no base,
+ * or an explicit version not greater than the latest tag).
+ */
+export function resolveReleaseVersion(versionOrBump: string, latestTag: string): { version: string; note: string } {
+	if (versionOrBump === "major" || versionOrBump === "minor" || versionOrBump === "patch") {
+		if (!latestTag) {
+			throw new Error(
+				`cannot ${versionOrBump}-bump with no prior v* tag to derive from. ` +
+					"Pass an explicit version for the first release (e.g. bun scripts/release.ts 18.0.3).",
+			);
+		}
+		const version = bumpVersion(latestTag, versionOrBump);
+		return { version, note: `Bumping ${versionOrBump} version from ${latestTag} -> ${version}` };
+	}
+	if (versionOrBump === "canary") {
+		if (!latestTag) {
+			throw new Error("cannot cut a canary with no prior v* tag; release an explicit base version first.");
+		}
+		const version = bumpCanaryVersion(latestTag);
+		return { version, note: `Bumping canary version from ${latestTag} -> ${version}` };
+	}
+	// Explicit version, already validated/normalized by the caller.
+	if (latestTag) {
+		if (compareVersions(versionOrBump, latestTag) <= 0) {
+			throw new Error(`Version ${versionOrBump} must be greater than latest tag ${latestTag}`);
+		}
+		return { version: versionOrBump, note: `Version ${versionOrBump} > ${latestTag}` };
+	}
+	// First release: no prior tag to be greater than.
+	return { version: versionOrBump, note: `First release: no prior v* tag; releasing ${versionOrBump}` };
+}
+
 async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
 	// Validate explicit versions before any compare: the shared compareVersions
@@ -262,21 +300,22 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
 
-	const latestTag = (await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).text()).trim();
-	let version = versionOrBump;
-	if (version === "major" || version === "minor" || version === "patch") {
-		version = bumpVersion(latestTag, version);
-		console.log(`Bumping ${versionOrBump} version from ${latestTag} -> ${version}`);
-	} else if (version === "canary") {
-		version = bumpCanaryVersion(latestTag);
-		console.log(`Bumping canary version from ${latestTag} -> ${version}`);
-	}
-
-	if (compareVersions(version, latestTag) <= 0) {
-		console.error(`Error: Version ${version} must be greater than latest tag ${latestTag}`);
+	// `git describe` exits non-zero when the repo has no `v*` tag yet (a freshly
+	// reset or brand-new fork). That is the first-release case, not an error, so
+	// resolve it through `.nothrow()` to an empty string — mirroring the changelog
+	// fixer's `gitMaybe` tolerance of the same condition — and let
+	// `resolveReleaseVersion` branch on it.
+	const describe = await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).quiet().nothrow();
+	const latestTag = describe.exitCode === 0 ? describe.text().trim() : "";
+	let version: string;
+	try {
+		const resolved = resolveReleaseVersion(versionOrBump, latestTag);
+		version = resolved.version;
+		console.log(`  ${resolved.note}\n`);
+	} catch (error) {
+		console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
 		process.exit(1);
 	}
-	console.log(`  Version ${version} > ${latestTag}\n`);
 
 	// 2. Update package versions
 	console.log(`Updating package versions to ${version}…`);
