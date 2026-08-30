@@ -131,6 +131,13 @@ export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTi
 	{ value: "priority", label: "Priority", description: "Priority on every supported family of the spawned model" },
 ];
 
+/**
+ * The provider families that carry an independent `tier.*` setting, so a
+ * caller reconciling the live per-family map against a reloaded config can
+ * iterate them without re-listing the keys at each site.
+ */
+export const SERVICE_TIER_FAMILIES: readonly ServiceTierFamily[] = ["openai", "anthropic", "google"];
+
 /** Map a per-family setting value to a wire {@link ServiceTier}, or `undefined` to omit. */
 export function serviceTierSettingToTier(value: string): ServiceTier | undefined {
 	if (value === "none" || value === "" || value === "inherit") return undefined;

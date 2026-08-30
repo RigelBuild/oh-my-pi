@@ -98,6 +98,22 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	 * before auto-mode persistence existed; readers fall back to `thinkingLevel`.
 	 */
 	configured?: string | null;
+	/**
+	 * True when this transition was written by a settings-derived application —
+	 * the settings-derived startup level, or the settings-tracking re-apply in
+	 * `#applyReloadedModel` — rather than a user/RPC/ACP selection. Mirrors
+	 * {@link ModelChangeEntry.settingsTracking}: it marks a selection that still
+	 * FOLLOWS the configured default, so a later `/refresh settings` may replace
+	 * it. Absent means an explicit session-level choice a reload must not clobber.
+	 */
+	settingsTracking?: true;
+	/**
+	 * True when this entry is a per-turn `auto` classification receipt, not a
+	 * selection. Like the ephemeral retry-fallback `model_change` role, it masks
+	 * whatever selector sits beneath it without being a choice of its own, so
+	 * settings-tracking classification walks PAST it to the real selection.
+	 */
+	autoResolved?: true;
 }
 
 export interface ModelChangeEntry extends SessionEntryBase {
@@ -106,6 +122,15 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	model: string;
 	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
 	role?: string;
+	/**
+	 * True when this transition was written by the settings-tracking auto-swap
+	 * (`#applyReloadedModel`), not a user action. Like the ephemeral fallback
+	 * role, it marks a change that still tracks the configured default rather
+	 * than a user pin, so a later `/refresh settings` may swap it again. Kept as
+	 * a dedicated flag (not an overloaded `role` sentinel) so a user's real
+	 * `modelRoles` entry named "settings" is never mistaken for the marker.
+	 */
+	settingsTracking?: true;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
 }
@@ -310,6 +335,35 @@ export type SessionEntry =
 	| ModeChangeEntry
 	| CredentialPinEntry
 	| ResetBoundaryEntry;
+
+/**
+ * Whether the session's thinking level still FOLLOWS the configured default,
+ * rather than being an explicit session-level choice a settings reload must not
+ * clobber. The latest non-`autoResolved` {@link ThinkingLevelChangeEntry}
+ * decides: its `settingsTracking` flag marks a settings-derived application
+ * (settings-derived startup, or a prior tracking re-apply) and keeps the session
+ * followable; an unflagged entry is a user/RPC/ACP selection and pins it.
+ *
+ * Per-turn `auto` classification receipts are skipped — like the ephemeral
+ * retry-fallback `model_change`, they mask the underlying selection without
+ * being one, so stopping at a receipt would let a refresh clobber an explicit
+ * `auto` pin. A branch with no thinking entry at all (nothing was ever
+ * selected) still follows settings.
+ *
+ * Shared because the answer is load-bearing in both directions: the settings
+ * refresh reads it to decide whether it may re-derive the level, and an
+ * explicit selection reads it to decide whether it must record a pin the
+ * refresh would otherwise not see.
+ */
+export function thinkingFollowsSettings(entries: readonly SessionEntry[]): boolean {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry?.type !== "thinking_level_change") continue;
+		if (entry.autoResolved === true) continue;
+		return entry.settingsTracking === true;
+	}
+	return true;
+}
 
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;

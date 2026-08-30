@@ -10,11 +10,12 @@ import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth }
 import { getDefault, settings } from "../../../config/settings";
 import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
 import { parseSSE } from "../../../mcp/json-rpc";
+import { isExaEnvHelperInjected } from "../../../mcp/reload";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
-import type { SearchParams } from "./base";
+import type { SearchAvailabilityContext, SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
@@ -126,6 +127,12 @@ export interface ExaSearchParams {
 	 */
 	authStorage?: AuthStorage;
 	sessionId?: string;
+	/**
+	 * The calling session's own MCP-discovered Exa key
+	 * (`getSessionExaApiKey`). Preferred over the process-global
+	 * `EXA_API_KEY`, which holds only the first session's injection.
+	 */
+	sessionExaApiKey?: string;
 }
 
 interface ExaSearchResult {
@@ -434,10 +441,27 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 	const storedKey = params.authStorage
 		? await params.authStorage.getApiKey("exa", params.sessionId, { signal: params.signal })
 		: undefined;
+	// Below AuthStorage, which is an explicit per-provider credential the
+	// operator configured. Between the session's OWN MCP-discovered key and
+	// `EXA_API_KEY`, the environment decides:
+	//
+	//   - An OPERATOR-exported `EXA_API_KEY` wins. `applyMCPEnvironment` refuses
+	//     to overwrite a foreign value precisely to honor that override, but it
+	//     still records the config-discovered key for this session — so picking
+	//     the recorded key first authenticated to the MCP-configured account and
+	//     silently defeated the documented override.
+	//   - A key THIS harness injected does not. That variable is process-global,
+	//     so with several top-level sessions it holds whichever session injected
+	//     FIRST and every later session would authenticate as that one; the
+	//     session's own key is the correct answer there.
+	const envKey = getEnvApiKey("exa");
+	const sessionKeyOutranksEnv = envKey === undefined || isExaEnvHelperInjected();
 	const keyOrResolver: ApiKey | undefined =
 		storedKey && params.authStorage
 			? params.authStorage.resolver("exa", { sessionId: params.sessionId })
-			: getEnvApiKey("exa");
+			: sessionKeyOutranksEnv
+				? (params.sessionExaApiKey ?? envKey)
+				: envKey;
 	const response = keyOrResolver
 		? await withAuth(keyOrResolver, key => callExaSearch(key, params), { signal: params.signal })
 		: await callExaMcpSearch(params);
@@ -481,9 +505,13 @@ export class ExaProvider extends SearchProvider {
 	readonly id = "exa";
 	readonly label = "Exa";
 
-	isAvailable(authStorage: AuthStorage): boolean {
+	isAvailable(authStorage: AuthStorage, context?: SearchAvailabilityContext): boolean {
 		if (!this.#settingsAllowSearch()) return false;
-		return !!getEnvApiKey("exa") || authStorage.hasAuth("exa");
+		// The session's own MCP-discovered key counts: `search()` accepts it, so a
+		// session holding one can service the request even when the process-global
+		// env key (another session's, possibly since removed) and the broker
+		// credential are both absent.
+		return !!getEnvApiKey("exa") || authStorage.hasAuth("exa") || !!context?.sessionExaApiKey;
 	}
 
 	/**
@@ -517,6 +545,7 @@ export class ExaProvider extends SearchProvider {
 			timeoutMs: params.timeoutMs,
 			authStorage: params.authStorage,
 			sessionId: params.sessionId,
+			sessionExaApiKey: params.sessionExaApiKey,
 			fetch: params.fetch,
 		});
 	}
