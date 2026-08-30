@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `PROVIDER_IMAGE_BYTE_BUDGETS`, `DEFAULT_PROVIDER_IMAGE_BYTE_BUDGET`, and `providerImageByteBudget()` so callers can size outgoing image payloads to the active provider's combined image-byte budget.
+- Added `PROVIDER_IMAGE_BYTE_BUDGETS`, `DEFAULT_PROVIDER_IMAGE_BYTE_BUDGET`, and `providerImageByteBudget()` so callers can size outgoing image payloads to the active provider's combined image-byte budget ([#10286](https://github.com/can1357/oh-my-pi/pull/10286) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 
 ## [17.4.1] - 2026-08-21
 
