@@ -78,6 +78,11 @@ async function createHarness(
 		// Auto-compaction OFF: any compaction we observe must be the one the
 		// `compact` tool requested, never a threshold/idle fire.
 		"compaction.enabled": false,
+		// Real lifecycle tests drive the actual `compact()`; pin the summary
+		// method so method selection resolves without a remote/vision path. A
+		// too-small session still short-circuits to "Nothing to compact" before
+		// any LLM summary call, so no API key is needed.
+		"compaction.methodOrder": ["soft"],
 		"retry.enabled": false,
 		"todo.enabled": false,
 		"todo.reminders": false,
@@ -231,5 +236,71 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 			await expect(session.prompt("compact then benign failure")).resolves.toBeDefined();
 			expect(compactSpy).toHaveBeenCalledTimes(1);
 		}
+	});
+
+	it("completes the prompt when the real compact() lifecycle runs at settle (no resolved spy)", async () => {
+		// The deadlock the P1 review flagged: onTurnEnd is awaited from inside the
+		// active agent loop, and compact() aborts that operation (its abort() waits
+		// on agent.waitForIdle(), which only resolves once onTurnEnd returns and the
+		// loop unwinds). Awaiting compact() inline would hang the prompt forever.
+		// Drive the REAL compact() — not a resolved spy — so a regression to the
+		// inline await reproduces the hang here instead of hiding behind the spy.
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		// Observe the real entrypoint without replacing it, so the actual lifecycle
+		// (defer past settle → abort is a no-op → too-small no-op) still executes.
+		const compactSpy = vi.spyOn(session, "compact");
+
+		// A pre-fix inline await never resolves, so the prompt would hang; awaiting
+		// it directly turns that into a bun:test timeout failure (the per-test
+		// timeout below), pinning the regression to this test rather than masking
+		// it with a resolved spy. Post-fix the deferred compaction runs after the
+		// run unwinds and the prompt settles normally.
+		await session.prompt("do the thing then compact");
+		await session.waitForIdle();
+
+		// The requested compaction ran for real (session too small → benign no-op,
+		// swallowed inside the settle path).
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	}, 15_000);
+
+	it("does NOT re-fire compaction on a later prompt that made no compact call (turn-scoped)", async () => {
+		// The blocking turn-scoping bug: a compact result that survives the
+		// transcript (guaranteed on the too-small no-op path) must not re-trigger
+		// compaction on a later, unrelated settle. Prompt 1 requests compaction and
+		// no-ops (too small). Prompt 2 makes NO compact call; its settle must not
+		// re-consume the stale result. Pre-fix (whole-transcript scan, no consume
+		// marker) prompt 2 re-fires → 2 calls. Turn-scoped → exactly 1.
+		const { session } = await createHarness([
+			// Prompt 1: request compaction.
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["ONE"], stopReason: "stop" },
+			// Prompt 2: a plain noop turn, then a text stop. No compact call.
+			{
+				content: [{ type: "toolCall", id: "call_noop", name: "noop", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["TWO"], stopReason: "stop" },
+		]);
+
+		const compactSpy = vi.spyOn(session, "compact");
+
+		await session.prompt("finish task then compact");
+		await session.waitForIdle();
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		await session.prompt("now do unrelated work");
+		await session.waitForIdle();
+		// Still exactly one: the second settle found no request for ITS turn.
+		expect(compactSpy).toHaveBeenCalledTimes(1);
 	});
 });

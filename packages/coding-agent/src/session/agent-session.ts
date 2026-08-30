@@ -722,6 +722,22 @@ export class AgentSession {
 	#rewoundToolResultIds = new Set<string>();
 	#lastSuccessfulYieldToolCallId: string | undefined = undefined;
 	/**
+	 * A `compact` tool request observed during the current run, consumed exactly
+	 * once at the genuine settle. Mirrors the rewind path's `#pendingRewindReport`
+	 * one-shot marker: recorded from a turn's own tool results and cleared when
+	 * applied, so a stale `compact` result surviving in the transcript can never
+	 * re-trigger compaction on a later, unrelated settle.
+	 */
+	#pendingCompactionRequest: { instructions?: string } | undefined = undefined;
+	/**
+	 * The compaction deferred to run after the settling turn unwinds. Awaited by
+	 * `waitForIdle()` and the prompt settle so callers observe a completed pass,
+	 * but deliberately NOT tracked as a post-prompt task: `compact()` aborts the
+	 * active operation, and `abort()` drains the post-prompt set — a tracked task
+	 * would await itself.
+	 */
+	#requestedCompaction: Promise<void> | undefined = undefined;
+	/**
 	 * Sticky across an in-flight prompt run: a successful `yield` makes the run
 	 * terminal for execution purposes, so any trailing empty/aborted assistant
 	 * stop must NOT trigger empty-stop/unexpected-stop/compaction continuations.
@@ -1315,14 +1331,15 @@ export class AgentSession {
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
-			// A `compact` tool call this turn requests context compaction. Run it
+			// A `compact` tool call this turn requested context compaction. It runs
 			// only at the genuine settle (`willContinue === false`) — never between
-			// tool-loop turns — because `compact()` aborts the active agent
-			// operation, which is a no-op once the run is ending but would truncate
-			// a still-continuing turn. Deferring here is the whole point of the
-			// tool signalling rather than compacting inline.
+			// tool-loop turns. `compact()` aborts the active agent operation, and
+			// this hook is awaited from INSIDE that operation, so awaiting it here
+			// would deadlock (its `abort()` waits on `agent.waitForIdle()`, which
+			// only resolves once this hook returns and the loop reaches `finally`).
+			// Schedule it to run after the run has unwound instead.
 			if (context?.willContinue === false) {
-				await this.#applyRequestedCompaction(messages);
+				this.#scheduleRequestedCompaction();
 			}
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -2992,6 +3009,16 @@ export class AgentSession {
 						this.#pendingRewindReport = report;
 					}
 				}
+				if (toolName === "compact" && !isError) {
+					// Record the request from THIS turn's own tool result, exactly as
+					// the rewind branch above stores `#pendingRewindReport`. The
+					// onTurnEnd settle consumes and clears it, so detection is scoped
+					// to the turn that called `compact` — never a stale result left in
+					// the retained tail (a no-op leaves the result in place, and even a
+					// successful pass keeps it in the kept region).
+					const instructions = details ? stringProperty(details, "instructions")?.trim() || undefined : undefined;
+					this.#pendingCompactionRequest = { instructions };
+				}
 			}
 		}
 
@@ -3627,6 +3654,17 @@ export class AgentSession {
 	 */
 	async #waitForPostPromptRecovery(generation?: number): Promise<void> {
 		while (true) {
+			// Drain a `compact`-tool-requested compaction deferred from onTurnEnd
+			// before the generation-bail below: the deferred run calls `compact()`,
+			// whose `abort()` bumps `#promptGeneration`, so a generation-scoped wait
+			// would otherwise return before the compaction it triggered completed.
+			// Awaiting it here first keeps the settle observing a finished pass. Not
+			// a tracked post-prompt task, since `compact()`'s abort drains that set
+			// (a tracked entry would await itself).
+			if (this.#requestedCompaction) {
+				await this.#requestedCompaction;
+				continue;
+			}
 			// An abort bumps #promptGeneration. When this wait runs on behalf of a
 			// specific prompt turn, stop as soon as that turn has been superseded:
 			// its promise must resolve on the abort, not block on a queued
@@ -5319,6 +5357,10 @@ export class AgentSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		// A `compact` request belongs to the logical session that produced it; a
+		// reset (new session, switch, tree navigation) drops the transcript that
+		// carried it, so drop the pending marker too.
+		this.#pendingCompactionRequest = undefined;
 	}
 
 	/**
@@ -7692,32 +7734,45 @@ export class AgentSession {
 	}
 
 	/**
-	 * Run the compaction requested by a `compact` tool call this turn. Invoked
-	 * from `onTurnEnd` at the genuine settle so `compact()`'s "abort current
-	 * operation first" step is a no-op (the run is already ending). Best-effort:
-	 * a compaction that is already running, or a session too small / already
-	 * compacted, is a benign no-op — the goal state already holds — so those are
-	 * swallowed; anything else is logged without escaping the settle path.
+	 * Schedule the compaction a `compact` tool call requested this turn. The
+	 * onTurnEnd hook runs inside the active agent operation, and `compact()`
+	 * aborts that operation (its `abort()` awaits `agent.waitForIdle()`, which
+	 * only resolves once this hook returns and the loop unwinds) — so it can only
+	 * run detached, after the settle. Deliberately NOT a tracked post-prompt task:
+	 * `abort()` drains that set, so a tracked entry would await itself. Instead the
+	 * promise is parked on `#requestedCompaction` and awaited by `waitForIdle()`
+	 * and the prompt settle, so callers still observe a completed pass.
 	 */
-	async #applyRequestedCompaction(messages: AgentMessage[]): Promise<void> {
-		let instructions: string | undefined;
-		let found = false;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i];
-			if (message?.role !== "toolResult" || message.toolName !== "compact" || message.isError) continue;
-			const details = message.details;
-			if (
-				details &&
-				typeof details === "object" &&
-				"instructions" in details &&
-				typeof details.instructions === "string"
-			) {
-				instructions = details.instructions.trim() || undefined;
-			}
-			found = true;
-			break;
-		}
-		if (!found) return;
+	#scheduleRequestedCompaction(): void {
+		const request = this.#pendingCompactionRequest;
+		if (!request) return;
+		// Consume the marker now, before the detached run: it is one-shot, so a
+		// later unrelated settle can never re-find it (the rewind path clears
+		// `#pendingRewindReport` the same way). A fresh `compact` call re-arms it.
+		this.#pendingCompactionRequest = undefined;
+		const run = (async () => {
+			// Wait for the settling run to fully unwind before compacting. The
+			// onTurnEnd hook that scheduled us is still on the agent loop's stack,
+			// so `agent.waitForIdle()` here resolves only once the loop reaches its
+			// `finally` — after which `compact()`'s "abort the active operation"
+			// step is a genuine no-op and cannot truncate the turn that called the
+			// tool. This is why the request could not be applied inline.
+			await this.agent.waitForIdle();
+			if (this.#isDisposed) return;
+			await this.#applyRequestedCompaction(request.instructions);
+		})().finally(() => {
+			if (this.#requestedCompaction === run) this.#requestedCompaction = undefined;
+		});
+		this.#requestedCompaction = run;
+	}
+
+	/**
+	 * Run a requested compaction. Best-effort: a compaction already running, or a
+	 * session too small / already compacted, is a benign no-op — the goal state
+	 * already holds — so those are swallowed; anything else is logged without
+	 * escaping the settle path.
+	 */
+	async #applyRequestedCompaction(instructions: string | undefined): Promise<void> {
 		// Another compaction (manual, or an auto threshold/idle pass that claimed
 		// this settle) is already running — its rewrite sheds the context, so skip
 		// rather than race a second appendCompaction/replaceMessages. `isCompacting`
