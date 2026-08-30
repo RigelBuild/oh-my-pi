@@ -37,6 +37,7 @@ describe("parseSubscriptionsConfig", () => {
 	const throwCases: Array<[string, string]> = [
 		["non-JSON string", "not json"],
 		["JSON non-object root (number)", "3"],
+		["JSON array root (accounts/plans silently absent)", "[]"],
 		["account entry not an object", JSON.stringify({ accounts: { a: 5 } })],
 		["provider missing", JSON.stringify({ accounts: { a: {} } })],
 		["provider not a string", JSON.stringify({ accounts: { a: { provider: 1 } } })],

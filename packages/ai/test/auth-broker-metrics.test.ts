@@ -357,6 +357,30 @@ describe("renderUsageMetrics", () => {
 		expect(samples.length).toBe(1);
 	});
 
+	test("label values with commas or = do not forge a dedup collision", () => {
+		// The dedup key once comma-joined raw `k=v` fragments, so a value holding
+		// `,` or `=` could forge a fragment boundary:
+		//   (account="x,email=y", email="z")  and
+		//   (account="x", email="y,email=z")
+		// serialize to the same "account=x,email=y,email=z,provider=..." string,
+		// dropping the second as a phantom duplicate. These are two distinct
+		// series and both must survive.
+		const report = (accountId: string, email: string, fetchedAt: number): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt,
+			metadata: { accountId, email },
+			limits: [],
+		});
+		const out = renderUsageMetrics([
+			report("x,email=y", "z", 1_700_000_000_000),
+			report("x", "y,email=z", 1_700_000_060_000),
+		]);
+
+		const samples = out.split("\n").filter(line => line.startsWith("llm_usage_report_fetched_at_seconds{"));
+		expect(samples.length).toBe(2);
+		expect(out).not.toContain("duplicate series dropped: ");
+	});
+
 	test("emits the email label on every sample, including reports that carry none", () => {
 		// A label present on some samples of a family and absent on others is an
 		// inconsistent label set; the scrape fails at parse.

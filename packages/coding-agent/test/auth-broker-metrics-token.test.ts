@@ -3,9 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
-import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
+
+// Captured at module load, before any suite calls `setAgentDir`. The mint suite
+// below must restore the shared resolver to this on teardown so later
+// full-suite tests never resolve agent paths through a deleted temp dir.
+const PRISTINE_AGENT_DIR = getAgentDir();
 
 function silenceStdout(): () => string {
 	let captured = "";
@@ -21,20 +26,29 @@ function silenceStdout(): () => string {
 // (0600, no trailing newline).
 describe("auth-broker token --metrics (scrape-scoped mint)", () => {
 	let agentDir = "";
-	let originalAgentDir: string | undefined;
+	// Snapshot the real resolver/env state before any override so teardown can
+	// restore it. `setAgentDir` mutates the shared dirs resolver AND
+	// `PI_CODING_AGENT_DIR`; restoring only `OMP_AGENT_DIR` would leave later
+	// full-suite tests resolving config paths through this deleted temp dir.
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 	const bearerPath = (): string => path.join(getConfigRootDir(), "auth-broker.token");
 	const metricsPath = (): string => path.join(getConfigRootDir(), "auth-broker-metrics.token");
 
 	beforeEach(async () => {
-		originalAgentDir = process.env.OMP_AGENT_DIR;
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-metrics-token-"));
 		setAgentDir(agentDir);
 	});
 
 	afterEach(async () => {
 		process.stdout.write = ORIGINAL_STDOUT_WRITE;
-		if (originalAgentDir === undefined) delete process.env.OMP_AGENT_DIR;
-		else process.env.OMP_AGENT_DIR = originalAgentDir;
+		// Restore the shared resolver + PI_CODING_AGENT_DIR to the pre-test state.
+		if (originalAgentDir) {
+			setAgentDir(originalAgentDir);
+		} else {
+			setAgentDir(fallbackAgentDir);
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
 		await removeWithRetries(agentDir);
 	});
 
@@ -110,5 +124,16 @@ describe("auth-broker token --metrics (scrape-scoped mint)", () => {
 
 		expect(parsed.path).toBe(metricsPath());
 		expect(parsed.token).toBe(await Bun.file(metricsPath()).text());
+	});
+});
+
+// Full-suite safety: the mint suite above overrides the shared dirs resolver in
+// `beforeEach` and must undo that in `afterEach`. A later suite in the same
+// worker relies on the resolver pointing back at the real agent dir; if teardown
+// restored only an unrelated env var, this resolves through the deleted temp dir
+// instead. Ordering-dependent by design — this must run after the mint suite.
+describe("agent-dir resolver is restored after the mint suite", () => {
+	test("getAgentDir returns the pristine dir, not a torn-down temp dir", () => {
+		expect(getAgentDir()).toBe(PRISTINE_AGENT_DIR);
 	});
 });

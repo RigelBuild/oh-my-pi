@@ -203,17 +203,20 @@ function parseUtcDate(value: string): number | undefined {
  * seconds.
  */
 export function parseSubscriptionsConfig(raw: string, file: string): SubscriptionLookup {
-	let parsed: SubscriptionsConfigFile;
+	let root: unknown;
 	try {
-		parsed = JSON.parse(raw) as SubscriptionsConfigFile;
+		root = JSON.parse(raw);
 	} catch (error) {
 		throw new Error(
 			`subscription config ${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
-	if (typeof parsed !== "object" || parsed === null) {
+	if (!isPlainObject(root)) {
 		throw new Error(`subscription config ${file} must be a JSON object`);
 	}
+	// `isPlainObject` proves a non-null, non-array object; the per-field shapes
+	// (all `unknown`) are validated below before any value is read.
+	const parsed = root as SubscriptionsConfigFile;
 
 	// Per-account map, keyed by "<provider>\x00<account>" for the lookup.
 	const accounts = new Map<string, { plan?: string; renewsAtSeconds?: number }>();

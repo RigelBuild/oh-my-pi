@@ -251,10 +251,10 @@ export function renderUsageMetrics(
 		const family = byName.get(name);
 		const seenSet = seen.get(name);
 		if (!family || !seenSet) return;
-		const key = [...labels]
-			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([k, v]) => `${k}=${v}`)
-			.join(",");
+		// Serialize the sorted tuple with JSON so label values containing `,` or
+		// `=` cannot forge a fragment boundary: a raw `k=v` comma-join lets
+		// (account="x,email=y") collide with (account="x", email="y,...").
+		const key = JSON.stringify([...labels].sort(([a], [b]) => a.localeCompare(b)));
 		if (seenSet.has(key)) {
 			// Identify the collided family and its `limit_id` only: a note is a
 			// comment line, so any raw label value here would both escape the
