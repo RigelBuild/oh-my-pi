@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- Fixed idle compaction discarding context while the session was still waiting on a backgrounded async job.
+- Fixed idle compaction discarding context while the session was still waiting on a backgrounded async job ([#10223](https://github.com/can1357/oh-my-pi/pull/10223) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 
 ## [18.0.11] - 2026-08-29
 
