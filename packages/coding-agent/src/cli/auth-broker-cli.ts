@@ -167,11 +167,32 @@ interface SubscriptionsConfigFile {
  * silently emits partial series. Converts each account's `renewsAt` ISO date to
  * unix seconds. Returns `undefined` when no path is configured (env or flag).
  */
-async function loadSubscriptionsConfig(pathArg: string | undefined): Promise<SubscriptionLookup | undefined> {
+export async function loadSubscriptionsConfig(pathArg: string | undefined): Promise<SubscriptionLookup | undefined> {
 	const file = pathArg ?? process.env[SUBSCRIPTIONS_ENV];
 	if (!file) return undefined;
-	const raw = await fs.readFile(file, "utf8");
+	const raw = await Bun.file(file).text();
 	return parseSubscriptionsConfig(raw, file);
+}
+
+/** A non-null, non-array plain JSON object. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse a strict `YYYY-MM-DD` string as UTC midnight, rejecting shaped-valid but
+ * out-of-range dates (`2026-02-29`) that {@link Date.parse} would silently
+ * normalize into the next month. Returns epoch milliseconds, or `undefined` if
+ * the components do not round-trip back to the input.
+ */
+function parseUtcDate(value: string): number | undefined {
+	const [year, month, day] = value.split("-").map(Number);
+	const ms = Date.UTC(year, month - 1, day);
+	const date = new Date(ms);
+	if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+		return undefined;
+	}
+	return ms;
 }
 
 /**
@@ -196,6 +217,9 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 
 	// Per-account map, keyed by "<provider>\x00<account>" for the lookup.
 	const accounts = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
+	if (parsed.accounts !== undefined && !isPlainObject(parsed.accounts)) {
+		throw new Error(`subscription config ${file}: "accounts" must be a JSON object`);
+	}
 	for (const [account, entry] of Object.entries(parsed.accounts ?? {})) {
 		if (typeof entry !== "object" || entry === null) {
 			throw new Error(`subscription config ${file}: account ${account} must be an object`);
@@ -219,8 +243,8 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 			if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.renewsAt)) {
 				throw new Error(`subscription config ${file}: account ${account} "renewsAt" must be a YYYY-MM-DD string`);
 			}
-			const ms = Date.parse(entry.renewsAt);
-			if (Number.isNaN(ms)) {
+			const ms = parseUtcDate(entry.renewsAt);
+			if (ms === undefined) {
 				throw new Error(
 					`subscription config ${file}: account ${account} "renewsAt" is not a valid date: ${entry.renewsAt}`,
 				);
@@ -232,6 +256,9 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 
 	// Per-plan table, keys are "<provider>:<plan>".
 	const plans: Array<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }> = [];
+	if (parsed.plans !== undefined && !isPlainObject(parsed.plans)) {
+		throw new Error(`subscription config ${file}: "plans" must be a JSON object`);
+	}
 	for (const [key, entry] of Object.entries(parsed.plans ?? {})) {
 		if (typeof entry !== "object" || entry === null) {
 			throw new Error(`subscription config ${file}: plan ${key} must be an object`);
