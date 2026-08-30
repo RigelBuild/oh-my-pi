@@ -45,6 +45,7 @@ import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
+import { CompactTool } from "./compact";
 import { ComputerTool } from "./computer";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
@@ -478,6 +479,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	computer: s => new ComputerTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
+	compact: CompactTool.createIf,
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
