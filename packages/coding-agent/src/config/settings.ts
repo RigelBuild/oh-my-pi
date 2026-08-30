@@ -1346,9 +1346,12 @@ export class Settings {
 		]);
 		if (globalResult.status === "rejected") throw globalResult.reason;
 		if (projectResult.status === "rejected") throw projectResult.reason;
-		if (globalResult.value) {
-			this.#global = globalResult.value;
-		}
+		// Replace the global layer even when the file is absent. If a global
+		// config.yml existed at start and was later deleted or renamed,
+		// `#loadExistingMainYaml` returns null; the layer must reset to empty
+		// rather than retain stale values. `#reloadPersistedLayers` already does
+		// this (`?? {}`); the `reload()` path must match.
+		this.#global = globalResult.value ?? {};
 
 		this.#project = projectResult.value;
 		this.#configOverlay = await this.#loadConfigOverlays();

@@ -10,6 +10,10 @@
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added a `refresh` tool and `/refresh` command that re-scan skills, rules, settings, and MCP in-session without a restart, gated behind ACP permission.
 
+### Fixed
+
+- Fixed the in-session `refresh` so an MCP refresh keeps extension-declared servers, a rules refresh (including an edited rule body) reaches the model prompt, and a settings-changing refresh applies the new skills config ([#10288](https://github.com/can1357/oh-my-pi/pull/10288) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Added

@@ -1627,26 +1627,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	}
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
-		"discoverTtsrRules",
-		async () => {
-			const { TtsrManager } = await import("./export/ttsr");
-			const ttsrSettings = settings.getGroup("ttsr");
-			const ttsrManager = new TtsrManager(ttsrSettings);
-			const rulesResult =
-				options.rules !== undefined
-					? { items: options.rules, warnings: undefined }
-					: await loadCapability<Rule>(ruleCapability.id, { cwd });
-			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-			});
-			if (existingSession.injectedTtsrRules.length > 0) {
-				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-			}
-			return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
-		},
-	);
+	// `rulebookRules`/`alwaysApplyRules` are reassignable so an in-session
+	// `refresh` can swap the roster the `rebuildSystemPrompt` closure renders
+	// from (wired via `applyReloadedRoster` below). Without that, a rules refresh
+	// would rebuild the prompt from this stale launch-time snapshot.
+	let rulebookRules: Rule[];
+	let alwaysApplyRules: Rule[];
+	const {
+		ttsrManager,
+		allRules,
+		rulebookRules: initialRulebookRules,
+		alwaysApplyRules: initialAlwaysApplyRules,
+	} = await logger.time("discoverTtsrRules", async () => {
+		const { TtsrManager } = await import("./export/ttsr");
+		const ttsrSettings = settings.getGroup("ttsr");
+		const ttsrManager = new TtsrManager(ttsrSettings);
+		const rulesResult =
+			options.rules !== undefined
+				? { items: options.rules, warnings: undefined }
+				: await loadCapability<Rule>(ruleCapability.id, { cwd });
+		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+		});
+		if (existingSession.injectedTtsrRules.length > 0) {
+			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
+		}
+		return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+	});
+	rulebookRules = initialRulebookRules;
+	alwaysApplyRules = initialAlwaysApplyRules;
 
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
@@ -3687,6 +3697,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			// An in-session `refresh` re-scans the roster and threads the fresh
+			// buckets back here. Reassigning the closure locals `rebuildSystemPrompt`
+			// reads is what makes a rules refresh reach the model prompt — without
+			// it, `refreshBaseSystemPrompt()` would rebuild from the stale
+			// launch-time snapshot. Skills bind a per-session snapshot updated
+			// separately (`applyReloadedSkills`); the prompt reads `session.skills`.
+			applyReloadedRoster: roster => {
+				rulebookRules = roster.rulebookRules;
+				alwaysApplyRules = roster.alwaysApplyRules;
+			},
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,

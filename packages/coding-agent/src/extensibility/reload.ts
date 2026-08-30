@@ -47,13 +47,6 @@ export interface RefreshResult {
 	modelSwapped?: boolean;
 	/** Whether MCP servers were rediscovered and their tools rebound. `true` when the reconnect ran; `undefined` when no MCP manager existed. */
 	mcp?: true;
-	/**
-	 * Set when the refresh was refused because a cooperative restart is in
-	 * progress (`AgentSession.requestRestart()` has latched). Distinguishes a
-	 * refusal from a successful no-op so `summarizeRefresh` can report it rather
-	 * than collapsing it into "nothing to reload".
-	 */
-	refused?: "restarting";
 }
 
 /** Inputs for a roster reload, sourced from the live session/settings. */

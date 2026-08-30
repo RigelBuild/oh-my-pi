@@ -34,9 +34,6 @@ export interface RefreshToolDetails {
 
 /** Human-readable one-line summary of what a refresh changed. */
 export function summarizeRefresh(scope: RefreshScope, result: RefreshResult): string {
-	if (result.refused === "restarting") {
-		return `Refresh skipped (${scope}): restart in progress.`;
-	}
 	const parts: string[] = [];
 	if (result.skills !== undefined) parts.push(`${result.skills} skills`);
 	if (result.rules !== undefined) parts.push(`${result.rules} rules`);
