@@ -985,6 +985,23 @@ function createResizeLimiter(limit: number): ResizeLimiter {
 	};
 }
 
+/**
+ * Encoder qualities tried, in order, when the default re-encode comes out
+ * heavier than the original. The caller's image-byte budget was already
+ * enforced upstream against the ORIGINAL bytes, so a resize that grows the
+ * payload silently reintroduces the 413 that budget prevents — a lossy source
+ * (an efficient WebP screenshot) can re-encode to ~15% MORE base64 even while
+ * its pixel dimensions shrink. Descending quality is only attempted for that
+ * overflow case, so an image that already shrinks keeps the q85 rendition.
+ *
+ * The ladder runs down to q5 because a source barely over the cap has almost
+ * no area to give back: a 2001px q5 WebP loses 0.1% of its pixels on the way
+ * to 2000px, so nothing above q25 re-encodes under its original bytes. A
+ * shorter ladder bottoming out at q40 left that image with no acceptable
+ * rendition at all.
+ */
+const ANTHROPIC_MANY_IMAGE_QUALITIES = [70, 55, 40, 25, 15, 5] as const;
+
 async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<ImageContent> {
 	try {
 		const inputBuffer = Buffer.from(block.data, "base64");
@@ -1000,8 +1017,34 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 			new Bun.Image(inputBuffer).resize(targetWidth, targetHeight).png().bytes(),
 			new Bun.Image(inputBuffer).resize(targetWidth, targetHeight).jpeg({ quality: 85 }).bytes(),
 		]);
-		const best =
+		let best =
 			png.length <= jpeg.length ? { buffer: png, mimeType: "image/png" } : { buffer: jpeg, mimeType: "image/jpeg" };
+
+		// Only re-encode further while the rendition is still heavier than what it
+		// replaces: shedding quality is a cost, so it is paid solely to keep this
+		// step from making the request bigger than the budget already approved.
+		//
+		// JPEG is tried first because it wins on the large photographic frames
+		// this path mostly sees. It pays a fixed per-format overhead a wide,
+		// shallow, low-detail image cannot amortise, though: a uniform 2001x100
+		// source is ~460 bytes as WebP, and every JPEG rung down to q5 re-encodes
+		// it to ~2.3x that. WebP is therefore a second pass rather than a twin of
+		// each rung — an image the JPEG ladder already got under its source never
+		// pays for the extra encodes. Anthropic accepts both formats.
+		outer: for (const format of ["jpeg", "webp"] as const) {
+			for (const quality of ANTHROPIC_MANY_IMAGE_QUALITIES) {
+				if (best.buffer.length <= inputBuffer.length) break outer;
+				const image = new Bun.Image(inputBuffer).resize(targetWidth, targetHeight);
+				const candidate = await (format === "jpeg" ? image.jpeg({ quality }) : image.webp({ quality })).bytes();
+				if (candidate.length < best.buffer.length) best = { buffer: candidate, mimeType: `image/${format}` };
+			}
+		}
+		// The dimension cap is non-negotiable: Anthropic REJECTS a many-image
+		// request whose images exceed it, so returning the over-cap original here
+		// would trade a recoverable byte overage for an unrecoverable 400 that
+		// leaves the session unable to send at all. When even the cheapest
+		// rendition is heavier than the source we still ship the resized one —
+		// the budget is a soft target, the cap is a hard gate.
 
 		return {
 			type: "image",

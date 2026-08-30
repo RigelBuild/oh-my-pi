@@ -5,6 +5,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "@oh-my-pi/pi-coding-agent/blob-broker/stream-fallback";
+import { providerImageByteBudget } from "@oh-my-pi/snapcompact";
 
 const model: Model = buildModel({
 	id: "gpt-4.1",
@@ -153,5 +154,96 @@ describe("provider-file stream fallback", () => {
 		expect(calls).toEqual(["native"]);
 		expect(service.fallbacks).toEqual([]);
 		expect(events).toEqual(["start", "text_start", "text_delta", "error"]);
+	});
+});
+
+const anthropicModel: Model = buildModel({
+	id: "claude-opus-4-8",
+	name: "claude-opus-4-8",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 8192,
+});
+
+/**
+ * Two lazy frames published as `{ data: "", url }` — the shape
+ * `blob-broker/service.ts` `frameSink` produces. They carry no inline bytes, so
+ * the transform pipeline's byte clamp had nothing to charge them against.
+ */
+function lazyFrameContext(): Context {
+	return {
+		messages: [
+			{
+				role: "user",
+				content: [{ type: "image", data: "", mimeType: "image/png", url: "https://frames.test/0" }],
+				timestamp: 0,
+			},
+			{
+				role: "user",
+				content: [{ type: "image", data: "", mimeType: "image/png", url: "https://frames.test/1" }],
+				timestamp: 1,
+			},
+		],
+	};
+}
+
+/** Materializes both frames inline at 60% of the byte budget each — 1.2x the cap. */
+class OversizedMaterializingService extends ImageUrlService {
+	constructor() {
+		super("/tmp/provider-fallback-oversized-test", [], { daemon: false });
+	}
+
+	override async fallbackContext(_context: Context, _model: Model): Promise<Context> {
+		const chunk = Math.ceil(providerImageByteBudget("anthropic") * 0.6);
+		const frame = (tag: string) => ({
+			type: "image" as const,
+			data: tag + "x".repeat(chunk - 1),
+			mimeType: "image/png",
+		});
+		return {
+			messages: [
+				{ role: "user", content: [frame("0")], timestamp: 0 },
+				{ role: "user", content: [frame("1")], timestamp: 1 },
+			],
+		};
+	}
+}
+
+function inlineImageBytes(context: Context): number {
+	let total = 0;
+	for (const message of context.messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const part of message.content) {
+			if (part.type === "image") total += part.data.length;
+		}
+	}
+	return total;
+}
+
+describe("byte budget on materialized fallback images", () => {
+	it("re-clamps images the URL fallback materializes inline", async () => {
+		// `base` here is the low-level provider stream fn: the fallback calls it
+		// directly, so the Agent's transform pipeline (where the byte clamp runs)
+		// never sees the materialized bytes.
+		const seen: Context[] = [];
+		const base: StreamFn = (_model, context) => {
+			seen.push(context);
+			return scriptedStream(seen.length === 1 ? "error" : "success");
+		};
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, new OversizedMaterializingService());
+
+		expect(await eventTypes(await wrapped(anthropicModel, lazyFrameContext()))).toEqual(["start", "done"]);
+
+		const retried = seen[1];
+		if (!retried) throw new Error("expected an inline retry");
+		// Unclamped, the recovery request carries 1.2x the byte budget and 413s —
+		// the very failure this fallback exists to recover from.
+		expect(inlineImageBytes(retried)).toBeLessThanOrEqual(providerImageByteBudget("anthropic"));
+		expect(retried.messages[0]?.content).toEqual([{ type: "text", text: "[image omitted: provider image limit]" }]);
 	});
 });

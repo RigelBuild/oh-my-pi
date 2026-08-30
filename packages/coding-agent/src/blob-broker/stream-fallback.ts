@@ -8,6 +8,7 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { logger } from "@oh-my-pi/pi-utils";
+import { clampProviderContextImages } from "../session/provider-image-budget";
 import { contextHasImageUrls, contextHasProviderFiles } from "./context-images";
 import type { ImageUrlService } from "./service";
 
@@ -45,7 +46,17 @@ export function wrapStreamFnWithBlobUrlFallback(base: StreamFn, broker: ImageUrl
 						continue;
 					}
 					if (event.type === "error" && !sawAttemptContent && event.error.stopReason === "error") {
-						const fallback = await broker.fallbackContext(attemptContext, model);
+						// Materialization turns reference-backed frames into inline
+						// bytes, which the byte clamp in `transformProviderContext`
+						// could not charge while they were URLs — and this recovery
+						// path calls the low-level stream fn directly, so that
+						// pipeline never runs again. Re-clamp here or a fallback
+						// built from many lazy frames 413s on the same limit the
+						// retry exists to escape.
+						const fallback = clampProviderContextImages(
+							await broker.fallbackContext(attemptContext, model),
+							model,
+						);
 						const fallbackSource = imageSource(fallback);
 						if (source !== "inline" && fallbackSource !== source) {
 							logger.warn("blob-broker: provider rejected image source; retrying with fallback", {
