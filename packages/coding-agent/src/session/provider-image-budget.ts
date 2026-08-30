@@ -104,6 +104,9 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 			case "toolResult":
 				return clampToolResultMessage(message, state);
 			case "assistant":
+				// Assistant images count toward the drop budget but are never
+				// themselves dropped — matching the pre-existing count-cap
+				// invariant, since snapcompact frames ride in user/tool messages.
 				return message;
 		}
 		return message;
