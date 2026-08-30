@@ -102,14 +102,62 @@ export class YieldQueue {
 		return false;
 	}
 
-	/** Arrange an idle flush for entries queued near the end of a streaming run. */
-	requestIdleFlush(): void {
+	/**
+	 * Whether any queued entry would actually survive an idle flush.
+	 *
+	 * A caller about to report the session idle must treat this as a pending
+	 * continuation: the flush injects its own agent turn, so an idle signal
+	 * emitted ahead of it invites a subscriber prompt into that turn.
+	 *
+	 * Presence alone is not enough. `#build` drops entries the dispatcher calls
+	 * stale, so a queue holding nothing but stale entries flushes to nothing and
+	 * starts no successor turn. Applying the same predicate here keeps this
+	 * answer and the flush's own decision in agreement — otherwise a caller
+	 * downgrades its terminal signal for a turn that never arrives, and no later
+	 * terminal signal is emitted. The predicates are pure reads of a version or
+	 * epoch counter, and this does not consume the entry: the flush re-checks.
+	 */
+	hasIdleDeliverable(): boolean {
 		for (const [kind, dispatcher] of this.#dispatchers) {
-			if (!dispatcher.skipIdleFlush && this.has(kind)) {
-				this.#scheduleIdleFlush();
-				return;
+			if (dispatcher.skipIdleFlush) continue;
+			const entries = this.#entries.get(kind);
+			if (!entries || entries.length === 0) continue;
+			if (!dispatcher.isStale) return true;
+			for (const entry of entries) {
+				let stale: boolean;
+				try {
+					stale = dispatcher.isStale(entry.value);
+				} catch {
+					// A throwing predicate is the flush's problem to report, not
+					// ours; it rejects the entry there. Treat it as deliverable so
+					// the flush runs and settles the entry either way.
+					return true;
+				}
+				if (!stale) return true;
 			}
 		}
+		return false;
+	}
+
+	/**
+	 * Arrange an idle flush for entries queued near the end of a streaming run.
+	 *
+	 * Scheduling asks a different question from {@link hasIdleDeliverable}: a
+	 * queue holding only stale entries still needs the pass, because `#build`
+	 * is what rejects them and settles their receipts. Gating this on
+	 * deliverability would leave an `enqueueWithReceipt` promise pending until
+	 * some unrelated live entry happened to schedule a flush.
+	 */
+	requestIdleFlush(): void {
+		if (this.#hasIdleFlushEntries()) this.#scheduleIdleFlush();
+	}
+
+	/** Whether any kind the idle flush drains holds an entry, stale or not. */
+	#hasIdleFlushEntries(): boolean {
+		for (const [kind, dispatcher] of this.#dispatchers) {
+			if (!dispatcher.skipIdleFlush && this.has(kind)) return true;
+		}
+		return false;
 	}
 
 	async flush(mode: YieldFlushMode): Promise<void> {
