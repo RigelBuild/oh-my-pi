@@ -5,7 +5,7 @@
  */
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import { clearCache as clearFsCache } from "../../capability/fs";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
@@ -56,7 +56,7 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../mcp/types";
-import { shortenPath } from "../../tools/render-utils";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { urlHyperlinkAlways } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
@@ -2141,7 +2141,10 @@ export class MCPCommandController {
 				// is recovery, so a silent all-failure strands the user).
 				this.ctx.showError(
 					`Failed to refresh MCP tools from all ${outcomes.length} connected servers:\n${failed
-						.map(outcome => `  ${outcome.name}: ${outcome.error}`)
+						.map(
+							outcome =>
+								`  ${outcome.name}: ${replaceTabs(truncateToWidth(sanitizeText(outcome.error.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE))}`,
+						)
 						.join("\n")}`,
 				);
 				return;
@@ -2155,7 +2158,12 @@ export class MCPCommandController {
 			];
 			if (failed.length > 0) {
 				lines.push(theme.fg("warning", `  ${failed.length} server(s) failed to refresh:`));
-				for (const outcome of failed) lines.push(theme.fg("warning", `    ${outcome.name}: ${outcome.error}`));
+				for (const outcome of failed) {
+					const detail = replaceTabs(
+						truncateToWidth(sanitizeText(outcome.error.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE),
+					);
+					lines.push(theme.fg("warning", `    ${outcome.name}: ${detail}`));
+				}
 			}
 			lines.push("");
 			this.#showMessage(lines.join("\n"));

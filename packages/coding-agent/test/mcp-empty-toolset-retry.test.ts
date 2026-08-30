@@ -183,4 +183,92 @@ describe("MCP empty-toolset warmup recovery", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+
+	it("coalesces concurrent refreshes for the same connection onto one tools/list", async () => {
+		// A manual `/mcp refresh` overlapping the automatic empty-toolset re-list
+		// must not each fire their own `tools/list`. Two concurrent
+		// `refreshServerTools` for the same live connection share one in-flight
+		// request; without the guard each clears `connection.tools` and re-lists
+		// independently, and an older response can overwrite a newer one.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
+		const manager = new MCPManager(workDir);
+
+		try {
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			// Connect listed once (empty). Baseline.
+			const listsAfterConnect = fs
+				.readFileSync(listLog, "utf8")
+				.split("\n")
+				.filter(line => line.trim().length > 0);
+			expect(listsAfterConnect).toHaveLength(1);
+
+			// Fire two refreshes in the same tick. The second must observe the
+			// first's in-flight promise and reuse it.
+			await Promise.all([manager.refreshServerTools("warmup"), manager.refreshServerTools("warmup")]);
+
+			const listsAfterRefresh = fs
+				.readFileSync(listLog, "utf8")
+				.split("\n")
+				.filter(line => line.trim().length > 0);
+			// Coalesced: exactly one additional tools/list. Pre-fix: two.
+			expect(listsAfterRefresh).toHaveLength(2);
+			expect(warmupTools(manager)).toHaveLength(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
+
+	it("discards a stale empty re-list once the connection was replaced (no toolless overwrite)", async () => {
+		// Reproduces the stale-overwrite race: an empty `tools/list` that was in
+		// flight against the ORIGINAL connection lands after a reconnect+refresh
+		// already recovered populated tools under the same name. Applying the
+		// stale `[]` unconditionally would wipe the recovered tools permanently.
+		// The connection-identity guard drops the response instead.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
+		const manager = new MCPManager(workDir);
+
+		try {
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			const original = manager.getConnection("warmup");
+			if (!original) throw new Error("expected an initial connection");
+
+			// Gate an empty `tools/list` on the ORIGINAL connection: it enters the
+			// request, then parks until we release it — standing in for the
+			// auto-retry loop's re-list that raced the manual recovery.
+			const gate = Promise.withResolvers<void>();
+			const entered = Promise.withResolvers<void>();
+			const realRequest = original.transport.request.bind(original.transport);
+			original.transport.request = (<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> => {
+				if (method === "tools/list") {
+					entered.resolve();
+					return gate.promise.then(() => ({ tools: [] }) as T);
+				}
+				return realRequest<T>(method, params);
+			}) as typeof original.transport.request;
+
+			const staleReList = manager.refreshServerTools("warmup");
+			// Await the real signal that the stale re-list reached its parked
+			// request, rather than guessing a delay, before replacing the
+			// connection out from under it.
+			await entered.promise;
+
+			// Replace the connection under the same name (disconnect + reconnect),
+			// then recover real tools on the replacement.
+			await manager.disconnectServer("warmup");
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			await manager.refreshServerTools("warmup");
+			expect(warmupTools(manager)).toHaveLength(1);
+			const replacement = manager.getConnection("warmup");
+			expect(replacement).not.toBe(original);
+
+			// Release the stale empty response. It must NOT overwrite the recovered
+			// tools — the guard sees the connection is no longer current.
+			gate.resolve();
+			await staleReList;
+
+			expect(warmupTools(manager)).toHaveLength(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
 });

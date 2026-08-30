@@ -272,8 +272,20 @@ export class MCPManager {
 	#reconnectHistory = new Map<string, number[]>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
-	/** Servers with an in-flight empty-toolset re-list loop, to avoid stacking duplicates. */
-	#pendingEmptyRetries = new Set<string>();
+	/**
+	 * Servers with an in-flight empty-toolset re-list loop, mapped to the
+	 * connection that owns the loop. Keyed by name to avoid stacking duplicates;
+	 * valued by connection so a loop scheduled under a name that was
+	 * disconnected+reconnected can detect it now targets a replacement and stop.
+	 */
+	#pendingEmptyRetries = new Map<string, MCPServerConnection>();
+	/**
+	 * In-flight per-server `refreshServerTools` calls, so a manual `/mcp refresh`
+	 * and an automatic empty-toolset re-list serialize onto one `tools/list`
+	 * instead of racing — an older empty response must never overwrite tools a
+	 * concurrent refresh already recovered.
+	 */
+	#pendingToolRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
 
 	constructor(
 		private cwd: string,
@@ -1017,6 +1029,7 @@ export class MCPManager {
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
 		this.#pendingEmptyRetries.delete(name);
+		this.#pendingToolRefresh.delete(name);
 
 		const connection = this.#connections.get(name);
 
@@ -1059,6 +1072,7 @@ export class MCPManager {
 		this.#subscribedResources.clear();
 		this.#reconnectHistory.clear();
 		this.#pendingEmptyRetries.clear();
+		this.#pendingToolRefresh.clear();
 	}
 
 	/**
@@ -1318,18 +1332,45 @@ export class MCPManager {
 		const connection = this.#connections.get(name);
 		if (!connection) return;
 
-		// Clear cached tools
-		connection.tools = undefined;
+		// Coalesce concurrent refreshes for the same connection onto one
+		// `tools/list`. A manual `/mcp refresh` overlapping an automatic
+		// empty-toolset re-list would otherwise each clear `connection.tools` and
+		// apply their own response unconditionally — an older empty response could
+		// land after the other recovered populated tools and overwrite them with
+		// `[]`. Sharing the in-flight promise makes both callers observe the same
+		// single result.
+		const existing = this.#pendingToolRefresh.get(name);
+		if (existing && existing.connection === connection) return existing.promise;
 
-		// Reload tools
-		const serverTools = await listTools(connection);
-		const reconnect = () => this.reconnectServer(name);
-		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		const doRefresh = async (): Promise<void> => {
+			// Clear cached tools
+			connection.tools = undefined;
 
-		// Replace tools from this server
-		this.#replaceServerTools(name, customTools);
-		await this.#onToolsChanged?.(this.#tools);
+			// Reload tools
+			const serverTools = await listTools(connection);
+
+			// The connection may have been replaced (disconnect+reconnect under the
+			// same name) while `tools/list` was in flight. Applying a stale
+			// response would clobber the replacement's tools; drop it.
+			if (this.#connections.get(name) !== connection) return;
+
+			const reconnect = () => this.reconnectServer(name);
+			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+			void this.toolCache?.set(name, connection.config, serverTools);
+
+			// Replace tools from this server
+			this.#replaceServerTools(name, customTools);
+			await this.#onToolsChanged?.(this.#tools);
+		};
+
+		const promise = doRefresh().finally(() => {
+			const pending = this.#pendingToolRefresh.get(name);
+			if (pending?.promise === promise) {
+				this.#pendingToolRefresh.delete(name);
+			}
+		});
+		this.#pendingToolRefresh.set(name, { connection, promise });
+		return promise;
 	}
 
 	/**
@@ -1372,22 +1413,33 @@ export class MCPManager {
 	 * or failure path ever refetches — the session would hold zero tools for its
 	 * whole lifetime. Re-list on a bounded backoff until tools appear, the
 	 * server disconnects, another path registers tools, or the schedule is
-	 * exhausted. Guarded on {@link #epoch} so a `disconnectAll`/reconfigure
-	 * abandons a stale loop. No-op when auto-retry is disabled
-	 * (`OMP_MCP_EMPTY_RETRY_MS=0`) or a loop for this server is already running.
+	 * abandons a stale loop, and on the originating connection so a
+	 * disconnect+reconnect under the same name (which does not bump `#epoch`)
+	 * abandons the old loop rather than letting it re-list against the
+	 * replacement. No-op when auto-retry is disabled (`OMP_MCP_EMPTY_RETRY_MS=0`)
+	 * or a loop for this server is already running.
 	 */
 	#scheduleEmptyToolsetRetry(name: string): void {
 		const delays = resolveEmptyToolsetRetryDelays();
 		if (delays.length === 0) return;
-		if (this.#pendingEmptyRetries.has(name)) return;
-		this.#pendingEmptyRetries.add(name);
+		const connection = this.#connections.get(name);
+		if (!connection) return;
+		// Dedup only against a loop already running for THIS connection. A stale
+		// loop still holding the marker for a since-replaced connection must not
+		// suppress the replacement's own loop.
+		if (this.#pendingEmptyRetries.get(name) === connection) return;
+		this.#pendingEmptyRetries.set(name, connection);
 		const startEpoch = this.#epoch;
 		void (async () => {
 			try {
 				for (const wait of delays) {
 					await delay(wait);
 					if (this.#epoch !== startEpoch) return;
-					if (!this.#connections.has(name)) return;
+					// Stop if this name now maps to a different (or no) connection:
+					// a disconnect+reconnect replaced our target, and a fresh loop
+					// owns the replacement. Continuing would re-list the wrong
+					// connection and let this loop's cleanup clear the new marker.
+					if (this.#connections.get(name) !== connection) return;
 					if (this.#serverToolCount(name) > 0) return;
 					try {
 						await this.refreshServerTools(name);
@@ -1410,7 +1462,11 @@ export class MCPManager {
 					path: `mcp:${name}`,
 				});
 			} finally {
-				this.#pendingEmptyRetries.delete(name);
+				// Clear only the marker this loop owns — a replacement connection's
+				// loop may have taken the slot while we were running.
+				if (this.#pendingEmptyRetries.get(name) === connection) {
+					this.#pendingEmptyRetries.delete(name);
+				}
 			}
 		})();
 	}
