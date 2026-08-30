@@ -258,6 +258,21 @@ export class MCPManager {
 	) {}
 
 	/**
+	 * Re-point config discovery at `cwd`.
+	 *
+	 * The constructor value is a session-START snapshot, but a live session can
+	 * MOVE project (`/move`, a cross-project resume): `SessionManager` and
+	 * `Settings` are both repointed, while this manager kept loading
+	 * `.mcp.json` from the ORIGINAL directory — so a reconnect disconnected the
+	 * current project's servers and respawned the old project's stdio commands.
+	 * Also feeds the `roots` capability, which advertises this directory to
+	 * connected servers.
+	 */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+	}
+
+	/**
 	 * Register a listener for MCP connection lifecycle events
 	 * (`connecting` / `connected` / `failed`).
 	 *

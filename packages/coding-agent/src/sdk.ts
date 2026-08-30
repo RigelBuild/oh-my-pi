@@ -22,15 +22,12 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
-import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
-	$env,
 	$flag,
 	getAgentDir,
 	getModelDbPath,
@@ -81,6 +78,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
+import { resolveDialect } from "./config/tool-dialect";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
@@ -88,6 +86,8 @@ import { createImageUrlServiceFromSettings } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+import { applyMCPEnvironment } from "./mcp/reload";
+import { TtsrManager } from "./export/ttsr";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -367,12 +367,6 @@ function logMCPLoadErrors(errors: MCPLoadResult["errors"]): void {
 	}
 }
 
-function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
-	if (result.exaApiKeys.length > 0 && !$env.EXA_API_KEY) {
-		Bun.env.EXA_API_KEY = result.exaApiKeys[0];
-	}
-}
-
 // Types
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
@@ -525,6 +519,13 @@ export interface CreateAgentSessionOptions {
 	skills?: Skill[];
 	/** Rules. Default: discovered from multiple locations */
 	rules?: Rule[];
+	/**
+	 * Marks {@link rules} as an INHERITED parent roster rather than an explicit
+	 * restriction. Set by the subagent spawn path, which always forwards the
+	 * parent's `session.rules`; a parent's refresh may replace an inherited
+	 * roster but must never widen an explicit one.
+	 */
+	rulesInherited?: boolean;
 	/** Context files (AGENTS.md content). Default: discovered walking up from cwd */
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
@@ -680,21 +681,9 @@ export interface CreateAgentSessionResult {
 	subagentEventBus?: EventBus;
 }
 
-export type DialectFormat = "auto" | "native" | Dialect;
-
-export function resolveDialect(
-	format: DialectFormat,
-	model: (Pick<Model, "supportsTools"> & Partial<Pick<Model, "id">>) | undefined,
-): Dialect | undefined {
-	if (format === "native") return undefined;
-	if (format === "auto") {
-		if (model?.supportsTools !== false) return undefined;
-		if (!model.id) return "glm";
-		const preferred = preferredDialect(model.id);
-		return preferred === FALLBACK_DIALECT ? "glm" : preferred;
-	}
-	return format;
-}
+// Re-exported from `config/tool-dialect` so the settings reconciliation in
+// `AgentSession` can resolve the same way without importing this entry point.
+export { type DialectFormat, resolveDialect } from "./config/tool-dialect";
 
 // Re-exports
 
@@ -1478,10 +1467,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// Load and create secret obfuscator early so resumed session state and prompt warnings
 	// reflect actual loaded secrets, not just the setting toggle.
-	const obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
+	//
+	// `let`, not `const`: `/refresh settings` rebuilds this when `secrets.enabled`
+	// moves, and every closure below reads the LOCAL (not a captured copy), so the
+	// rebuild reaches `convertToLlmFinal`, `transformProviderContext`, and
+	// tool-argument deobfuscation. Frozen, a session that enabled secrets on disk
+	// kept sending the configured values to providers while refresh reported the
+	// privacy setting updated.
+	let obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
 		? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
 		: undefined;
-	const secretsEnabled = obfuscator?.hasSecrets() === true;
+	// `let`, not `const`: the prompt's `<redacted-content>` block explains that
+	// `$$HASH$$` placeholders are intentional opaque values, so it must hold
+	// whenever the obfuscator can MINT one. `/refresh settings` rebuilds that
+	// obfuscator, and `rebuildSystemPrompt` reads this local — frozen, a session
+	// that enabled secrets on disk started emitting placeholders while the prompt
+	// still omitted the instruction, so the model read them as errors and tried
+	// to "fix" them.
+	//
+	// Keyed on `hasSecrets()` rather than the `secrets.enabled` flag: that verdict
+	// is what every minting path already gates on, so the instruction holds
+	// exactly when a placeholder can appear.
+	let secretsEnabled = obfuscator?.hasSecrets() === true;
 
 	// An abnormal process exit after a non-terminal message tail is durable
 	// evidence that the old process can no longer finish that turn. Preserve the
@@ -1506,6 +1513,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? [options.modelPattern.trim()]
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
+	// Whether a thinking level was actually REQUESTED at startup, tracked apart
+	// from whether a model was. `options.thinkingLevel` (CLI `--thinking`, and
+	// the `:level` suffix `main.ts` lifts off an explicit `--model` selector)
+	// starts it; the deferred `modelPattern` path sets it below when the pattern
+	// it resolved carried its own suffix. A model supplied WITHOUT any suffix
+	// says nothing about thinking — the level then came from
+	// `thinking.defaultLevel` or `defaultThinkingLevel`, which must stay
+	// settings-tracking so editing that setting and running `refresh('settings')`
+	// still reaches the session.
+	let explicitThinkingSelector = options.thinkingLevel !== undefined;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
 	const defaultRoleValue = settings.getModelRole("default");
 	let explicitDefaultProviders: Set<string> | undefined;
@@ -1660,27 +1677,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
-		"discoverTtsrRules",
-		async () => {
-			const { TtsrManager } = await import("./export/ttsr");
-			const ttsrSettings = settings.getGroup("ttsr");
-			const ttsrManager = new TtsrManager(ttsrSettings);
-			const rulesResult =
-				options.rules !== undefined
-					? { items: options.rules, warnings: undefined }
-					: await loadCapability<Rule>(ruleCapability.id, { cwd });
-			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-				agentName: resolvedAgentName,
-			});
-			if (existingSession.injectedTtsrRules.length > 0) {
-				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-			}
-			return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
-		},
-	);
+	// `rulebookRules`/`alwaysApplyRules` are reassignable so an in-session
+	// `refresh` can swap the roster the `rebuildSystemPrompt` closure renders
+	// from (wired via `applyReloadedRoster` below). Without that, a rules refresh
+	// would rebuild the prompt from this stale launch-time snapshot.
+	let rulebookRules: Rule[];
+	let alwaysApplyRules: Rule[];
+	const {
+		ttsrManager,
+		allRules,
+		rulebookRules: initialRulebookRules,
+		alwaysApplyRules: initialAlwaysApplyRules,
+	} = await logger.time("discoverTtsrRules", async () => {
+		const ttsrSettings = settings.getGroup("ttsr");
+		const ttsrManager = new TtsrManager(ttsrSettings);
+		const rulesResult =
+			options.rules !== undefined
+				? { items: options.rules, warnings: undefined }
+				: await loadCapability<Rule>(ruleCapability.id, { cwd });
+		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+			agentName: resolvedAgentName,
+		});
+		if (existingSession.injectedTtsrRules.length > 0) {
+			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
+		}
+		return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+	});
+	rulebookRules = initialRulebookRules;
+	alwaysApplyRules = initialAlwaysApplyRules;
 
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
@@ -1814,6 +1840,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			refresh: scope => session.refresh(scope),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
@@ -2038,7 +2065,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								await deferredMCPManager.disconnectAll();
 								return;
 							}
-							applyMCPEnvironment(mcpResult);
+							// Owned by THIS session's manager, so the key this session
+							// installs cannot later be replaced or deleted by a peer
+							// top-level session's own startup or refresh.
+							applyMCPEnvironment(mcpResult, deferredMCPManager);
 							logMCPLoadErrors(mcpResult.errors);
 							// Connected MCP tools are enabled and mounted under xd:// devices.
 							await liveSession.refreshMCPTools(mcpResult.tools);
@@ -2062,7 +2092,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (settings.get("mcp.notifications")) {
 					mcpManager.setNotificationsEnabled(true);
 				}
-				applyMCPEnvironment(mcpResult);
+				applyMCPEnvironment(mcpResult, mcpManager);
 
 				// Log MCP errors
 				for (const { path, error } of mcpResult.errors) {
@@ -2624,6 +2654,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelFallbackMessage = undefined;
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;
+					// The resolved pattern carried its own `:level` suffix (or
+					// inherited the unavailable primary's), so this startup really
+					// did request a thinking level.
+					explicitThinkingSelector = true;
 				}
 				thinkingLevel = pickInitialThinkingLevel(selectedModel);
 				autoThinking = thinkingLevel === AUTO_THINKING;
@@ -3620,9 +3654,57 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
+		// An EXPLICIT startup model (`options.model` / `options.modelPattern`, incl.
+		// CLI `--model`) is a user pin, exactly like an in-session `/model` pick, and
+		// must be recorded with role `default` on BOTH startup paths. On a resumed
+		// branch whose latest non-ephemeral `model_change` is role-less,
+		// `AgentSession.#hasSessionModelOverride()` would otherwise classify the
+		// explicitly requested model as settings-tracking, and the next
+		// `refresh('settings')` would replace it with the configured default.
+		const explicitStartupModel = hasExplicitModel ? model : undefined;
+		// An EXPLICIT thinking selection — `options.thinkingLevel` (incl. CLI
+		// `--thinking`, which is also where `main.ts` puts an explicit model
+		// selector's `:level` suffix), or a resolved `modelPattern`'s own suffix
+		// — is a session pin a settings reload must not clobber, exactly as an
+		// explicit model is. Hoisted above the branch: BOTH startup paths must
+		// record it, and a settings-DERIVED level stays settings-tracking so a
+		// later `refresh('settings')` may re-derive it.
+		//
+		// A model given WITHOUT a thinking suffix is deliberately NOT enough. It
+		// pins the model only; the level then came from the model's
+		// `thinking.defaultLevel` or the global `defaultThinkingLevel`, and
+		// classifying that as a pin wrote an unflagged receipt that made
+		// `thinkingFollowsSettings()` read `false` forever — so editing
+		// `defaultThinkingLevel` and running `refresh('settings')` left the old
+		// level active with nothing the user could do about it short of an
+		// explicit re-selection.
+		const explicitStartupThinking = explicitThinkingSelector;
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
+			if (explicitStartupModel) {
+				sessionManager.appendModelChange(`${explicitStartupModel.provider}/${explicitStartupModel.id}`, "default");
+			}
+			// An explicit thinking selection needs its pin receipt on the RESUMED
+			// path too. Startup applies `options.thinkingLevel` to the new `Agent`
+			// either way, but with no receipt on the branch
+			// `AgentSession.#thinkingFollowsSettings()` sees only the prior
+			// session's entry (or none) and falls through to its follows-settings
+			// default, so the next unrelated `refresh('settings')` overwrote the
+			// explicitly requested level. Only an EXPLICIT choice writes here: a
+			// settings-derived resume must keep tracking the configured default,
+			// and the level it resolved to is already restored from the branch.
+			if (explicitStartupThinking) {
+				if (autoThinking) {
+					// `configured: auto` so the pin records the SELECTOR, not the
+					// provisional effort — same reason as the new-session branch.
+					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
+				} else {
+					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, {
+						settingsTracking: false,
+					});
+				}
+			}
 			if (options.openAIServiceTier !== undefined) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
@@ -3631,12 +3713,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				// A settings-derived startup stays role-less (still tracks the
+				// configured default and remains swappable).
+				sessionManager.appendModelChange(
+					`${model.provider}/${model.id}`,
+					explicitStartupModel ? "default" : undefined,
+				);
 			}
 			if (!autoThinking) {
-				// Do not write the `auto` selector before the first turn resolves; auto
-				// classification persists its concrete effort once a real user turn runs.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, {
+					settingsTracking: !explicitStartupThinking,
+				});
+			} else if (explicitStartupThinking) {
+				// An EXPLICITLY selected `auto` is a session pin too, and it needs a
+				// receipt to say so. A settings-derived `auto` writes nothing (the
+				// per-turn classifier persists its concrete effort once a real user
+				// turn runs, and an absent entry already reads as follows-settings),
+				// but an explicit one has nowhere else to record the pin: every
+				// classifier receipt is `autoResolved`, which
+				// `AgentSession.#thinkingFollowsSettings()` deliberately walks PAST,
+				// so the branch would hold no selection at all and fall through to
+				// that scan's follows-settings default — letting an unrelated
+				// `refresh('settings')` replace the user's `auto` with the
+				// configured/model fallback. `configured: auto` (not the provisional
+				// effort) so resume restores the selector, not the effort it
+				// happened to show.
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
 			}
 			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
@@ -3751,6 +3853,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: settings.getGroup("skills"),
+			// Only the caller-supplied rule policy (SDK `rules` / `--no-rules`), not
+			// the disk-discovered set: present, an in-session refresh re-buckets it
+			// instead of re-scanning disk, so it cannot re-enable ambient rules the
+			// session excluded. `undefined` keeps the roster-editing disk re-scan.
+			rules: options.rules,
+			// Whether that policy is the parent's INHERITED roster (the subagent
+			// spawn path always forwards `session.rules`) rather than a caller
+			// restriction. A parent refresh may replace the former in a running
+			// child; the latter it must never widen.
+			rulesInherited: options.rulesInherited,
+			// The session's initial discovered roster (rulebook + always-apply), so
+			// a settings-only `refresh` re-buckets the COMPLETE set against the
+			// reloaded TTSR gating and drops only newly-gated rules — instead of
+			// re-bucketing from TTSR entries alone (empty non-TTSR set) and wiping
+			// every non-TTSR rule from the published active rules and next prompt.
+			initialRosterRules: [...rulebookRules, ...alwaysApplyRules],
+			// The complete UNGATED discovery output. A settings-only `refresh`
+			// re-buckets THIS set, so toggling `ttsr.disabledRules`/`builtinRules`
+			// applies in both directions: re-bucketing only the gated roster above
+			// could never restore a rule whose disable entry the user reverted.
+			initialSourceRules: allRules,
+			// The same name init bucketed with, so a refresh re-buckets under this
+			// session's agent scope rather than admitting every agent-scoped rule.
+			agentRuleName: resolvedAgentName,
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
@@ -3786,6 +3912,50 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			// An in-session `refresh` re-scans the roster and threads the fresh
+			// buckets back here. Reassigning the closure locals `rebuildSystemPrompt`
+			// reads is what makes a rules refresh reach the model prompt — without
+			// it, `refreshBaseSystemPrompt()` would rebuild from the stale
+			// launch-time snapshot. Skills bind a per-session snapshot updated
+			// separately (`applyReloadedSkills`); the prompt reads `session.skills`.
+			applyReloadedRoster: roster => {
+				rulebookRules = roster.rulebookRules;
+				alwaysApplyRules = roster.alwaysApplyRules;
+				// Re-publish the session's OWN rule snapshot too. `rule://`
+				// resolution prefers `context.rules` (this array) over the process
+				// global, so leaving it at the launch-time value serves stale rule
+				// content — and hides a newly added rule — from every tool that
+				// threads `session.activeRules`.
+				//
+				// The TTSR part is the set the refresh already PUBLISHED, never
+				// `ttsrManager.getRules()`: that registry deliberately retains
+				// registrations while TTSR is globally disabled, so re-deriving
+				// from it here re-added rules the published global set omits — a
+				// condition-only rule stayed addressable through `rule://` with no
+				// bucket to justify it, and a described one was listed twice,
+				// while the reported count came from the narrowed set. Both
+				// snapshots must be the rule set a FRESH session under the current
+				// gating would hold, so both read the same answer.
+				toolSession.activeRules = [
+					...roster.rulebookRules,
+					...roster.alwaysApplyRules,
+					...roster.publishedTtsrRules,
+				];
+				// And the SPAWN-facing field, which is a different set: children
+				// receive `rules: session.rules` as `options.rules`, and a defined
+				// `options.rules` is the child's authoritative rule policy (it skips
+				// the disk scan and buckets exactly this list). Left at the
+				// launch-time `allRules`, a rule added or edited before the spawn was
+				// silently absent from the new child's prompt and `rule://` snapshot.
+				//
+				// The UNGATED source roster is the right value: the gated buckets
+				// above are THIS session's applicable set, so forwarding them would
+				// bake this session's `ttsr.disabledRules`/`agents` scoping into the
+				// child as an unrecoverable policy — the child could never restore a
+				// rule whose disable entry the user later reverted, and a rule scoped
+				// to the child's own agent would be missing outright.
+				toolSession.rules = [...roster.sourceRules];
+			},
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
@@ -3799,6 +3969,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolSession.pendingFullWriteDescription = enabled ? true : undefined;
 			},
 			ensureGoalRegistered,
+			// Rebuilds a setting-gated tool set (`generate_image`, `tts`) when its
+			// setting is turned on after construction. Reproduces the SAME startup
+			// gates the initial install applies, so a group this session was never
+			// allowed to have stays absent: `restrictToolNames` installs no custom
+			// tools at all, and an explicit `--no-tools`/tool whitelist that omits
+			// `generate_image` must keep omitting it (issue #5305) — image-gen is
+			// force-activated, so honoring the whitelist here is the only filter.
+			// Returns the raw `CustomTool`s; the session adapts and wraps them
+			// against its own live tool context, exactly as an MCP tool refresh does.
+			createSettingGatedTools: async setting => {
+				if (restrictToolNames) return [];
+				if (setting === "speechgen.enabled") return [ttsTool as unknown as CustomTool];
+				if (options.toolNames && !options.toolNames.includes("generate_image")) return [];
+				const imageGenTools = await getImageGenTools(modelRegistry, agent.state.model ?? model);
+				return imageGenTools as unknown as CustomTool[];
+			},
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();
@@ -3814,10 +4000,55 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				: undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
+			// The manager THIS session was built with (owned or the parent's), so an
+			// in-session refresh reconnects it rather than the process-global
+			// `MCPManager.instance()` — which, with multiple top-level sessions, may
+			// be a different session's manager.
+			mcpManager,
 			ttsrManager,
 			obfuscator,
+			// Reassigns the closure local, so the rebuild reaches
+			// `convertToLlmFinal`/`transformProviderContext`/tool-argument
+			// deobfuscation — the consumers that read `obfuscator` directly and
+			// which a session-only swap would never touch. The session installs the
+			// returned instance as its own live value.
+			//
+			// It also refreshes the `secretsEnabled` local that `rebuildSystemPrompt`
+			// renders the `<redacted-content>` block from, and reports whether that
+			// verdict MOVED so the caller can rebuild the prompt. Reporting the
+			// move (rather than rebuilding here) keeps the decision with
+			// `#doRefresh`, which already batches every prompt-affecting change into
+			// one rebuild at the end — and keeps a steady-state refresh
+			// byte-identical so provider prompt caching keeps hitting.
+			rebuildObfuscator: async () => {
+				obfuscator = settings.get("secrets.enabled")
+					? // The session's CURRENT directory, like the rest of refresh
+						// (`settings.reload()`, the roster reload, the prompt's repo
+						// context). `/move` and a cross-project resume repoint it, and
+						// the project half of the secret set is `<cwd>/.omp/secrets.yml`
+						// — so rebuilding from the construction-time value read the
+						// ORIGINAL project's file, leaving the destination project's
+						// secrets unobfuscated in provider requests while the source
+						// project's substitutions kept being applied.
+						//
+						// `agentDir`/`options.agentDir` deliberately stay
+						// construction-time: they locate the GLOBAL secrets.yml and the
+						// placeholder-key file, neither of which is project-scoped, and
+						// the key must stay stable for the session's lifetime so
+						// placeholders already minted into the transcript keep
+						// deobfuscating after a move.
+						await buildSecretObfuscator(sessionManager.getCwd(), agentDir, options.agentDir)
+					: undefined;
+				const nextSecretsEnabled = obfuscator?.hasSecrets() === true;
+				const promptStateChanged = nextSecretsEnabled !== secretsEnabled;
+				secretsEnabled = nextSecretsEnabled;
+				return { obfuscator, promptStateChanged };
+			},
 			agentId: resolvedAgentId,
 			agentKind,
+			// Retain the registry this session was created against so refresh's skill
+			// fan-out targets THIS tree's descendants, not a foreign global tree.
+			agentRegistry,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
@@ -4165,7 +4396,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					serviceTierResolver: agent.serviceTierResolver,
 					hideThinkingSummary: agent.hideThinkingSummary,
 					maxRetryDelayMs: agent.maxRetryDelayMs,
-					kimiApiFormat,
+					// Read from the live agent, like the tuning fields above: a
+					// `providers.kimiApiFormat` change applied by `/refresh settings`
+					// updates `agent.kimiApiFormat`, while the construction-time
+					// constant would pin every later capture to the old wire format.
+					kimiApiFormat: agent.kimiApiFormat,
 					preferWebsockets: preferOpenAICodexWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,

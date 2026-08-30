@@ -489,6 +489,14 @@ export interface ExecutorOptions {
 	/** Parent-discovered rules, forwarded to skip rule discovery in the subagent. */
 	rules?: Rule[];
 	/**
+	 * Marks {@link rules} as the parent's INHERITED roster rather than an
+	 * explicit caller restriction, so a parent refresh may replace it in this
+	 * running child. The structured spawn path always forwards
+	 * `session.rules`, so without this the child's launch-time roster would
+	 * look like a policy and stay frozen.
+	 */
+	rulesInherited?: boolean;
+	/**
 	 * Parent session's live extension-root policy. Forwarded separately from
 	 * `preloadedExtensionPaths`, which only controls extension module loading.
 	 */
@@ -3459,6 +3467,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
+				rulesInherited: options.rulesInherited,
 				extensionRoots: options.extensionRoots,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,

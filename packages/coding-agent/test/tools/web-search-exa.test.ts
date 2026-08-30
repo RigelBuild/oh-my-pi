@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { applyMCPEnvironment, isExaEnvHelperInjected } from "@oh-my-pi/pi-coding-agent/mcp/reload";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	buildExaRequestBody,
@@ -14,6 +15,7 @@ import {
 	synthesizeAnswer,
 } from "@oh-my-pi/pi-coding-agent/web/search/providers/exa";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { mockFetch as wrapFetch } from "../helpers/fetch-mock";
 
 async function withLocalAuthStorage<T>(run: (authStorage: AuthStorage) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "web-search-exa-auth-"));
@@ -701,9 +703,127 @@ describe("searchExa", () => {
 		expect(available).toBe(true);
 	});
 
+	it("reports available for the auto chain on the session's own discovered key alone", async () => {
+		// `search()` accepts `sessionExaApiKey`, so a session holding one can
+		// service the request with the environment empty and no broker
+		// credential — the state left behind when the session that injected
+		// `EXA_API_KEY` removes it. Without the key in the availability check the
+		// auto chain skips Exa and falls through to another provider.
+		delete process.env.EXA_API_KEY;
+		const available = await withLocalAuthStorage(authStorage =>
+			Promise.resolve(new ExaProvider().isAvailable(authStorage, { sessionExaApiKey: "my-own-session-key" })),
+		);
+		expect(available).toBe(true);
+	});
+
+	it("stays unavailable when no session key accompanies the empty environment", async () => {
+		// The context is not a blanket yes: an absent or empty session key must
+		// leave the verdict exactly where it was.
+		delete process.env.EXA_API_KEY;
+		const verdicts = await withLocalAuthStorage(authStorage =>
+			Promise.resolve([
+				new ExaProvider().isAvailable(authStorage, {}),
+				new ExaProvider().isAvailable(authStorage, { sessionExaApiKey: undefined }),
+				new ExaProvider().isAvailable(authStorage, { sessionExaApiKey: "" }),
+			]),
+		);
+		expect(verdicts).toEqual([false, false, false]);
+	});
+
+	it("keeps the settings kill switch ahead of a session key", async () => {
+		// `exa.enabled: false` is an operator refusal; a per-request credential
+		// must not reopen the provider.
+		delete process.env.EXA_API_KEY;
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { "exa.enabled": false, "exa.searchDelayMs": 0 } });
+		const available = await withLocalAuthStorage(authStorage =>
+			Promise.resolve(new ExaProvider().isAvailable(authStorage, { sessionExaApiKey: "my-own-session-key" })),
+		);
+		expect(available).toBe(false);
+	});
+
 	it("throws SearchProviderError on non-ok HTTP response", async () => {
 		await expect(searchExa({ query: "forbidden", fetch: mockFetch("Forbidden", 403) })).rejects.toThrow(
 			"exa: 403 forbidden",
 		);
+	});
+});
+
+// `EXA_API_KEY` is process-global while Exa credentials are per-session MCP
+// config, so the session key must outrank an environment value ANOTHER session
+// injected — otherwise every later session authenticates as whichever one
+// injected first. But it must NOT outrank the OPERATOR's own export:
+// `applyMCPEnvironment` deliberately refuses to overwrite a foreign value to
+// honor that documented override, while still recording the config-discovered
+// key for the session. Ranking the recorded key first therefore defeated the
+// override silently.
+describe("searchExa: EXA_API_KEY vs the session's MCP-discovered key", () => {
+	// `Bun.env` is a string map at runtime, but TypeScript pins a deleted
+	// property's type to `undefined`, so read/write through a widened alias.
+	const env: Record<string, string | undefined> = Bun.env;
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		resetExaSearchThrottleForTest();
+		await Settings.init({ inMemory: true, overrides: { "exa.searchDelayMs": 0 } });
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		resetExaSearchThrottleForTest();
+		resetSettingsForTest();
+		delete env.EXA_API_KEY;
+	});
+
+	/** Runs one search and reports the `x-api-key` the native Exa client sent. */
+	async function keyUsedForSearch(sessionExaApiKey?: string): Promise<string | undefined> {
+		let sent: string | undefined;
+		const result = await searchExa({
+			query: "precedence probe",
+			sessionExaApiKey,
+			fetch: wrapFetch((_url, init) => {
+				sent = (init?.headers as Record<string, string> | undefined)?.["x-api-key"];
+				return new Response(JSON.stringify(makeMockExaResponse()), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}),
+		});
+		expect(result.provider).toBe("exa");
+		return sent;
+	}
+
+	it("keeps an operator-exported EXA_API_KEY ahead of a discovered session key", async () => {
+		env.EXA_API_KEY = "operator-exported-key";
+		// The operator's value is FOREIGN to the injection helper: it never
+		// installed it, so a reload leaves it alone. Discovery still recorded the
+		// MCP-configured key for this session.
+		expect(isExaEnvHelperInjected()).toBe(false);
+
+		// Pre-fix the recorded key was picked unconditionally, so search
+		// authenticated to the MCP-configured account despite the export.
+		expect(await keyUsedForSearch("mcp-configured-key")).toBe("operator-exported-key");
+	});
+
+	it("prefers the session key over an EXA_API_KEY the harness itself injected", async () => {
+		// A peer top-level session's reload put its own key in the environment.
+		// That is not an operator override, and reading it would make THIS session
+		// authenticate as the peer.
+		const owner = {};
+		applyMCPEnvironment({ exaApiKeys: ["peer-injected-key"] }, owner);
+		expect(env.EXA_API_KEY).toBe("peer-injected-key");
+		expect(isExaEnvHelperInjected()).toBe(true);
+
+		expect(await keyUsedForSearch("my-own-session-key")).toBe("my-own-session-key");
+	});
+
+	it("falls back to EXA_API_KEY when this session discovered no key", async () => {
+		env.EXA_API_KEY = "operator-exported-key";
+		expect(await keyUsedForSearch(undefined)).toBe("operator-exported-key");
+	});
+
+	it("uses the session key when the environment carries nothing at all", async () => {
+		delete env.EXA_API_KEY;
+		expect(await keyUsedForSearch("my-own-session-key")).toBe("my-own-session-key");
 	});
 });

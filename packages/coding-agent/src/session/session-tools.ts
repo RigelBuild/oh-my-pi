@@ -39,6 +39,45 @@ import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } fro
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+/**
+ * Equality over the skill fields that affect the rendered system prompt.
+ * Mirrors the rule-side `ruleIdentityEqual`: an existing SKILL.md whose
+ * `description`/`hide` frontmatter changes without a rename/move must count as
+ * a roster change so the prompt rebuilds. `hide` is normalized so `undefined`
+ * and `false` (both "advertised") compare equal.
+ */
+function skillIdentityEqual(a: Skill, b: Skill): boolean {
+	return (
+		a.name === b.name &&
+		a.filePath === b.filePath &&
+		a.description === b.description &&
+		(a.hide ?? false) === (b.hide ?? false)
+	);
+}
+
+/** A tool set whose very existence is gated on one boolean setting. */
+export interface SettingGatedToolGroup {
+	readonly setting: SettingGatedToolSetting;
+	/**
+	 * Names the group is KNOWN to install, so a disable can drop them even on a
+	 * session whose set was installed by the startup path rather than by a
+	 * reconcile. The factory's actual output is unioned in on top.
+	 */
+	readonly toolNames: readonly string[];
+}
+
+/** The boolean settings that gate a whole tool set's existence. */
+export type SettingGatedToolSetting = "generate_image.enabled" | "speechgen.enabled";
+
+/**
+ * Tool sets sdk.ts installs at construction from a boolean setting and never
+ * revisits, so `refresh('settings')` has to reconcile them explicitly.
+ */
+export const SETTING_GATED_TOOL_GROUPS: readonly SettingGatedToolGroup[] = [
+	{ setting: "generate_image.enabled", toolNames: ["generate_image"] },
+	{ setting: "speechgen.enabled", toolNames: ["tts"] },
+];
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
 	agent: Agent;
@@ -82,6 +121,14 @@ interface SessionToolsOptions {
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/**
+	 * Builds one {@link SETTING_GATED_TOOL_GROUPS} entry's tools when its
+	 * setting is enabled after construction. Supplied by sdk.ts, which owns the
+	 * same startup gates (`restrictToolNames`, an explicit `--no-tools`/tool
+	 * whitelist) the initial install honors — so a group the session was never
+	 * allowed to have returns empty here rather than appearing on a refresh.
+	 */
+	createSettingGatedTools?: (setting: SettingGatedToolSetting) => Promise<CustomTool[]>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -253,6 +300,13 @@ export class SessionTools {
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
+	#createSettingGatedTools: SessionToolsOptions["createSettingGatedTools"];
+	/**
+	 * Tool names this session has installed per setting-gated group, so a later
+	 * disable can drop exactly what an earlier enable added — including a tool
+	 * whose name the static group table does not list.
+	 */
+	#settingGatedToolNames = new Map<SettingGatedToolSetting, Set<string>>();
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
@@ -284,6 +338,7 @@ export class SessionTools {
 		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
 		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
+		this.#createSettingGatedTools = options.createSettingGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
@@ -353,6 +408,56 @@ export class SessionTools {
 		return this.#skills;
 	}
 
+	/**
+	 * Swap in a freshly reloaded skills snapshot (from an in-session `refresh`)
+	 * and report whether the set actually changed. `skill://` binds this
+	 * per-session snapshot, so a `setActiveSkills` global swap alone does not
+	 * reach it. Positional prompt-identity compare (name, path, description,
+	 * `hide`) mirrors discovery's stable order and the rule-side
+	 * `ruleIdentityEqual`: editing an existing SKILL.md's `description`/`hide`
+	 * frontmatter WITHOUT renaming still counts as a change and rebuilds the
+	 * advertised roster. An unchanged set returns `false` so the prompt rebuild
+	 * is skipped and Anthropic prompt caching keeps hitting.
+	 */
+	applyReloadedSkills(skills: readonly Skill[], skillsSettings?: SkillsSettings): boolean {
+		let changed = this.#skills.length !== skills.length;
+		if (!changed) {
+			for (let i = 0; i < skills.length; i++) {
+				if (!skillIdentityEqual(this.#skills[i], skills[i])) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		this.#skills = [...skills];
+		// Refresh the settings snapshot too: `skills.enableSkillCommands` gates
+		// skill slash-command availability (available-commands.ts), so a stale
+		// construction-time snapshot would keep the old command surface after a
+		// config change. Only overwrite when the caller supplies a fresh group.
+		if (skillsSettings !== undefined) this.#skillsSettings = skillsSettings;
+		return changed;
+	}
+
+	/**
+	 * Install a freshly reloaded `skills.*` settings group WITHOUT touching the
+	 * discovered skill roster, and report whether the command-gating flag
+	 * (`skills.enableSkillCommands`) actually moved.
+	 *
+	 * A `settings`-only refresh reloads the live `Settings` but runs no roster
+	 * rediscovery, so it has no `applyReloadedSkills` call to piggyback the
+	 * snapshot on — yet the cached snapshot is exactly what gates the skill
+	 * command surface (available-commands.ts, acp-agent.ts, rpc-mode.ts), so
+	 * leaving it stale keeps those consumers honoring the old flag until an
+	 * unrelated `skills`/`all` refresh. Returning the flag delta lets the caller
+	 * notify command-metadata subscribers only on a real change, so an unchanged
+	 * config stays a no-op.
+	 */
+	applyReloadedSkillsSettings(skillsSettings: SkillsSettings): boolean {
+		const changed = this.#skillsSettings?.enableSkillCommands !== skillsSettings.enableSkillCommands;
+		this.#skillsSettings = skillsSettings;
+		return changed;
+	}
+
 	/** Diagnostics produced while loading the current skills. */
 	get skillWarnings(): SkillWarning[] {
 		return this.#skillWarnings;
@@ -361,6 +466,11 @@ export class SessionTools {
 	/** Settings snapshot used for the current skill discovery. */
 	get skillsSettings(): SkillsSettings | undefined {
 		return this.#skillsSettings;
+	}
+
+	/** Whether runtime reloads may rediscover disk-backed skills (false under `--no-skills`/SDK `skills: []`). */
+	get skillsReloadable(): boolean {
+		return this.#skillsReloadable;
 	}
 
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
@@ -554,6 +664,27 @@ export class SessionTools {
 		const extensionRunner = this.#host.extensionRunner();
 		return extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped;
 	}
+
+	/**
+	 * The `CustomToolContext` a `CustomTool` adapted into THIS session's
+	 * registry executes against. Every field reads live session state, so a
+	 * tool installed at any point sees the session's current model, cwd, and
+	 * queue rather than a snapshot from when it was built. Shared by the MCP
+	 * refresh and the setting-gated groups, which install through the same
+	 * adapter.
+	 */
+	readonly #customToolContext = (): CustomToolContext => ({
+		sessionManager: this.#host.sessionManager,
+		modelRegistry: this.#host.modelRegistry,
+		model: this.#host.model(),
+		isIdle: () => !this.#host.isStreaming(),
+		hasQueuedMessages: () => this.#host.queuedMessageCount() > 0,
+		abort: () => {
+			this.#host.agent.abort();
+		},
+		settings: this.#host.settings,
+		localProtocolOptions: this.#host.localProtocolOptions(),
+	});
 
 	/** Installs and activates the ephemeral vibe tool set. */
 	activateVibeTools(baseToolNames: string[]): Promise<void> {
@@ -1448,6 +1579,75 @@ export class SessionTools {
 		});
 	}
 
+	/**
+	 * Reconcile the tool sets whose EXISTENCE is gated on a boolean setting
+	 * (`generate_image.enabled`, `speechgen.enabled`) against the live settings.
+	 *
+	 * sdk.ts pushes both into `customTools` at construction and nothing later
+	 * registers or removes them, so a reload alone left an enable with the tools
+	 * still absent and a disable with them still callable — the same class of
+	 * staleness as the `think` scratchpad above, which is why this mirrors it:
+	 * disabling drops the name from the active set while preserving its registry
+	 * entry, and enabling builds the tools once (via the host factory, which
+	 * owns the startup gates a session-level `--no-tools`/whitelist imposes) and
+	 * re-activates them.
+	 *
+	 * Returns whether the active tool set actually moved, so a caller can skip a
+	 * prompt rebuild when nothing changed.
+	 */
+	reconcileSettingGatedTools(): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			let changed = false;
+			for (const group of SETTING_GATED_TOOL_GROUPS) {
+				if (await this.#applySettingGatedToolGroup(group)) changed = true;
+			}
+			return changed;
+		});
+	}
+
+	async #applySettingGatedToolGroup(group: SettingGatedToolGroup): Promise<boolean> {
+		const enabled = this.#host.settings.get(group.setting) === true;
+		const active = this.getEnabledToolNames();
+		// Names this session has ever had installed for the group, so a disable
+		// reaches a set the STARTUP path installed (which this instance never
+		// recorded) as well as one an earlier reconcile built.
+		const installed = this.#settingGatedToolNames.get(group.setting);
+		const owned = new Set<string>(group.toolNames);
+		if (installed) for (const name of installed) owned.add(name);
+		if (!enabled) {
+			const next = active.filter(name => !owned.has(name));
+			if (next.length === active.length) return false;
+			await this.#applyActiveToolsByName(next);
+			return true;
+		}
+		const create = this.#createSettingGatedTools;
+		if (!create) return false;
+		// Only build what the registry is actually missing: a group disabled and
+		// re-enabled keeps its registry entries, and rebuilding would discard a
+		// later extension re-registration of the same name.
+		if (group.toolNames.some(name => !this.#toolRegistry.has(name))) {
+			const built = await create(group.setting);
+			const names = this.#settingGatedToolNames.get(group.setting) ?? new Set<string>();
+			for (const customTool of built) {
+				names.add(customTool.name);
+				owned.add(customTool.name);
+				if (this.#toolRegistry.has(customTool.name)) continue;
+				// Adapted here rather than by the host, against THIS session's live
+				// tool context — the same binding an MCP tool refresh performs, and
+				// the reason a subagent's copy of these tools reaches its own cwd,
+				// exec, and pending-action queue rather than the parent's.
+				const adapted = CustomToolAdapter.wrap(customTool, this.#customToolContext) as AgentTool;
+				const wrapped = this.#wrapRuntimeTool(adapted);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+			}
+			this.#settingGatedToolNames.set(group.setting, names);
+		}
+		const missing = [...owned].filter(name => this.#toolRegistry.has(name) && !active.includes(name));
+		if (missing.length === 0) return false;
+		await this.#applyActiveToolsByName([...active, ...missing]);
+		return true;
+	}
+
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	refreshBaseSystemPrompt(): Promise<void> {
 		return this.runToolRegistryMutation(() => this.#refreshBaseSystemPrompt());
@@ -1554,9 +1754,11 @@ export class SessionTools {
 	 *
 	 * Inputs NOT covered: tool input schemas; memory instructions read from disk;
 	 * and SDK-init-time closure constants in `sdk.ts` (`inlineToolDescriptors`,
-	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`, `secretsEnabled`). The
-	 * closure-captured ones cannot change at runtime regardless of skip behavior.
-	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
+	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`). Those cannot change at
+	 * runtime regardless of skip behavior. `secretsEnabled` lives in the same
+	 * closure but IS mutable — the obfuscator rebuild moves it — so it drives an
+	 * explicit {@link refreshBaseSystemPrompt} from the refresh instead. For
+	 * everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
 	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.
 	 *
 	 * The calendar date is deliberately NOT part of the signature: the date/cwd
@@ -1631,18 +1833,7 @@ export class SessionTools {
 			this.#mcpManagerToolNames = previousMcpManagerToolNames;
 		};
 
-		const getCustomToolContext = (): CustomToolContext => ({
-			sessionManager: this.#host.sessionManager,
-			modelRegistry: this.#host.modelRegistry,
-			model: this.#host.model(),
-			isIdle: () => !this.#host.isStreaming(),
-			hasQueuedMessages: () => this.#host.queuedMessageCount() > 0,
-			abort: () => {
-				this.#host.agent.abort();
-			},
-			settings: this.#host.settings,
-			localProtocolOptions: this.#host.localProtocolOptions(),
-		});
+		const getCustomToolContext = this.#customToolContext;
 
 		const extensionRunner = this.#host.extensionRunner();
 		const managerTools = deduplicateMCPToolsByName(mcpTools).map(customTool => {

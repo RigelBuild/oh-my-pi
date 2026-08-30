@@ -21,6 +21,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -33,13 +34,17 @@ import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
+import type { RefreshScope } from "../extensibility/reload";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { MCPManager } from "../mcp/manager";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionManager } from "./session-manager";
+import type { SettingGatedToolSetting } from "./session-tools";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -184,6 +189,53 @@ export interface AgentSessionConfig {
 	skillWarnings?: SkillWarning[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
 	skillsReloadable?: boolean;
+	/**
+	 * Caller-supplied rule policy (SDK `rules` array; `--no-rules` passes `[]`).
+	 * Present, an in-session `refresh` re-buckets these rules rather than
+	 * re-scanning disk, so it cannot re-enable ambient rules the session
+	 * excluded. Absent (`undefined`), a refresh re-discovers rules from disk.
+	 */
+	rules?: readonly Rule[];
+	/**
+	 * Whether {@link rules} is an INHERITED disk roster rather than an explicit
+	 * caller restriction.
+	 *
+	 * The real spawn path always forwards the parent's `session.rules` as a
+	 * child's `options.rules`, so `rules` being defined does not mean the caller
+	 * restricted this session's rule set — for a subagent it usually just means
+	 * "here is the roster my parent had discovered". A parent refresh must be
+	 * able to replace an inherited roster with the fresh one, or added, edited,
+	 * and deleted rules stay stale in every running child. An EXPLICIT policy
+	 * (SDK `rules` / `--no-rules`) still must never be widened, so the two cases
+	 * cannot share one signal.
+	 */
+	rulesInherited?: boolean;
+	/**
+	 * The session's initial discovered rule roster (rulebook + always-apply
+	 * buckets) snapshot at construction. A settings-only `refresh` re-buckets
+	 * this COMPLETE set against the reloaded TTSR gating, so it can only DROP a
+	 * newly-gated rule — never wipe the non-TTSR rules a roster refresh has not
+	 * yet re-populated. Absent (`undefined`), the roster snapshot starts empty
+	 * and a settings-only refresh cannot re-bucket the non-TTSR rules.
+	 */
+	initialRosterRules?: readonly Rule[];
+	/**
+	 * The session's COMPLETE, UNGATED discovered rule set (`sdk.ts` `allRules`) —
+	 * every rule the discovery produced, before `ttsr.disabledRules`/`builtinRules`
+	 * dropped any. A settings-only `refresh` re-buckets THIS set, so flipping a
+	 * gating lever applies in both directions: re-bucketing only the surviving
+	 * gated roster could never restore a rule whose `disabledRules` entry was
+	 * reverted. Absent (`undefined`), the gated roster is reused and a settings
+	 * refresh stays drop-only.
+	 */
+	initialSourceRules?: readonly Rule[];
+	/**
+	 * The session's resolved agent name for rule `agents` scoping (`sdk.ts`
+	 * `resolvedAgentName`: explicit `agentName`, else `main`/`sub`). An
+	 * in-session `refresh` re-buckets against THIS name, matching init; absent,
+	 * `bucketRules` disables scoping and admits every agent-scoped rule.
+	 */
+	agentRuleName?: string;
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
@@ -221,6 +273,12 @@ export interface AgentSessionConfig {
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/**
+	 * Builds the tools for one setting-gated group (`generate_image.enabled`,
+	 * `speechgen.enabled`) when its setting is turned on after construction, so
+	 * `refresh('settings')` can install a set the startup path skipped.
+	 */
+	createSettingGatedTools?: (setting: SettingGatedToolSetting) => Promise<CustomTool[]>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
@@ -248,6 +306,42 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/**
+	 * Thread a freshly reloaded skills/rules roster into the closure state that
+	 * {@link rebuildSystemPrompt} reads, so an in-session `refresh` re-renders the
+	 * advertised roster instead of the stale launch-time snapshot. The advertisement
+	 * renders from SDK-closure locals, not the process globals, so a global swap
+	 * alone does not reach it. No-op when the SDK did not wire it (subagents/tests).
+	 */
+	applyReloadedRoster?: (roster: {
+		skills: readonly Skill[];
+		rulebookRules: Rule[];
+		alwaysApplyRules: Rule[];
+		/**
+		 * The TTSR registrations this pass published — already narrowed to what
+		 * the current gating admits. The host's session-local `activeRules`
+		 * snapshot must republish exactly this, never `TtsrManager.getRules()`:
+		 * that registry deliberately retains entries while TTSR is disabled, so
+		 * re-deriving the set there re-adds rules the published global set (and a
+		 * fresh disabled session) correctly omits.
+		 */
+		publishedTtsrRules: readonly Rule[];
+		/**
+		 * The refreshed UNGATED discovery output ({@link initialSourceRules}'s
+		 * successor), for the spawn-facing rule policy children inherit. Gated
+		 * buckets are this session's own applicable set; forwarding them to a child
+		 * as its authoritative `rules` would make this session's TTSR gating
+		 * irreversible there.
+		 */
+		sourceRules: readonly Rule[];
+	}) => void;
+	/**
+	 * Pre-refresh hook for embedded hosts. Awaited as the first statement inside
+	 * {@link AgentSession.refresh}'s critical section, before any config surface
+	 * is re-read, so the host can stage fresh skills/rules/settings/MCP to disk.
+	 * Wired from `CreateAgentSessionOptions.onBeforeRefresh`.
+	 */
+	onBeforeRefresh?: (scope: RefreshScope) => void | Promise<void>;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -260,6 +354,29 @@ export interface AgentSessionConfig {
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
 	obfuscator?: SecretObfuscator;
+	/**
+	 * Rebuilds the secret obfuscator from the reloaded `secrets.enabled` setting
+	 * and the on-disk `secrets.yml`, returning the new instance (`undefined` when
+	 * secrets are off). Called by `refresh("settings")`.
+	 *
+	 * The host owns this because the obfuscator is shared with sdk.ts closures
+	 * (`convertToLlmFinal`, `transformProviderContext`, tool-argument
+	 * deobfuscation) that the session cannot reach; the host reassigns its own
+	 * local so those closures observe the rebuild too. Absent, `secrets.enabled`
+	 * stays frozen at construction.
+	 *
+	 * `promptStateChanged` reports whether the rebuild moved the host's
+	 * secret-placeholder PROMPT state — the `<redacted-content>` block that tells
+	 * the model `$$HASH$$` values are intentional. That state lives in the same
+	 * host closure and must be rebuilt into the prompt when it moves, or the
+	 * session mints placeholders the prompt never explains. It tracks the
+	 * obfuscator's `hasSecrets()` verdict — the same gate every minting path
+	 * reads — rather than the `secrets.enabled` flag.
+	 */
+	rebuildObfuscator?: () => Promise<{
+		obfuscator: SecretObfuscator | undefined;
+		promptStateChanged: boolean;
+	}>;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
 	/** Logical owner for retained eval kernels created by this session. */
@@ -272,6 +389,14 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/**
+	 * Registry this session is created against (SDK
+	 * `CreateAgentSessionOptions.agentRegistry`, else the global). Skill fan-out
+	 * on refresh iterates THIS registry, restricted to this session's own
+	 * descendants — so a session on a caller-supplied registry never overwrites
+	 * an unrelated global-tree session's snapshot. Default: `AgentRegistry.global()`.
+	 */
+	agentRegistry?: AgentRegistry;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
@@ -323,6 +448,13 @@ export interface AgentSessionConfig {
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * The MCP manager this session was constructed with (owned or an inherited
+	 * parent's). An in-session `refresh` reconnects THIS instance rather than the
+	 * process-global `MCPManager.instance()`, which — with multiple top-level
+	 * SDK/ACP sessions — may point at a different session's manager.
+	 */
+	mcpManager?: MCPManager;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 }
