@@ -14,6 +14,7 @@ import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
+import { PROMETHEUS_CONTENT_TYPE, renderUsageMetrics, type SubscriptionLookup } from "./prometheus-metrics";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	ClientUsageReportRequest,
@@ -57,6 +58,21 @@ export interface AuthBrokerServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty disables auth (loopback only). */
 	bearerTokens: string[];
+	/**
+	 * Scrape-scoped read-only tokens accepted ONLY for `GET /metrics`.
+	 * These never reach the vault routes — a metrics token authorizes the usage
+	 * exposition and nothing else, so the scrape cred is least-privilege and
+	 * distinct from the master bearer. Master `bearerTokens` also satisfy
+	 * `/metrics`; a metrics token does not satisfy any other route.
+	 */
+	metricsTokens?: string[];
+	/**
+	 * Static subscription-config input. Threaded into the `/metrics` renderer as
+	 * its `subscriptions` opts member, producing the four `llm_subscription_*`
+	 * families. Absent → those families are not emitted and `/metrics` is
+	 * byte-identical to before.
+	 */
+	subscriptions?: SubscriptionLookup;
 	/** Broker version string surfaced on `/v1/healthz`. */
 	version?: string;
 	/** Refresh credentials expiring within this window. Default 5 min. */
@@ -648,6 +664,8 @@ function serveSnapshotStream(
 export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_BROKER_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
+	// Scrape-scoped tokens reach ONLY `/metrics`; master bearers also satisfy it.
+	const metricsTokens = new Set<string>([...opts.bearerTokens, ...(opts.metricsTokens ?? [])]);
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 	const externalChangePollMs = opts.externalChangePollMs ?? DEFAULT_EXTERNAL_CHANGE_POLL_MS;
@@ -675,6 +693,31 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (req.method === "GET" && pathname === "/v1/healthz") {
 					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
+				}
+				if (req.method === "GET" && pathname === "/metrics") {
+					if (!isAuthorized(req, metricsTokens)) {
+						logger.info("auth-broker metrics unauthorized", { method: req.method, path: pathname, peer });
+						return json(401, { error: "unauthorized" });
+					}
+					try {
+						// Same cache read as `/v1/usage`: within the 5-min TTL this is a
+						// cache hit; on expiry it performs the underlying provider fetch,
+						// capped by the TTL. `?? []` on last-good expiry / absent method
+						// renders an empty 200 exposition so the dashboard sees absent
+						// series, not a 5xx.
+						const reports = (await opts.storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
+						const body = renderUsageMetrics(reports, { subscriptions: opts.subscriptions });
+						logger.info("auth-broker metrics served", { peer, reports: reports.length });
+						return new Response(body, { status: 200, headers: { "Content-Type": PROMETHEUS_CONTENT_TYPE } });
+					} catch (error) {
+						// Only a storage-level THROW reaches here. The common degradations
+						// (provider-fetch failure → last-good → null, dropped credentials)
+						// never throw; they shrink the series set, which the dashboard's
+						// expected-accounts panel detects.
+						const message = error instanceof Error ? error.message : String(error);
+						logger.warn("auth-broker metrics fetch failed", { peer, error: message });
+						return empty(503);
+					}
 				}
 				if (!isAuthorized(req, tokens)) {
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });

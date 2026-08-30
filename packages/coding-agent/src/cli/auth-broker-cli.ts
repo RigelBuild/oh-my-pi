@@ -32,7 +32,12 @@ import {
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
-import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	AuthBrokerClient,
+	DEFAULT_AUTH_BROKER_BIND,
+	type SubscriptionLookup,
+	startAuthBroker,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
@@ -51,6 +56,8 @@ export interface AuthBrokerCommandArgs {
 		json?: boolean;
 		bind?: string;
 		regenerate?: boolean;
+		/** `token`/`serve`: operate on the scrape-scoped `/metrics` token. */
+		metrics?: boolean;
 		via?: string;
 		provider?: string;
 		dryRun?: boolean;
@@ -64,6 +71,8 @@ export interface AuthBrokerCommandArgs {
 		includeEnv?: boolean;
 		/** `migrate`: required `--from-local` source. Reserved for future sources. */
 		fromLocal?: boolean;
+		/** `serve`: path to the JSON subscription-config file. */
+		subscriptionsConfig?: string;
 	};
 }
 
@@ -85,13 +94,26 @@ const CALLBACK_PORTS: Record<string, number> = Object.fromEntries(
 	),
 );
 
+/** Master bearer token file — authorizes the entire vault. */
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
 }
 
-async function readToken(): Promise<string | null> {
+/**
+ * Scrape-scoped read-only token file. Authorizes ONLY `GET /metrics`, never the
+ * vault routes, so a scrape credential is least-privilege and distinct from the
+ * master bearer. A fixed path mirroring the master bearer's convention: this
+ * file — not a one-shot stdout print — is a stable deterministic source a
+ * secrets-staging step can read. Rotation: re-mint (rewrites the file),
+ * re-stage, re-converge.
+ */
+function getMetricsTokenFilePath(): string {
+	return path.join(getConfigRootDir(), "auth-broker-metrics.token");
+}
+
+async function readTokenFile(file: string): Promise<string | null> {
 	try {
-		const raw = await Bun.file(getTokenFilePath()).text();
+		const raw = await Bun.file(file).text();
 		const trimmed = raw.trim();
 		return trimmed.length > 0 ? trimmed : null;
 	} catch (err) {
@@ -100,9 +122,10 @@ async function readToken(): Promise<string | null> {
 	}
 }
 
-async function writeToken(token: string): Promise<void> {
-	const file = getTokenFilePath();
+async function writeTokenFile(file: string, token: string): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+	// No trailing newline: the raw file bytes ARE the token value a secrets-staging
+	// step stages verbatim.
 	await Bun.write(file, token);
 	try {
 		await fs.chmod(file, 0o600);
@@ -115,12 +138,125 @@ function generateToken(): string {
 	return crypto.randomBytes(32).toString("base64url");
 }
 
-async function ensureToken(): Promise<string> {
-	const existing = await readToken();
+/** Read-or-mint the token at `file`, persisting a freshly generated one. */
+async function ensureTokenFile(file: string): Promise<string> {
+	const existing = await readTokenFile(file);
 	if (existing) return existing;
 	const token = generateToken();
-	await writeToken(token);
+	await writeTokenFile(file, token);
 	return token;
+}
+
+/** Env var honored by `serve` when `--subscriptions-config` is not passed (flag wins). */
+const SUBSCRIPTIONS_ENV = "OMP_AUTH_BROKER_SUBSCRIPTIONS";
+
+/**
+ * On-disk JSON shape for the subscription config. `accounts` is keyed by the
+ * opaque provider accountId (`accountLabelOf`); `plans` by
+ * `"<provider>:<canonical-plan>"`. `renewsAt` is an ISO `YYYY-MM-DD` date the
+ * loader converts to unix seconds before it reaches the renderer.
+ */
+interface SubscriptionsConfigFile {
+	accounts?: Record<string, { provider?: unknown; plan?: unknown; renewsAt?: unknown }>;
+	plans?: Record<string, { capacityWeight?: unknown; monthlyPriceUsd?: unknown }>;
+}
+
+/**
+ * Read + parse the subscription-config file into a {@link SubscriptionLookup}.
+ * Fails loudly (throws) on a parse error or malformed shape so the broker never
+ * silently emits partial series. Converts each account's `renewsAt` ISO date to
+ * unix seconds. Returns `undefined` when no path is configured (env or flag).
+ */
+async function loadSubscriptionsConfig(pathArg: string | undefined): Promise<SubscriptionLookup | undefined> {
+	const file = pathArg ?? process.env[SUBSCRIPTIONS_ENV];
+	if (!file) return undefined;
+	const raw = await fs.readFile(file, "utf8");
+	return parseSubscriptionsConfig(raw, file);
+}
+
+/**
+ * Parse raw subscription-config JSON into a {@link SubscriptionLookup}. Pure and
+ * synchronous (no I/O): `file` is used only in error messages. Fails loudly
+ * (throws) on a parse error or malformed shape so the broker never silently
+ * emits partial series. Converts each account's `renewsAt` ISO date to unix
+ * seconds.
+ */
+export function parseSubscriptionsConfig(raw: string, file: string): SubscriptionLookup {
+	let parsed: SubscriptionsConfigFile;
+	try {
+		parsed = JSON.parse(raw) as SubscriptionsConfigFile;
+	} catch (error) {
+		throw new Error(
+			`subscription config ${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (typeof parsed !== "object" || parsed === null) {
+		throw new Error(`subscription config ${file} must be a JSON object`);
+	}
+
+	// Per-account map, keyed by "<provider>\x00<account>" for the lookup.
+	const accounts = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
+	for (const [account, entry] of Object.entries(parsed.accounts ?? {})) {
+		if (typeof entry !== "object" || entry === null) {
+			throw new Error(`subscription config ${file}: account ${account} must be an object`);
+		}
+		if (typeof entry.provider !== "string") {
+			throw new Error(`subscription config ${file}: account ${account} is missing a string "provider"`);
+		}
+		if (entry.provider.length === 0 || account.length === 0) {
+			throw new Error(
+				`subscription config ${file}: account ${account} "provider" and account key must be non-empty`,
+			);
+		}
+		if (entry.plan !== undefined && typeof entry.plan !== "string") {
+			throw new Error(`subscription config ${file}: account ${account} "plan" must be a string`);
+		}
+		let renewsAtSeconds: number | undefined;
+		if (entry.renewsAt !== undefined) {
+			if (typeof entry.renewsAt !== "string") {
+				throw new Error(`subscription config ${file}: account ${account} "renewsAt" must be a YYYY-MM-DD string`);
+			}
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.renewsAt)) {
+				throw new Error(`subscription config ${file}: account ${account} "renewsAt" must be a YYYY-MM-DD string`);
+			}
+			const ms = Date.parse(entry.renewsAt);
+			if (Number.isNaN(ms)) {
+				throw new Error(
+					`subscription config ${file}: account ${account} "renewsAt" is not a valid date: ${entry.renewsAt}`,
+				);
+			}
+			renewsAtSeconds = ms / 1000;
+		}
+		accounts.set(`${entry.provider}\x00${account}`, { plan: entry.plan, renewsAtSeconds });
+	}
+
+	// Per-plan table, keys are "<provider>:<plan>".
+	const plans: Array<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }> = [];
+	for (const [key, entry] of Object.entries(parsed.plans ?? {})) {
+		if (typeof entry !== "object" || entry === null) {
+			throw new Error(`subscription config ${file}: plan ${key} must be an object`);
+		}
+		const sep = key.indexOf(":");
+		if (sep <= 0 || sep === key.length - 1) {
+			throw new Error(`subscription config ${file}: plan key ${key} must be "<provider>:<plan>"`);
+		}
+		if (typeof entry.capacityWeight !== "number" || typeof entry.monthlyPriceUsd !== "number") {
+			throw new Error(
+				`subscription config ${file}: plan ${key} needs numeric "capacityWeight" and "monthlyPriceUsd"`,
+			);
+		}
+		plans.push({
+			provider: key.slice(0, sep),
+			plan: key.slice(sep + 1),
+			capacityWeight: entry.capacityWeight,
+			monthlyPriceUsd: entry.monthlyPriceUsd,
+		});
+	}
+
+	return {
+		lookup: (provider, account) => accounts.get(`${provider}\x00${account}`),
+		plans,
+	};
 }
 
 /**
@@ -158,7 +294,10 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	setLoggerTransports({ console: true, file: false });
 
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
-	const token = await ensureToken();
+	const token = await ensureTokenFile(getTokenFilePath());
+	// Mint the scrape-scoped read-only token too. It authorizes ONLY `GET /metrics`;
+	// a scrape agent stages this value, never the master bearer above.
+	const metricsToken = await ensureTokenFile(getMetricsTokenFilePath());
 	const dbPath = getAgentDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = new AuthStorage(store, {
@@ -166,14 +305,23 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			refreshBrokerOAuthCredential(provider, credential, signal),
 	});
 	await storage.reload();
+	// Load the static subscription config if a path is set via the flag or
+	// `OMP_AUTH_BROKER_SUBSCRIPTIONS`; a parse/shape error throws so the broker
+	// never boots emitting partial series. Unset → omit, broker runs exactly as
+	// before.
+	const subscriptions = await loadSubscriptionsConfig(flags.subscriptionsConfig);
+	if (subscriptions) logger.info("auth-broker subscription config loaded", { plans: subscriptions.plans.length });
 	const handle = startAuthBroker({
 		storage,
 		bind,
 		bearerTokens: [token],
+		metricsTokens: [metricsToken],
+		...(subscriptions ? { subscriptions } : {}),
 		version: VERSION,
 	});
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
+	logger.info("auth-broker metrics token loaded", { path: getMetricsTokenFilePath(), mode: "0600" });
 
 	const credentialDisabledUnsub = storage.onCredentialDisabled((event: CredentialDisabledEvent) => {
 		logger.warn("auth-broker credential disabled", { ...event });
@@ -194,19 +342,22 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	// `--metrics` selects the scrape-scoped read-only token; otherwise this
+	// manages the master bearer, unchanged.
+	const file = flags.metrics ? getMetricsTokenFilePath() : getTokenFilePath();
 	if (flags.regenerate) {
 		const next = generateToken();
-		await writeToken(next);
+		await writeTokenFile(file, next);
 		if (flags.json) {
-			process.stdout.write(`${JSON.stringify({ token: next, path: getTokenFilePath() })}\n`);
+			process.stdout.write(`${JSON.stringify({ token: next, path: file })}\n`);
 		} else {
 			process.stdout.write(`${next}\n`);
 		}
 		return;
 	}
-	const token = await ensureToken();
+	const token = await ensureTokenFile(file);
 	if (flags.json) {
-		process.stdout.write(`${JSON.stringify({ token, path: getTokenFilePath() })}\n`);
+		process.stdout.write(`${JSON.stringify({ token, path: file })}\n`);
 	} else {
 		process.stdout.write(`${token}\n`);
 	}
