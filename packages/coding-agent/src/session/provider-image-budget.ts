@@ -13,70 +13,139 @@ import type {
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { providerImageBudget } from "@oh-my-pi/snapcompact";
+import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
 
-const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
+const IMAGE_OMISSION_NOTICE: TextContent = {
 	type: "text",
 	text: "[image omitted: provider image limit]",
 };
 
-function countImages(context: Context): number {
-	let count = 0;
+/**
+ * The single traversal both budgets are derived from, so the population each
+ * one enforces can never drift apart.
+ *
+ * Only images that actually reach the provider are tallied. An assistant image
+ * is a display artifact that NO provider accepts in a replay turn:
+ * `transform-messages.ts` drops every assistant image block unconditionally
+ * before a request is built (the native Responses result rides in
+ * `providerPayload` instead), and the converters that bypass that transform
+ * render an assistant turn from its text, thinking and tool-call blocks alone.
+ * So an assistant image consumes neither budget, and charging it against
+ * either evicts a live user or tool image to make room for something that was
+ * never going to be sent — a handful of old generated artifacts could push
+ * every current screenshot out on their own.
+ *
+ * Within that population the two budgets still count different things, so they
+ * are tallied separately. The COUNT cap is a per-request image cap the provider
+ * applies to every image part, reference-backed or not, so references consume
+ * it. The BYTE cap bounds the base64 payload actually put on the wire, so an
+ * image the provider resolves from a reference contributes no bytes. Conflating
+ * them either over-drops (charging reference bytes that never travel) or
+ * under-drops (letting references push the request past the image count).
+ *
+ * `byteModel` is the model whose reference shapes decide which images put bytes
+ * on the wire, or `undefined` for a caller that needs the count alone — the
+ * count pass runs before normalization rewrites inline sizes, so tallying bytes
+ * there would only produce a number it must not use.
+ */
+function collectImageStats(context: Context, byteModel: Model | undefined): { total: number; inlineSizes: number[] } {
+	let total = 0;
+	const inlineSizes: number[] = [];
 	for (const message of context.messages) {
-		if (!Array.isArray(message.content)) continue;
+		if (message.role === "assistant" || !Array.isArray(message.content)) continue;
 		for (const part of message.content) {
-			if (part.type === "image") count++;
+			if (part.type !== "image") continue;
+			total++;
+			if (byteModel !== undefined && sendsInlineImageBytes(part, byteModel)) inlineSizes.push(part.data.length);
 		}
 	}
-	return count;
+	return { total, inlineSizes };
+}
+
+/** Count of oldest images to drop so the surviving image payload fits `byteLimit`. */
+function imageDropCountForBytes(sizes: readonly number[], byteLimit: number): number {
+	let total = 0;
+	for (const size of sizes) total += size;
+	let drops = 0;
+	for (let index = 0; total > byteLimit && index < sizes.length; index++) {
+		total -= sizes[index] ?? 0;
+		drops++;
+	}
+	return drops;
+}
+
+interface ImageClampState {
+	/** Image parts of ANY kind still to drop for the per-request count cap. */
+	remainingDrops: number;
+	/** INLINE images still to drop for the byte cap; only inline bytes travel. */
+	remainingInlineDrops: number;
+	model: Model;
+}
+
+/**
+ * Drops the oldest images until both budgets are satisfied, tracking them
+ * separately. An inline image pays down the byte constraint AND the count
+ * constraint; a reference-backed image pays down only the count. A reference is
+ * therefore dropped only while the count cap still needs it, so byte pressure
+ * can never be "satisfied" by evicting context that carries no bytes.
+ */
+/** Any drop still owed on either budget. */
+function clampWanted(state: ImageClampState): boolean {
+	return state.remainingDrops > 0 || state.remainingInlineDrops > 0;
 }
 
 function clampContent(
 	content: readonly (TextContent | ImageContent)[],
-	state: { remainingDrops: number },
+	state: ImageClampState,
 ): (TextContent | ImageContent)[] | undefined {
 	let changed = false;
 	const clamped: (TextContent | ImageContent)[] = [];
 	for (const part of content) {
-		if (part.type === "image" && state.remainingDrops > 0) {
-			state.remainingDrops--;
-			changed = true;
-			continue;
+		if (part.type === "image") {
+			const inline = sendsInlineImageBytes(part, state.model);
+			const needed = inline ? state.remainingInlineDrops > 0 || state.remainingDrops > 0 : state.remainingDrops > 0;
+			if (needed) {
+				if (inline && state.remainingInlineDrops > 0) state.remainingInlineDrops--;
+				if (state.remainingDrops > 0) state.remainingDrops--;
+				changed = true;
+				continue;
+			}
 		}
 		clamped.push(part);
 	}
 	return changed ? clamped : undefined;
 }
 
-function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
-	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
+// A turn whose ONLY content was a dropped image must keep a placeholder: an
+// empty content array is skipped by the Anthropic converter, so the turn would
+// vanish from the transcript and take its conversational position with it.
+function clampUserMessage(message: UserMessage, state: ImageClampState): UserMessage {
+	if (!Array.isArray(message.content) || !clampWanted(state)) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content
+		? { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE], providerPayload: undefined }
+		: message;
 }
 
-function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
-	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
+function clampDeveloperMessage(message: DeveloperMessage, state: ImageClampState): DeveloperMessage {
+	if (!Array.isArray(message.content) || !clampWanted(state)) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content
+		? { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE], providerPayload: undefined }
+		: message;
 }
 
-function clampToolResultMessage(message: ToolResultMessage, state: { remainingDrops: number }): ToolResultMessage {
-	if (state.remainingDrops <= 0) return message;
+function clampToolResultMessage(message: ToolResultMessage, state: ImageClampState): ToolResultMessage {
+	if (!clampWanted(state)) return message;
 	const content = clampContent(message.content, state);
 	if (!content) return message;
-	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
+	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] };
 }
 
-/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
-export function clampProviderContextImages(context: Context, model: Model): Context {
-	if (!model.input.includes("image")) return context;
-	const limit = providerImageBudget(model.provider);
-	const totalImages = countImages(context);
-	if (totalImages <= limit) return context;
-
-	const state = { remainingDrops: totalImages - limit };
+/** Applies an already-computed drop allowance oldest-first across the context. */
+function applyImageClamp(context: Context, state: ImageClampState): Context {
 	const messages = context.messages.map(message => {
 		switch (message.role) {
 			case "user":
@@ -86,11 +155,77 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 			case "toolResult":
 				return clampToolResultMessage(message, state);
 			case "assistant":
+				// Assistant images are display artifacts the request never
+				// carries, so they consume no budget and there is nothing to
+				// reclaim by dropping them from the transcript.
 				return message;
 		}
 		return message;
 	});
 	return { ...context, messages };
+}
+
+/**
+ * Headroom the count pass leaves above the provider cap, as a multiple of it.
+ *
+ * The count pass runs before anything has decoded, so it cannot know which
+ * images the unreadable pass is about to turn into text. Clamping straight to
+ * the cap therefore spent a slot on an image that was about to stop being one:
+ * a history of exactly `cap` valid images plus one corrupt newer image evicted
+ * the OLDEST VALID image to fit the corrupt one, and the final count-aware
+ * clamp — which sees only survivors — would have kept all `cap` of them.
+ *
+ * Keeping `cap * (1 + slack)` images instead lets the decode pass consume the
+ * overage out of the images that fail it, and the real cap is enforced
+ * afterwards by {@link clampProviderContextImages} over what actually survived.
+ *
+ * This is deliberately a MULTIPLE and not "validate everything": the pass
+ * exists to bound decode work, and decoding an unbounded history is the cost it
+ * was introduced to remove. So the quota is preserved for up to `cap * slack`
+ * unreadable images and decode work stays bounded by a constant multiple of the
+ * cap — never by the length of the history.
+ */
+export const PROVIDER_IMAGE_COUNT_DECODE_SLACK = 1;
+
+/** Drops oldest image blocks to satisfy the per-request image COUNT cap, plus
+ *  {@link PROVIDER_IMAGE_COUNT_DECODE_SLACK} worth of headroom.
+ *  Runs FIRST, ahead of the normalize and unreadable passes: both are per-image
+ *  expensive (the unreadable pass fully decodes each one behind a 512-entry
+ *  cache that a longer history evicts on every request, and normalization can
+ *  re-encode), so paying either for an image no cap could ever admit is pure
+ *  waste. The headroom is what keeps this from pre-committing the cap to images
+ *  the decode pass is about to replace with text — see the constant.
+ *  Bytes are deliberately NOT considered here — normalization
+ *  rewrites inline sizes, so only {@link clampProviderContextImages}, running
+ *  after it, sees final byte counts. */
+export function clampProviderContextImageCount(context: Context, model: Model): Context {
+	if (!model.input.includes("image")) return context;
+	const admissible = providerImageBudget(model.provider) * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK);
+	const countDrops = collectImageStats(context, undefined).total - admissible;
+	if (countDrops <= 0) return context;
+	return applyImageClamp(context, { remainingDrops: countDrops, remainingInlineDrops: 0, model });
+}
+
+/** Drops oldest transient image blocks so outgoing vision requests fit the
+ *  active provider's image budget — both the per-request image COUNT cap and the
+ *  combined image-BYTE cap (a long snapcompact archive can stay under the count
+ *  cap yet bust the request-size limit on summed frame bytes). */
+export function clampProviderContextImages(context: Context, model: Model): Context {
+	if (!model.input.includes("image")) return context;
+	const { total, inlineSizes } = collectImageStats(context, model);
+	if (total === 0) return context;
+	const countDrops = Math.max(0, total - providerImageBudget(model.provider));
+	const inlineDrops = imageDropCountForBytes(inlineSizes, providerImageByteBudget(model.provider));
+	if (countDrops === 0 && inlineDrops === 0) return context;
+
+	// The two budgets are tracked as SEPARATE remaining constraints rather than
+	// collapsed with max(): a reference-backed drop satisfies the count cap but
+	// relieves no bytes, so one shared counter lets references absorb the whole
+	// allowance and leaves the request over the byte budget (and still 413ing).
+	// `inlineDrops` is the number of INLINE images that must go; `countDrops` is
+	// the number of image parts of any kind. A dropped inline image pays down
+	// both.
+	return applyImageClamp(context, { remainingDrops: countDrops, remainingInlineDrops: inlineDrops, model });
 }
 
 /**
