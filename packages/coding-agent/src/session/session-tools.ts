@@ -362,6 +362,28 @@ export class SessionTools {
 		return this.#skills;
 	}
 
+	/**
+	 * Swap in a freshly reloaded skills snapshot (from an in-session `refresh`)
+	 * and report whether the set actually changed. `skill://` binds this
+	 * per-session snapshot, so a `setActiveSkills` global swap alone does not
+	 * reach it. Positional name+path compare mirrors discovery's stable order;
+	 * an unchanged set returns `false` so the prompt rebuild is skipped and
+	 * Anthropic prompt caching keeps hitting.
+	 */
+	applyReloadedSkills(skills: readonly Skill[]): boolean {
+		let changed = this.#skills.length !== skills.length;
+		if (!changed) {
+			for (let i = 0; i < skills.length; i++) {
+				if (this.#skills[i].name !== skills[i].name || this.#skills[i].filePath !== skills[i].filePath) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		this.#skills = [...skills];
+		return changed;
+	}
+
 	/** Diagnostics produced while loading the current skills. */
 	get skillWarnings(): SkillWarning[] {
 		return this.#skillWarnings;

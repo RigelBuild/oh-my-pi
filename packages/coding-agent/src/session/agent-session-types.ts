@@ -21,6 +21,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -31,6 +32,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
+import type { RefreshScope } from "../extensibility/reload";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -230,6 +232,25 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/**
+	 * Thread a freshly reloaded skills/rules roster into the closure state that
+	 * {@link rebuildSystemPrompt} reads, so an in-session `refresh` re-renders the
+	 * advertised roster instead of the stale launch-time snapshot. The advertisement
+	 * renders from SDK-closure locals, not the process globals, so a global swap
+	 * alone does not reach it. No-op when the SDK did not wire it (subagents/tests).
+	 */
+	applyReloadedRoster?: (roster: {
+		skills: readonly Skill[];
+		rulebookRules: Rule[];
+		alwaysApplyRules: Rule[];
+	}) => void;
+	/**
+	 * Pre-refresh hook for embedded hosts. Awaited as the first statement inside
+	 * {@link AgentSession.refresh}'s critical section, before any config surface
+	 * is re-read, so the host can stage fresh skills/rules/settings/MCP to disk.
+	 * Wired from `CreateAgentSessionOptions.onBeforeRefresh`.
+	 */
+	onBeforeRefresh?: (scope: RefreshScope) => void | Promise<void>;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */

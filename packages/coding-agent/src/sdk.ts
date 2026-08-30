@@ -1782,6 +1782,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			refresh: scope => session.refresh(scope),
 			rules: allRules,
 			eventBus,
 			subagentEventBus,

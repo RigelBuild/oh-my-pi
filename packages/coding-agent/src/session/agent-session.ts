@@ -101,10 +101,15 @@ import {
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
+import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	getModelMatchPreferences,
+	type ResolvedModelRoleValue,
+	resolveModelFromSettings,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -145,6 +150,7 @@ import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
+import { type RefreshResult, type RefreshScope, reloadSkillsAndRules } from "../extensibility/reload";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
@@ -154,6 +160,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
+import { MCPManager } from "../mcp/manager";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
@@ -178,6 +185,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
+import { AgentRegistry } from "../registry/agent-registry";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -336,7 +344,7 @@ import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import { type BranchSummaryEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -490,6 +498,23 @@ function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
 
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
+
+/**
+ * Identity comparison of two rule snapshots by name+path, position by position.
+ * Discovery yields a stable order, so a positional compare is a correct
+ * roster-identity test. Detects a rules-only change across a refresh so the
+ * advertised roster rebuilds even when no skill changed. (The skills-side
+ * equivalent lives in {@link SessionTools.applyReloadedSkills}, which owns the
+ * per-session `#skills` snapshot that `skill://` binds.)
+ */
+function rulesEqual(a: readonly Rule[], b: readonly Rule[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i].name !== b[i].name || a[i].path !== b[i].path) return false;
+	}
+	return true;
+}
 
 export class AgentSession {
 	readonly agent: Agent;
@@ -677,6 +702,31 @@ export class AgentSession {
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
+	#applyReloadedRoster:
+		| ((roster: { skills: readonly Skill[]; rulebookRules: Rule[]; alwaysApplyRules: Rule[] }) => void)
+		| undefined;
+	#onBeforeRefresh: ((scope: RefreshScope) => void | Promise<void>) | undefined;
+	/**
+	 * The rendered rule roster (rulebook + always-apply) last advertised in the
+	 * system prompt, snapshot for change detection across a `refresh`. These
+	 * buckets are reload-stable (a TTSR-conditioned rule is consumed by the
+	 * manager, not re-bucketed — see `bucketRules`), so a name+path compare is a
+	 * sound roster-identity test. Starts empty: the constructor's prompt is
+	 * already current, and the first `refresh` aligns the snapshot to disk.
+	 */
+	#rosterRules: readonly Rule[] = [];
+	/**
+	 * In-session refresh serialization. The tail chains overlapping `refresh()`
+	 * callers so they run strictly one-at-a-time; it is deliberately
+	 * failure-swallowing (`run.then(() => {}, () => {})`) so one caller's throw
+	 * never rejects the next. `#activeRefresh` is the *raw* in-flight
+	 * `#doRefresh` run held separately from the swallowing tail so a failed
+	 * `onBeforeRefresh` pull surfaces to a draining restart, not only to the
+	 * refresh caller. It is cleared on settlement under an identity check so it
+	 * never names a stale (settled/rejected) run.
+	 */
+	#refreshTail: Promise<unknown> = Promise.resolve();
+	#activeRefresh: Promise<RefreshResult> | undefined;
 
 	readonly #ttsr: TtsrCoordinator;
 	readonly #stats: SessionStatsTracker;
@@ -1373,6 +1423,8 @@ export class AgentSession {
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
+		this.#applyReloadedRoster = config.applyReloadedRoster;
+		this.#onBeforeRefresh = config.onBeforeRefresh;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -4936,6 +4988,233 @@ export class AgentSession {
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
 	refreshSkills(): Promise<void> {
 		return this.#tools.refreshSkills();
+	}
+
+	/**
+	 * Latch-ready refusal check for {@link refresh}. Reads whether a cooperative
+	 * restart is in flight — a state authored elsewhere as the `#restarting`
+	 * latch (set synchronously by `requestRestart()` before it disposes). Until
+	 * that lands, no restart machinery exists, so this is always `false` and
+	 * refresh never refuses. Kept as a single private accessor so the carve is
+	 * one line, not scattered latch reads.
+	 */
+	#restartInFlight(): boolean {
+		return false;
+	}
+
+	/**
+	 * Re-read the frozen-at-session-start config surfaces from disk and swap the
+	 * fresh values into this live session, WITHOUT a restart. Pure re-READ: no
+	 * config file is written (the `/model` reformat footgun is avoided by
+	 * construction — see {@link Settings.reload}).
+	 *
+	 * Surfaces (scoped):
+	 * - `skills` / `rules`: re-scan the roster and re-publish the `skill://`
+	 *   / `rule://` snapshots (`skills` and `rules` re-scan together — the roster
+	 *   is one on-disk surface — and select which COUNT is surfaced).
+	 * - `settings`: re-read every settings layer + re-resolve the default model,
+	 *   swapping the active model iff it changed and the user has NOT pinned a
+	 *   session-only `/model` override.
+	 * - `mcp`: disconnect + rediscover MCP servers and rebind their tools.
+	 * - `all`: every surface above.
+	 *
+	 * Runs on the top-level session and fans the skills snapshot out to running
+	 * subagents (each binds its own `this.session.skills`). A no-op reload keeps
+	 * the system prompt byte-identical so Anthropic prompt caching keeps hitting.
+	 */
+	async refresh(scope: RefreshScope = "all"): Promise<RefreshResult> {
+		// Restart in progress: refuse a new refresh so nothing chains on behind
+		// the one restart drains, and report the refusal (not a silent no-op).
+		if (this.#restartInFlight()) return { refused: "restarting" };
+		// Serialize onto the tail so overlapping callers run strictly in order,
+		// each seeing a fully-applied prior refresh. Re-check the latch when this
+		// callback begins: a refresh queued behind an in-flight one *before* the
+		// latch must refuse, not run during restart.
+		const run = this.#refreshTail.then((): RefreshResult | Promise<RefreshResult> => {
+			if (this.#restartInFlight()) return { refused: "restarting" };
+			// #activeRefresh is the raw #doRefresh run a draining restart reads so a
+			// failed onBeforeRefresh pull surfaces to the restart, not just to this
+			// caller — never the failure-swallowing tail below.
+			const active = this.#doRefresh(scope);
+			this.#activeRefresh = active;
+			// Clear on settle, identity-checked, so #activeRefresh only ever names
+			// a CURRENTLY-running refresh — never a stale settled/rejected promise
+			// a later restart drain would wrongly observe. Use then(clear, clear),
+			// NOT finally: .finally() returns a derived promise that re-raises a
+			// rejection, and voiding it leaks an unhandled rejection on a throwing
+			// onBeforeRefresh pull — which the process-level handler escalates to
+			// a session-wide teardown. then(clear, clear) absorbs the rejection on
+			// this identity-clear branch; the real failure still propagates through
+			// `active`/`run` to the caller and the drain.
+			const clearActive = () => {
+				if (this.#activeRefresh === active) this.#activeRefresh = undefined;
+			};
+			void active.then(clearActive, clearActive);
+			return active;
+		});
+		// The stored tail is deliberately failure-swallowing so one caller's throw
+		// never rejects the next in line.
+		this.#refreshTail = run.then(
+			() => {},
+			() => {},
+		);
+		return run;
+	}
+
+	async #doRefresh(scope: RefreshScope): Promise<RefreshResult> {
+		// Host pre-hook: stage fresh config to disk before any surface is re-read.
+		// First statement in the critical section, so a throw here releases the
+		// mutex with all roster/settings/MCP state untouched.
+		if (this.#onBeforeRefresh) await this.#onBeforeRefresh(scope);
+		const doRoster = scope === "all" || scope === "skills" || scope === "rules";
+		const doSettings = scope === "all" || scope === "settings";
+		const doMcp = scope === "all" || scope === "mcp";
+
+		const result: RefreshResult = {};
+		let rosterChanged = false;
+
+		// Clear the process-global capability fs cache before re-reading any
+		// roster/MCP source. `capability/fs.readFile` caches file bytes for the
+		// process lifetime with no mtime check, so re-running discovery over it
+		// would enumerate NEW skill/rule/.mcp.json files but serve STALE bytes for
+		// an EDITED one — the headline `refresh` case (edited rulebook, edited
+		// mcp.json). Every other reload path clears first for exactly this reason:
+		// `/new` and SessionTools.refreshSkills() call resetCapabilities(), and the
+		// MCP config writer invalidates on write. Settings-only refresh skips this
+		// (settings.reload() reads through fs.promises/Bun.file, not the cache).
+		if (doRoster || doMcp) resetCapabilities();
+
+		if (doRoster) {
+			const ttsrManager = this.ttsrManager;
+			if (ttsrManager) {
+				const ttsrSettings = this.settings.getGroup("ttsr");
+				const reloaded = await reloadSkillsAndRules({
+					cwd: this.sessionManager.getCwd(),
+					skillsSettings: this.skillsSettings,
+					disabledExtensions: this.settings.get("disabledExtensions") ?? undefined,
+					ttsrManager,
+					ttsrSettings: {
+						builtinRules: ttsrSettings.builtinRules,
+						disabledRules: ttsrSettings.disabledRules,
+					},
+				});
+				const skillsChanged = this.applyReloadedSkills(reloaded.activeSkills);
+				// A rules-only change (edited rulebook / new always-apply rule with
+				// no skill change) must also rebuild the advertised prompt. Compare
+				// the rendered roster buckets — now reload-stable (bucketRules no
+				// longer mis-buckets already-registered TTSR rules) — against the
+				// last snapshot so the rebuild fires on a real rule change and
+				// stays a no-op otherwise (keeping prompt caching intact).
+				const nextRosterRules = [...reloaded.rulebookRules, ...reloaded.alwaysApplyRules];
+				const rulesChanged = !rulesEqual(this.#rosterRules, nextRosterRules);
+				this.#rosterRules = nextRosterRules;
+				rosterChanged = skillsChanged || rulesChanged;
+				this.#applyReloadedRoster?.({
+					skills: reloaded.activeSkills,
+					rulebookRules: reloaded.rulebookRules,
+					alwaysApplyRules: reloaded.alwaysApplyRules,
+				});
+				result.skills = reloaded.skills;
+				result.rules = reloaded.rules;
+			}
+		}
+
+		if (doSettings) {
+			const { changed } = await this.settings.reload();
+			result.settingsChanged = changed;
+			result.modelSwapped = changed ? await this.#applyReloadedModel() : false;
+		}
+
+		if (doMcp) {
+			const mcpManager = MCPManager.instance();
+			if (mcpManager) {
+				await mcpManager.disconnectAll();
+				// Thread the same discovery options startup uses (sdk.ts). Without
+				// them, discoverAndConnect defaults re-enable project-level MCP
+				// servers a user opted out of via `mcp.enableProjectConfig: false`
+				// and reconnect browser servers startup deliberately filtered —
+				// a refresh must not silently bypass those controls.
+				await mcpManager.discoverAndConnect({
+					enableProjectConfig: this.settings.get("mcp.enableProjectConfig") ?? true,
+					filterExa: true,
+					filterBrowser: this.settings.get("browser.enabled") ?? false,
+				});
+				await this.refreshMCPTools(mcpManager.getTools());
+				result.mcp = true;
+			}
+		}
+
+		// Re-render the system prompt once if the roster changed (the MCP path
+		// already reconciles the prompt through its own signature-guarded rebuild;
+		// a model swap re-primes separately). Skipped on a no-op so prompt caching
+		// keeps hitting.
+		if (rosterChanged) {
+			await this.refreshBaseSystemPrompt();
+		}
+
+		return result;
+	}
+
+	/**
+	 * Thread a freshly reloaded skills snapshot into this session's per-session
+	 * skills (which `skill://` binds — a `setActiveSkills` global swap alone
+	 * does not reach it) AND into every running subagent's snapshot. Subagents
+	 * each captured their own `this.session.skills` at spawn, so they carry the
+	 * identical staleness; the process-global {@link AgentRegistry} is the only
+	 * handle on those live child sessions. Returns whether the top-level skill
+	 * set actually changed (drives the prompt rebuild).
+	 */
+	applyReloadedSkills(skills: readonly Skill[]): boolean {
+		const changed = this.#tools.applyReloadedSkills(skills);
+		// Fan out to running subagents. Every alive AgentSession (this one plus
+		// each sub) reads its own frozen snapshot, so update them all. `list()`
+		// returns every registered session including advisors; advisors never
+		// resolve `skill://`, so overwriting their snapshot is a harmless no-op.
+		for (const ref of AgentRegistry.global().list()) {
+			if (ref.session && ref.session !== this) {
+				ref.session.#tools.applyReloadedSkills(skills);
+			}
+		}
+		return changed;
+	}
+
+	/**
+	 * Re-resolve the default model from the (already-reloaded) settings and swap
+	 * the session's active model iff it changed AND the user has not pinned a
+	 * session-only `/model` override (that pin is the highest-precedence choice
+	 * and a settings reload must not clobber it). Returns whether it swapped.
+	 */
+	async #applyReloadedModel(): Promise<boolean> {
+		if (this.#hasSessionModelOverride()) return false;
+		const resolved = resolveModelFromSettings({
+			settings: this.settings,
+			availableModels: this.getAvailableModels(),
+			matchPreferences: getModelMatchPreferences(this.settings),
+		});
+		if (!resolved) return false;
+		const current = this.model;
+		if (current && current.provider === resolved.provider && current.id === resolved.id) return false;
+		if (!this.#modelRegistry.hasConfiguredAuth(resolved)) return false;
+		await this.setModel(resolved, "default");
+		return true;
+	}
+
+	/**
+	 * Whether the user pinned a session-only model this session (an explicit
+	 * `/model` pick, `temporary`, or a non-default role). Mirrors the restore
+	 * logic in `getRestorableSessionModels`: a `model_change` whose role is
+	 * `default`, the ephemeral fallback role, or absent still tracks the settings
+	 * default and is safe to swap; anything else is a user pin.
+	 */
+	#hasSessionModelOverride(): boolean {
+		const entries = this.sessionManager.getBranch();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry.type !== "model_change") continue;
+			const role = entry.role;
+			return !(role === undefined || role === "default" || role === EPHEMERAL_MODEL_CHANGE_ROLE);
+		}
+		return false;
 	}
 
 	/**
