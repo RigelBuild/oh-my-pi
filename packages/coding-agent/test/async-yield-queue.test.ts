@@ -221,4 +221,82 @@ describe("async result yield queue delivery", () => {
 
 		await expect(receipt).rejects.toThrow("deadline expired");
 	});
+
+	test("reports no idle deliverable when every queued entry is already suppressed", async () => {
+		// `hasIdleDeliverable()` answers "will a flush start a turn?", and a caller
+		// about to emit a terminal idle signal withholds it on a true. Presence is
+		// the wrong question: `#build` drops suppressed entries, so a queue holding
+		// only those flushes to nothing and starts no successor turn. Answering on
+		// presence would withhold the terminal signal for a turn that never comes,
+		// and no later one is emitted.
+		const harness = createHarness(false);
+		const jobId = harness.manager.register("bash", "acknowledged job", async () => "result");
+
+		await harness.manager.waitForAll();
+		expect(await harness.manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+		expect(harness.queue.has("async-result")).toBe(true);
+		expect(harness.queue.hasIdleDeliverable()).toBe(true);
+
+		// The foreground wait acknowledged it, so the entry is still queued but can
+		// no longer be delivered.
+		harness.manager.acknowledgeDeliveries([jobId]);
+		expect(harness.queue.has("async-result")).toBe(true);
+		expect(harness.queue.hasIdleDeliverable()).toBe(false);
+
+		// And the flush agrees: nothing is injected, which is why the caller must
+		// not have treated it as a pending continuation.
+		await harness.queue.flush("idle");
+		expect(harness.prompts).toHaveLength(0);
+	});
+
+	test("still reports an idle deliverable when one queued entry survives suppression", async () => {
+		// The other direction: a partially stale batch DOES start a turn, so the
+		// answer must be per-entry rather than "any kind is stale".
+		const harness = createHarness(false);
+		const suppressed = harness.manager.register("bash", "acknowledged job", async () => "gone");
+		const live = harness.manager.register("bash", "live job", async () => "kept");
+
+		await harness.manager.waitForAll();
+		expect(await harness.manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+
+		harness.manager.acknowledgeDeliveries([suppressed]);
+		expect(harness.queue.hasIdleDeliverable()).toBe(true);
+
+		await harness.queue.flush("idle");
+		expect(harness.prompts).toHaveLength(1);
+		expect(asyncDetails(harness.prompts[0]![0]!).jobs.map(job => job.jobId)).toEqual([live]);
+	});
+
+	test("still schedules an idle flush for stale-only entries so their receipts settle", async () => {
+		// Scheduling and continuation-classification are different questions.
+		// `#build` is what rejects a stale entry and settles its receipt, so a
+		// queue holding only stale entries still needs the pass — gating the
+		// schedule on deliverability would leave the promise pending until some
+		// unrelated live entry happened to arm another flush.
+		const harness = createHarness(true);
+		const receipt = harness.queue.enqueueWithReceipt<AsyncEntry>("async-result", {
+			jobId: "stale-receipt",
+			result: "done",
+			job: undefined,
+			durationMs: undefined,
+		});
+		let settled = false;
+		void receipt.catch(() => {
+			settled = true;
+		});
+		// Acknowledged before any flush ran: the entry can never be delivered.
+		harness.manager.acknowledgeDeliveries(["stale-receipt"]);
+		expect(harness.queue.hasIdleDeliverable()).toBe(false);
+
+		// Streaming ended, so the queue is asked to arm its post-run pass.
+		harness.setStreaming(false);
+		harness.queue.requestIdleFlush();
+		expect(harness.scheduledFlushes).toHaveLength(1);
+
+		await harness.scheduledFlushes[0]!();
+		await expect(receipt).rejects.toThrow(/stale/);
+		expect(settled).toBe(true);
+		// Nothing was injected: the pass exists to settle, not to start a turn.
+		expect(harness.prompts).toHaveLength(0);
+	});
 });

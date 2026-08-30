@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
+- Added an opt-in agent-callable `compact` tool (`compact.enabled`, default off) that lets the agent compact its own context at a turn boundary. A prompt arriving mid-compaction waits for the rewrite, and interrupting the requesting turn cancels it. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- Fixed the `compact` tool reporting the session idle when a steer or follow-up arrived during the compaction, so an RPC/ACP client could prompt into a turn that was already starting. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.1.19] - 2026-09-12
+
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).
 
@@ -56,6 +60,7 @@
 
 ## [18.1.18] - 2026-09-11
 
+
 ### Added
 
 - Enable `tui.mouse` to focus live subagent cards and jump-list rows by clicking them, with a hover highlight on the target; native selection becomes Shift+drag while on ([#11737](https://github.com/can1357/oh-my-pi/pull/11737) by [@H4vC](https://github.com/H4vC)).
@@ -83,6 +88,7 @@
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
 
 ## [18.1.17] - 2026-09-10
+
 
 ### Added
 
@@ -115,6 +121,7 @@
 
 ## [18.1.16] - 2026-09-09
 
+
 ### Added
 
 - `/rename` without a title now generates a session name from recent conversation using the configured tiny model.
@@ -139,6 +146,7 @@
 - Returning from a focused agent (Agent Hub) now re-renders the main session's queued steering/follow-up block instead of leaving it blank until the next repaint ([#11379](https://github.com/can1357/oh-my-pi/issues/11379)).
 
 ## [18.1.15] - 2026-09-08
+
 
 ### Added
 
@@ -167,6 +175,7 @@
 
 ## [18.1.14] - 2026-09-07
 
+
 ### Fixed
 
 - `omp update` now refuses to overwrite shebang scripts or non-OMP executables behind foreign symlinks and reports the physical binary path it verified ([#11152](https://github.com/can1357/oh-my-pi/issues/11152)).
@@ -184,11 +193,13 @@
 
 ## [18.1.13] - 2026-09-07
 
+
 ### Fixed
 
 - Fixed GPT-6 Astra requiring `/extended-context` for its full context window: it now keeps the documented 1.05M-token window with the setting on or off, and explicit per-model `contextWindow` overrides still win.
 
 ## [18.1.12] - 2026-09-06
+
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
@@ -218,6 +229,7 @@
 
 ## [18.1.11] - 2026-09-05
 
+
 ### Added
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
@@ -236,6 +248,7 @@
 
 ## [18.1.10] - 2026-09-04
 
+
 ### Changed
 
 - Subagent `yield` now takes `data`/`error` directly instead of nesting them under a `result` wrapper.
@@ -246,6 +259,7 @@
 - Restored mouse clicks, hover, and wheel scrolling in Plan Review.
 
 ## [18.1.9] - 2026-09-04
+
 
 ### Breaking Changes
 
@@ -285,6 +299,7 @@
 
 ## [18.1.8] - 2026-09-03
 
+
 ### Fixed
 
 - Improved background task results with structured output schemas: parsed results are now available through the `agent://<id>` resource, while large or invalid inline JSON is replaced with a reliable pointer to the complete result.
@@ -295,6 +310,7 @@
 - Fixed multi-minute TUI freezes during subagent activity and batch execution.
 
 ## [18.1.7] - 2026-09-03
+
 
 ### Breaking Changes
 
@@ -327,6 +343,7 @@
 - Fixed ACP clients receiving invalid file locations or updates for released terminals, preventing invalid worktree scans and terminal errors on Windows.
 
 ## [18.1.6] - 2026-09-03
+
 
 ### Breaking Changes
 
@@ -384,6 +401,7 @@
 
 ## [18.1.5] - 2026-09-03
 
+
 ### Added
 
 - Added Abliteration provider support to `/login`, including `ABLITERATION_API_KEY` configuration and help text.
@@ -413,6 +431,7 @@
 - Removed the bundled `designer` subagent and `designer` model role; `modelRoles.designer` and `@designer` are no longer built in.
 
 ## [18.1.3] - 2026-09-02
+
 
 ### Changed
 
@@ -445,6 +464,7 @@
 
 ## [18.1.2] - 2026-09-01
 
+
 ### Added
 
 - Recover stray <SM:EDIT> payloads emitted as plain text into real edit tool calls, with support for disabling this behavior through the edit.recoverInlineEdits setting.
@@ -463,11 +483,13 @@
 
 ## [18.1.1] - 2026-09-01
 
+
 ### Fixed
 
 - Fixed a native crash (and multi-gigabyte committed-memory growth held until exit) when git status ran over worktrees with tens of thousands of untracked files: whole-worktree porcelain status now runs through the git CLI with bounded output capture, falling back to the in-process gitoxide walk only when git is not installed, and any panic escaping a native VCS operation now surfaces as a structured `VcsError` instead of a process-level failure.
 
 ## [18.1.0] - 2026-09-01
+
 
 ### Added
 
@@ -535,6 +557,7 @@
 
 ## [18.0.11] - 2026-08-29
 
+
 ### Added
 
 - Added gallery previews for composer and status-line components, with CLI filters for browsing by surface, composer, or segment.
@@ -568,6 +591,7 @@
 
 ## [18.0.10] - 2026-08-28
 
+
 ### Added
 
 - Added the Sharpshooter memory backend for tracking friction-earned project decisions, with `/memory queue` and `/memory sync` controls.
@@ -593,6 +617,7 @@
 
 ## [18.0.9] - 2026-08-28
 
+
 ### Breaking Changes
 
 - Removed the `git` and `jj` wrapper modules from the SDK surface. VCS operations are now available through `@oh-my-pi/pi-natives/vcs`, including native handles and typed `VcsError` support; the package continues to re-export the `github` (gh CLI) helpers.
@@ -617,6 +642,7 @@
 - Fixed `omp usage` to report Codex Chat and Spark capacity meters separately when they share a usage window.
 
 ## [18.0.8] - 2026-08-27
+
 
 ### Added
 
@@ -652,6 +678,7 @@
 
 ## [18.0.7] - 2026-08-26
 
+
 ### Added
 
 - Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
@@ -675,6 +702,7 @@
 - The edit tool now repairs a stray closing marker typed in place of the divider in a selection (`old⟫new` inside one selection instead of `old│new`) and applies the intended replacement with a note, instead of failing with an unmatched-marker error.
 
 ## [18.0.7] - 2026-08-26
+
 
 ### Added
 
@@ -747,6 +775,7 @@
 
 ## [18.0.6] - 2026-08-26
 
+
 ### Added
 
 - Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
@@ -766,6 +795,7 @@
 - Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
 
 ## [18.0.5] - 2026-08-25
+
 
 ### Added
 
@@ -833,6 +863,7 @@
 
 ## [18.0.4] - 2026-08-24
 
+
 ### Added
 
 - Added the `omp git` command (and `/git` slash command): an interactive, fullscreen repository TUI featuring a split/inline/hunk diff viewer with minimap scrollbar, syntax highlighting, a staging sidebar with line-level staging, commit composer with amend support, and author avatars. Supports keyboard navigation, full mouse interaction, and pinning views to specific commits via `omp git <revision>`.
@@ -865,6 +896,7 @@
 
 ## [18.0.3] - 2026-08-23
 
+
 ### Added
 
 - Added opt-in edit auto-repair (`edit.autoRepair.enabled`): when an edit breaks a file's AST parse, the smol model repairs the broken region in place — validated by re-parse, revert-rejected, and surfaced as a diff in the tool result — instead of only warning.
@@ -877,6 +909,7 @@
 - Multi-select ask options whose labels end in `(Recommended)` now show their checked state and avoid duplicate recommendation suffixes ([#9452](https://github.com/can1357/oh-my-pi/issues/9452)).
 
 ## [18.0.2] - 2026-08-23
+
 
 ### Added
 
@@ -899,6 +932,7 @@
 - Fixed goal mode failing to start (`No such tool: xd://goal`) when `goal.enabled` was turned on after the session had already started; the `goal` tool is now registered lazily on goal-mode entry ([#9444](https://github.com/can1357/oh-my-pi/issues/9444)).
 
 ## [18.0.1] - 2026-08-23
+
 
 ### Added
 
@@ -994,6 +1028,7 @@
 
 ## [18.0.0] - 2026-08-22
 
+
 ### Added
 
 - Added the `omp render` command to replay session threads and benchmark transcript pipeline performance.
@@ -1030,6 +1065,7 @@
 
 ## [17.4.4] - 2026-08-22
 
+
 ### Added
 
 - Added the `tui.resizeScrollback` setting (default `append`) controlling how a settled width resize refreshes pane scrollback when the terminal repaints in place (tmux/screen/Zellij panes, in-place direct terminals). Multiplexers rewrap old output naively on width changes, leaving history hard-broken at the old width; `append` re-emits the transcript at the new width below it (one fresh copy per settled resize), `rebuild` clears pane history first so it holds exactly one current-width copy (needs a host that honors ED3, like tmux; erases pre-session scrollback), and `preserve` keeps the old-width history untouched with zero growth ([#8193](https://github.com/can1357/oh-my-pi/issues/8193)).
@@ -1043,11 +1079,13 @@
 
 ## [17.4.3] - 2026-08-21
 
+
 ### Fixed
 
 - Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
 
 ## [17.4.2] - 2026-08-21
+
 
 ### Added
 
@@ -1079,6 +1117,7 @@
 - Restored prompts (esc-esc, `/tree`, branch, queued-message dequeue, failed-submit recovery) collapse image markers back into clickable atomic chip tokens and re-materialize their file links instead of degrading to dead text.
 
 ## [17.4.1] - 2026-08-21
+
 
 ### Added
 
@@ -1138,6 +1177,7 @@
 
 ## [17.4.0] - 2026-08-20
 
+
 ### Added
 
 - `/cleanse` (and `omp cleanse`) — run the checker/repair loop in-session, with a live status board of running checkers, repair subagents, and token/cost totals.
@@ -1175,6 +1215,7 @@
 - GNU/BSD compat sweep across built-in shell utilities (`timeout`, `diff`, `find`, `date`, `tail`, `head`, `rg`, `stat`, `truncate`, `cksum`, `sleep`, `which`, `nohup`, `kill`).
 
 ## [17.3.8] - 2026-08-19
+
 
 - Fixed unquoted internal URLs in `bash` commands consuming adjacent shell operators into the resolved filesystem path.
 
@@ -1238,11 +1279,13 @@
 
 ## [17.3.7] - 2026-08-17
 
+
 ### Changed
 
 - Send the `omp/<version>` User-Agent on xAI chat (`xai` and `xai-oauth`) unless the request already set its own ([#8840](https://github.com/can1357/oh-my-pi/pull/8840) by [@Jaaneek](https://github.com/Jaaneek)).
 
 ## [17.3.6] - 2026-08-17
+
 
 ### Added
 
@@ -1257,6 +1300,7 @@
 - Fixed `omp stats` and `/stats` dashboards being unreachable from container hosts by accepting an explicit `--host` bind address while preserving the `127.0.0.1` default.
 
 ## [17.3.5] - 2026-08-16
+
 
 ### Added
 
@@ -1326,6 +1370,7 @@
 
 ## [17.3.4] - 2026-08-14
 
+
 ### Changed
 
 - Replaced the MuPDF-WASM PDF document backend with `pdf-inspector` through `@oh-my-pi/pi-natives`, preserving cached text conversion and PDF line selectors while reporting pages that need OCR.
@@ -1339,6 +1384,7 @@
 
 ## [17.3.3] - 2026-08-14
 
+
 ### Fixed
 
 - Automatically continued Gemini turns that stopped after thinking without final output, using a bounded final-answer reminder instead of exhausting generic retries.
@@ -1347,6 +1393,7 @@
 
 ## [17.3.2] - 2026-08-13
 
+
 ### Fixed
 
 - Fixed the parent TUI stalling after a subagent submits its result until terminal focus or resize wakes the event loop ([#8462](https://github.com/can1357/oh-my-pi/issues/8462)).
@@ -1354,6 +1401,7 @@
 - Fixed `read` hashline headers collapsing nested in-workspace paths to the bare basename, which let a same-basename file at the session cwd capture a verbatim follow-up `edit` and deterministically reject it with `hash is not from this session`. Headers now retain the workspace-relative path (e.g. `[src/settings.json#0063]`) ([#8482](https://github.com/can1357/oh-my-pi/issues/8482)).
 
 ## [17.3.1] - 2026-08-13
+
 
 ### Fixed
 
@@ -1366,6 +1414,7 @@
 - Fixed the browser tool executable probe launching the user's installed GUI Chromium on Windows: the `--version` version probe from ecb22957 was Linux-scoped but ran for every platform candidate, so on Windows it could hand off to a running `chrome.exe`, open a normal browser window, then reject the candidate and fall back to cached Chrome for Testing. The probe is now confined to Linux ([#8445](https://github.com/can1357/oh-my-pi/issues/8445)).
 
 ## [17.3.0] - 2026-08-13
+
 
 ### Breaking Changes
 
@@ -1409,6 +1458,7 @@
 
 ## [17.2.15] - 2026-08-12
 
+
 ### Added
 
 - Added `--external-thinking` CLI flag to force external thinking tool activation.
@@ -1433,11 +1483,13 @@
 
 ## [17.2.14] - 2026-08-11
 
+
 ### Added
 
 - Added `externalThinking` setting for private scratchpad reasoning via the new `think` tool
 
 ## [17.2.13] - 2026-08-11
+
 
 ### Added
 
@@ -1496,6 +1548,7 @@
 
 ## [17.2.12] - 2026-08-08
 
+
 ### Fixed
 
 - Fixed shell minimization replacing meaningful `rustc --print` output with `OK`.
@@ -1509,6 +1562,7 @@
 - Fixed Claude marketplace task agents treating provider-specific model aliases as OMP selectors, allowing them to inherit the parent model ([#7966](https://github.com/can1357/oh-my-pi/issues/7966)).
 
 ## [17.2.11] - 2026-08-07
+
 
 ### Added
 
@@ -1549,6 +1603,7 @@
 - Fixed `/handoff` reporting "Handoff cancelled" for actual generation or stream timeout errors, ensuring the real error is surfaced.
 
 ## [17.2.10] - 2026-08-06
+
 
 ### Breaking Changes
 
@@ -1592,6 +1647,7 @@
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
 
 ## [17.2.9] - 2026-08-05
+
 
 ### Breaking Changes
 
@@ -1643,11 +1699,13 @@
 
 ## [17.2.8] - 2026-08-04
 
+
 ### Changed
 
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
 
 ## [17.2.7] - 2026-08-03
+
 
 ### Changed
 
@@ -1664,6 +1722,7 @@
 - Fixed bash.patterns allow rules rejecting valid commands when quoted arguments contained shell metacharacters (such as Cargo benchmark regex filters).
 
 ## [17.2.6] - 2026-08-03
+
 
 ### Added
 
@@ -1682,6 +1741,7 @@
 - Fixed startup hanging during local model discovery when a timed-out transport left its request pending, which blocked the CLI before OAuth login could finish ([#7482](https://github.com/can1357/oh-my-pi/issues/7482)).
 
 ## [17.2.5] - 2026-08-03
+
 
 ### Breaking Changes
 
@@ -1734,6 +1794,7 @@
 
 ## [17.2.4] - 2026-08-01
 
+
 ### Added
 
 - Added `requestIdFormat` (`"string"` | `"number"`, default `"number"`) to MCP server config, honored by the stdio, HTTP, and SSE transports. JSON-RPC 2.0 permits both id shapes, but Apple's `xcrun mcpbridge` decodes `id` as an integer only and silently drops string ids (`mcpbridge.DecodeError Code=1`), hanging every request until it times out. The option is OMP-specific, so set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin); servers imported from another tool's config ignore it ([#7053](https://github.com/can1357/oh-my-pi/issues/7053)).
@@ -1775,6 +1836,7 @@
 
 ## [17.2.3] - 2026-08-01
 
+
 ### Changed
 
 - Tightened the system prompt notation: the legend now defines `⟺`, `≠`, `∉`/`∌`, and operator binding order; replaced undefined symbols (`⊭`, `≢`) in prompt bodies; removed delegation guidance duplicated between the eager-tasks preamble and the delegation gates.
@@ -1788,6 +1850,7 @@
 - Fixed Codex web search collapsing backend errors to `Codex error (): Unknown error`; the SSE error parser now preserves the backend code and message from top-level, nested `error`, and `response.error` envelopes ([#7200](https://github.com/can1357/oh-my-pi/issues/7200)).
 
 ## [17.2.2] - 2026-07-31
+
 
 ### Added
 
@@ -1835,6 +1898,7 @@
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
 
 ## [17.2.1] - 2026-07-30
+
 
 ### Added
 
