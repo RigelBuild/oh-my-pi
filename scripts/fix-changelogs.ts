@@ -911,7 +911,13 @@ export async function changelogPaths(repoRoot: string): Promise<string[]> {
 }
 
 async function changelogDiff(repoRoot: string, since: string, paths: readonly string[]): Promise<string> {
-	if (paths.length === 0) return "";
+	// `resolveSince` yields "" only on a fork with no `v*` tag AND no `refs/clog`
+	// baseline — the first release on a freshly reset fork. There is no floor to
+	// diff against, so nothing reads as "added since the baseline" and the
+	// promotion pass is a no-op; short-circuit before `git diff` sees the empty
+	// revision (`git diff '' -- paths` dies with `fatal: bad revision ''`). The
+	// structural cleanups in `fixChangelogContent` still run on every file.
+	if (paths.length === 0 || since === "") return "";
 	return git(["diff", "--unified=0", "--no-color", "--no-ext-diff", since, "--", ...paths], repoRoot);
 }
 
@@ -1070,12 +1076,14 @@ function usage(): string {
 
 function printSummary(result: RunChangelogFixerResult, mode: CliOptions["mode"]): void {
 	const suffix = mode === "write" ? "" : ` (${mode}, not written)`;
+	// `since` is "" on a first release with no `v*` tag and no `refs/clog` floor.
+	const since = result.since === "" ? "the initial commit (no prior release)" : result.since;
 	if (result.changedFiles.length === 0) {
-		console.log(`Changelogs already clean since ${result.since}.`);
+		console.log(`Changelogs already clean since ${since}.`);
 		return;
 	}
 
-	console.log(`Fixed ${result.changedFiles.length} changelog(s) since ${result.since}${suffix}:`);
+	console.log(`Fixed ${result.changedFiles.length} changelog(s) since ${since}${suffix}:`);
 	for (const file of result.changedFiles) {
 		const parts = [
 			`${file.promotedItems} promoted item(s)`,

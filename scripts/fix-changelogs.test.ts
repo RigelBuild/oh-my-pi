@@ -413,6 +413,58 @@ describe("runChangelogFixer baseline pin", () => {
 		}
 	});
 });
+
+const DUPLICATE_HEADINGS = `# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- First fix.
+
+### Fixed
+
+- Second fix.
+`;
+
+describe("runChangelogFixer tagless first release", () => {
+	it("does not crash and skips the diff floor when the repo has no v* tag and no clog baseline", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-tagless-"));
+		const git = (...args: string[]) =>
+			$`git ${args}`
+				.cwd(repoRoot)
+				.quiet()
+				.env({
+					...process.env,
+					GIT_CONFIG_GLOBAL: "/dev/null",
+					GIT_CONFIG_SYSTEM: "/dev/null",
+					GIT_AUTHOR_NAME: "t",
+					GIT_AUTHOR_EMAIL: "t@t",
+					GIT_COMMITTER_NAME: "t",
+					GIT_COMMITTER_EMAIL: "t@t",
+				});
+		try {
+			const changelogPath = path.join(repoRoot, "packages/foo/CHANGELOG.md");
+			await git("init", "-b", "main");
+			await Bun.write(changelogPath, DUPLICATE_HEADINGS);
+			await git("add", "-A");
+			await git("commit", "-m", "first commit, no tag");
+
+			// No `v*` tag and no `refs/clog` ref: resolveSince returns "", which used
+			// to reach `git diff '' -- paths` and die with `fatal: bad revision ''`.
+			const result = await runChangelogFixer({ repoRoot, write: false });
+			expect(result.since).toBe("");
+
+			// The diff-driven promotion pass is a no-op (no floor), but the structural
+			// cleanup still runs: the duplicate `### Fixed` heading is merged.
+			const fixed = result.changedFiles.find(file => file.path === "packages/foo/CHANGELOG.md");
+			expect(fixed?.promotedItems).toBe(0);
+			expect(fixed?.mergedDuplicateHeadings).toBe(1);
+		} finally {
+			await fs.rm(repoRoot, { recursive: true, force: true });
+		}
+	});
+});
 describe("runChangelogFixer size limit", () => {
 	it("collapses oversized changelogs behind a link to the last commit containing them, idempotently", async () => {
 		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-collapse-"));
