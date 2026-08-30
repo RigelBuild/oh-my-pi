@@ -491,6 +491,17 @@ function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
+/**
+ * Outcome of {@link AgentSession.requestRestart}. `ok: true` means the host
+ * `onRestartRequested` callback returned (the host's re-attach is what actually
+ * completes the restart). A refusal is a clean, recoverable no-op — the session
+ * is untouched and the host may retry:
+ * - `unavailable`: no `onRestartRequested` callback is bound.
+ * - `no-session-file`: an in-memory session has no re-attach handle.
+ * - `busy`: unpersisted input is queued (recycling would drop it).
+ */
+export type RequestRestartResult = { ok: true } | { ok: false; reason: "unavailable" | "no-session-file" | "busy" };
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -513,6 +524,17 @@ export class AgentSession {
 	get effectiveExtensionRoots(): EffectiveExtensionRoots {
 		return this.#extensionRoots();
 	}
+
+	#onRestartRequested: ((info: { sessionId: string; sessionFile: string }) => void | Promise<void>) | undefined;
+	/**
+	 * Cooperative-restart state. `#restarting` latches out new turns from entry
+	 * through the host callback. `#restartCall` coalesces an in-flight
+	 * `requestRestart()` so the host callback fires exactly once per restart;
+	 * unlike `#disposeCall` it is cleared on a *recoverable* pre-dispose failure
+	 * so the host can retry.
+	 */
+	#restarting = false;
+	#restartCall: Promise<RequestRestartResult> | undefined;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -873,6 +895,15 @@ export class AgentSession {
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
 	#wakeForIrc(records: CustomMessage[]): void {
+		// Cooperative restart in progress (or session torn down): do NOT wake a
+		// turn that would append past the durability barrier. Re-queue the records
+		// as asides rather than drop — they flush to the transcript on a successful
+		// restart's dispose (IrcBridge.flushPending) or stay pending for the
+		// resumed session on a recoverable pre-dispose failure.
+		if (this.#restarting || this.#isDisposed) {
+			this.#irc.requeuePending(records);
+			return;
+		}
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.deferWake(records);
 			return;
@@ -1318,10 +1349,18 @@ export class AgentSession {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			isStreaming: () => this.isStreaming,
+			// Suppress idle drain/injection while a cooperative restart is latched,
+			// exactly as an in-flight turn does. The latch must block turn-start AND
+			// leave queued async results in place: a successful restart's dispose()
+			// clears the queue, a recoverable pre-dispose failure leaves them for
+			// the resumed session (nothing lost).
+			isStreaming: () => this.isStreaming || this.#restarting,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				// Defense in depth: never wake a turn past the durability barrier
+				// (restart latched) or re-wake a torn-down session.
+				if (this.#restarting || this.#isDisposed) return;
 				this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
@@ -1373,6 +1412,7 @@ export class AgentSession {
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
+		this.#onRestartRequested = config.onRestartRequested;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -3469,12 +3509,21 @@ export class AgentSession {
 		});
 		this.#schedulePostPromptTask(
 			async signal => {
-				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
-				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
-				// streaming turn — agent.continue() here would race the handoff's session
-				// reset. The first-class fix is in #checkCompaction/the agent_end handler,
-				// but this guard catches anything that bypasses that path.
-				if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
+				// Defense in depth: if compaction/handoff/a cooperative restart slipped
+				// onto the post-prompt queue alongside us (e.g. via a scheduler we don't
+				// own), refuse to start a fresh streaming turn — agent.continue() here
+				// bypasses AgentSession.prompt's #restarting guard, so it would append
+				// past the durability barrier during a restart, or race the handoff's
+				// session reset. The first-class fixes live in #checkCompaction / the
+				// agent_end handler / requestRestart's latch; this guard catches anything
+				// that bypasses those paths.
+				if (
+					signal.aborted ||
+					this.#isDisposed ||
+					this.#restarting ||
+					this.isCompacting ||
+					this.isGeneratingHandoff
+				) {
 					this.#skipAgentContinue("session-unavailable", request);
 					return;
 				}
@@ -4939,6 +4988,103 @@ export class AgentSession {
 	}
 
 	/**
+	 * True while any unpersisted in-memory input is queued — the quiescence
+	 * predicate `requestRestart()` refuses on. Covers BOTH in-memory buffers: the
+	 * raw steering/follow-up queues (`agent.hasQueuedMessages()`, deliberately the
+	 * unfiltered predicate so a non-displayable steer still blocks) AND
+	 * `#pendingNextTurnMessages` (filled by `queueDeferredMessage()` /
+	 * `sendCustomMessage({ deliverAs: "nextTurn" })`). Neither is persisted, so
+	 * recycling with either non-empty would drop it.
+	 */
+	#hasUnpersistedInput(): boolean {
+		return this.agent.hasQueuedMessages() || this.#pendingNextTurnMessages.length > 0;
+	}
+
+	/**
+	 * Request a cooperative restart of THIS session (session recycle — same
+	 * loaded code; picking up a new build is a host-process operation, never
+	 * per-agent). Latches out new turns, waits for the running turn to settle,
+	 * flushes to disk, disposes, then invokes the host `onRestartRequested`
+	 * callback with the data needed to re-attach. Refuses (clean, recoverable
+	 * no-op) when no callback is bound, there is no session file, or unpersisted
+	 * input is queued.
+	 */
+	requestRestart(): Promise<RequestRestartResult> {
+		// Coalesce: a second call while one is in flight returns the same promise,
+		// so the host callback fires exactly once per restart. Unlike #disposeCall
+		// this is cleared on a recoverable pre-dispose failure.
+		if (this.#restartCall) return this.#restartCall;
+		// Pre-latch refusals: return WITHOUT latching or caching so the session
+		// stays fully live.
+		if (!this.#onRestartRequested) return Promise.resolve({ ok: false, reason: "unavailable" });
+		const sessionFile = this.sessionFile;
+		if (sessionFile === undefined) return Promise.resolve({ ok: false, reason: "no-session-file" });
+		// Refuse over unpersisted input rather than recycle across a drop.
+		if (this.#hasUnpersistedInput()) return Promise.resolve({ ok: false, reason: "busy" });
+		// Commit: latch first (so no turn can start between the wait and the
+		// callback), then coalesce the committed attempt.
+		this.#restarting = true;
+		this.#restartCall = this.#doRequestRestart(this.#onRestartRequested, sessionFile);
+		return this.#restartCall;
+	}
+
+	async #doRequestRestart(
+		onRestartRequested: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>,
+		sessionFile: string,
+	): Promise<RequestRestartResult> {
+		try {
+			// Quiesce the owning turn so the transcript is complete before capture.
+			await this.waitForIdle();
+			// Re-check the quiescence gate: input queued *during* the wait (a
+			// host/extension steer/follow-up that calls agent.steer directly, so
+			// the turn-start latch never saw it) would otherwise be lost across the
+			// recycle. A clean recoverable refusal — drop the latch, leave the
+			// session untouched.
+			if (this.#hasUnpersistedInput()) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				return { ok: false, reason: "busy" };
+			}
+			// Capture the durable re-attach identity — the file-preserved id
+			// SessionManager.open restores, NOT the sessionId getter (which can
+			// return a fresh provider UUID that diverges from it).
+			const sessionId = this.sessionManager.getSessionId();
+			// Durability barrier: the file the host re-opens reflects the full transcript.
+			await this.sessionManager.flush();
+			await this.sessionManager.ensureOnDisk();
+			// Final quiescence re-check, extending the guard across the whole
+			// entry->dispose window. A host/extension steer/follow-up landing during
+			// the flush/ensureOnDisk awaits above calls agent.steer/followUp directly
+			// (never the turn-start latch) and is not persisted by the flush that
+			// already ran. Re-check immediately before the point of no return: if
+			// input arrived, drop the latch and refuse busy — the session is still
+			// alive and untouched, so the host retries once quiet.
+			if (this.#hasUnpersistedInput()) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				return { ok: false, reason: "busy" };
+			}
+			// Dispose BEFORE the callback: create-before-dispose is unsafe in-process
+			// (AsyncJobManager singleton + lock-free append writer). dispose() is
+			// idempotent.
+			await this.dispose();
+			await onRestartRequested({ sessionId, sessionFile });
+			return { ok: true };
+		} catch (err) {
+			// Split on dispose ordering. A throw BEFORE dispose began (#disposeCall
+			// still unset) is recoverable: the session is still alive, so unlatch and
+			// clear the coalesce cache, then rethrow — the host may retry. A throw
+			// at/after dispose (the callback) is terminal: the old session is gone,
+			// nothing to unlatch, and the rejection propagates.
+			if (!this.#disposeCall) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+			}
+			throw err;
+		}
+	}
+
+	/**
 	 * Applies Code Mode at session startup: when the initial model activates
 	 * it (`codeMode` `on`, or `auto` matching a `code_mode_only` catalog flag),
 	 * the initial tool surface is routed through the Code Mode-aware path so
@@ -5710,6 +5856,10 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		// Cooperative restart latched: refuse to begin a new turn so nothing
+		// appends past the durability barrier before dispose. A no-op return, not
+		// a throw — the host driving restart is not an error.
+		if (this.#restarting) return false;
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -5954,6 +6104,14 @@ export class AgentSession {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
+		// Cooperative restart latched: refuse to begin a turn from ANY entry point
+		// that reaches this chokepoint. prompt() guards at its top, but
+		// promptCustomMessage()'s non-streaming branch dispatches here directly
+		// (skill/collab/ACP prompts), so the shared chokepoint must observe the
+		// latch too or a turn started in the post-idle/pre-dispose drain window
+		// would append past the durability barrier and race dispose. A no-op drop,
+		// not a throw — mirrors the top-of-prompt() guard.
+		if (this.#restarting) return false;
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
@@ -6512,6 +6670,11 @@ export class AgentSession {
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isStreaming) return false;
 		if (this.isRetrying) return false;
+		// A cooperative restart has latched: no turn may start from entry through
+		// the host callback. The authoritative gate is in #scheduleAgentContinue,
+		// but keep the predicate honest so a queued-drain scheduled before the
+		// latch re-checks here and refuses.
+		if (this.#restarting) return false;
 		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),
 		// whose initial steering poll injects the steer before the first provider call, so the
 		// request tail becomes the steer (valid) regardless of any injected custom / bashExecution
@@ -6636,6 +6799,12 @@ export class AgentSession {
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<void> {
+		// Cooperative restart in progress (or session torn down): this raw-prompt
+		// path bypasses AgentSession.prompt's #restarting guard, so gate it here —
+		// a turn started after the latch would append past the durability barrier.
+		// The caller re-sends after a `busy` refusal; in-memory agent-initiated
+		// input is not replayed across the recycle.
+		if (this.#restarting || this.#isDisposed) return;
 		this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return;

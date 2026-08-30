@@ -230,6 +230,13 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/**
+	 * Cooperative restart hook for embedded hosts. Invoked by
+	 * {@link AgentSession.requestRestart} after OMP has quiesced, flushed, and
+	 * disposed this session, with the data the host needs to re-attach the
+	 * recycled session. Wired from `CreateAgentSessionOptions.onRestartRequested`.
+	 */
+	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */

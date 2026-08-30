@@ -631,6 +631,28 @@ export interface CreateAgentSessionOptions {
 	 */
 	onFirstChatDispatch?: () => void;
 
+	/**
+	 * Cooperative restart hook for embedded hosts. When the session (or its
+	 * host) calls {@link AgentSession.requestRestart}, OMP latches out new turns,
+	 * waits for the running turn to settle, flushes the session file to disk,
+	 * disposes the session, then invokes this callback with the data needed to
+	 * re-attach. The session is already disposed when this fires, so the host
+	 * re-opens the manager (`await SessionManager.open(sessionFile)`) and recreates
+	 * the session **through the same configured factory / options it used
+	 * originally**, substituting the reopened manager — re-passing this callback
+	 * and all host options (cwd, agentDir, event bus, injected settings). A bare
+	 * `createAgentSession({ sessionManager })` drops every option, so the recycled
+	 * session would restart once and then never again, and silently lose host
+	 * config. Never create the replacement before this callback (it cannot: the
+	 * old session is gone) — that is the create-before-dispose hazard OMP disposes
+	 * first to avoid.
+	 *
+	 * Recycles ONLY this session (same loaded code); picking up a new build is a
+	 * host-process-level operation, never triggered per-agent. Unset =>
+	 * `requestRestart()` refuses (restart unavailable).
+	 */
+	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
+
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
 }
@@ -1782,6 +1804,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			// Bound only when the host wired onRestartRequested, so the restart tool
+			// can guard on the binding's presence.
+			requestRestart: options.onRestartRequested ? () => session.requestRestart() : undefined,
 			rules: allRules,
 			eventBus,
 			subagentEventBus,
@@ -3686,6 +3711,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			onRestartRequested: options.onRestartRequested,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
