@@ -6,6 +6,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -79,7 +80,7 @@ afterEach(async () => {
 
 async function createHarness(
 	responses: MockResponse[],
-	options: { includeCompactTool?: boolean } = {},
+	options: { includeCompactTool?: boolean; extensionRunner?: ExtensionRunner } = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const includeCompactTool = options.includeCompactTool ?? true;
 	const tempDir = TempDir.createSync("@pi-compact-tool-");
@@ -124,6 +125,7 @@ async function createHarness(
 		settings,
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+		extensionRunner: options.extensionRunner,
 	});
 	const harness = { session, authStorage, tempDir };
 	activeHarnesses.push(harness);
@@ -387,5 +389,69 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		// Never fired: prompt 1's errored settle skipped the schedule, and the
 		// per-run reset dropped the un-applied request before prompt 2's settle.
 		expect(compactSpy).not.toHaveBeenCalled();
+	}, 15_000);
+
+	it("lets a session_stop continuation scheduled at the compacting settle run before compaction aborts it", async () => {
+		// The compact-triggering settle also fires a session_stop hook that
+		// schedules a hidden continuation turn. That continuation runs as a
+		// tracked post-prompt task, which `agent.waitForIdle()` does NOT cover.
+		// Since `compact()` calls `abort()` — draining the post-prompt controller
+		// — the deferred compaction MUST first await the post-prompt tasks
+		// settling, or the continuation is cancelled before it can run. Observe
+		// the continuation by counting the extra model call it drives, and pin the
+		// ordering: the continuation must finish BEFORE compact() is entered.
+		let sessionStopCalls = 0;
+		const extensionRunner = {
+			emit: async () => undefined,
+			emitBeforeAgentStart: async () => undefined,
+			hasHandlers: (eventType: string) => eventType === "session_stop",
+			// Only the first settle schedules a continuation; the continuation's
+			// own settle returns undefined so the run terminates.
+			emitSessionStop: async () => {
+				sessionStopCalls++;
+				return sessionStopCalls === 1 ? { continue: true, additionalContext: "keep going" } : undefined;
+			},
+		} as unknown as ExtensionRunner;
+
+		const { session, mock } = await createHarness(
+			[
+				// Turn 1: request compaction and stop — this settle fires session_stop.
+				{
+					content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["first answer"], stopReason: "stop" },
+				// Turn 2: the hidden session_stop continuation turn. Its model call
+				// is the observable proof the continuation ran.
+				{ content: ["continuation answer"], stopReason: "stop" },
+			],
+			{ extensionRunner },
+		);
+
+		// Prove ordering, not just occurrence: compact() must not be entered until
+		// the continuation turn has streamed. Spy compact() to snapshot the model
+		// call count at entry — a pre-fix abort would race the continuation and
+		// enter compact() with the continuation turn's call still missing.
+		let modelCallsAtCompact = -1;
+		const compactSpy = vi.spyOn(session, "compact").mockImplementation(async () => {
+			modelCallsAtCompact = mock.calls.length;
+			return fakeCompaction();
+		});
+
+		await session.prompt("do the thing then compact");
+		await session.waitForIdle();
+
+		// The continuation turn ran: three model calls (turn 1, its stop, the
+		// hidden continuation), and the hook fired at both settles.
+		expect(sessionStopCalls).toBe(2);
+		expect(mock.calls).toHaveLength(3);
+		// The requested compaction still ran, exactly once...
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		// ...and only AFTER the continuation streamed — all three model calls were
+		// already recorded when compact() was entered. RED (drop the
+		// `#postPromptTasksPromise` await before compact): abort() drains the
+		// continuation task, so it never streams (mock.calls stays at 2) and
+		// compact() is entered early.
+		expect(modelCallsAtCompact).toBe(3);
 	}, 15_000);
 });

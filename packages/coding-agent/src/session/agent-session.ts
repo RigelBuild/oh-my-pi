@@ -7771,6 +7771,14 @@ export class AgentSession {
 			// step is a genuine no-op and cannot truncate the turn that called the
 			// tool. This is why the request could not be applied inline.
 			await this.agent.waitForIdle();
+			// The settle may have scheduled a post-prompt continuation (plan/todo
+			// enforcement, a session-stop follow-up) that `agent.waitForIdle()`
+			// does not cover — those run as tracked post-prompt tasks, not agent
+			// loop activity. `compact()` calls `abort()`, which drains the
+			// post-prompt controller, so any such continuation still in flight
+			// would be cancelled. Await it settling first so the enforcement runs
+			// before the abort fires.
+			if (this.#postPromptTasksPromise) await this.#postPromptTasksPromise;
 			if (this.#isDisposed) return;
 			await this.#applyRequestedCompaction(request.instructions);
 		})().finally(() => {

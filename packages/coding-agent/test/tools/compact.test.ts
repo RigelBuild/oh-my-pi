@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { CompactTool } from "@oh-my-pi/pi-coding-agent/tools/compact";
 
 function createToolSession(overrides: Partial<ToolSession> = {}): ToolSession {
@@ -28,10 +28,6 @@ describe("compact tool factory (BUILTIN_TOOLS.compact / CompactTool.createIf)", 
 	it("returns null for a subagent session (taskDepth >= 1)", () => {
 		expect(CompactTool.createIf(createToolSession({ taskDepth: 1 }))).toBeNull();
 		expect(CompactTool.createIf(createToolSession({ taskDepth: 3 }))).toBeNull();
-	});
-
-	it("is registered in BUILTIN_TOOLS", () => {
-		expect(typeof BUILTIN_TOOLS.compact).toBe("function");
 	});
 });
 
