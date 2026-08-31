@@ -80,7 +80,12 @@ afterEach(async () => {
 
 async function createHarness(
 	responses: MockResponse[],
-	options: { includeCompactTool?: boolean; extensionRunner?: ExtensionRunner } = {},
+	options: {
+		includeCompactTool?: boolean;
+		extensionRunner?: ExtensionRunner;
+		/** Replace the built-in `compact` tool with a wrapper of the same name. */
+		compactToolOverride?: AgentTool;
+	} = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const includeCompactTool = options.includeCompactTool ?? true;
 	const tempDir = TempDir.createSync("@pi-compact-tool-");
@@ -107,10 +112,10 @@ async function createHarness(
 	// The real CompactTool: its result carries `toolName === "compact"` +
 	// `details.requested`, which is exactly what the onTurnEnd wiring scans for.
 	// A top-level ToolSession stub is enough — the tool only reads taskDepth.
-	const compactTool = new CompactTool(topLevelToolSession());
-	const tools: AgentTool[] = includeCompactTool
-		? [noopTool, yieldTool, compactTool as AgentTool]
-		: [noopTool, yieldTool];
+	// `compactToolOverride` swaps in a same-named wrapper to model an extension
+	// that re-registered the built-in `compact` name.
+	const compactTool = options.compactToolOverride ?? (new CompactTool(topLevelToolSession()) as AgentTool);
+	const tools: AgentTool[] = includeCompactTool ? [noopTool, yieldTool, compactTool] : [noopTool, yieldTool];
 
 	const agent = new Agent({
 		getApiKey: () => "test-key",
@@ -453,5 +458,114 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		// continuation task, so it never streams (mock.calls stays at 2) and
 		// compact() is entered early.
 		expect(modelCallsAtCompact).toBe(3);
+	}, 15_000);
+
+	it("holds the terminal agent_end until the requested compaction pass completes (RPC/subscriber idle signal)", async () => {
+		// A model-requested compaction runs the real `compact()` at settle, which
+		// disconnects and calls `abort()`; abort's `#resetInFlight()` would flush
+		// the deferred terminal `agent_end` mid-pass. Subscribers (rpc-mode, ACP,
+		// Cursor) treat `agent_end` as the idle signal, so flushing before the
+		// summary + history rewrite finishes lets a client fire its next prompt
+		// into a disconnected, being-rewritten session. Drive the REAL compact()
+		// and assert the terminal `agent_end` is emitted only AFTER the compaction
+		// pass returns. Pre-fix the abort flushes it first → agent_end precedes
+		// compact:done (RED).
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		const order: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") order.push("agent_end");
+		});
+
+		// Call through to the real lifecycle (abort + too-small no-op) but bracket
+		// it so the ordering of the compaction's completion is observable. `finally`
+		// records completion whether the too-small case throws (swallowed by the
+		// settle path) or returns.
+		const realCompact = session.compact.bind(session);
+		const compactSpy = vi.spyOn(session, "compact").mockImplementation(async instructions => {
+			try {
+				return await realCompact(instructions);
+			} finally {
+				order.push("compact:done");
+			}
+		});
+
+		await session.prompt("do the thing then compact");
+		await session.waitForIdle();
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(order).toContain("compact:done");
+		expect(order).toContain("agent_end");
+		// The idle signal must not reach subscribers until the rewrite pass is done.
+		expect(order.indexOf("agent_end")).toBeGreaterThan(order.indexOf("compact:done"));
+	}, 15_000);
+
+	it("schedules a rewrite only when the compact result carries details.requested === true (marker, not name)", async () => {
+		// An extension may re-register the built-in `compact` name (the SDK supports
+		// replacing registry entries). A same-named wrapper that DECLINES — a
+		// successful result WITHOUT the native tool's `requested: true` marker — must
+		// not be treated as authorization for a real context rewrite. Name-only
+		// matching (pre-fix) fires the rewrite anyway.
+		const declineWrapper: AgentTool = {
+			name: "compact",
+			label: "Compact",
+			description: "A wrapper that re-registers the compact name but declines to request a rewrite.",
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text" as const, text: "declined; not delegating" }] };
+			},
+		};
+
+		const declined = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			{ compactToolOverride: declineWrapper },
+		);
+		const declinedSpy = vi.spyOn(declined.session, "compact").mockResolvedValue(fakeCompaction());
+		await declined.session.prompt("call the wrapper compact");
+		await declined.session.waitForIdle();
+		// No marker → not authorization → no rewrite scheduled.
+		expect(declinedSpy).not.toHaveBeenCalled();
+
+		// A same-named wrapper that DOES set the marker still schedules the rewrite.
+		const requestingWrapper: AgentTool = {
+			name: "compact",
+			label: "Compact",
+			description: "A wrapper that re-registers the compact name and requests a rewrite via the marker.",
+			parameters: type({}),
+			async execute() {
+				return {
+					content: [{ type: "text" as const, text: "delegating to native compaction" }],
+					details: { requested: true },
+				};
+			},
+		};
+
+		const requesting = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			{ compactToolOverride: requestingWrapper },
+		);
+		const requestingSpy = vi.spyOn(requesting.session, "compact").mockResolvedValue(fakeCompaction());
+		await requesting.session.prompt("call the wrapper compact");
+		await requesting.session.waitForIdle();
+		// Marker present → authorization → exactly one rewrite.
+		expect(requestingSpy).toHaveBeenCalledTimes(1);
 	}, 15_000);
 });

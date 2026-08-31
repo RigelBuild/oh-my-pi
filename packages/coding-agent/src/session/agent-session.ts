@@ -1010,6 +1010,19 @@ export class AgentSession {
 		const pending = this.#pendingAgentEndEmit;
 		if (!pending) return;
 		this.#pendingAgentEndEmit = undefined;
+		// A model-requested compaction (the `compact` tool) runs detached after the
+		// settle but is still awaited by this prompt's `#waitForPostPromptRecovery`,
+		// so the prompt is genuinely in-flight until it finishes. `compact()` calls
+		// `abort()`, whose `#resetInFlight()` reaches here mid-pass — flushing the
+		// terminal `agent_end` BEFORE the summary + history rewrite complete would
+		// tell a subscriber (rpc-mode, ACP, Cursor) the session is idle while it is
+		// disconnected and being rewritten, so its next `prompt` could race the
+		// compaction. Re-defer while a requested compaction is pending; the outer
+		// prompt's `#endInFlight` re-flushes once `#requestedCompaction` has cleared.
+		if (pending.type === "agent_end" && pending.isTerminal !== false && this.#requestedCompaction) {
+			this.#pendingAgentEndEmit = pending;
+			return;
+		}
 		if (pending.type !== "agent_end" || pending.isTerminal === false) {
 			this.#emit(pending);
 			return;
@@ -1349,7 +1362,19 @@ export class AgentSession {
 			// could reach this settle before the async marker existed, and the late
 			// marker then leaked into a later, unrelated turn. Scoped to the turn that
 			// called `compact` via the one-shot marker, mirroring `#pendingRewindReport`.
-			const compactResult = context?.toolResults.find(result => result.toolName === "compact" && !result.isError);
+			// Match the native `compact` tool's intent marker, not just its name. The
+			// SDK lets an extension re-register the built-in `compact` name; a wrapper
+			// that declines or does not delegate to the native tool still produces a
+			// non-error result under that name. Requiring `details.requested === true`
+			// (the marker the native tool sets) means only a genuine request from the
+			// native tool authorizes a real context rewrite.
+			const compactResult = context?.toolResults.find(
+				result =>
+					result.toolName === "compact" &&
+					!result.isError &&
+					isRecord(result.details) &&
+					result.details.requested === true,
+			);
 			if (compactResult) {
 				const details = compactResult.details;
 				const instructions = details ? stringProperty(details, "instructions")?.trim() || undefined : undefined;
