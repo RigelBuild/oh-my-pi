@@ -345,7 +345,12 @@ import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import { type BranchSummaryEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type NewSessionOptions } from "./session-entries";
+import {
+	type BranchSummaryEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type NewSessionOptions,
+	SETTINGS_TRACKING_MODEL_CHANGE_ROLE,
+} from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -5203,16 +5208,17 @@ export class AgentSession {
 		const current = this.model;
 		if (current && current.provider === resolved.provider && current.id === resolved.id) return false;
 		if (!this.#modelRegistry.hasConfiguredAuth(resolved)) return false;
-		await this.setModel(resolved, "default");
+		await this.setModel(resolved, SETTINGS_TRACKING_MODEL_CHANGE_ROLE);
 		return true;
 	}
 
 	/**
 	 * Whether the user pinned a session-only model this session (an explicit
-	 * `/model` pick, `temporary`, or a non-default role). Mirrors the restore
-	 * logic in `getRestorableSessionModels`: a `model_change` whose role is
-	 * `default`, the ephemeral fallback role, or absent still tracks the settings
-	 * default and is safe to swap; anything else is a user pin.
+	 * `/model` pick, which writes role `default`, or `temporary`, or a non-default
+	 * role). A `model_change` whose role is absent, the ephemeral fallback role,
+	 * or the settings-tracking role still tracks the settings default and is safe
+	 * to swap; anything else — including an explicit `default` selection — is a
+	 * user pin a settings reload must not clobber.
 	 */
 	#hasSessionModelOverride(): boolean {
 		const entries = this.sessionManager.getBranch();
@@ -5220,7 +5226,11 @@ export class AgentSession {
 			const entry = entries[i];
 			if (entry.type !== "model_change") continue;
 			const role = entry.role;
-			return !(role === undefined || role === "default" || role === EPHEMERAL_MODEL_CHANGE_ROLE);
+			return !(
+				role === undefined ||
+				role === EPHEMERAL_MODEL_CHANGE_ROLE ||
+				role === SETTINGS_TRACKING_MODEL_CHANGE_ROLE
+			);
 		}
 		return false;
 	}

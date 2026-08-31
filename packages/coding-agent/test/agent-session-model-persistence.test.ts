@@ -9,7 +9,10 @@ import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import {
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	SETTINGS_TRACKING_MODEL_CHANGE_ROLE,
+} from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -600,6 +603,21 @@ describe("AgentSession model persistence", () => {
 					[EPHEMERAL_MODEL_CHANGE_ROLE]: "anthropic/claude-sonnet-4-6",
 				},
 				EPHEMERAL_MODEL_CHANGE_ROLE,
+			),
+		).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	it("lists only the default model for settings-tracking restores", () => {
+		// A settings-tracking auto-swap (role SETTINGS_TRACKING_MODEL_CHANGE_ROLE)
+		// still tracks the configured default, so restoring must offer the default
+		// alone — never resurrect the tracked selector as if it were a user pin.
+		expect(
+			getRestorableSessionModels(
+				{
+					default: "anthropic/claude-sonnet-4-5",
+					[SETTINGS_TRACKING_MODEL_CHANGE_ROLE]: "anthropic/claude-sonnet-4-6",
+				},
+				SETTINGS_TRACKING_MODEL_CHANGE_ROLE,
 			),
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});

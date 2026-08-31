@@ -25,6 +25,15 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+/**
+ * Role stamped on a `model_change` written by the settings-tracking auto-swap
+ * (`#applyReloadedModel`). Like {@link EPHEMERAL_MODEL_CHANGE_ROLE}, it marks a
+ * change that still tracks the configured default rather than a user pin, so a
+ * later `/refresh settings` may swap it again. Must not collide with a real
+ * semantic role in `modelRoles`.
+ */
+export const SETTINGS_TRACKING_MODEL_CHANGE_ROLE = "settings";
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this

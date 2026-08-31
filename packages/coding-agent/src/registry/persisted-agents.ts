@@ -5,7 +5,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
-import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, SETTINGS_TRACKING_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
@@ -227,7 +227,11 @@ async function readPersistedAgentHistory(
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
-			if (modelChange.role && modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+			if (
+				modelChange.role &&
+				modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+				modelChange.role !== SETTINGS_TRACKING_MODEL_CHANGE_ROLE
+			) {
 				modelRole ??= modelChange.role;
 			}
 			// The transition that installed the serving model: it carries the
@@ -308,7 +312,11 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 				}
 				if (record.type === "model_change") {
 					if (typeof record.model === "string") history.resolvedModel = record.model;
-					if (typeof record.role === "string" && record.role !== EPHEMERAL_MODEL_CHANGE_ROLE) {
+					if (
+						typeof record.role === "string" &&
+						record.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
+						record.role !== SETTINGS_TRACKING_MODEL_CHANGE_ROLE
+					) {
 						history.modelRole = record.role;
 					}
 					if (typeof record.resolvedModelIsFallback === "boolean") {
