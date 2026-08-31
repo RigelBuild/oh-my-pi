@@ -285,7 +285,7 @@ export class MCPManager {
 	 * instead of racing — an older empty response must never overwrite tools a
 	 * concurrent refresh already recovered.
 	 */
-	#pendingToolRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
+	#pendingToolRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void>; dirty: boolean }>();
 
 	constructor(
 		private cwd: string,
@@ -801,7 +801,7 @@ export class MCPManager {
 		const refresh = (() => {
 			switch (kind) {
 				case "tools":
-					return this.refreshServerTools(serverName);
+					return this.refreshServerTools(serverName, { notification: true });
 				case "resources":
 					return this.refreshServerResources(serverName);
 				case "prompts":
@@ -1328,7 +1328,7 @@ export class MCPManager {
 	/**
 	 * Refresh tools from a specific server.
 	 */
-	async refreshServerTools(name: string): Promise<void> {
+	async refreshServerTools(name: string, options?: { notification?: boolean }): Promise<void> {
 		const connection = this.#connections.get(name);
 		if (!connection) return;
 
@@ -1339,8 +1339,20 @@ export class MCPManager {
 		// land after the other recovered populated tools and overwrite them with
 		// `[]`. Sharing the in-flight promise makes both callers observe the same
 		// single result.
+		//
+		// A `notifications/tools/list_changed` that arrives mid-flight is the one
+		// exception: its whole point is that the toolset changed AGAIN, so the
+		// in-flight `tools/list` (which predates it) may already be stale. Rather
+		// than fire a second concurrent list (reintroducing the overwrite race the
+		// single-flight fixed), it marks the pending entry dirty so exactly ONE
+		// follow-up refresh runs after the current one settles. A plain concurrent
+		// `/mcp refresh` never sets dirty, so manual refreshes still coalesce to
+		// one.
 		const existing = this.#pendingToolRefresh.get(name);
-		if (existing && existing.connection === connection) return existing.promise;
+		if (existing && existing.connection === connection) {
+			if (options?.notification) existing.dirty = true;
+			return existing.promise;
+		}
 
 		const doRefresh = async (): Promise<void> => {
 			// Clear cached tools
@@ -1367,9 +1379,15 @@ export class MCPManager {
 			const pending = this.#pendingToolRefresh.get(name);
 			if (pending?.promise === promise) {
 				this.#pendingToolRefresh.delete(name);
+				// A `list_changed` landed mid-flight: run exactly one follow-up so
+				// the newer toolset is not lost until the next notification. Only
+				// re-list if the connection is still the current one.
+				if (pending.dirty && this.#connections.get(name) === connection) {
+					void this.#triggerNotificationRefresh(name, "tools");
+				}
 			}
 		});
-		this.#pendingToolRefresh.set(name, { connection, promise });
+		this.#pendingToolRefresh.set(name, { connection, promise, dirty: false });
 		return promise;
 	}
 

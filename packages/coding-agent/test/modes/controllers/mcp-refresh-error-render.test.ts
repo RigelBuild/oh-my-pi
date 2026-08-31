@@ -114,4 +114,41 @@ describe("/mcp refresh error rendering normalizes transport-controlled errors", 
 		expect(message).toContain("alpha: boom   tab   separated");
 		expect(message).toContain("beta: line-one line-two line-three");
 	});
+
+	it("partial-failure branch sanitizes a control-laden server name", async () => {
+		const harness = makeHarness([
+			{ name: "healthy", ok: true },
+			{ name: "evil\tname\nwith\rcontrol", ok: false, error: "boom" },
+		]);
+
+		await harness.controller.handle("/mcp refresh");
+
+		const out = harness.rendered();
+		expect(out).toContain("1 server(s) failed to refresh");
+		// The server-controlled name carried a tab, LF, and CR — none may reach
+		// the transcript to punch holes across rows.
+		const errorRow = out.split("\n").find(line => line.includes("boom")) ?? "";
+		expect(errorRow).not.toContain("\t");
+		expect(errorRow).not.toContain("\r");
+		expect(errorRow).toContain("evil");
+		expect(errorRow).toContain("control: boom");
+	});
+
+	it("all-failed branch sanitizes and bounds each server name", async () => {
+		const longName = `alpha-${"z".repeat(300)}-end`;
+		const harness = makeHarness([
+			{ name: "beta\tname", ok: false, error: "boom" },
+			{ name: longName, ok: false, error: "boom" },
+		]);
+
+		await harness.controller.handle("/mcp refresh");
+
+		const message = harness.errored() ?? "";
+		expect(message).toContain("Failed to refresh MCP tools from all 2 connected servers");
+		expect(message).not.toContain("\t");
+		// The overlong name row is truncated below the raw name length.
+		const longRow = message.split("\n").find(line => line.includes("alpha-")) ?? "";
+		expect(longRow.length).toBeLessThan(longName.length);
+		expect(longRow).not.toContain(`${"z".repeat(300)}`);
+	});
 });

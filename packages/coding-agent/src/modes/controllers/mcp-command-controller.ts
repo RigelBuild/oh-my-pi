@@ -2141,10 +2141,7 @@ export class MCPCommandController {
 				// is recovery, so a silent all-failure strands the user).
 				this.ctx.showError(
 					`Failed to refresh MCP tools from all ${outcomes.length} connected servers:\n${failed
-						.map(
-							outcome =>
-								`  ${outcome.name}: ${replaceTabs(truncateToWidth(sanitizeText(outcome.error.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE))}`,
-						)
+						.map(outcome => `  ${this.#formatRefreshFailureRow(outcome)}`)
 						.join("\n")}`,
 				);
 				return;
@@ -2159,10 +2156,7 @@ export class MCPCommandController {
 			if (failed.length > 0) {
 				lines.push(theme.fg("warning", `  ${failed.length} server(s) failed to refresh:`));
 				for (const outcome of failed) {
-					const detail = replaceTabs(
-						truncateToWidth(sanitizeText(outcome.error.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE),
-					);
-					lines.push(theme.fg("warning", `    ${outcome.name}: ${detail}`));
+					lines.push(theme.fg("warning", `    ${this.#formatRefreshFailureRow(outcome)}`));
 				}
 			}
 			lines.push("");
@@ -2170,6 +2164,23 @@ export class MCPCommandController {
 		} catch (error) {
 			this.ctx.showError(`Failed to refresh MCP tools: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/**
+	 * Render one `/mcp refresh` failure as a single bounded TUI row. Both the
+	 * server name and the error can carry tabs, newlines, or control chars (a
+	 * name is server-controlled), so sanitize the COMPLETE `name: error` row and
+	 * cap its width — an overlong or control-laden name would otherwise corrupt
+	 * or overflow the row just as an unsanitized error did. Matches the sibling
+	 * render pipeline in command-controller.ts.
+	 */
+	#formatRefreshFailureRow(outcome: { name: string; error: string }): string {
+		return replaceTabs(
+			truncateToWidth(
+				sanitizeText(`${outcome.name}: ${outcome.error}`.replace(/[\r\n]+/g, " ")),
+				TRUNCATE_LENGTHS.LINE,
+			),
+		);
 	}
 
 	/**

@@ -271,4 +271,97 @@ describe("MCP empty-toolset warmup recovery", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+
+	it("runs exactly one follow-up when a list_changed notification lands mid-flight", async () => {
+		// A `notifications/tools/list_changed` arriving while the first
+		// notification's `tools/list` is still in flight must not be lost: the
+		// in-flight promise is shared (no second concurrent list, preserving the
+		// single-flight overwrite fix), but the newer notification marks the
+		// pending entry dirty so exactly ONE follow-up refresh runs once the
+		// current one settles.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
+		const manager = new MCPManager(workDir);
+
+		try {
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			const connection = manager.getConnection("warmup");
+			if (!connection) throw new Error("expected a connection");
+
+			// Count `tools/list` request INITIATIONS (synchronous, so a follow-up
+			// started in the pending entry's `.finally` is counted before the
+			// outer await resumes) and gate the first one so a second notification
+			// arrives mid-flight.
+			let listInitiations = 0;
+			const gate = Promise.withResolvers<void>();
+			const entered = Promise.withResolvers<void>();
+			let gated = true;
+			const realRequest = connection.transport.request.bind(connection.transport);
+			connection.transport.request = (<T = unknown>(
+				method: string,
+				params?: Record<string, unknown>,
+			): Promise<T> => {
+				if (method === "tools/list") {
+					listInitiations++;
+					if (gated) {
+						gated = false;
+						entered.resolve();
+						return gate.promise.then(() => realRequest<T>("tools/list", params));
+					}
+				}
+				return realRequest<T>(method, params);
+			}) as typeof connection.transport.request;
+
+			// First notification-driven refresh parks on the gate.
+			const first = manager.refreshServerTools("warmup", { notification: true });
+			await entered.promise;
+			// Second list_changed lands mid-flight: it shares the in-flight request
+			// rather than firing a concurrent one. While the first is gated, no new
+			// `tools/list` has been initiated by the second caller.
+			const second = manager.refreshServerTools("warmup", { notification: true });
+			expect(listInitiations).toBe(1);
+
+			gate.resolve();
+			await Promise.all([first, second]);
+
+			// First refresh's list + exactly one dirty follow-up = 2 initiations.
+			// Without the dirty flag the newer notification is dropped → 1.
+			expect(listInitiations).toBe(2);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
+
+	it("plain concurrent /mcp refresh still coalesces to one list (no dirty follow-up)", async () => {
+		// A manual refresh does not pass the notification flag, so overlapping
+		// manual refreshes never mark dirty: they coalesce to a single list with
+		// no follow-up. This is the contract the dirty scoping must not break. A
+		// follow-up, if wrongly queued, initiates its `tools/list` synchronously
+		// in the pending entry's `.finally` — before the outer await resumes — so
+		// counting initiations catches it without any wall-clock wait.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
+		const manager = new MCPManager(workDir);
+
+		try {
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			const connection = manager.getConnection("warmup");
+			if (!connection) throw new Error("expected a connection");
+
+			let listInitiations = 0;
+			const realRequest = connection.transport.request.bind(connection.transport);
+			connection.transport.request = (<T = unknown>(
+				method: string,
+				params?: Record<string, unknown>,
+			): Promise<T> => {
+				if (method === "tools/list") listInitiations++;
+				return realRequest<T>(method, params);
+			}) as typeof connection.transport.request;
+
+			await Promise.all([manager.refreshServerTools("warmup"), manager.refreshServerTools("warmup")]);
+
+			// Exactly one list — coalesced, and NO follow-up initiated.
+			expect(listInitiations).toBe(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
 });

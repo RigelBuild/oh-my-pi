@@ -89,4 +89,27 @@ describe("MCPToolCache empty-toolset guard", () => {
 		await cache.set("litellm", CONFIG, []);
 		expect(await cache.get("litellm", CONFIG)).toBeNull();
 	});
+
+	test("a slower older non-empty set() cannot clobber a newer empty result", async () => {
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+
+		// Seed a real cached toolset so the empty write has something to invalidate.
+		await cache.set("litellm", CONFIG, [TOOL]);
+		expect(await cache.get("litellm", CONFIG)).toEqual([TOOL]);
+
+		// A non-empty write races: it must `await hashConfig()` before it can
+		// persist. Start it but do NOT await — it is now parked on the async hash.
+		const slowNonEmpty = cache.set("litellm", CONFIG, [TOOL]);
+
+		// A NEWER empty result lands and invalidates synchronously (empty writes
+		// take no async hash).
+		await cache.set("litellm", CONFIG, []);
+		expect(await cache.get("litellm", CONFIG)).toBeNull();
+
+		// The older non-empty write now resolves. It must NOT resurrect the stale
+		// tools past the newer empty write — the read stays a miss.
+		await slowNonEmpty;
+		expect(await cache.get("litellm", CONFIG)).toBeNull();
+	});
 });
