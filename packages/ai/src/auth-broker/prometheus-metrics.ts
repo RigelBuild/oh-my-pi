@@ -150,7 +150,7 @@ export interface SubscriptionLookup {
  * `planType` produce the identical `plan` label and the `on(provider, plan)`
  * join matches.
  */
-function canonicalizePlan(plan: string): string {
+export function canonicalizePlan(plan: string): string {
 	const normalized = plan
 		.trim()
 		.toLowerCase()

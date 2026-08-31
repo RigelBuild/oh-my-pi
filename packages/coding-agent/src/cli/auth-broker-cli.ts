@@ -34,6 +34,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerClient,
+	canonicalizePlan,
 	DEFAULT_AUTH_BROKER_BIND,
 	type SubscriptionLookup,
 	startAuthBroker,
@@ -214,8 +215,17 @@ function parsePlanRenewal(
 	file: string,
 	label: string,
 ): { plan?: string; renewsAtSeconds?: number } {
-	if (entry.plan !== undefined && typeof entry.plan !== "string") {
-		throw new Error(`subscription config ${file}: ${label} "plan" must be a string`);
+	if (entry.plan !== undefined) {
+		if (typeof entry.plan !== "string") {
+			throw new Error(`subscription config ${file}: ${label} "plan" must be a string`);
+		}
+		// The renderer canonicalizes an explicit plan and emits it as the
+		// `plan` label. An empty/whitespace-only plan canonicalizes to "" and
+		// would emit `plan=""` instead of falling back to the provider-reported
+		// plan, so reject it here — omitting the field entirely stays valid.
+		if (canonicalizePlan(entry.plan).length === 0) {
+			throw new Error(`subscription config ${file}: ${label} "plan" must not be empty`);
+		}
 	}
 	let renewsAtSeconds: number | undefined;
 	if (entry.renewsAt !== undefined) {
@@ -316,6 +326,12 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 
 	// Per-plan table, keys are "<provider>:<plan>".
 	const plans: Array<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }> = [];
+	// Two plan keys whose {provider, canonicalized plan} collapse to one exported
+	// identity (e.g. "anthropic:Max Plan" and "anthropic:max-plan") would both be
+	// accepted here, but the renderer dedups by that identity and silently keeps
+	// only the first — so config order would decide the reported facts. Reject
+	// the collision loudly instead.
+	const seenPlanIdentities = new Set<string>();
 	if (parsed.plans !== undefined && !isPlainObject(parsed.plans)) {
 		throw new Error(`subscription config ${file}: "plans" must be a JSON object`);
 	}
@@ -332,9 +348,18 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 				`subscription config ${file}: plan ${key} needs numeric "capacityWeight" and "monthlyPriceUsd"`,
 			);
 		}
+		const provider = key.slice(0, sep);
+		const plan = key.slice(sep + 1);
+		const identity = `${provider}:${canonicalizePlan(plan)}`;
+		if (seenPlanIdentities.has(identity)) {
+			throw new Error(
+				`subscription config ${file}: plan key ${key} duplicates canonical plan ${canonicalizePlan(plan)}`,
+			);
+		}
+		seenPlanIdentities.add(identity);
 		plans.push({
-			provider: key.slice(0, sep),
-			plan: key.slice(sep + 1),
+			provider,
+			plan,
 			capacityWeight: entry.capacityWeight,
 			monthlyPriceUsd: entry.monthlyPriceUsd,
 		});

@@ -34,6 +34,12 @@ describe("parseSubscriptionsConfig", () => {
 		expect(lookup.plans).toEqual([]);
 	});
 
+	it("parses an entry that omits plan entirely (renewal-only / provider-derived)", () => {
+		const raw = JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-08-26" } } });
+		const lookup = parseSubscriptionsConfig(raw, FILE);
+		expect(lookup.lookup("p", "a", "")).toEqual({ plan: undefined, renewsAtSeconds: 1787702400 });
+	});
+
 	it("scopes account entries by org and falls back to an org-less entry", () => {
 		const raw = JSON.stringify({
 			accounts: {
@@ -154,6 +160,21 @@ describe("parseSubscriptionsConfig", () => {
 		[
 			"renewsAt normalized-invalid (2026-13-01)",
 			JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-13-01" } } }),
+		],
+		[
+			"plan keys collapse to one canonical identity",
+			JSON.stringify({
+				plans: {
+					"anthropic:Max Plan": { capacityWeight: 1, monthlyPriceUsd: 1 },
+					"anthropic:max-plan": { capacityWeight: 2, monthlyPriceUsd: 2 },
+				},
+			}),
+		],
+		["account plan empty string", JSON.stringify({ accounts: { a: { provider: "p", plan: "" } } })],
+		["account plan whitespace-only", JSON.stringify({ accounts: { a: { provider: "p", plan: "   " } } })],
+		[
+			"nested org plan empty string",
+			JSON.stringify({ accounts: { a: { provider: "p", orgs: { x: { plan: "" } } } } }),
 		],
 	];
 
