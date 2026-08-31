@@ -57,6 +57,34 @@ describe("parseSubscriptionsConfig", () => {
 		expect(lookup.lookup("anthropic", "acct-1", "org-personal")).toBeUndefined();
 	});
 
+	it("resolves the SAME account id in two orgs via the nested orgs map", () => {
+		// Two orgs for one account id cannot be two top-level `accounts` keys —
+		// JSON.parse keeps only the last property of a duplicated key. The nested
+		// `orgs` map lets a single account id carry an independent plan/renewal per
+		// org; a regression collapses both orgs onto one plan (or drops one).
+		const raw = JSON.stringify({
+			accounts: {
+				"acct-1": {
+					provider: "anthropic",
+					org: "org-team",
+					plan: "team",
+					renewsAt: "2026-08-26",
+					orgs: {
+						"org-personal": { plan: "max", renewsAt: "2026-09-15" },
+					},
+				},
+			},
+		});
+		const lookup = parseSubscriptionsConfig(raw, FILE);
+		expect(lookup.lookup("anthropic", "acct-1", "org-team")).toEqual({ plan: "team", renewsAtSeconds: 1787702400 });
+		expect(lookup.lookup("anthropic", "acct-1", "org-personal")).toEqual({
+			plan: "max",
+			renewsAtSeconds: 1789430400,
+		});
+		// Neither org's entry leaks to a third, unconfigured org (no bare fallback).
+		expect(lookup.lookup("anthropic", "acct-1", "org-other")).toBeUndefined();
+	});
+
 	const throwCases: Array<[string, string]> = [
 		["non-JSON string", "not json"],
 		["JSON non-object root (number)", "3"],
@@ -66,6 +94,20 @@ describe("parseSubscriptionsConfig", () => {
 		["provider not a string", JSON.stringify({ accounts: { a: { provider: 1 } } })],
 		["provider empty string", JSON.stringify({ accounts: { a: { provider: "" } } })],
 		["account key empty string", JSON.stringify({ accounts: { "": { provider: "p" } } })],
+		[
+			"org not a string (number coerced to empty scope)",
+			JSON.stringify({ accounts: { a: { provider: "p", org: 42 } } }),
+		],
+		["orgs map not an object", JSON.stringify({ accounts: { a: { provider: "p", orgs: 5 } } })],
+		["orgs entry not an object", JSON.stringify({ accounts: { a: { provider: "p", orgs: { x: 5 } } } })],
+		[
+			"org scope declared twice (top-level org + orgs key)",
+			JSON.stringify({ accounts: { a: { provider: "p", org: "team", orgs: { team: { plan: "x" } } } } }),
+		],
+		[
+			"nested org plan not a string",
+			JSON.stringify({ accounts: { a: { provider: "p", orgs: { x: { plan: 1 } } } } }),
+		],
 		["plan not a string", JSON.stringify({ accounts: { a: { provider: "p", plan: 1 } } })],
 		["renewsAt not a string", JSON.stringify({ accounts: { a: { provider: "p", renewsAt: 1 } } })],
 		[

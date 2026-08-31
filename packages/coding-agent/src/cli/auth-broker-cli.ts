@@ -155,9 +155,17 @@ const SUBSCRIPTIONS_ENV = "OMP_AUTH_BROKER_SUBSCRIPTIONS";
  * opaque provider accountId (`accountLabelOf`); `plans` by
  * `"<provider>:<canonical-plan>"`. `renewsAt` is an ISO `YYYY-MM-DD` date the
  * loader converts to unix seconds before it reaches the renderer.
+ *
+ * One account id can hold subscriptions in several organizations. The
+ * account-level `plan`/`renewsAt` describe the account's `org` scope (or the
+ * org-less fallback when `org` is absent); the optional `orgs` map carries the
+ * remaining org scopes, each keyed by its organization id with its own
+ * `plan`/`renewsAt`. A single JSON property per account id cannot represent the
+ * same account in two orgs, so the extra scopes live inside `orgs` rather than
+ * as duplicate top-level keys.
  */
 interface SubscriptionsConfigFile {
-	accounts?: Record<string, { provider?: unknown; org?: unknown; plan?: unknown; renewsAt?: unknown }>;
+	accounts?: Record<string, { provider?: unknown; org?: unknown; plan?: unknown; renewsAt?: unknown; orgs?: unknown }>;
 	plans?: Record<string, { capacityWeight?: unknown; monthlyPriceUsd?: unknown }>;
 }
 
@@ -196,6 +204,34 @@ function parseUtcDate(value: string): number | undefined {
 }
 
 /**
+ * Validate + normalize the `plan`/`renewsAt` pair shared by an account-level
+ * entry and each nested `orgs` entry. `label` names the offending entry in the
+ * fail-loudly error (`account foo` or `account foo org bar`). Converts a
+ * `YYYY-MM-DD` `renewsAt` to unix seconds; throws on any malformed field.
+ */
+function parsePlanRenewal(
+	entry: { plan?: unknown; renewsAt?: unknown },
+	file: string,
+	label: string,
+): { plan?: string; renewsAtSeconds?: number } {
+	if (entry.plan !== undefined && typeof entry.plan !== "string") {
+		throw new Error(`subscription config ${file}: ${label} "plan" must be a string`);
+	}
+	let renewsAtSeconds: number | undefined;
+	if (entry.renewsAt !== undefined) {
+		if (typeof entry.renewsAt !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(entry.renewsAt)) {
+			throw new Error(`subscription config ${file}: ${label} "renewsAt" must be a YYYY-MM-DD string`);
+		}
+		const ms = parseUtcDate(entry.renewsAt);
+		if (ms === undefined) {
+			throw new Error(`subscription config ${file}: ${label} "renewsAt" is not a valid date: ${entry.renewsAt}`);
+		}
+		renewsAtSeconds = ms / 1000;
+	}
+	return { plan: entry.plan as string | undefined, renewsAtSeconds };
+}
+
+/**
  * Parse raw subscription-config JSON into a {@link SubscriptionLookup}. Pure and
  * synchronous (no I/O): `file` is used only in error messages. Fails loudly
  * (throws) on a parse error or malformed shape so the broker never silently
@@ -222,6 +258,7 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 	// `org` is the canonicalized organization scope (trim + lowercase, "" when the
 	// entry declares none) so an account email's several org-scoped subscriptions
 	// each carry their own plan/renewal instead of one config applying to both.
+	// The same account id can appear in several orgs via the nested `orgs` map.
 	const accounts = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
 	if (parsed.accounts !== undefined && !isPlainObject(parsed.accounts)) {
 		throw new Error(`subscription config ${file}: "accounts" must be a JSON object`);
@@ -238,27 +275,43 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 				`subscription config ${file}: account ${account} "provider" and account key must be non-empty`,
 			);
 		}
-		if (entry.plan !== undefined && typeof entry.plan !== "string") {
-			throw new Error(`subscription config ${file}: account ${account} "plan" must be a string`);
-		}
-		let renewsAtSeconds: number | undefined;
-		if (entry.renewsAt !== undefined) {
-			if (typeof entry.renewsAt !== "string") {
-				throw new Error(`subscription config ${file}: account ${account} "renewsAt" must be a YYYY-MM-DD string`);
-			}
-			if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.renewsAt)) {
-				throw new Error(`subscription config ${file}: account ${account} "renewsAt" must be a YYYY-MM-DD string`);
-			}
-			const ms = parseUtcDate(entry.renewsAt);
-			if (ms === undefined) {
-				throw new Error(
-					`subscription config ${file}: account ${account} "renewsAt" is not a valid date: ${entry.renewsAt}`,
-				);
-			}
-			renewsAtSeconds = ms / 1000;
+		// A malformed `org` (e.g. a number) must fail loudly, not silently coerce
+		// to the empty scope — an empty-scope entry would then answer for EVERY
+		// org of the account, defeating org scoping.
+		if (entry.org !== undefined && typeof entry.org !== "string") {
+			throw new Error(`subscription config ${file}: account ${account} "org" must be a string`);
 		}
 		const org = typeof entry.org === "string" ? entry.org.trim().toLowerCase() : "";
-		accounts.set(`${entry.provider}\x00${account}\x00${org}`, { plan: entry.plan, renewsAtSeconds });
+		accounts.set(`${entry.provider}\x00${account}\x00${org}`, parsePlanRenewal(entry, file, `account ${account}`));
+
+		// Additional org scopes for the same account id: keyed by org id, each
+		// with its own plan/renewal. A top-level `org` plus an `orgs` entry for
+		// the same canonical scope would collide, so reject the duplicate.
+		if (entry.orgs !== undefined) {
+			if (!isPlainObject(entry.orgs)) {
+				throw new Error(`subscription config ${file}: account ${account} "orgs" must be a JSON object`);
+			}
+			for (const [orgKey, orgEntry] of Object.entries(entry.orgs)) {
+				if (typeof orgEntry !== "object" || orgEntry === null || Array.isArray(orgEntry)) {
+					throw new Error(`subscription config ${file}: account ${account} org ${orgKey} must be an object`);
+				}
+				const orgScope = orgKey.trim().toLowerCase();
+				const key = `${entry.provider}\x00${account}\x00${orgScope}`;
+				if (accounts.has(key)) {
+					throw new Error(
+						`subscription config ${file}: account ${account} declares org scope "${orgScope}" more than once`,
+					);
+				}
+				accounts.set(
+					key,
+					parsePlanRenewal(
+						orgEntry as { plan?: unknown; renewsAt?: unknown },
+						file,
+						`account ${account} org ${orgKey}`,
+					),
+				);
+			}
+		}
 	}
 
 	// Per-plan table, keys are "<provider>:<plan>".

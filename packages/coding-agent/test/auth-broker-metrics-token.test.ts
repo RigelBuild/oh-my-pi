@@ -3,7 +3,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
-import { getAgentDir, getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	__resetDirsFromEnvForTests,
+	getActiveProfile,
+	getAgentDir,
+	getConfigRootDir,
+	removeWithRetries,
+	setAgentDir,
+} from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
 
@@ -26,12 +34,15 @@ function silenceStdout(): () => string {
 // (0600, no trailing newline).
 describe("auth-broker token --metrics (scrape-scoped mint)", () => {
 	let agentDir = "";
-	// Snapshot the real resolver/env state before any override so teardown can
-	// restore it. `setAgentDir` mutates the shared dirs resolver AND
-	// `PI_CODING_AGENT_DIR`; restoring only `OMP_AGENT_DIR` would leave later
-	// full-suite tests resolving config paths through this deleted temp dir.
+	// Snapshot the full resolver-driving env before any override so teardown can
+	// restore it. `setAgentDir` mutates the shared dirs resolver AND deletes
+	// `OMP_PROFILE`/`PI_PROFILE` while forcing `PI_CODING_AGENT_DIR`; restoring
+	// only an agent path would strand a later full-suite test that ran under an
+	// active profile on the default profile. Save every var `setAgentDir` touches
+	// and rebuild resolver state from the restored env with the reset helper.
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+	const originalOmpProfile = process.env.OMP_PROFILE;
+	const originalPiProfile = process.env.PI_PROFILE;
 	const bearerPath = (): string => path.join(getConfigRootDir(), "auth-broker.token");
 	const metricsPath = (): string => path.join(getConfigRootDir(), "auth-broker-metrics.token");
 
@@ -42,13 +53,12 @@ describe("auth-broker token --metrics (scrape-scoped mint)", () => {
 
 	afterEach(async () => {
 		process.stdout.write = ORIGINAL_STDOUT_WRITE;
-		// Restore the shared resolver + PI_CODING_AGENT_DIR to the pre-test state.
-		if (originalAgentDir) {
-			setAgentDir(originalAgentDir);
-		} else {
-			setAgentDir(fallbackAgentDir);
-			delete process.env.PI_CODING_AGENT_DIR;
-		}
+		// Restore every var `setAgentDir` mutated, then rebuild the shared resolver
+		// from that env so a profile active before this suite survives.
+		restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDir);
+		restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+		restoreEnvValue("PI_PROFILE", originalPiProfile);
+		__resetDirsFromEnvForTests();
 		await removeWithRetries(agentDir);
 	});
 
@@ -135,5 +145,43 @@ describe("auth-broker token --metrics (scrape-scoped mint)", () => {
 describe("agent-dir resolver is restored after the mint suite", () => {
 	test("getAgentDir returns the pristine dir, not a torn-down temp dir", () => {
 		expect(getAgentDir()).toBe(PRISTINE_AGENT_DIR);
+	});
+});
+
+// F3 regression: the mint suite's teardown must restore a profile that was
+// active before it ran, not just an agent path. This exercises the exact
+// save + restore + resolver-rebuild sequence the suite's afterEach uses. A
+// teardown that called only `setAgentDir` (which deletes OMP_PROFILE/PI_PROFILE)
+// would strand a later full-suite test on the default profile.
+describe("mint-suite teardown restores an active profile", () => {
+	test("OMP_PROFILE active before the override is restored after teardown", async () => {
+		const ambientOmp = process.env.OMP_PROFILE;
+		const ambientPi = process.env.PI_PROFILE;
+		const ambientAgent = process.env.PI_CODING_AGENT_DIR;
+		try {
+			process.env.OMP_PROFILE = "auth-broker-metrics-token-profile";
+			delete process.env.PI_PROFILE;
+			// Suite-body snapshot (what the mint suite captures before any override).
+			const savedOmp = process.env.OMP_PROFILE;
+			const savedPi = process.env.PI_PROFILE;
+			const savedAgent = process.env.PI_CODING_AGENT_DIR;
+			// beforeEach override.
+			const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-metrics-token-f3-"));
+			setAgentDir(tmp);
+			expect(process.env.OMP_PROFILE).toBeUndefined();
+			// afterEach restore (the fixed sequence).
+			restoreEnvValue("PI_CODING_AGENT_DIR", savedAgent);
+			restoreEnvValue("OMP_PROFILE", savedOmp);
+			restoreEnvValue("PI_PROFILE", savedPi);
+			__resetDirsFromEnvForTests();
+			await removeWithRetries(tmp);
+			expect(process.env.OMP_PROFILE).toBe("auth-broker-metrics-token-profile");
+			expect(getActiveProfile()).toBe("auth-broker-metrics-token-profile");
+		} finally {
+			restoreEnvValue("OMP_PROFILE", ambientOmp);
+			restoreEnvValue("PI_PROFILE", ambientPi);
+			restoreEnvValue("PI_CODING_AGENT_DIR", ambientAgent);
+			__resetDirsFromEnvForTests();
+		}
 	});
 });
