@@ -35,6 +35,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { RefreshScope } from "../extensibility/reload";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { MCPManager } from "../mcp/manager";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -168,6 +169,13 @@ export interface AgentSessionConfig {
 	skillWarnings?: SkillWarning[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
 	skillsReloadable?: boolean;
+	/**
+	 * Caller-supplied rule policy (SDK `rules` array; `--no-rules` passes `[]`).
+	 * Present, an in-session `refresh` re-buckets these rules rather than
+	 * re-scanning disk, so it cannot re-enable ambient rules the session
+	 * excluded. Absent (`undefined`), a refresh re-discovers rules from disk.
+	 */
+	rules?: readonly Rule[];
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
@@ -322,6 +330,13 @@ export interface AgentSessionConfig {
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * The MCP manager this session was constructed with (owned or an inherited
+	 * parent's). An in-session `refresh` reconnects THIS instance rather than the
+	 * process-global `MCPManager.instance()`, which — with multiple top-level
+	 * SDK/ACP sessions — may point at a different session's manager.
+	 */
+	mcpManager?: MCPManager;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 }

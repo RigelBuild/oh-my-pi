@@ -61,7 +61,7 @@ import {
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
 import { getLatestCompactionEntry } from "./session-context";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, SETTINGS_TRACKING_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -1503,13 +1503,7 @@ export class TurnRecovery {
 	/** Live session role for chain lookup, provided its assignment still matches the active model. */
 	#liveRetryRoleHint(currentModel: Model | null | undefined): string | undefined {
 		const role = this.#host.sessionManager?.getLastModelChangeRole?.();
-		if (
-			!role ||
-			role === EPHEMERAL_MODEL_CHANGE_ROLE ||
-			role === SETTINGS_TRACKING_MODEL_CHANGE_ROLE ||
-			!currentModel
-		)
-			return undefined;
+		if (!role || role === EPHEMERAL_MODEL_CHANGE_ROLE || !currentModel) return undefined;
 		const configured = this.#host.settings.getModelRole(role);
 		if (!configured) return undefined;
 		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);

@@ -11,12 +11,7 @@ import {
 	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
 } from "./messages";
-import {
-	type CompactionEntry,
-	EPHEMERAL_MODEL_CHANGE_ROLE,
-	SETTINGS_TRACKING_MODEL_CHANGE_ROLE,
-	type SessionEntry,
-} from "./session-entries";
+import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
 // ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
@@ -96,8 +91,7 @@ export function getRestorableSessionModels(
 	if (
 		!lastModelChangeRole ||
 		lastModelChangeRole === "default" ||
-		lastModelChangeRole === EPHEMERAL_MODEL_CHANGE_ROLE ||
-		lastModelChangeRole === SETTINGS_TRACKING_MODEL_CHANGE_ROLE
+		lastModelChangeRole === EPHEMERAL_MODEL_CHANGE_ROLE
 	) {
 		return defaultModel ? [defaultModel] : [];
 	}

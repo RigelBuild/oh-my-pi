@@ -2327,14 +2327,21 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param options.settingsTracking Marks a settings-tracking auto-swap (not a user pin), leaving `role` free for a real user role.
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(
+		model: string,
+		role?: string,
+		resolvedModelIsFallback = false,
+		options?: { settingsTracking?: boolean },
+	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
 			resolvedModelIsFallback,
+			...(options?.settingsTracking ? { settingsTracking: true } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;

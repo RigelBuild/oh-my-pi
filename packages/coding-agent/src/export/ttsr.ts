@@ -70,7 +70,7 @@ const DEFAULT_SCOPE: TtsrScope = {
 };
 
 export class TtsrManager {
-	readonly #settings: Required<TtsrSettings>;
+	#settings: Required<TtsrSettings>;
 	readonly #rules = new Map<string, TtsrEntry>();
 	readonly #injectionRecords = new Map<string, InjectionRecord>();
 	readonly #buffers = new Map<string, string>();
@@ -82,6 +82,19 @@ export class TtsrManager {
 
 	constructor(settings?: TtsrSettings) {
 		this.#settings = { ...DEFAULT_SETTINGS, ...settings };
+	}
+
+	/**
+	 * Apply reloaded runtime settings (`ttsr.enabled`/`contextMode`/`interruptMode`/
+	 * `repeatMode`/`repeatGap`, plus `builtinRules`/`disabledRules` gating) to the
+	 * live manager on an in-session refresh, WITHOUT tearing it down: registered
+	 * rules, injection records, buffers, and the message counter are preserved, so
+	 * an already-injected rule stays injected and repeat gaps keep counting. Only
+	 * the settings snapshot the runtime reads (`getSettings`, `#canTrigger`,
+	 * enablement gates) is replaced.
+	 */
+	reconfigure(settings: Partial<TtsrSettings>): void {
+		this.#settings = { ...this.#settings, ...settings };
 	}
 
 	/** Check if a rule can be triggered based on repeat settings. */

@@ -48,7 +48,10 @@ interface Harness {
 	dispose: () => Promise<void>;
 }
 
-async function makeHarness(overrides: Record<string, unknown> = {}): Promise<Harness> {
+async function makeHarness(
+	overrides: Record<string, unknown> = {},
+	sdkOverrides: Record<string, unknown> = {},
+): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-roster-");
 	const cwd = tempDir.path();
 	// A repo root so project-scoped RULES.md discovery walks up and stops here.
@@ -77,6 +80,7 @@ async function makeHarness(overrides: Record<string, unknown> = {}): Promise<Har
 		enableMCP: false,
 		enableLsp: false,
 		skipPythonPreflight: true,
+		...sdkOverrides,
 	});
 
 	return {
@@ -166,6 +170,70 @@ describe("AgentSession refresh: roster reaches the prompt", () => {
 			// Pre-fix (roster scanned with the construction-time skills snapshot
 			// and before settings.reload()), the skill stayed loaded.
 			expect(h.session.skills.map(s => s.name)).not.toContain(skillName);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("keeps a --no-skills roster disabled across refresh (no ambient re-enable)", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const skillName = `refresh-skill-${marker}`;
+		// SDK `skills: []` (the --no-skills path) marks the roster non-reloadable.
+		const h = await makeHarness({}, { skills: [] });
+		try {
+			// A project skill lands on disk that discovery WOULD pick up.
+			await fs.mkdir(path.join(h.cwd, ".omp", "skills", skillName), { recursive: true });
+			await fs.writeFile(
+				path.join(h.cwd, ".omp", "skills", skillName, "SKILL.md"),
+				`---\nname: ${skillName}\ndescription: ${skillName} fixture\n---\nbody\n`,
+			);
+			expect(h.session.skills.map(s => s.name)).not.toContain(skillName);
+
+			await h.session.refresh("all");
+
+			// Pre-fix (refresh scanned disk unconditionally), the ambient skill was
+			// re-discovered and enabled even though the session opted out.
+			expect(h.session.skills.map(s => s.name)).not.toContain(skillName);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("keeps a --no-rules policy across refresh (no ambient rule re-enable)", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const ruleText = `AMBIENT_RULE_${marker}`;
+		// SDK `rules: []` (the --no-rules path) supplies an explicit empty policy.
+		const h = await makeHarness({}, { rules: [] });
+		try {
+			await fs.mkdir(path.join(h.cwd, ".omp"), { recursive: true });
+			await fs.writeFile(path.join(h.cwd, ".omp", "RULES.md"), `${ruleText}\n`);
+
+			const result = await h.session.refresh("rules");
+
+			// Pre-fix (refresh scanned the rules capability unconditionally), the
+			// ambient RULES.md was re-discovered and rendered despite --no-rules.
+			expect(result.rules).toBe(0);
+			expect(h.session.systemPrompt.join("\n")).not.toContain(ruleText);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("refreshes the skill-settings snapshot so enableSkillCommands takes effect", async () => {
+		const h = await makeHarness();
+		try {
+			// Seed the initial value on disk (not a runtime override, which would
+			// outrank the reload), then flip it and refresh.
+			await fs.writeFile(h.settingsPath, "skills:\n  enableSkillCommands: false\n");
+			await h.session.refresh("all");
+			expect(h.session.skillsSettings?.enableSkillCommands).toBe(false);
+
+			await fs.writeFile(h.settingsPath, "skills:\n  enableSkillCommands: true\n");
+			await h.session.refresh("all");
+
+			// Pre-fix (refresh left #skillsSettings at the construction snapshot),
+			// the session kept reporting the stale enableSkillCommands value.
+			expect(h.session.skillsSettings?.enableSkillCommands).toBe(true);
 		} finally {
 			await h.dispose();
 		}

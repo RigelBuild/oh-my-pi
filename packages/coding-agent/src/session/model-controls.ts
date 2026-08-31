@@ -219,6 +219,13 @@ export class ModelControls {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/**
+			 * Records this transition as a settings-tracking auto-swap (not a user
+			 * pin): the `model_change` carries the `settingsTracking` flag and no
+			 * role, so a later `/refresh settings` may swap it again and a user's
+			 * real role named "default"/"settings" is never mistaken for it.
+			 */
+			settingsTracking?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
@@ -231,7 +238,12 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+		this.#host.sessionManager.appendModelChange(
+			`${targetModel.provider}/${targetModel.id}`,
+			options?.settingsTracking ? undefined : role,
+			false,
+			options?.settingsTracking ? { settingsTracking: true } : undefined,
+		);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,

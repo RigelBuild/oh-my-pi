@@ -389,7 +389,7 @@ export class SessionTools {
 	 * advertised roster. An unchanged set returns `false` so the prompt rebuild
 	 * is skipped and Anthropic prompt caching keeps hitting.
 	 */
-	applyReloadedSkills(skills: readonly Skill[]): boolean {
+	applyReloadedSkills(skills: readonly Skill[], skillsSettings?: SkillsSettings): boolean {
 		let changed = this.#skills.length !== skills.length;
 		if (!changed) {
 			for (let i = 0; i < skills.length; i++) {
@@ -400,6 +400,11 @@ export class SessionTools {
 			}
 		}
 		this.#skills = [...skills];
+		// Refresh the settings snapshot too: `skills.enableSkillCommands` gates
+		// skill slash-command availability (available-commands.ts), so a stale
+		// construction-time snapshot would keep the old command surface after a
+		// config change. Only overwrite when the caller supplies a fresh group.
+		if (skillsSettings !== undefined) this.#skillsSettings = skillsSettings;
 		return changed;
 	}
 
@@ -411,6 +416,11 @@ export class SessionTools {
 	/** Settings snapshot used for the current skill discovery. */
 	get skillsSettings(): SkillsSettings | undefined {
 		return this.#skillsSettings;
+	}
+
+	/** Whether runtime reloads may rediscover disk-backed skills (false under `--no-skills`/SDK `skills: []`). */
+	get skillsReloadable(): boolean {
+		return this.#skillsReloadable;
 	}
 
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */

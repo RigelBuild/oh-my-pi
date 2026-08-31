@@ -151,4 +151,47 @@ describe("AgentSession refresh('settings'): model-swap precedence", () => {
 			await h.dispose();
 		}
 	});
+
+	it("treats a user role literally named 'settings' as a PINNED explicit pick", async () => {
+		const h = await makeHarness();
+		const modelC = bundledAnthropic("claude-haiku-4-5");
+		try {
+			// The user configures a CUSTOM model role NAMED "settings" and picks it.
+			// This must read as an explicit pin, never as the internal auto-swap
+			// marker (which is now a dedicated entry flag, not the role string).
+			await h.session.setModel(h.modelB, "settings");
+			expect(h.session.model?.id).toBe(h.modelB.id);
+
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${modelC.provider}/${modelC.id}\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Pre-fix (role string "settings" overloaded as the marker), the swap
+			// predicate read this as still-tracking and clobbered the pick.
+			expect(result.modelSwapped).toBe(false);
+			expect(h.session.model?.id).toBe(h.modelB.id);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("still swaps a flag-marked settings-tracking entry (auto-swap stays swappable)", async () => {
+		const h = await makeHarness();
+		const modelC = bundledAnthropic("claude-haiku-4-5");
+		try {
+			// First refresh auto-swaps: the model_change is marked with the
+			// settingsTracking flag (role "default"), not a role sentinel.
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${h.modelB.provider}/${h.modelB.id}\n`);
+			expect((await h.session.refresh("settings")).modelSwapped).toBe(true);
+			expect(h.session.model?.id).toBe(h.modelB.id);
+			// The flag left the session swappable, so a later change swaps again —
+			// even though the marker entry carries role "default".
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${modelC.provider}/${modelC.id}\n`);
+			const second = await h.session.refresh("settings");
+			expect(second.modelSwapped).toBe(true);
+			expect(h.session.model?.id).toBe(modelC.id);
+		} finally {
+			await h.dispose();
+		}
+	});
 });

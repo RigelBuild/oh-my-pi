@@ -3663,6 +3663,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: settings.getGroup("skills"),
+			// Only the caller-supplied rule policy (SDK `rules` / `--no-rules`), not
+			// the disk-discovered set: present, an in-session refresh re-buckets it
+			// instead of re-scanning disk, so it cannot re-enable ambient rules the
+			// session excluded. `undefined` keeps the roster-editing disk re-scan.
+			rules: options.rules,
 			modelRegistry,
 			toolRegistry,
 			memoryAgentDir: agentDir,
@@ -3735,6 +3740,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				: undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
+			// The manager THIS session was built with (owned or the parent's), so an
+			// in-session refresh reconnects it rather than the process-global
+			// `MCPManager.instance()` — which, with multiple top-level sessions, may
+			// be a different session's manager.
+			mcpManager,
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,

@@ -11,6 +11,7 @@
  *     complete and reconnect.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fsp from "node:fs/promises";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
@@ -21,6 +22,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const roots: EffectiveExtensionRoots = {
 	explicit: ["/ext/pkg"],
@@ -39,6 +41,7 @@ function fakeManager() {
 			exaApiKeys: [],
 		})),
 		getTools: vi.fn(() => []),
+		setNotificationsEnabled: vi.fn((_enabled: boolean) => {}),
 	};
 }
 
@@ -55,7 +58,7 @@ describe("AgentSession.refresh('mcp')", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function makeSession(): Promise<AgentSession> {
+	async function makeSession(mcpManager?: MCPManager): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -71,6 +74,7 @@ describe("AgentSession.refresh('mcp')", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 			toolRegistry: new Map<string, AgentTool>(),
 			extensionRoots: () => roots,
+			mcpManager,
 		});
 		sessions.push(session);
 		return session;
@@ -78,8 +82,7 @@ describe("AgentSession.refresh('mcp')", () => {
 
 	it("threads the session's extension roots into MCP rediscovery", async () => {
 		const manager = fakeManager();
-		MCPManager.setInstance(manager as unknown as MCPManager);
-		const session = await makeSession();
+		const session = await makeSession(manager as unknown as MCPManager);
 
 		const result = await session.refresh("mcp");
 
@@ -91,6 +94,59 @@ describe("AgentSession.refresh('mcp')", () => {
 		expect(manager.discoverAndConnect.mock.calls[0]?.[0]).toMatchObject({ extensionRoots: roots });
 	});
 
+	it("refreshes THIS session's own manager, not the process-global instance()", async () => {
+		// Two top-level sessions with distinct managers. The process-global
+		// instance() points at session B's manager (the last setInstance wins),
+		// but refreshing session A must reconnect A's own manager.
+		const managerA = fakeManager();
+		const managerB = fakeManager();
+		const sessionA = await makeSession(managerA as unknown as MCPManager);
+		MCPManager.setInstance(managerB as unknown as MCPManager);
+
+		await sessionA.refresh("mcp");
+
+		// Pre-fix (refresh read MCPManager.instance()), session B's manager was
+		// reconnected — disconnecting B's servers — and A's was untouched.
+		expect(managerA.discoverAndConnect).toHaveBeenCalledTimes(1);
+		expect(managerB.discoverAndConnect).not.toHaveBeenCalled();
+		expect(managerB.disconnectAll).not.toHaveBeenCalled();
+	});
+
+	it("syncs mcp.notifications onto this session's manager on a settings refresh", async () => {
+		const tempDir = TempDir.createSync("@pi-refresh-mcp-notif-");
+		const settingsPath = `${tempDir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  notifications: false\n");
+		const settings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir: tempDir.path() });
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const manager = fakeManager();
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager as unknown as MCPManager,
+		});
+		sessions.push(session);
+
+		// Flip notifications false->true on disk, then refresh settings.
+		await fsp.writeFile(settingsPath, "mcp:\n  notifications: true\n");
+		await session.refresh("settings");
+
+		// Pre-fix: reloading Settings never called setNotificationsEnabled, so
+		// the manager kept its stale flag and servers stayed unsubscribed.
+		expect(manager.setNotificationsEnabled).toHaveBeenCalledWith(true);
+		await tempDir.remove();
+	});
+
 	it("surfaces per-server reconnect errors instead of reporting unconditional success", async () => {
 		const manager = fakeManager();
 		manager.discoverAndConnect = vi.fn(async (_options?: unknown) => ({
@@ -99,8 +155,7 @@ describe("AgentSession.refresh('mcp')", () => {
 			connectedServers: [],
 			exaApiKeys: [],
 		}));
-		MCPManager.setInstance(manager as unknown as MCPManager);
-		const session = await makeSession();
+		const session = await makeSession(manager as unknown as MCPManager);
 
 		const result = await session.refresh("mcp");
 
@@ -113,8 +168,7 @@ describe("AgentSession.refresh('mcp')", () => {
 
 	it("leaves mcpErrors unset when every server reconnects", async () => {
 		const manager = fakeManager();
-		MCPManager.setInstance(manager as unknown as MCPManager);
-		const session = await makeSession();
+		const session = await makeSession(manager as unknown as MCPManager);
 
 		const result = await session.refresh("mcp");
 
@@ -124,8 +178,7 @@ describe("AgentSession.refresh('mcp')", () => {
 
 	it("runs sequential and overlapping refreshes to completion (no dead restart latch)", async () => {
 		const manager = fakeManager();
-		MCPManager.setInstance(manager as unknown as MCPManager);
-		const session = await makeSession();
+		const session = await makeSession(manager as unknown as MCPManager);
 
 		// Sequential.
 		expect((await session.refresh("mcp")).mcp).toBe(true);

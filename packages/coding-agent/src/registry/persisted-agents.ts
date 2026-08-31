@@ -5,7 +5,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, SETTINGS_TRACKING_MODEL_CHANGE_ROLE } from "../session/session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
@@ -150,7 +150,10 @@ async function readPersistedAgentHistory(
 ): Promise<AgentHistorySummary> {
 	const parents = new Map<string, string | undefined>();
 	const assistantById = new Map<string, AssistantMetrics>();
-	const modelChangeById = new Map<string, { model: string; role?: string; resolvedModelIsFallback: boolean }>();
+	const modelChangeById = new Map<
+		string,
+		{ model: string; role?: string; settingsTracking?: boolean; resolvedModelIsFallback: boolean }
+	>();
 	let leafId: string | undefined;
 	let leafTimestamp: number | undefined;
 	try {
@@ -170,6 +173,7 @@ async function readPersistedAgentHistory(
 					modelChangeById.set(id, {
 						model: record.model,
 						role: typeof record.role === "string" ? record.role : undefined,
+						settingsTracking: record.settingsTracking === true,
 						resolvedModelIsFallback: record.resolvedModelIsFallback === true,
 					});
 					return;
@@ -227,11 +231,7 @@ async function readPersistedAgentHistory(
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
-			if (
-				modelChange.role &&
-				modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
-				modelChange.role !== SETTINGS_TRACKING_MODEL_CHANGE_ROLE
-			) {
+			if (modelChange.role && modelChange.role !== EPHEMERAL_MODEL_CHANGE_ROLE && !modelChange.settingsTracking) {
 				modelRole ??= modelChange.role;
 			}
 			// The transition that installed the serving model: it carries the
@@ -315,7 +315,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 					if (
 						typeof record.role === "string" &&
 						record.role !== EPHEMERAL_MODEL_CHANGE_ROLE &&
-						record.role !== SETTINGS_TRACKING_MODEL_CHANGE_ROLE
+						record.settingsTracking !== true
 					) {
 						history.modelRole = record.role;
 					}

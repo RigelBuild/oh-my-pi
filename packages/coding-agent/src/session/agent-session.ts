@@ -160,7 +160,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
-import { MCPManager } from "../mcp/manager";
+import type { MCPManager } from "../mcp/manager";
 import { reloadMcpServers } from "../mcp/reload";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
@@ -345,12 +345,7 @@ import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import {
-	type BranchSummaryEntry,
-	EPHEMERAL_MODEL_CHANGE_ROLE,
-	type NewSessionOptions,
-	SETTINGS_TRACKING_MODEL_CHANGE_ROLE,
-} from "./session-entries";
+import { type BranchSummaryEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -747,6 +742,22 @@ export class AgentSession {
 	 * already current, and the first `refresh` aligns the snapshot to disk.
 	 */
 	#rosterRules: readonly Rule[] = [];
+	/**
+	 * Caller-supplied rule policy (SDK `rules`/`--no-rules`). When set, an
+	 * in-session `refresh` re-buckets these rules instead of scanning disk, so it
+	 * cannot re-enable ambient rules the session excluded. `undefined` means a
+	 * refresh re-discovers rules from disk (the default, roster-editing behavior).
+	 */
+	readonly #rulesPolicy: readonly Rule[] | undefined;
+	/**
+	 * The MCP manager this session was constructed with (owned or an inherited
+	 * parent's). An in-session `refresh('mcp'|'all')` reconnects THIS instance,
+	 * not the process-global `MCPManager.instance()` — with multiple top-level
+	 * SDK/ACP sessions, `setInstance` is called per session, so `instance()` may
+	 * be a different session's manager, and refreshing session A would disconnect
+	 * session B's servers. `undefined` when the session has no MCP manager.
+	 */
+	readonly #mcpManager: MCPManager | undefined;
 	/**
 	 * In-session refresh serialization. The tail chains overlapping `refresh()`
 	 * callers so they run strictly one-at-a-time; it is deliberately
@@ -1452,6 +1463,8 @@ export class AgentSession {
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#applyReloadedRoster = config.applyReloadedRoster;
 		this.#onBeforeRefresh = config.onBeforeRefresh;
+		this.#rulesPolicy = config.rules;
+		this.#mcpManager = config.mcpManager;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
@@ -5084,18 +5097,41 @@ export class AgentSession {
 			const { changed } = await this.settings.reload();
 			result.settingsChanged = changed;
 			result.modelSwapped = changed ? await this.#applyReloadedModel() : false;
+			// Apply reloaded TTSR runtime settings (enabled/contextMode/interruptMode/
+			// repeatMode/repeatGap, plus builtinRules/disabledRules) to the reused
+			// manager, preserving injection/trigger state. The roster re-bucket below
+			// only forwards the gating flags; without this the interrupt/context/repeat
+			// runtime behavior would stay frozen at construction until restart. Runs
+			// on a `settings`-only refresh too, which never enters the roster block.
+			if (changed) this.ttsrManager?.reconfigure(this.settings.getGroup("ttsr"));
+			// Sync the MCP notifications flag from the reloaded settings onto THIS
+			// session's manager. Runs on a `settings`-only refresh too (which never
+			// enters the MCP reconnect block): reloading `Settings` alone never calls
+			// `setNotificationsEnabled`, so a `mcp.notifications` false->true flip
+			// would otherwise leave already-connected servers unsubscribed — and even
+			// an `all` reconnect would re-connect them with the stale flag still off.
+			// `setNotificationsEnabled` self-guards on no-change and subscribes the
+			// live connections directly; the `all` reconnect below then re-subscribes
+			// the freshly reconnected servers under the now-current flag.
+			if (changed) this.#mcpManager?.setNotificationsEnabled(this.settings.get("mcp.notifications") ?? false);
 		}
 
 		if (doRoster) {
 			const ttsrManager = this.ttsrManager;
 			if (ttsrManager) {
 				const ttsrSettings = this.settings.getGroup("ttsr");
+				// Fresh skills-settings snapshot from the LIVE settings instance
+				// (reloaded above for an `all` refresh). Threaded into the reload AND
+				// back into the per-session snapshot so `skills.enableSkillCommands`
+				// changes reach the reload discovery and the command surface alike.
+				const freshSkillsSettings = this.settings.getGroup("skills");
+				const prevEnableSkillCommands = this.#tools.skillsSettings?.enableSkillCommands;
 				const reloaded = await reloadSkillsAndRules({
 					cwd: this.sessionManager.getCwd(),
 					// Derive from the LIVE settings instance (reloaded above for an
 					// `all` refresh), not the frozen construction snapshot, so an
 					// edited `skills.*` config takes effect.
-					skillsSettings: this.settings.getGroup("skills"),
+					skillsSettings: freshSkillsSettings,
 					disabledExtensions: this.settings.get("disabledExtensions") ?? undefined,
 					// Same live roots the MCP reconnect threads: a session with
 					// explicit/session-local roots or discovery disabled must reload
@@ -5106,8 +5142,25 @@ export class AgentSession {
 						builtinRules: ttsrSettings.builtinRules,
 						disabledRules: ttsrSettings.disabledRules,
 					},
+					// A non-reloadable roster (--no-skills / SDK `skills: []`) marks the
+					// session's skills frozen; `refreshSkills()` honors that. Feed the
+					// current snapshot back in so the reload keeps it (skipping the disk
+					// re-scan) instead of re-discovering ambient skills and enabling them.
+					skills: this.#tools.skillsReloadable ? undefined : this.skills,
+					// A caller-supplied rule policy (SDK `rules` / `--no-rules`) is
+					// re-bucketed as-is; the reload re-scans disk only when it is absent,
+					// so a refresh cannot re-enable ambient rules the session excluded.
+					rules: this.#rulesPolicy,
 				});
-				const skillsChanged = this.applyReloadedSkills(reloaded.activeSkills);
+				const skillsChanged = this.applyReloadedSkills(reloaded.activeSkills, freshSkillsSettings);
+				// A change to `skills.enableSkillCommands` flips skill slash-command
+				// availability (available-commands.ts reads the snapshot just updated),
+				// so refresh the command metadata — mirroring `refreshSkills()`, which
+				// always fires it. Skill-set changes rebuild the prompt below; the
+				// command surface has its own notification.
+				if (this.#tools.skillsSettings?.enableSkillCommands !== prevEnableSkillCommands) {
+					this.#notifyCommandMetadataChanged();
+				}
 				// A rules-only change (edited rulebook / new always-apply rule with
 				// no skill change) must also rebuild the advertised prompt. Compare
 				// the rendered roster buckets — now reload-stable (bucketRules no
@@ -5129,7 +5182,12 @@ export class AgentSession {
 		}
 
 		if (doMcp) {
-			const mcpManager = MCPManager.instance();
+			// Refresh THIS session's own manager, not the process-global
+			// `MCPManager.instance()`: with multiple top-level SDK/ACP sessions,
+			// `createAgentSessionScoped` calls `setInstance` per session, so
+			// `instance()` may be a different session's manager — refreshing session
+			// A would disconnect session B's servers.
+			const mcpManager = this.#mcpManager;
 			if (mcpManager) {
 				// Reuse the shared reconnect-and-rebind sequence the /mcp reload and
 				// /reload-plugins surfaces use, so this path cannot drift from them.
@@ -5177,8 +5235,8 @@ export class AgentSession {
 	 * handle on those live child sessions. Returns whether the top-level skill
 	 * set actually changed (drives the prompt rebuild).
 	 */
-	applyReloadedSkills(skills: readonly Skill[]): boolean {
-		const changed = this.#tools.applyReloadedSkills(skills);
+	applyReloadedSkills(skills: readonly Skill[], skillsSettings?: SkillsSettings): boolean {
+		const changed = this.#tools.applyReloadedSkills(skills, skillsSettings);
 		// Fan out to running subagents. Every alive AgentSession (this one plus
 		// each sub) reads its own frozen snapshot, so update them all. `list()`
 		// returns every registered session including advisors; advisors never
@@ -5208,7 +5266,7 @@ export class AgentSession {
 		const current = this.model;
 		if (current && current.provider === resolved.provider && current.id === resolved.id) return false;
 		if (!this.#modelRegistry.hasConfiguredAuth(resolved)) return false;
-		await this.setModel(resolved, SETTINGS_TRACKING_MODEL_CHANGE_ROLE);
+		await this.setModel(resolved, "default", { settingsTracking: true });
 		return true;
 	}
 
@@ -5216,21 +5274,20 @@ export class AgentSession {
 	 * Whether the user pinned a session-only model this session (an explicit
 	 * `/model` pick, which writes role `default`, or `temporary`, or a non-default
 	 * role). A `model_change` whose role is absent, the ephemeral fallback role,
-	 * or the settings-tracking role still tracks the settings default and is safe
+	 * or the settings-tracking flag still tracks the settings default and is safe
 	 * to swap; anything else — including an explicit `default` selection — is a
-	 * user pin a settings reload must not clobber.
+	 * user pin a settings reload must not clobber. The tracking marker is a
+	 * dedicated `settingsTracking` flag, not a role sentinel, so a user role
+	 * literally named "settings" reads as a real pin.
 	 */
 	#hasSessionModelOverride(): boolean {
 		const entries = this.sessionManager.getBranch();
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i];
 			if (entry.type !== "model_change") continue;
+			if (entry.settingsTracking === true) return false;
 			const role = entry.role;
-			return !(
-				role === undefined ||
-				role === EPHEMERAL_MODEL_CHANGE_ROLE ||
-				role === SETTINGS_TRACKING_MODEL_CHANGE_ROLE
-			);
+			return !(role === undefined || role === EPHEMERAL_MODEL_CHANGE_ROLE);
 		}
 		return false;
 	}
@@ -7699,6 +7756,7 @@ export class AgentSession {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			settingsTracking?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);

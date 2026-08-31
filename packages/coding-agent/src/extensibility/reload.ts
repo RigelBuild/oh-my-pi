@@ -80,6 +80,15 @@ export interface ReloadSkillsAndRulesOptions {
 	ttsrManager: TtsrManager;
 	/** TTSR gating from `settings.getGroup("ttsr")` — mirrors `bucketRules` at init. */
 	ttsrSettings?: { builtinRules?: boolean; disabledRules?: readonly string[] };
+	/**
+	 * Caller-supplied rule policy (SDK `rules` array / `--no-rules`, which passes
+	 * `rules: []`). When provided, these rules are re-bucketed instead of scanning
+	 * disk, so a refresh cannot re-discover and re-enable ambient rules the
+	 * session explicitly excluded — mirroring init (`sdk.ts`), which buckets
+	 * `options.rules` when set rather than reading the rules capability. Omitted
+	 * (`undefined`), the rules capability is re-scanned as before.
+	 */
+	rules?: readonly Rule[];
 	/** Fresh skills, if the caller already discovered them (skips re-scan). */
 	skills?: readonly Skill[];
 }
@@ -125,10 +134,15 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 		).skills;
 	setActiveSkills(skills);
 
-	// Rules: re-scan the rules capability and re-bucket through the LIVE ttsr
-	// manager (preserving injected state), exactly as `sdk.ts` does at init.
-	const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd, extensionRoots: options.extensionRoots });
-	const { rulebookRules, alwaysApplyRules, ttsrRuleNames } = bucketRules(rulesResult.items, options.ttsrManager, {
+	// Rules: re-bucket through the LIVE ttsr manager (preserving injected state),
+	// exactly as `sdk.ts` does at init. A caller-supplied rule policy (SDK `rules`
+	// / `--no-rules`) is re-bucketed as-is; only when it is absent do we re-scan
+	// the rules capability — otherwise a refresh would re-discover and re-enable
+	// ambient rules the session explicitly excluded.
+	const ruleItems =
+		options.rules ??
+		(await loadCapability<Rule>(ruleCapability.id, { cwd, extensionRoots: options.extensionRoots })).items;
+	const { rulebookRules, alwaysApplyRules, ttsrRuleNames } = bucketRules(ruleItems, options.ttsrManager, {
 		builtinRules: options.ttsrSettings?.builtinRules,
 		disabledRules: options.ttsrSettings?.disabledRules,
 	});

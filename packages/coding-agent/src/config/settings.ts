@@ -1340,21 +1340,33 @@ export class Settings {
 	}
 
 	async #loadReadOnly(): Promise<Settings> {
-		const [globalResult, projectResult] = await Promise.allSettled([
-			this.#loadExistingMainYaml(),
-			this.#loadProjectSettings(),
+		// Non-quarantining readers (`quarantineInvalid = false`), exactly as the
+		// hardened `#reloadPersistedLayers` uses: a pure re-read (startup read-only
+		// load AND the in-session `reload()`/`/refresh settings` path) must never
+		// MOVE a malformed config aside — the startup loaders acquire a write lock
+		// and rename invalid YAML to `.broken-*`, which would let a read reload
+		// relocate the user's file. Malformed files are preserved in place and
+		// surface as a thrown read error instead.
+		const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
+			this.#readExistingMainYaml(false),
+			this.#readProjectSettings(false),
+			this.#readConfigOverlays(false),
 		]);
 		if (globalResult.status === "rejected") throw globalResult.reason;
 		if (projectResult.status === "rejected") throw projectResult.reason;
-		// Replace the global layer even when the file is absent. If a global
-		// config.yml existed at start and was later deleted or renamed,
-		// `#loadExistingMainYaml` returns null; the layer must reset to empty
-		// rather than retain stale values. `#reloadPersistedLayers` already does
-		// this (`?? {}`); the `reload()` path must match.
-		this.#global = globalResult.value ?? {};
+		if (overlayResult.status === "rejected") throw overlayResult.reason;
 
-		this.#project = projectResult.value;
-		this.#configOverlay = await this.#loadConfigOverlays();
+		this.#configPath = globalResult.value.configPath;
+		// Replace the global layer even when the file is absent. If a global
+		// config.yml existed at start and was later deleted or renamed, the read
+		// returns null; the layer must reset to empty rather than retain stale
+		// values, matching `#reloadPersistedLayers` (`?? {}`).
+		this.#global = globalResult.value.settings ?? {};
+		this.#project = projectResult.value.settings;
+		this.#projectFileSettings = projectResult.value.fileSettings;
+		this.#projectShellPathSource = projectResult.value.shellPathSource;
+		this.#configOverlay = overlayResult.value.settings;
+		this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 		this.#rebuildMerged();
 		return this;
 	}
