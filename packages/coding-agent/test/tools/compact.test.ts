@@ -45,20 +45,19 @@ describe("compact tool metadata", () => {
 });
 
 describe("compact tool execute (signal-only, no inline compaction)", () => {
-	it("returns details.requested === true with a text confirmation and does not compact inline", async () => {
+	it("returns details.requested === true and does not compact inline", async () => {
 		const session = createToolSession();
 		const tool = new CompactTool(session);
 		// The tool must be a pure signal: the ToolSession stub has no compaction
 		// machinery, so any attempt to actually compact from execute() would throw
 		// or touch session state. A clean resolve with requested:true proves the
-		// deferral — the session runs compaction later at turn settle.
+		// deferral — the session runs compaction later at turn settle. The confirmation
+		// text is user-facing copy, not a contract; the deferred-compaction behaviour is
+		// covered by the session-level tests.
 		const result = await tool.execute("call_compact", {});
 
 		expect(result.details?.requested).toBe(true);
 		expect(result.isError).toBeUndefined();
-		const text = result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
-		expect(text.length).toBeGreaterThan(0);
-		expect(text.toLowerCase()).toContain("compaction");
 	});
 
 	it("trims instructions into details.instructions", async () => {

@@ -753,6 +753,14 @@ export class AgentSession {
 	#resetPromptMaintenanceState(): void {
 		this.#recovery.resetForNewPrompt();
 		this.#yieldTerminationPending = false;
+		// Consume any compact request left un-applied by the previous run. When
+		// `compact` succeeds but the following inference errors or is externally
+		// aborted, agent-core skips `onTurnEnd` (see agent-loop `emitTurnEnd`), so
+		// the settle that would have scheduled the compaction never runs and the
+		// marker survives. Clearing it here — alongside the sibling
+		// `#yieldTerminationPending` — before the next prompt begins guarantees a
+		// stale request cannot fire at the settle of a later, unrelated prompt.
+		this.#pendingCompactionRequest = undefined;
 	}
 
 	#acquirePowerAssertion(): void {
@@ -1331,13 +1339,28 @@ export class AgentSession {
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
-			// A `compact` tool call this turn requested context compaction. It runs
-			// only at the genuine settle (`willContinue === false`) — never between
-			// tool-loop turns. `compact()` aborts the active agent operation, and
-			// this hook is awaited from INSIDE that operation, so awaiting it here
-			// would deadlock (its `abort()` waits on `agent.waitForIdle()`, which
-			// only resolves once this hook returns and the loop reaches `finally`).
-			// Schedule it to run after the run has unwound instead.
+			// A `compact` tool call this turn requested context compaction. Record
+			// the request synchronously from THIS turn's own completed tool results:
+			// the awaited onTurnEnd hook is the correct synchronous source, and this
+			// runs at every turn boundary (mid-loop and settle) so a request made in
+			// an earlier tool-loop turn is still captured. Reading it from the
+			// fire-and-forget message_end path instead raced — `Agent.#emit` does not
+			// await listener promises, so a fast following response or terminal yield
+			// could reach this settle before the async marker existed, and the late
+			// marker then leaked into a later, unrelated turn. Scoped to the turn that
+			// called `compact` via the one-shot marker, mirroring `#pendingRewindReport`.
+			const compactResult = context?.toolResults.find(result => result.toolName === "compact" && !result.isError);
+			if (compactResult) {
+				const details = compactResult.details;
+				const instructions = details ? stringProperty(details, "instructions")?.trim() || undefined : undefined;
+				this.#pendingCompactionRequest = { instructions };
+			}
+			// Apply it only at the genuine settle (`willContinue === false`) — never
+			// between tool-loop turns. `compact()` aborts the active agent operation,
+			// and this hook is awaited from INSIDE that operation, so awaiting it here
+			// would deadlock (its `abort()` waits on `agent.waitForIdle()`, which only
+			// resolves once this hook returns and the loop reaches `finally`). Schedule
+			// it to run after the run has unwound instead.
 			if (context?.willContinue === false) {
 				this.#scheduleRequestedCompaction();
 			}
@@ -3008,16 +3031,6 @@ export class AgentSession {
 					if (report.length > 0) {
 						this.#pendingRewindReport = report;
 					}
-				}
-				if (toolName === "compact" && !isError) {
-					// Record the request from THIS turn's own tool result, exactly as
-					// the rewind branch above stores `#pendingRewindReport`. The
-					// onTurnEnd settle consumes and clears it, so detection is scoped
-					// to the turn that called `compact` — never a stale result left in
-					// the retained tail (a no-op leaves the result in place, and even a
-					// successful pass keeps it in the kept region).
-					const instructions = details ? stringProperty(details, "instructions")?.trim() || undefined : undefined;
-					this.#pendingCompactionRequest = { instructions };
 				}
 			}
 		}

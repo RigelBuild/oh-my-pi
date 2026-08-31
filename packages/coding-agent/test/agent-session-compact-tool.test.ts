@@ -28,6 +28,20 @@ const noopTool: AgentTool = {
 	},
 };
 
+// A terminal `yield` tool: its non-array `result` makes the tool result
+// terminal, so agent-core aborts the run with the graceful terminal-yield
+// reason and the settle `onTurnEnd` fires in the SAME turn that carried the
+// `compact` result — the ordering that raced the old async-set marker.
+const yieldTool: AgentTool = {
+	name: "yield",
+	label: "Yield",
+	description: "Finish the task.",
+	parameters: type({ result: type("unknown") }),
+	async execute() {
+		return { content: [{ type: "text" as const, text: "yielded" }] };
+	},
+};
+
 /** A stub compaction result so `session.compact` can be spied without a real LLM summary. */
 function fakeCompaction(): CompactionResult {
 	return { summary: "stub summary", firstKeptEntryId: "kept-1", tokensBefore: 0 };
@@ -93,7 +107,9 @@ async function createHarness(
 	// `details.requested`, which is exactly what the onTurnEnd wiring scans for.
 	// A top-level ToolSession stub is enough — the tool only reads taskDepth.
 	const compactTool = new CompactTool(topLevelToolSession());
-	const tools: AgentTool[] = includeCompactTool ? [noopTool, compactTool as AgentTool] : [noopTool];
+	const tools: AgentTool[] = includeCompactTool
+		? [noopTool, yieldTool, compactTool as AgentTool]
+		: [noopTool, yieldTool];
 
 	const agent = new Agent({
 		getApiKey: () => "test-key",
@@ -303,4 +319,73 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		// Still exactly one: the second settle found no request for ITS turn.
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 	});
+
+	it("captures the request from the turn even when compact and the terminal yield settle together (a)", async () => {
+		// A single turn carries the `compact` result AND a terminal `yield`, so the
+		// run aborts with the graceful terminal-yield reason and the settle
+		// `onTurnEnd` fires in the SAME turn that produced the compact result. The
+		// old wiring recorded the request from the fire-and-forget `message_end`
+		// listener, which `Agent.#emit` does not await — so the awaited settle could
+		// reach `#scheduleRequestedCompaction()` before that async listener set the
+		// marker, and the compaction was silently dropped (0 calls) while the late
+		// marker leaked into a later turn. Reading it synchronously from
+		// `context.toolResults` in `onTurnEnd` closes that window: the result is
+		// paired with the turn before the hook runs, so it is always visible here.
+		const { session } = await createHarness([
+			{
+				content: [
+					{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} },
+					{ type: "toolCall", id: "call_yield", name: "yield", arguments: { result: { data: { ok: true } } } },
+				],
+				stopReason: "toolUse",
+			},
+		]);
+
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue(fakeCompaction());
+
+		await session.prompt("compact and yield in one turn");
+		await session.waitForIdle();
+
+		// Exactly one: the settle read the compact result from its own turn's
+		// results, not from a marker a still-pending listener had yet to set.
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	}, 15_000);
+
+	it("does NOT fire a stale request on the next clean prompt when the compacting run errored before settle (b)", async () => {
+		// `compact` is requested and its result pairs with the turn, but the
+		// FOLLOWING inference errors — agent-core skips `onTurnEnd` on an errored
+		// turn (see agent-loop `emitTurnEnd`), so the settle that would have
+		// scheduled the compaction never runs and the request is left un-applied.
+		// A later, unrelated prompt must NOT inherit it. The per-run reset clears
+		// the pending request before the next prompt begins; without that clear the
+		// stale request fires at prompt 2's clean settle → 1 call.
+		const { session } = await createHarness([
+			// Prompt 1: request compaction, then the next inference errors out.
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ throw: "provider exploded after compact" },
+			// Prompt 2: a plain noop turn, then a clean text stop. No compact call.
+			{
+				content: [{ type: "toolCall", id: "call_noop", name: "noop", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["TWO"], stopReason: "stop" },
+		]);
+
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue(fakeCompaction());
+
+		// The errored inference makes prompt 1 settle without ever reaching the
+		// compaction schedule; the run resolves (the error is surfaced, not thrown).
+		await session.prompt("compact then the model errors");
+		await session.waitForIdle();
+
+		await session.prompt("now do unrelated clean work");
+		await session.waitForIdle();
+
+		// Never fired: prompt 1's errored settle skipped the schedule, and the
+		// per-run reset dropped the un-applied request before prompt 2's settle.
+		expect(compactSpy).not.toHaveBeenCalled();
+	}, 15_000);
 });
