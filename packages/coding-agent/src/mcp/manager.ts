@@ -1373,6 +1373,16 @@ export class MCPManager {
 			// Replace tools from this server
 			this.#replaceServerTools(name, customTools);
 			await this.#onToolsChanged?.(this.#tools);
+
+			// A refresh (notification- or user-driven) that lands mid-warmup — or
+			// while the server's upstream sessions restart — can list `[]` on a
+			// still-connected server, just like the initial connect and reconnect
+			// paths. Without re-arming the recovery loop here, a populated server
+			// that momentarily lists empty would stay toolless until the next
+			// notification or manual refresh. The scheduler dedups against a loop
+			// already running for this connection, so overlapping refreshes cannot
+			// stack loops.
+			if (serverTools.length === 0) this.#scheduleEmptyToolsetRetry(name);
 		};
 
 		const promise = doRefresh().finally(() => {

@@ -364,4 +364,67 @@ describe("MCP empty-toolset warmup recovery", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+
+	it("re-arms recovery when a refresh empties a populated server", async () => {
+		// A populated gateway can answer a notification- or user-driven refresh
+		// with `[]` while its upstream sessions restart. The refresh registers
+		// the empty set, but only connect and reconnect schedule the recovery
+		// loop — so pre-fix the server stays toolless until the next notification
+		// or manual refresh. The refresh path must re-arm the same loop, and it
+		// must fire exactly once (the scheduler dedups against a running loop).
+		//
+		// Scripted list counts model the outage: connect lists one tool, the
+		// refresh lists empty, the recovery re-list lists one tool again.
+		const manager = new MCPManager(workDir);
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [FIXTURE_PATH],
+			env: { OMP_TEST_TOOLS_PER_LIST: "1,0,1", OMP_TEST_LIST_LOG: listLog },
+		};
+
+		const emptied = Promise.withResolvers<void>();
+		const recovered = Promise.withResolvers<void>();
+		let sawEmpty = false;
+		manager.setOnToolsChanged(tools => {
+			const count = tools.filter(t => t.name.startsWith("mcp__warmup_")).length;
+			if (count === 0) {
+				sawEmpty = true;
+				emptied.resolve();
+			} else if (count === 1 && sawEmpty) {
+				// Only the post-empty repopulation is recovery; the populated
+				// initial connect also fires this callback with count 1.
+				recovered.resolve();
+			}
+		});
+
+		try {
+			// Connect lands populated — the server already advertises its tool.
+			await manager.connectServers({ warmup: config }, {});
+			expect(warmupTools(manager)).toHaveLength(1);
+
+			// A refresh lists empty and clears the registered tool. Pre-fix this
+			// is where recovery is lost: the empty set stands with no retry armed.
+			await manager.refreshServerTools("warmup");
+			await emptied.promise;
+			expect(warmupTools(manager)).toEqual([]);
+
+			// Re-armed recovery re-lists and repopulates the tool with no
+			// reconnect and no further user action.
+			await recovered.promise;
+			expect(warmupTools(manager)).toHaveLength(1);
+			expect(manager.getConnectionStatus("warmup")).toBe("connected");
+
+			// The recovery loop terminated after the first re-list that produced a
+			// tool: connect (1) + refresh-empty (1) + recovery re-list (1) = 3. A
+			// loop that stacked or never terminated would show more.
+			const lists = fs
+				.readFileSync(listLog, "utf8")
+				.split("\n")
+				.filter(line => line.trim().length > 0);
+			expect(lists).toHaveLength(3);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
 });
