@@ -448,7 +448,10 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		// An explicit cycle is a user pin, exactly like `setModel`: record the
+		// model_change with role "default" and no `settingsTracking` flag so a
+		// later `/refresh settings` does not treat it as a swappable auto-track.
+		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`, "default");
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
@@ -479,7 +482,10 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+		// An explicit cycle is a user pin, exactly like `setModel`: record the
+		// model_change with role "default" and no `settingsTracking` flag so a
+		// later `/refresh settings` does not treat it as a swappable auto-track.
+		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`, "default");
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();

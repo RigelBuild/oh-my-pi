@@ -194,4 +194,34 @@ describe("AgentSession refresh('settings'): model-swap precedence", () => {
 			await h.dispose();
 		}
 	});
+
+	it("preserves an explicitly cycled model across a settings refresh", async () => {
+		const h = await makeHarness();
+		const modelC = bundledAnthropic("claude-haiku-4-5");
+		try {
+			// The user cycles the active model (alt+m style). A cycle is an
+			// explicit user pick, exactly like `setModel`, so it must survive a
+			// later refresh that changed the configured default.
+			const cycled = await h.session.cycleModel();
+			if (!cycled) throw new Error("Expected cycleModel to switch models");
+			const cycledId = cycled.model.id;
+			expect(h.session.model?.id).toBe(cycledId);
+
+			// Change the on-disk default to a model that is NOT the cycled one (and
+			// differs from the current on-disk default modelA), so an unwanted
+			// auto-swap would visibly replace the cycled model.
+			const newDefault = [h.modelB, modelC].find(m => m.id !== cycledId);
+			if (!newDefault) throw new Error("Expected a distinct model for the new default");
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${newDefault.provider}/${newDefault.id}\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Pre-fix: the cycle recorded a role-less, non-tracking model_change,
+			// so the swap predicate read it as still-tracking and clobbered it.
+			expect(result.modelSwapped).toBe(false);
+			expect(h.session.model?.id).toBe(cycledId);
+		} finally {
+			await h.dispose();
+		}
+	});
 });
