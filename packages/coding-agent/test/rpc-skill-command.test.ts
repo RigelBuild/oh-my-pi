@@ -27,6 +27,7 @@ describe("tryRunRpcSkillCommand", () => {
 				async promptCustomMessage(nextMessage: typeof message, nextOptions?: typeof options) {
 					message = nextMessage;
 					options = nextOptions;
+					return true;
 				},
 			},
 			"/skill:reviewer focus on risks",
@@ -69,6 +70,7 @@ describe("tryRunRpcSkillCommand", () => {
 					async promptCustomMessage(nextMessage, nextOptions) {
 						expect(nextMessage.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
 						options = nextOptions;
+						return true;
 					},
 				},
 				"/skill:reviewer wait for the current turn",
@@ -121,6 +123,7 @@ describe("tryRunRpcSkillCommand", () => {
 					],
 					async promptCustomMessage() {
 						dispatched = true;
+						return true;
 					},
 				},
 				"/compact /skill:reviewer",

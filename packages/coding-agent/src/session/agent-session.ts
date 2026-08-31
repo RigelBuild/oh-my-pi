@@ -5856,10 +5856,16 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
-		// Cooperative restart latched: refuse to begin a new turn so nothing
-		// appends past the durability barrier before dispose. A no-op return, not
-		// a throw — the host driving restart is not an error.
-		if (this.#restarting) return false;
+		// Cooperative restart latched: the turn will never start, so a caller
+		// waiting on an `agent_end` must be told (return false), AND a user prompt
+		// must be handed back through the drop hook so the host can restore /
+		// resubmit it after the recycle instead of silently losing it. Synthetic /
+		// agent-initiated input is not replayed across a recycle, so only user
+		// prompts are surfaced. A no-op for the host driving restart, not an error.
+		if (this.#restarting) {
+			if (!options?.synthetic) this.#promptDropped?.({ text, images: options?.images });
+			return false;
+		}
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -6026,7 +6032,7 @@ export class AgentSession {
 			queueChipText?: string;
 			queueOnly?: boolean;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		const textContent =
 			typeof message.content === "string"
 				? message.content
@@ -6062,7 +6068,9 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
-			return;
+			// Queued behind the running turn — it will be delivered, so the caller
+			// still owes an `agent_end`. Mirrors prompt()'s streaming-queue `true`.
+			return true;
 		}
 		if (this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
@@ -6072,7 +6080,7 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
-			return;
+			return true;
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -6085,7 +6093,10 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 
-		await this.#promptWithMessage(customMessage, textContent, {
+		// A `false` here means the turn never started (restart latched, disposal,
+		// or a usage-preflight denial): propagate it so lifecycle-managing callers
+		// (ACP, skill runners) do not wait for an `agent_end` that never comes.
+		return await this.#promptWithMessage(customMessage, textContent, {
 			...options,
 			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
 		});
@@ -6798,16 +6809,18 @@ export class AgentSession {
 	async #promptAgentInitiatedMessage(
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
-	): Promise<void> {
+	): Promise<boolean> {
 		// Cooperative restart in progress (or session torn down): this raw-prompt
 		// path bypasses AgentSession.prompt's #restarting guard, so gate it here —
 		// a turn started after the latch would append past the durability barrier.
 		// The caller re-sends after a `busy` refusal; in-memory agent-initiated
-		// input is not replayed across the recycle.
-		if (this.#restarting || this.#isDisposed) return;
+		// input is not replayed across the recycle. Report `false` so callers that
+		// promised a turn (sendCustomMessage({ triggerTurn: true })) learn none
+		// started instead of waiting on an `agent_end` that never fires.
+		if (this.#restarting || this.#isDisposed) return false;
 		this.#beginInFlight();
 		try {
-			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return;
+			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
@@ -6815,6 +6828,7 @@ export class AgentSession {
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
 			await this.agent.prompt(message);
 			await this.#waitForPostPromptRecovery();
+			return true;
 		} finally {
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
@@ -6868,8 +6882,10 @@ export class AgentSession {
 	 * @returns true iff this call synchronously started a new turn (awaited
 	 * `agent.prompt`); false when the message was queued/appended without a turn
 	 * — including when `triggerTurn` is downgraded because the client defers
-	 * agent-initiated turns. Callers that must mirror the resulting `agent_end`
-	 * use this to avoid acting on a turn that never ran.
+	 * agent-initiated turns, or when a cooperative restart is latched / the
+	 * session is disposed so the requested turn cannot start. Callers that must
+	 * mirror the resulting `agent_end` use this to avoid acting on a turn that
+	 * never ran.
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
@@ -6922,10 +6938,13 @@ export class AgentSession {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 					return false;
 				}
-				await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
+				// Propagate whether a turn actually started: a restart-latched or
+				// disposed session refuses inside #promptAgentInitiatedMessage, and
+				// returning a false `true` would leave a protocol host awaiting an
+				// `agent_end` that never comes.
+				return await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 					acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
 				});
-				return true;
 			}
 			this.agent.appendMessage(normalizedAppMessage);
 			this.sessionManager.appendCustomMessageEntry(
@@ -6943,8 +6962,7 @@ export class AgentSession {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
-			await this.#promptAgentInitiatedMessage(normalizedAppMessage);
-			return true;
+			return await this.#promptAgentInitiatedMessage(normalizedAppMessage);
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);

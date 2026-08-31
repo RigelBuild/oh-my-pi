@@ -18,11 +18,14 @@
  * internal `waitForIdle()` supplies the "let this turn settle" wait.
  *
  * Result reporting splits on dispose ordering. Pre-dispose refusals
- * (`busy`/`unavailable`/`no-session-file`, all returned before teardown) are
- * surfaced to the still-open transcript so the model sees them. A post-dispose
- * host-callback throw has no awaiting caller on this path — dispose already
- * closed the transcript — so it is caught and logged (recovery via the durable
- * session file), never left unhandled and never silently swallowed.
+ * (`busy`/`unavailable`/`no-session-file`, returned as `{ ok: false }` before
+ * teardown) surface to the still-open transcript so the model sees them. A
+ * pre-dispose THROW (flush/ensureOnDisk rejected before dispose began — the
+ * session is still alive and unlatched) is likewise surfaced: the recycle did
+ * not happen, so the model must learn it. Only a post-dispose host-callback
+ * throw is log-only — dispose already closed the transcript, so there is no
+ * caller to inform; recovery is via the durable session file. Never left
+ * unhandled, never silently swallowed.
  */
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -118,17 +121,28 @@ export class RestartTool implements AgentTool<typeof restartSchema, RestartToolD
 				);
 			})
 			.catch((err: unknown) => {
-				// A rejected requestRestart() is either a recoverable pre-dispose
-				// throw (flush/ensureOnDisk failed, session still alive and
-				// unlatched) or a terminal post-dispose
-				// throw (the callback threw; old session gone). The tool cannot
-				// append either way — the pre-dispose refusals it *can* surface
-				// arrive as a returned { ok: false } in .then() above, not as a
-				// rejection — so log dispose-agnostically. Recovery is via the
-				// durable session file; never swallow.
-				logger.error("restart tool: requestRestart failed", {
-					error: err instanceof Error ? err.message : String(err),
-				});
+				const message = err instanceof Error ? err.message : String(err);
+				// Split on dispose ordering, the same seam requestRestart() latches
+				// on. A rejection while the session is still alive is a RECOVERABLE
+				// pre-dispose throw (flush()/ensureOnDisk() failed before teardown,
+				// latch already cleared): the restart did NOT happen and the
+				// transcript is still open, so surface a phase-aware failure the
+				// model can act on — otherwise it believes the ack and never learns
+				// the recycle was refused. A rejection after dispose is terminal
+				// (the host callback threw, old session gone): no open transcript to
+				// append to, so log only and rely on the durable session file.
+				if (this.session.isDisposed?.() === false) {
+					this.session.queueDeferredMessage?.(
+						createCustomMessage(
+							"restart-refused",
+							`Restart was not performed: preparing the session to recycle failed (${message}). The session is still active; retry once it is idle.`,
+							true,
+							undefined,
+							new Date().toISOString(),
+						),
+					);
+				}
+				logger.error("restart tool: requestRestart failed", { error: message });
 			});
 
 		return toolResult<RestartToolDetails>({ scheduled: true })

@@ -209,6 +209,71 @@ describe("RestartTool outcome reporting (split on dispose ordering)", () => {
 		expect(message).toBe("restart tool: requestRestart failed");
 		expect(message).not.toContain("after dispose");
 	});
+
+	// Pre-dispose throw: flush()/ensureOnDisk() rejected BEFORE dispose began, so
+	// the session is still alive and unlatched — the restart did NOT happen. The
+	// tool must surface a phase-aware failure to the still-open transcript (a
+	// `restart-refused` custom message) so the model learns the recycle was
+	// refused, not just log it behind the "restart scheduled" ack.
+	//
+	// RED (pre-fix): the .catch() only logged; queueDeferredMessage was never
+	// called on a rejection, so `queued` stayed empty and this fails.
+	it("surfaces a pre-dispose throw to the still-alive transcript", async () => {
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+		const queued: CustomMessage[] = [];
+		const requestRestart = vi.fn(async (): Promise<RequestRestartResult> => {
+			throw new Error("ensureOnDisk failed: disk full");
+		});
+		const tool = new RestartTool(
+			toolSession({
+				requestRestart,
+				// Session is still alive: the throw happened before dispose began.
+				isDisposed: () => false,
+				queueDeferredMessage: (message: CustomMessage) => void queued.push(message),
+			}),
+		);
+
+		const out = await tool.execute("call-1", {});
+		expect(out.details).toEqual({ scheduled: true });
+
+		await waitFor(() => queued.length > 0);
+		expect(requestRestart).toHaveBeenCalledTimes(1);
+		expect(queued).toHaveLength(1);
+		expect(queued[0]!.customType).toBe("restart-refused");
+		const text =
+			typeof queued[0]!.content === "string"
+				? queued[0]!.content
+				: queued[0]!.content.map(b => (b.type === "text" ? b.text : "")).join("");
+		expect(text).toContain("still active");
+		expect(text).toContain("disk full");
+	});
+
+	// Post-dispose throw: the host callback threw AFTER dispose closed the
+	// transcript. There is no open transcript to append to, so the tool must NOT
+	// queue a deferred message (it would target a dead session) — log-only,
+	// recovery via the durable session file.
+	it("does not surface a post-dispose throw (transcript already closed)", async () => {
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+		const queued: CustomMessage[] = [];
+		const requestRestart = vi.fn(async (): Promise<RequestRestartResult> => {
+			throw new Error("re-attach failed after dispose");
+		});
+		const tool = new RestartTool(
+			toolSession({
+				requestRestart,
+				// Session was already disposed when the callback threw.
+				isDisposed: () => true,
+				queueDeferredMessage: (message: CustomMessage) => void queued.push(message),
+			}),
+		);
+
+		const out = await tool.execute("call-1", {});
+		expect(out.details).toEqual({ scheduled: true });
+
+		await waitFor(() => errorSpy.mock.calls.length > 0);
+		expect(requestRestart).toHaveBeenCalledTimes(1);
+		expect(queued).toHaveLength(0);
+	});
 });
 
 describe("RestartTool no-deadlock (model turn)", () => {

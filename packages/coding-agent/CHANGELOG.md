@@ -8,7 +8,7 @@
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Added an in-session `restart` tool that cooperatively recycles the agent session to pick up host-staged changes a live refresh cannot reach, plus SDK lifecycle callbacks (`onRestartRequested`) so embedded hosts can honor it.
+- SDK embedders can wire a restart lifecycle callback (`onRestartRequested`) that exposes an in-session `restart` tool, cooperatively recycling the agent session to pick up host-staged changes a live refresh cannot reach. The tool is offered only when the embedder supplies the callback; a default `omp` CLI session does not present it ([#10289](https://github.com/can1357/oh-my-pi/pull/10289) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 
 ## [18.0.11] - 2026-08-29
 
