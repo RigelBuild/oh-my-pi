@@ -5068,6 +5068,16 @@ export class AgentSession {
 			// (AsyncJobManager singleton + lock-free append writer). dispose() is
 			// idempotent.
 			await this.dispose();
+			// Drop the process-global discovery/capability caches so the host's
+			// rebuild (a fresh createAgentSession over the reopened file) re-reads
+			// on-disk AGENTS.md/skills/rules instead of the bytes this session
+			// cached — a host may have staged edits that restart exists to pick up.
+			// This is the same resetCapabilities() step newSession() performs across
+			// a conversation boundary (issue #9273); the reconstruction rebuilds via
+			// the SDK factory, not newSession(), so the invalidation has to happen
+			// here on the dispose->callback handoff, leaving caches clear for the
+			// host's re-discovery.
+			resetCapabilities();
 			await onRestartRequested({ sessionId, sessionFile });
 			return { ok: true };
 		} catch (err) {
@@ -6023,7 +6033,12 @@ export class AgentSession {
 			// a message that was never persisted).
 			this.#promptDropped?.({ text: typedText, images: options?.images });
 		}
-		return true;
+		// A dropped prompt (restart latched inside the shared chokepoint after this
+		// prompt passed the top-of-prompt() guard, disposal, or a preflight denial)
+		// never started a turn, so a lifecycle-managing host must be told not to
+		// await an `agent_end` that will never arrive. Propagate the dispatch
+		// outcome rather than an unconditional `true`.
+		return dispatched;
 	}
 
 	async promptCustomMessage<T = unknown>(

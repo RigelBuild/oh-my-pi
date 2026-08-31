@@ -18,6 +18,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { LoadedCustomCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { DroppedPrompt } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -46,11 +47,14 @@ describe("AgentSession restart-latch prompt contract", () => {
 	});
 
 	/**
-	 * Build a live, file-backed session and latch a restart that hangs at the
-	 * durability flush, so `#restarting` is set but dispose never completes.
-	 * Returns once the latch is committed.
+	 * Build a live, file-backed session whose durability flush is gated open, so
+	 * a restart requested against it latches `#restarting` and then parks before
+	 * dispose. The gate is released in afterEach via `releaseFlush`.
 	 */
-	async function latchedSession(): Promise<void> {
+	async function buildSession(config?: {
+		customCommands?: LoadedCustomCommand[];
+		onRestartRequested?: () => void | Promise<void>;
+	}): Promise<void> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");
 		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
@@ -68,15 +72,25 @@ describe("AgentSession restart-latch prompt contract", () => {
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
-			onRestartRequested: () => {},
+			customCommands: config?.customCommands,
+			onRestartRequested: config?.onRestartRequested ?? (() => {}),
 		});
 
 		const flushGate = Promise.withResolvers<void>();
 		releaseFlush = flushGate.resolve;
 		// Gate the durability barrier so #doRequestRestart parks after latching
 		// #restarting but before dispose — the exact post-latch/pre-dispose window.
+		// Released in afterEach via releaseFlush.
 		vi.spyOn(sessionManager, "flush").mockReturnValue(flushGate.promise);
+	}
 
+	/**
+	 * Build a live, file-backed session and latch a restart that hangs at the
+	 * durability flush, so `#restarting` is set but dispose never completes.
+	 * Returns once the latch is committed.
+	 */
+	async function latchedSession(): Promise<void> {
+		await buildSession();
 		// requestRestart() sets #restarting synchronously before its first await,
 		// so the session is latched the moment this returns. The returned promise
 		// stays pending on the gated flush; released in afterEach.
@@ -103,6 +117,40 @@ describe("AgentSession restart-latch prompt contract", () => {
 
 		expect(forwarded).toBe(false);
 		expect(dropped).toEqual([]);
+	});
+
+	it("returns false and drops a user prompt latched mid-flight after passing the top guard", async () => {
+		// The real race prompt() must survive: a user prompt clears the
+		// top-of-prompt() latch check, then a concurrent restart latches
+		// #restarting while the prompt is still in async preprocessing, so the
+		// SECOND guard inside #promptWithMessage refuses it. A custom slash
+		// command reproduces that window deterministically — its execute() runs
+		// AFTER the top guard but BEFORE #promptWithMessage, and requestRestart()
+		// sets #restarting synchronously, so the shared chokepoint sees the latch
+		// and returns false. prompt() must propagate that false (not a stale
+		// unconditional true) so a lifecycle host does not await a dead agent_end,
+		// and must still hand the input back through the drop hook.
+		const latch: LoadedCustomCommand = {
+			path: "latch.ts",
+			resolvedPath: "latch.ts",
+			source: "project",
+			command: {
+				name: "latch",
+				description: "latch a restart mid-prompt",
+				execute: () => {
+					void session.requestRestart();
+					return "do the thing";
+				},
+			},
+		};
+		await buildSession({ customCommands: [latch] });
+		const dropped: DroppedPrompt[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt));
+
+		const forwarded = await session.prompt("/latch");
+
+		expect(forwarded).toBe(false);
+		expect(dropped).toEqual([{ text: "/latch", images: undefined }]);
 	});
 
 	it("reports promptCustomMessage as not-dispatched when latched", async () => {
