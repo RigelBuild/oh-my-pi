@@ -692,9 +692,15 @@ export class MCPManager {
 					this.#replaceServerTools(name, customTools);
 					void this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
-					// Connected but the server advertised no tools — likely a gateway
-					// still warming up. Re-list on a backoff so the session self-heals.
-					if (serverTools.length === 0) this.#scheduleEmptyToolsetRetry(name);
+					// Connected but the server advertised no tools. A tools-capable
+					// server listing `[]` is likely a gateway still warming up —
+					// re-list on a backoff so the session self-heals. A server
+					// WITHOUT the tools capability (resource-only/prompt-only) lists
+					// `[]` permanently by design; scheduling would run the full retry
+					// and session-wide rebind forever, so gate on the capability too.
+					if (connection.capabilities.tools && serverTools.length === 0) {
+						this.#scheduleEmptyToolsetRetry(name);
+					}
 
 					notify({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
@@ -913,6 +919,16 @@ export class MCPManager {
 	 */
 	getConnection(name: string): MCPServerConnection | undefined {
 		return this.#connections.get(name);
+	}
+
+	/**
+	 * Whether an empty-toolset recovery loop is currently armed for `name`.
+	 * Exposes the synchronously-set `#pendingEmptyRetries` marker so the
+	 * scheduling decision can be asserted deterministically without waiting out
+	 * the backoff.
+	 */
+	hasPendingEmptyToolsetRetry(name: string): boolean {
+		return this.#pendingEmptyRetries.has(name);
 	}
 
 	/**
@@ -1291,8 +1307,12 @@ export class MCPManager {
 			void this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			// A reconnect that lands mid-warmup can also see an empty toolset;
-			// re-list on a backoff so tools appear once the server populates.
-			if (serverTools.length === 0) this.#scheduleEmptyToolsetRetry(name);
+			// re-list on a backoff so tools appear once the server populates. Only
+			// tools-capable servers can ever advertise tools — a resource-only
+			// server always lists `[]`, so gate scheduling on the capability.
+			if (connection.capabilities.tools && serverTools.length === 0) {
+				this.#scheduleEmptyToolsetRetry(name);
+			}
 			return connection;
 		} catch (error) {
 			// Detach synchronously and close in the background so a slow close
@@ -1381,8 +1401,12 @@ export class MCPManager {
 			// that momentarily lists empty would stay toolless until the next
 			// notification or manual refresh. The scheduler dedups against a loop
 			// already running for this connection, so overlapping refreshes cannot
-			// stack loops.
-			if (serverTools.length === 0) this.#scheduleEmptyToolsetRetry(name);
+			// stack loops. A resource-only server (no tools capability) always
+			// lists `[]`, so gate scheduling on the capability to avoid an endless
+			// no-op retry loop and session-wide rebind.
+			if (connection.capabilities.tools && serverTools.length === 0) {
+				this.#scheduleEmptyToolsetRetry(name);
+			}
 		};
 
 		const promise = doRefresh().finally(() => {
@@ -1391,9 +1415,13 @@ export class MCPManager {
 				this.#pendingToolRefresh.delete(name);
 				// A `list_changed` landed mid-flight: run exactly one follow-up so
 				// the newer toolset is not lost until the next notification. Only
-				// re-list if the connection is still the current one.
+				// re-list if the connection is still the current one. RETURN the
+				// follow-up so the promise the coalesced notification callers await
+				// resolves on the fresh catalog — `.finally` chains the returned
+				// promise, preserving `#handleServerNotification`'s post-refresh
+				// ordering contract for the second notification.
 				if (pending.dirty && this.#connections.get(name) === connection) {
-					void this.#triggerNotificationRefresh(name, "tools");
+					return this.#triggerNotificationRefresh(name, "tools");
 				}
 			}
 		});

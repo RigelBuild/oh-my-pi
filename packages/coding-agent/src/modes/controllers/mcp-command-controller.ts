@@ -2162,7 +2162,8 @@ export class MCPCommandController {
 			lines.push("");
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
-			this.ctx.showError(`Failed to refresh MCP tools: ${error instanceof Error ? error.message : String(error)}`);
+			const message = error instanceof Error ? error.message : String(error);
+			this.ctx.showError(`Failed to refresh MCP tools: ${this.#sanitizeRefreshErrorText(message)}`);
 		}
 	}
 
@@ -2175,12 +2176,17 @@ export class MCPCommandController {
 	 * render pipeline in command-controller.ts.
 	 */
 	#formatRefreshFailureRow(outcome: { name: string; error: string }): string {
-		return replaceTabs(
-			truncateToWidth(
-				sanitizeText(`${outcome.name}: ${outcome.error}`.replace(/[\r\n]+/g, " ")),
-				TRUNCATE_LENGTHS.LINE,
-			),
-		);
+		return this.#sanitizeRefreshErrorText(`${outcome.name}: ${outcome.error}`);
+	}
+
+	/**
+	 * Normalize a transport-controlled error string for a single bounded TUI
+	 * row: collapse newlines to spaces, strip control chars, replace tabs, and
+	 * cap width. Shared by the per-server failure rows and the final rebind
+	 * catch so both apply identical normalization.
+	 */
+	#sanitizeRefreshErrorText(text: string): string {
+		return replaceTabs(truncateToWidth(sanitizeText(text.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE));
 	}
 
 	/**

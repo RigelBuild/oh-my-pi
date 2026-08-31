@@ -35,6 +35,7 @@ import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-stora
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "warmup-empty-tools-mcp.ts");
+const RESOURCE_ONLY_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "resource-only-mcp.ts");
 const BUN_EXEC = process.execPath;
 
 function createFakeStorage(): AgentStorage & { raw: Map<string, string> } {
@@ -331,6 +332,69 @@ describe("MCP empty-toolset warmup recovery", () => {
 		}
 	}, 15_000);
 
+	it("resolves the coalesced list_changed caller on the follow-up's fresh catalog", async () => {
+		// #handleServerNotification awaits the promise returned by
+		// refreshServerTools before fanning out to extension listeners, so a
+		// listener sees the manager's post-refresh state. A second
+		// `list_changed` landing mid-flight coalesces onto the in-flight promise
+		// and marks it dirty, which queues exactly one follow-up list. If that
+		// follow-up is fired-and-forgotten, the coalesced caller resolves on the
+		// STALE first response and the ordering contract breaks: the follow-up
+		// catalog it requested has not landed yet. The follow-up must be chained
+		// onto the awaited promise so the caller resolves only after it settles.
+		//
+		// Scripted counts model a changed toolset: connect lists 1 tool, the
+		// first refresh re-lists the same 1 (stale), the follow-up lists 2
+		// (fresh). When the coalesced caller resolves, the fresh set must stand.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
+		const manager = new MCPManager(workDir);
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [FIXTURE_PATH],
+			env: { OMP_TEST_TOOLS_PER_LIST: "1,1,2", OMP_TEST_LIST_LOG: listLog },
+		};
+
+		try {
+			await manager.connectServers({ warmup: config }, {});
+			const connection = manager.getConnection("warmup");
+			if (!connection) throw new Error("expected a connection");
+			expect(warmupTools(manager)).toHaveLength(1);
+
+			// Gate the first refresh's `tools/list` so the second notification
+			// arrives while it is in flight and coalesces onto it.
+			const gate = Promise.withResolvers<void>();
+			const entered = Promise.withResolvers<void>();
+			let gated = true;
+			const realRequest = connection.transport.request.bind(connection.transport);
+			connection.transport.request = (<T = unknown>(
+				method: string,
+				params?: Record<string, unknown>,
+			): Promise<T> => {
+				if (method === "tools/list" && gated) {
+					gated = false;
+					entered.resolve();
+					return gate.promise.then(() => realRequest<T>("tools/list", params));
+				}
+				return realRequest<T>(method, params);
+			}) as typeof connection.transport.request;
+
+			const first = manager.refreshServerTools("warmup", { notification: true });
+			await entered.promise;
+			const second = manager.refreshServerTools("warmup", { notification: true });
+
+			gate.resolve();
+			await Promise.all([first, second]);
+
+			// The coalesced caller resolved only after the follow-up delivered the
+			// fresh 2-tool catalog. Pre-fix the follow-up is fired with `void`, so
+			// the caller resolves on the stale 1-tool response → length 1.
+			expect(warmupTools(manager)).toHaveLength(2);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
+
 	it("plain concurrent /mcp refresh still coalesces to one list (no dirty follow-up)", async () => {
 		// A manual refresh does not pass the notification flag, so overlapping
 		// manual refreshes never mark dirty: they coalesce to a single list with
@@ -423,6 +487,62 @@ describe("MCP empty-toolset warmup recovery", () => {
 				.split("\n")
 				.filter(line => line.trim().length > 0);
 			expect(lists).toHaveLength(3);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
+
+	it("does not schedule empty-toolset recovery for a server without the tools capability", async () => {
+		// A resource-only (or prompt-only) MCP server never advertises the tools
+		// capability, so `listTools()` short-circuits to `[]` without a
+		// `tools/list` call. That permanent empty is not a warmup window — it is
+		// the server's fixed shape. Scheduling the recovery loop would run the
+		// full retry schedule and a session-wide tools-changed rebind on every
+		// attempt for a server that can never produce a tool. Gate scheduling on
+		// the capability, and guard against over-correction: a tools-capable
+		// server that lists empty must still arm recovery.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "20";
+		const manager = new MCPManager(workDir);
+		const resourceOnlyConfig: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [RESOURCE_ONLY_FIXTURE_PATH],
+		};
+
+		try {
+			const changed = Promise.withResolvers<void>();
+			manager.setOnToolsChanged(() => changed.resolve());
+			await manager.connectServers({ resonly: resourceOnlyConfig }, {});
+			// `#onToolsChanged` fires synchronously in the connect tool-load block
+			// immediately before the scheduling decision, so awaiting it observes
+			// the final marker state with no wall-clock wait.
+			await changed.promise;
+
+			expect(manager.getConnectionStatus("resonly")).toBe("connected");
+			expect(warmupTools(manager)).toEqual([]);
+			// Pre-fix this is `true`: the empty result alone armed the loop.
+			expect(manager.hasPendingEmptyToolsetRetry("resonly")).toBe(false);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
+
+	it("still schedules recovery for a tools-capable server that lists empty", async () => {
+		// Over-correction guard for the capability gate: the warmup fixture DOES
+		// advertise the tools capability and lists `[]` on its first call, so the
+		// recovery loop must still arm — the gate narrows scheduling to
+		// tools-incapable servers, it must not suppress the warmup case.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "20";
+		const manager = new MCPManager(workDir);
+
+		try {
+			const changed = Promise.withResolvers<void>();
+			manager.setOnToolsChanged(() => changed.resolve());
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			await changed.promise;
+
+			expect(warmupTools(manager)).toEqual([]);
+			expect(manager.hasPendingEmptyToolsetRetry("warmup")).toBe(true);
 		} finally {
 			await manager.disconnectAll();
 		}
