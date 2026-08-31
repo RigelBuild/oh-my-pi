@@ -16,6 +16,13 @@ import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "./rule";
 export interface RuleBuckets {
 	rulebookRules: Rule[];
 	alwaysApplyRules: Rule[];
+	/**
+	 * Names of the condition-bearing rules the TTSR manager consumed (holds) on
+	 * this pass. An in-session refresh reconciles the manager against this set
+	 * (`TtsrManager.retainRules`) to drop a rule deleted from disk or newly
+	 * disabled; at init it is unused.
+	 */
+	ttsrRuleNames: Set<string>;
 }
 
 export interface BucketRulesOptions {
@@ -44,6 +51,7 @@ export function bucketRules(
 
 	const rulebookRules: Rule[] = [];
 	const alwaysApplyRules: Rule[] = [];
+	const ttsrRuleNames = new Set<string>();
 
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
@@ -61,7 +69,10 @@ export function bucketRules(
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
 		if (hasTtsrCondition) {
 			ttsrManager.addRule(rule);
-			if (ttsrManager.hasRule(rule.name)) continue;
+			if (ttsrManager.hasRule(rule.name)) {
+				ttsrRuleNames.add(rule.name);
+				continue;
+			}
 		}
 		if (rule.alwaysApply === true) {
 			alwaysApplyRules.push(rule);
@@ -72,5 +83,5 @@ export function bucketRules(
 		}
 	}
 
-	return { rulebookRules, alwaysApplyRules };
+	return { rulebookRules, alwaysApplyRules, ttsrRuleNames };
 }

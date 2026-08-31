@@ -5092,6 +5092,10 @@ export class AgentSession {
 					// edited `skills.*` config takes effect.
 					skillsSettings: this.settings.getGroup("skills"),
 					disabledExtensions: this.settings.get("disabledExtensions") ?? undefined,
+					// Same live roots the MCP reconnect threads: a session with
+					// explicit/session-local roots or discovery disabled must reload
+					// skills+rules against ITS scope, not process-level discovery.
+					extensionRoots: this.effectiveExtensionRoots,
 					ttsrManager,
 					ttsrSettings: {
 						builtinRules: ttsrSettings.builtinRules,
@@ -5131,7 +5135,7 @@ export class AgentSession {
 				// without them, defaults re-enable project-level MCP servers a user
 				// opted out of via `mcp.enableProjectConfig: false` and reconnect
 				// browser servers startup deliberately filtered.
-				await reloadMcpServers({
+				const mcpResult = await reloadMcpServers({
 					manager: mcpManager,
 					setMCPPromptCommands: commands => this.setMCPPromptCommands(commands),
 					refreshMCPTools: tools => this.refreshMCPTools(tools),
@@ -5140,6 +5144,11 @@ export class AgentSession {
 					filterBrowser: this.settings.get("browser.enabled") ?? false,
 				});
 				result.mcp = true;
+				// Surface per-server reconnect failures instead of unconditionally
+				// reporting success, mirroring the `/mcp reload` path
+				// (`#showMCPConnectionErrors`). A server that failed to reconnect is
+				// dropped from the tool set but the refresh otherwise ran.
+				if (mcpResult.errors.size > 0) result.mcpErrors = mcpResult.errors;
 			}
 		}
 

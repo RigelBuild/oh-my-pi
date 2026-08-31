@@ -41,7 +41,15 @@ export function summarizeRefresh(scope: RefreshScope, result: RefreshResult): st
 		parts.push(result.settingsChanged ? "settings updated" : "settings unchanged");
 	}
 	if (result.modelSwapped) parts.push("model swapped");
-	if (result.mcp) parts.push("MCP reconnected");
+	if (result.mcp) {
+		const failed = result.mcpErrors;
+		if (failed && failed.size > 0) {
+			const detail = [...failed.entries()].map(([server, error]) => `${server}: ${error}`).join("; ");
+			parts.push(`MCP reconnected with ${failed.size} error(s) (${detail})`);
+		} else {
+			parts.push("MCP reconnected");
+		}
+	}
 	const body = parts.length > 0 ? parts.join(", ") : "nothing to reload";
 	return `Refreshed (${scope}): ${body}.`;
 }

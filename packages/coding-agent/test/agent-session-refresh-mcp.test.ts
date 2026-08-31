@@ -91,6 +91,37 @@ describe("AgentSession.refresh('mcp')", () => {
 		expect(manager.discoverAndConnect.mock.calls[0]?.[0]).toMatchObject({ extensionRoots: roots });
 	});
 
+	it("surfaces per-server reconnect errors instead of reporting unconditional success", async () => {
+		const manager = fakeManager();
+		manager.discoverAndConnect = vi.fn(async (_options?: unknown) => ({
+			tools: [],
+			errors: new Map<string, string>([["broken-server", "ECONNREFUSED"]]),
+			connectedServers: [],
+			exaApiKeys: [],
+		}));
+		MCPManager.setInstance(manager as unknown as MCPManager);
+		const session = await makeSession();
+
+		const result = await session.refresh("mcp");
+
+		expect(result.mcp).toBe(true);
+		// Pre-fix: refresh discarded the MCPLoadResult and never populated
+		// mcpErrors, so a failed reconnect reported plain "MCP reconnected".
+		expect(result.mcpErrors).toBeInstanceOf(Map);
+		expect(result.mcpErrors?.get("broken-server")).toBe("ECONNREFUSED");
+	});
+
+	it("leaves mcpErrors unset when every server reconnects", async () => {
+		const manager = fakeManager();
+		MCPManager.setInstance(manager as unknown as MCPManager);
+		const session = await makeSession();
+
+		const result = await session.refresh("mcp");
+
+		expect(result.mcp).toBe(true);
+		expect(result.mcpErrors).toBeUndefined();
+	});
+
 	it("runs sequential and overlapping refreshes to completion (no dead restart latch)", async () => {
 		const manager = fakeManager();
 		MCPManager.setInstance(manager as unknown as MCPManager);

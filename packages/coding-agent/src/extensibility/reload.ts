@@ -18,6 +18,7 @@
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { type Rule, ruleCapability, setActiveRules } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { loadCapability } from "../discovery";
 import type { TtsrManager } from "../export/ttsr";
@@ -47,6 +48,8 @@ export interface RefreshResult {
 	modelSwapped?: boolean;
 	/** Whether MCP servers were rediscovered and their tools rebound. `true` when the reconnect ran; `undefined` when no MCP manager existed. */
 	mcp?: true;
+	/** MCP servers that failed to reconnect on this refresh, message keyed by server name. Empty/undefined when every server connected. */
+	mcpErrors?: Map<string, string>;
 }
 
 /** Inputs for a roster reload, sourced from the live session/settings. */
@@ -57,6 +60,16 @@ export interface ReloadSkillsAndRulesOptions {
 	skillsSettings?: SkillsSettings;
 	/** Disabled extension ids (`settings.get("disabledExtensions")`). */
 	disabledExtensions?: string[];
+	/**
+	 * The live session's effective extension roots (explicit + mode + configured),
+	 * forwarded to BOTH the skills and rules discovery so a post-startup roster
+	 * reload honors the same extension scope the session started with — the same
+	 * source the MCP reconnect path threads. Omitted here, discovery falls back to
+	 * process-level roots: sessions with `additionalExtensionPaths` /
+	 * `disableExtensionDiscovery` / session-local roots would lose explicitly
+	 * supplied plugin skills/rules or load ambient extensions they excluded.
+	 */
+	extensionRoots?: EffectiveExtensionRoots;
 	/**
 	 * The live session's TTSR manager. Reused (not replaced) so a rule reload
 	 * preserves in-flight injected/trigger state. New TTSR rules register via
@@ -106,6 +119,7 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 			await loadSkills({
 				...options.skillsSettings,
 				disabledExtensions: options.disabledExtensions,
+				extensionRoots: options.extensionRoots,
 				cwd,
 			})
 		).skills;
@@ -113,11 +127,17 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 
 	// Rules: re-scan the rules capability and re-bucket through the LIVE ttsr
 	// manager (preserving injected state), exactly as `sdk.ts` does at init.
-	const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd });
-	const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, options.ttsrManager, {
+	const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd, extensionRoots: options.extensionRoots });
+	const { rulebookRules, alwaysApplyRules, ttsrRuleNames } = bucketRules(rulesResult.items, options.ttsrManager, {
 		builtinRules: options.ttsrSettings?.builtinRules,
 		disabledRules: options.ttsrSettings?.disabledRules,
 	});
+	// Reconcile the reused manager against the rules still discovered AND enabled.
+	// A condition-bearing rule deleted from disk or newly disabled is absent from
+	// `ttsrRuleNames`, so its stale registration is dropped here — otherwise the
+	// `getRules()` spread below would republish it into `activeRules` (still
+	// reachable via `rule://`, still triggering).
+	options.ttsrManager.retainRules(ttsrRuleNames);
 	const activeRules = [...rulebookRules, ...alwaysApplyRules, ...options.ttsrManager.getRules()];
 	setActiveRules(activeRules);
 

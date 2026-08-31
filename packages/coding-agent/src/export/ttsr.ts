@@ -346,6 +346,31 @@ export class TtsrManager {
 	}
 
 	/**
+	 * Reconcile the registered rule set against the names still discovered and
+	 * ENABLED on an in-session refresh. A condition-bearing rule deleted from
+	 * disk or added to `ttsr.disabledRules` is no longer in `keep`, so its stale
+	 * registration is dropped here — otherwise `getRules()` would keep
+	 * republishing it into `activeRules` (reachable via `rule://`, still
+	 * triggering). Rules that survive keep their injection/trigger state
+	 * untouched (the reuse-not-replace contract); only dropped rules shed their
+	 * injection record. `canMatch*` flags are recomputed from the survivors so a
+	 * removed text/thinking rule stops arming those buffers.
+	 */
+	retainRules(keep: ReadonlySet<string>): void {
+		for (const name of [...this.#rules.keys()]) {
+			if (keep.has(name)) continue;
+			this.#rules.delete(name);
+			this.#injectionRecords.delete(name);
+		}
+		this.#canMatchText = false;
+		this.#canMatchThinking = false;
+		for (const entry of this.#rules.values()) {
+			if (entry.scope.allowText) this.#canMatchText = true;
+			if (entry.scope.allowThinking) this.#canMatchThinking = true;
+		}
+	}
+
+	/**
 	 * Add a stream chunk to its scoped buffer and return matching rules.
 	 *
 	 * Buffers are isolated by source/tool key so matches don't bleed across

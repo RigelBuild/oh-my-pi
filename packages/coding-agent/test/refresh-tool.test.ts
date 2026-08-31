@@ -42,6 +42,16 @@ describe("summarizeRefresh", () => {
 		expect(summarizeRefresh("mcp", {})).toBe("Refreshed (mcp): nothing to reload.");
 	});
 
+	it("renders MCP reconnect errors when servers fail", () => {
+		// Pre-fix: refresh discarded the load result, so a failed reconnect still
+		// rendered a bare "MCP reconnected" with no failure detail.
+		expect(summarizeRefresh("mcp", { mcp: true, mcpErrors: new Map([["broken", "ECONNREFUSED"]]) })).toBe(
+			"Refreshed (mcp): MCP reconnected with 1 error(s) (broken: ECONNREFUSED).",
+		);
+		// An empty error map is treated as success (no failures to surface).
+		expect(summarizeRefresh("mcp", { mcp: true, mcpErrors: new Map() })).toBe("Refreshed (mcp): MCP reconnected.");
+	});
+
 	it("renders every surface for an 'all' refresh", () => {
 		const result: RefreshResult = {
 			skills: 3,

@@ -241,4 +241,64 @@ describe("bucketRules", () => {
 		expect(enabled.addRule(makeRule({ name: "empty", description: "no conditions" }))).toBe(false);
 		expect(enabled.hasRule("empty")).toBe(false);
 	});
+
+	// bucketRules reports the condition-bearing rules the manager consumed, so an
+	// in-session refresh can reconcile the reused manager.
+	it("reports the consumed TTSR rule names via ttsrRuleNames", () => {
+		const mgr = new TtsrManager();
+		const rules = [
+			makeRule({ name: "ttsr-a", condition: ["ALPHA"], description: "a" }),
+			makeRule({ name: "ttsr-b", astCondition: ["console.log($A)"], description: "b" }),
+			makeRule({ name: "book", description: "rulebook" }),
+		];
+
+		const { ttsrRuleNames } = bucketRules(rules, mgr);
+
+		expect([...ttsrRuleNames].sort()).toEqual(["ttsr-a", "ttsr-b"]);
+	});
+
+	// A condition rule deleted from disk (or newly disabled) is no longer in the
+	// discovered/enabled set, so retainRules drops its stale registration —
+	// otherwise getRules() would republish it into activeRules, still reachable
+	// via rule:// and still triggering.
+	it("retainRules drops a rule absent from the enabled set and stops it triggering", () => {
+		const mgr = new TtsrManager();
+		const gone = makeRule({ name: "gone", condition: ["FORBIDDEN"], description: "d" });
+		const kept = makeRule({ name: "kept", condition: ["BANNED"], description: "d" });
+
+		const first = bucketRules([gone, kept], mgr);
+		expect(
+			mgr
+				.getRules()
+				.map(r => r.name)
+				.sort(),
+		).toEqual(["gone", "kept"]);
+		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["gone"]);
+
+		// Simulate a refresh where "gone" was deleted from disk: only "kept" is
+		// rediscovered, so bucketRules consumes only it. Pre-fix, the reused
+		// manager still held "gone".
+		const second = bucketRules([kept], mgr);
+		mgr.retainRules(second.ttsrRuleNames);
+		void first;
+
+		expect(mgr.getRules().map(r => r.name)).toEqual(["kept"]);
+		// The dropped rule no longer triggers; the survivor still does.
+		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" })).toEqual([]);
+		expect(mgr.checkDelta("contains BANNED token", { source: "text" }).map(r => r.name)).toEqual(["kept"]);
+	});
+
+	// retainRules must recompute the text/thinking arming flags from survivors,
+	// so removing the only text rule stops the text buffer from arming.
+	it("retainRules recomputes canMatch flags after dropping the last text rule", () => {
+		const mgr = new TtsrManager();
+		const textRule = makeRule({ name: "text-rule", condition: ["FORBIDDEN"], description: "d" });
+
+		bucketRules([textRule], mgr);
+		expect(mgr.checkDelta("FORBIDDEN", { source: "text" }).map(r => r.name)).toEqual(["text-rule"]);
+
+		mgr.retainRules(new Set());
+		expect(mgr.getRules()).toEqual([]);
+		expect(mgr.checkDelta("FORBIDDEN", { source: "text" })).toEqual([]);
+	});
 });

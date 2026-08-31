@@ -40,6 +40,22 @@ import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } fro
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+/**
+ * Equality over the skill fields that affect the rendered system prompt.
+ * Mirrors the rule-side `ruleIdentityEqual`: an existing SKILL.md whose
+ * `description`/`hide` frontmatter changes without a rename/move must count as
+ * a roster change so the prompt rebuilds. `hide` is normalized so `undefined`
+ * and `false` (both "advertised") compare equal.
+ */
+function skillIdentityEqual(a: Skill, b: Skill): boolean {
+	return (
+		a.name === b.name &&
+		a.filePath === b.filePath &&
+		a.description === b.description &&
+		(a.hide ?? false) === (b.hide ?? false)
+	);
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
 	agent: Agent;
@@ -366,15 +382,18 @@ export class SessionTools {
 	 * Swap in a freshly reloaded skills snapshot (from an in-session `refresh`)
 	 * and report whether the set actually changed. `skill://` binds this
 	 * per-session snapshot, so a `setActiveSkills` global swap alone does not
-	 * reach it. Positional name+path compare mirrors discovery's stable order;
-	 * an unchanged set returns `false` so the prompt rebuild is skipped and
-	 * Anthropic prompt caching keeps hitting.
+	 * reach it. Positional prompt-identity compare (name, path, description,
+	 * `hide`) mirrors discovery's stable order and the rule-side
+	 * `ruleIdentityEqual`: editing an existing SKILL.md's `description`/`hide`
+	 * frontmatter WITHOUT renaming still counts as a change and rebuilds the
+	 * advertised roster. An unchanged set returns `false` so the prompt rebuild
+	 * is skipped and Anthropic prompt caching keeps hitting.
 	 */
 	applyReloadedSkills(skills: readonly Skill[]): boolean {
 		let changed = this.#skills.length !== skills.length;
 		if (!changed) {
 			for (let i = 0; i < skills.length; i++) {
-				if (this.#skills[i].name !== skills[i].name || this.#skills[i].filePath !== skills[i].filePath) {
+				if (!skillIdentityEqual(this.#skills[i], skills[i])) {
 					changed = true;
 					break;
 				}
