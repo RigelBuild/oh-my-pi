@@ -17,7 +17,7 @@ describe("parseSubscriptionsConfig", () => {
 			},
 		});
 		const lookup = parseSubscriptionsConfig(raw, FILE);
-		const entry = lookup.lookup("anthropic", "acct-1");
+		const entry = lookup.lookup("anthropic", "acct-1", "");
 		expect(entry).toEqual({ plan: "max", renewsAtSeconds: 1787702400 });
 		expect(lookup.plans).toEqual([{ provider: "anthropic", plan: "max", capacityWeight: 2, monthlyPriceUsd: 200 }]);
 	});
@@ -25,13 +25,36 @@ describe("parseSubscriptionsConfig", () => {
 	it("pins renewsAt to UTC-midnight epoch seconds (no TZ drift)", () => {
 		const raw = JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-08-26" } } });
 		const lookup = parseSubscriptionsConfig(raw, FILE);
-		expect(lookup.lookup("p", "a")?.renewsAtSeconds).toBe(1787702400);
+		expect(lookup.lookup("p", "a", "")?.renewsAtSeconds).toBe(1787702400);
 	});
 
 	it("accepts empty/absent maps without throwing", () => {
 		const lookup = parseSubscriptionsConfig("{}", FILE);
-		expect(lookup.lookup("p", "a")).toBeUndefined();
+		expect(lookup.lookup("p", "a", "")).toBeUndefined();
 		expect(lookup.plans).toEqual([]);
+	});
+
+	it("scopes account entries by org and falls back to an org-less entry", () => {
+		const raw = JSON.stringify({
+			accounts: {
+				"acct-1": { provider: "anthropic", org: "org-team", plan: "team" },
+				"acct-1 personal": { provider: "anthropic", org: "org-personal", plan: "max" },
+				"acct-2": { provider: "anthropic", plan: "pro" },
+			},
+		});
+		const lookup = parseSubscriptionsConfig(raw, FILE);
+		// Distinct org keys resolve to their own entry.
+		expect(lookup.lookup("anthropic", "acct-1", "org-team")).toEqual({ plan: "team", renewsAtSeconds: undefined });
+		expect(lookup.lookup("anthropic", "acct-1 personal", "org-personal")).toEqual({
+			plan: "max",
+			renewsAtSeconds: undefined,
+		});
+		// An org-less config entry resolves for any org of that account.
+		expect(lookup.lookup("anthropic", "acct-2", "org-x")).toEqual({ plan: "pro", renewsAtSeconds: undefined });
+		expect(lookup.lookup("anthropic", "acct-2", "")).toEqual({ plan: "pro", renewsAtSeconds: undefined });
+		// An org-scoped entry does not answer a mismatched org unless a bare
+		// fallback exists.
+		expect(lookup.lookup("anthropic", "acct-1", "org-personal")).toBeUndefined();
 	});
 
 	const throwCases: Array<[string, string]> = [
@@ -119,7 +142,7 @@ describe("loadSubscriptionsConfig", () => {
 			}),
 		);
 		const lookup = await loadSubscriptionsConfig(file);
-		expect(lookup?.lookup("anthropic", "acct-1")).toEqual({ plan: "max", renewsAtSeconds: 1787702400 });
+		expect(lookup?.lookup("anthropic", "acct-1", "")).toEqual({ plan: "max", renewsAtSeconds: 1787702400 });
 		expect(lookup?.plans).toEqual([{ provider: "anthropic", plan: "max", capacityWeight: 2, monthlyPriceUsd: 200 }]);
 	});
 

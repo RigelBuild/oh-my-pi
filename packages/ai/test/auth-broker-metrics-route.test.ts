@@ -66,9 +66,11 @@ describe("auth-broker GET /metrics route", () => {
 		expect(res.headers.get("content-type")).toBe("text/plain; version=0.0.4; charset=utf-8");
 		const body = await res.text();
 		expect(body).toContain(
-			'llm_usage_limit_used_fraction{provider="openai-codex",account="acct-1",email="",limit_id="openai-codex:primary",window="5h"} 0.25',
+			'llm_usage_limit_used_fraction{provider="openai-codex",account="acct-1",org="",email="",limit_id="openai-codex:primary",window="5h"} 0.25',
 		);
-		expect(body).toContain('llm_usage_reset_credits_available{provider="openai-codex",account="acct-1",email=""} 2');
+		expect(body).toContain(
+			'llm_usage_reset_credits_available{provider="openai-codex",account="acct-1",org="",email=""} 2',
+		);
 	});
 
 	test("master bearer also satisfies /metrics", async () => {

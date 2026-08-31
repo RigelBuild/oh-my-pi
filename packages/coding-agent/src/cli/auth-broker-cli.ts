@@ -157,7 +157,7 @@ const SUBSCRIPTIONS_ENV = "OMP_AUTH_BROKER_SUBSCRIPTIONS";
  * loader converts to unix seconds before it reaches the renderer.
  */
 interface SubscriptionsConfigFile {
-	accounts?: Record<string, { provider?: unknown; plan?: unknown; renewsAt?: unknown }>;
+	accounts?: Record<string, { provider?: unknown; org?: unknown; plan?: unknown; renewsAt?: unknown }>;
 	plans?: Record<string, { capacityWeight?: unknown; monthlyPriceUsd?: unknown }>;
 }
 
@@ -218,7 +218,10 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 	// (all `unknown`) are validated below before any value is read.
 	const parsed = root as SubscriptionsConfigFile;
 
-	// Per-account map, keyed by "<provider>\x00<account>" for the lookup.
+	// Per-account map, keyed by "<provider>\x00<account>\x00<org>" for the lookup.
+	// `org` is the canonicalized organization scope (trim + lowercase, "" when the
+	// entry declares none) so an account email's several org-scoped subscriptions
+	// each carry their own plan/renewal instead of one config applying to both.
 	const accounts = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
 	if (parsed.accounts !== undefined && !isPlainObject(parsed.accounts)) {
 		throw new Error(`subscription config ${file}: "accounts" must be a JSON object`);
@@ -254,7 +257,8 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 			}
 			renewsAtSeconds = ms / 1000;
 		}
-		accounts.set(`${entry.provider}\x00${account}`, { plan: entry.plan, renewsAtSeconds });
+		const org = typeof entry.org === "string" ? entry.org.trim().toLowerCase() : "";
+		accounts.set(`${entry.provider}\x00${account}\x00${org}`, { plan: entry.plan, renewsAtSeconds });
 	}
 
 	// Per-plan table, keys are "<provider>:<plan>".
@@ -284,7 +288,12 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 	}
 
 	return {
-		lookup: (provider, account) => accounts.get(`${provider}\x00${account}`),
+		// Prefer the exact org-scoped entry; fall back to an org-less config entry
+		// so a pre-org config (no `org` key) still resolves for every org of that
+		// account, matching the prior single-key behavior.
+		lookup: (provider, account, org) =>
+			accounts.get(`${provider}\x00${account}\x00${org}`) ??
+			(org.length > 0 ? accounts.get(`${provider}\x00${account}\x00`) : undefined),
 		plans,
 	};
 }

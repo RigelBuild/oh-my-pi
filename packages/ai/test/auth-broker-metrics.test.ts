@@ -88,33 +88,33 @@ describe("renderUsageMetrics", () => {
 
 		// used_fraction keyed on {provider, account, email, limit_id, window}.
 		expect(out).toContain(
-			'llm_usage_limit_used_fraction{provider="anthropic",account="acct-claude-1",email="a@example.com",limit_id="anthropic:5h",window="5h"} 0.42',
+			'llm_usage_limit_used_fraction{provider="anthropic",account="acct-claude-1",org="",email="a@example.com",limit_id="anthropic:5h",window="5h"} 0.42',
 		);
 		// resets_at converted ms -> s.
 		expect(out).toContain(
-			'llm_usage_limit_resets_at_seconds{provider="anthropic",account="acct-claude-1",email="a@example.com",limit_id="anthropic:5h",window="5h"} 1700000900',
+			'llm_usage_limit_resets_at_seconds{provider="anthropic",account="acct-claude-1",org="",email="a@example.com",limit_id="anthropic:5h",window="5h"} 1700000900',
 		);
 		// status enum: ok=0, warning=1, exhausted=2.
 		expect(out).toContain(
-			'llm_usage_limit_status{provider="anthropic",account="acct-claude-1",email="a@example.com",limit_id="anthropic:5h",window="5h"} 0',
+			'llm_usage_limit_status{provider="anthropic",account="acct-claude-1",org="",email="a@example.com",limit_id="anthropic:5h",window="5h"} 0',
 		);
 		expect(out).toContain(
-			'llm_usage_limit_status{provider="anthropic",account="acct-claude-1",email="a@example.com",limit_id="anthropic:7d",window="7d"} 1',
+			'llm_usage_limit_status{provider="anthropic",account="acct-claude-1",org="",email="a@example.com",limit_id="anthropic:7d",window="7d"} 1',
 		);
 		expect(out).toContain(
-			'llm_usage_limit_status{provider="openai-codex",account="acct-codex-9",email="c@example.com",limit_id="openai-codex:primary",window="5h"} 2',
+			'llm_usage_limit_status{provider="openai-codex",account="acct-codex-9",org="",email="c@example.com",limit_id="openai-codex:primary",window="5h"} 2',
 		);
 		// raw amount families carry unit label.
 		expect(out).toContain(
-			'llm_usage_limit_used{provider="anthropic",account="acct-claude-1",email="a@example.com",limit_id="anthropic:5h",window="5h",unit="percent"} 42',
+			'llm_usage_limit_used{provider="anthropic",account="acct-claude-1",org="",email="a@example.com",limit_id="anthropic:5h",window="5h",unit="percent"} 42',
 		);
 		// reset credits keyed on {provider, account, email} only.
 		expect(out).toContain(
-			'llm_usage_reset_credits_available{provider="openai-codex",account="acct-codex-9",email="c@example.com"} 3',
+			'llm_usage_reset_credits_available{provider="openai-codex",account="acct-codex-9",org="",email="c@example.com"} 3',
 		);
 		// fetched_at per account, ms -> s.
 		expect(out).toContain(
-			'llm_usage_report_fetched_at_seconds{provider="anthropic",account="acct-claude-1",email="a@example.com"} 1700000000',
+			'llm_usage_report_fetched_at_seconds{provider="anthropic",account="acct-claude-1",org="",email="a@example.com"} 1700000000',
 		);
 		// Email is exported by design: the account UUID is opaque, so the email
 		// label is what makes a subscription account legible on the dashboard.
@@ -125,15 +125,15 @@ describe("renderUsageMetrics", () => {
 	test('absent status maps to -1, and a windowless limit emits window=""', () => {
 		const out = renderUsageMetrics([codexReport()]);
 		expect(out).toContain(
-			'llm_usage_limit_status{provider="openai-codex",account="acct-codex-9",email="c@example.com",limit_id="openai-codex:extra",window=""} -1',
+			'llm_usage_limit_status{provider="openai-codex",account="acct-codex-9",org="",email="c@example.com",limit_id="openai-codex:extra",window=""} -1',
 		);
 		// A limit with no window/resetsAt emits no resets_at series for it.
 		expect(out).not.toContain(
-			'llm_usage_limit_resets_at_seconds{provider="openai-codex",account="acct-codex-9",email="c@example.com",limit_id="openai-codex:extra"',
+			'llm_usage_limit_resets_at_seconds{provider="openai-codex",account="acct-codex-9",org="",email="c@example.com",limit_id="openai-codex:extra"',
 		);
 		// used_fraction still emitted for the windowless limit.
 		expect(out).toContain(
-			'llm_usage_limit_used_fraction{provider="openai-codex",account="acct-codex-9",email="c@example.com",limit_id="openai-codex:extra",window=""} 0.5',
+			'llm_usage_limit_used_fraction{provider="openai-codex",account="acct-codex-9",org="",email="c@example.com",limit_id="openai-codex:extra",window=""} 0.5',
 		);
 	});
 
@@ -160,7 +160,7 @@ describe("renderUsageMetrics", () => {
 		const out = renderUsageMetrics([report]);
 		// unknown status -> -1; no email in metadata -> email="".
 		expect(out).toContain(
-			'llm_usage_limit_status{provider="anthropic",account="acct-x",email="",limit_id="anthropic:5h",window="5h"} -1',
+			'llm_usage_limit_status{provider="anthropic",account="acct-x",org="",email="",limit_id="anthropic:5h",window="5h"} -1',
 		);
 		// no used_fraction, used, max, remaining, resets_at families for this limit
 		expect(out).not.toContain("llm_usage_limit_used_fraction");
@@ -245,7 +245,7 @@ describe("renderUsageMetrics", () => {
 		const out = renderUsageMetrics([report]);
 		// First wins (0.1), duplicate dropped, note emitted.
 		expect(out).toContain(
-			'llm_usage_limit_used_fraction{provider="openai-codex",account="acct-dup",email="",limit_id="openai-codex:dup",window="5h"} 0.1',
+			'llm_usage_limit_used_fraction{provider="openai-codex",account="acct-dup",org="",email="",limit_id="openai-codex:dup",window="5h"} 0.1',
 		);
 		expect(out).not.toContain("} 0.9");
 		expect(out).toContain("# note duplicate series dropped: llm_usage_limit_used_fraction");
@@ -348,7 +348,7 @@ describe("renderUsageMetrics", () => {
 		const out = renderUsageMetrics([base("  A.User@Example.COM  "), base("a.user@example.com")]);
 
 		expect(out).toContain(
-			'llm_usage_report_fetched_at_seconds{provider="anthropic",account="acct-canon",email="a.user@example.com"} 1700000000',
+			'llm_usage_report_fetched_at_seconds{provider="anthropic",account="acct-canon",org="",email="a.user@example.com"} 1700000000',
 		);
 		expect(out).not.toContain("A.User@Example.COM");
 		// One series, not two: the second report collided and was dropped.
@@ -393,7 +393,7 @@ describe("renderUsageMetrics", () => {
 		expect(samples.length).toBeGreaterThan(0);
 		for (const line of samples) expect(line).toContain("email=");
 		// The email-less report still emits the label, empty.
-		expect(out).toContain('account="acct-codex-9",email=""');
+		expect(out).toContain('account="acct-codex-9",org="",email=""');
 	});
 
 	test("emits the four llm_subscription_ families with canonicalized plan labels from a populated config", () => {
@@ -410,13 +410,13 @@ describe("renderUsageMetrics", () => {
 
 		expect(out).toContain("# TYPE llm_subscription_info gauge");
 		expect(out).toContain(
-			'llm_subscription_info{provider="anthropic",account="acct-claude-1",email="a@example.com",plan="max_20x"} 1',
+			'llm_subscription_info{provider="anthropic",account="acct-claude-1",org="",email="a@example.com",plan="max_20x"} 1',
 		);
 		// The anchor 1_760_000_000 is 2025-10-09 08:53:20 UTC; the renderer rolls
 		// it forward date-only, flooring to UTC midnight, and with `now` pinned to
 		// the anchor instant the current occurrence is that same day's midnight.
 		expect(out).toContain(
-			`llm_subscription_renews_at_seconds{provider="anthropic",account="acct-claude-1",email="a@example.com"} ${
+			`llm_subscription_renews_at_seconds{provider="anthropic",account="acct-claude-1",org="",email="a@example.com"} ${
 				Date.UTC(2025, 9, 9) / 1000
 			}`,
 		);
@@ -434,7 +434,7 @@ describe("renderUsageMetrics", () => {
 		};
 		const out = renderUsageMetrics([codexReport()], { subscriptions });
 		expect(out).toContain(
-			'llm_subscription_info{provider="openai-codex",account="acct-codex-9",email="c@example.com",plan="pro"} 1',
+			'llm_subscription_info{provider="openai-codex",account="acct-codex-9",org="",email="c@example.com",plan="pro"} 1',
 		);
 		// A configured account WITHOUT renewsAtSeconds must emit no renewal gauge
 		// (undefined stays undefined through the roll-forward callsite).
@@ -469,6 +469,84 @@ describe("renderUsageMetrics", () => {
 		expect(weightLines.length).toBe(1);
 		const priceLines = out.split("\n").filter(line => line.startsWith("llm_subscription_plan_price_usd{"));
 		expect(priceLines.length).toBe(1);
+	});
+
+	test("two org-scoped subscriptions on one account emit distinct, non-colliding series", () => {
+		// One Anthropic account email holds two org subscriptions (a Team seat and
+		// a personal Max plan). The storage layer keeps them as separate reports
+		// distinguished by metadata.orgId; without an org in the series identity
+		// both collapse to {provider, account, email} and one org's usage sample is
+		// silently dropped in add().
+		const orgReport = (orgId: string, usedFraction: number, fetchedAt: number): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt,
+			metadata: { accountId: "acct-shared", email: "shared@example.com", orgId },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", windowId: "5h", shared: true },
+					window: { id: "5h", label: "5 Hour", resetsAt: 1_700_000_900_000 },
+					amount: { usedFraction, unit: "percent" },
+					status: "ok",
+				},
+			],
+		});
+		const out = renderUsageMetrics([
+			orgReport("org-team", 0.42, 1_700_000_000_000),
+			orgReport("org-personal", 0.87, 1_700_000_060_000),
+		]);
+
+		// Both org subscriptions produce their own series, keyed by the org label.
+		expect(out).toContain(
+			'llm_usage_limit_used_fraction{provider="anthropic",account="acct-shared",org="org-team",email="shared@example.com",limit_id="anthropic:5h",window="5h"} 0.42',
+		);
+		expect(out).toContain(
+			'llm_usage_limit_used_fraction{provider="anthropic",account="acct-shared",org="org-personal",email="shared@example.com",limit_id="anthropic:5h",window="5h"} 0.87',
+		);
+		// Two distinct series, neither dropped as a phantom duplicate.
+		const fractionLines = out.split("\n").filter(line => line.startsWith("llm_usage_limit_used_fraction{"));
+		expect(fractionLines.length).toBe(2);
+		const fetchedLines = out.split("\n").filter(line => line.startsWith("llm_usage_report_fetched_at_seconds{"));
+		expect(fetchedLines.length).toBe(2);
+		expect(out).not.toContain("duplicate series dropped: ");
+	});
+
+	test("the subscription lookup is scoped by org so one account's two orgs get their own plan", () => {
+		// Same account+email, two orgs; the config declares a different plan per
+		// org. Without org in the lookup key, one org's plan applies to both.
+		const orgReport = (orgId: string, fetchedAt: number): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt,
+			metadata: { accountId: "acct-shared", email: "shared@example.com", orgId },
+			limits: [],
+		});
+		const subscriptions = {
+			lookup: (provider: string, account: string, org: string) =>
+				provider === "anthropic" && account === "acct-shared"
+					? org === "org-team"
+						? { plan: "team" }
+						: org === "org-personal"
+							? { plan: "max_20x" }
+							: undefined
+					: undefined,
+			plans: [],
+		};
+		const out = renderUsageMetrics(
+			[orgReport("org-team", 1_700_000_000_000), orgReport("org-personal", 1_700_000_060_000)],
+			{
+				subscriptions,
+			},
+		);
+
+		expect(out).toContain(
+			'llm_subscription_info{provider="anthropic",account="acct-shared",org="org-team",email="shared@example.com",plan="team"} 1',
+		);
+		expect(out).toContain(
+			'llm_subscription_info{provider="anthropic",account="acct-shared",org="org-personal",email="shared@example.com",plan="max_20x"} 1',
+		);
+		const infoLines = out.split("\n").filter(line => line.startsWith("llm_subscription_info{"));
+		expect(infoLines.length).toBe(2);
 	});
 });
 
@@ -530,7 +608,7 @@ describe("nextRenewalSeconds", () => {
 		const out = renderUsageMetrics([claudeReport()], { subscriptions, now });
 		const expected = Date.UTC(2026, 7, 9) / 1000; // 2026-08-09, next day-9 at-or-after now
 		expect(out).toContain(
-			`llm_subscription_renews_at_seconds{provider="anthropic",account="acct-claude-1",email="a@example.com"} ${expected}`,
+			`llm_subscription_renews_at_seconds{provider="anthropic",account="acct-claude-1",org="",email="a@example.com"} ${expected}`,
 		);
 	});
 });
@@ -559,7 +637,7 @@ describe("accountLabelOf", () => {
 		// The report carries no email, so the exposition emits email="".
 		const out = renderUsageMetrics([report]);
 		expect(out).toContain(
-			'llm_usage_limit_used_fraction{provider="openai-codex",account="scope-acct",email="",limit_id="openai-codex:extra:primary",window=""} 0.1',
+			'llm_usage_limit_used_fraction{provider="openai-codex",account="scope-acct",org="",email="",limit_id="openai-codex:extra:primary",window=""} 0.1',
 		);
 	});
 

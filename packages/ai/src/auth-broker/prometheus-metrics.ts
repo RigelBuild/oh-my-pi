@@ -64,6 +64,25 @@ export function emailLabelOf(report: UsageReport): string {
 	return "";
 }
 
+/**
+ * Organization/workspace scope label, read from `report.metadata?.orgId`.
+ *
+ * One account (Anthropic email, ChatGPT workspace) can hold several org-scoped
+ * subscriptions; the storage layer preserves them as separate reports keyed by
+ * `metadata.orgId` (see `#getUsageReportIdentifiers`), so the exported series
+ * must carry the org too or two subscriptions collapse to one `{provider,
+ * account, email}` identity and one org's usage is silently dropped in `add()`.
+ * Canonicalized (trim + lowercase) to match the storage layer's org keying, and
+ * emitted as `org=""` when absent (single-org accounts) so the label set stays
+ * consistent across every sample of a family — an inconsistent set fails the
+ * scrape at parse.
+ */
+export function orgLabelOf(report: UsageReport): string {
+	const orgId = report.metadata?.orgId;
+	if (typeof orgId === "string") return orgId.trim().toLowerCase();
+	return "";
+}
+
 /** Numeric gauge value per usage status; absent AND `unknown` both map to -1. */
 const STATUS_VALUE: Record<UsageStatus, number> = {
 	ok: 0,
@@ -107,14 +126,19 @@ interface MetricFamily {
 /**
  * Static subscription-config lookup injected into {@link renderUsageMetrics}
  * (subscription layer). It carries both a per-account lookup (plan + renewal
- * clock, keyed by the opaque `{provider, account}` identity) and the per-plan
- * table (capacity weight + monthly price). Plan strings arrive raw; the
+ * clock, keyed by the opaque `{provider, account, org}` identity) and the
+ * per-plan table (capacity weight + monthly price). Plan strings arrive raw; the
  * renderer canonicalizes them via {@link canonicalizePlan} so a config plan and
  * a Codex-derived `planType` collapse to one series.
  */
 export interface SubscriptionLookup {
-	/** Per-account facts, or `undefined` when the account is not configured. */
-	lookup(provider: string, account: string): { plan?: string; renewsAtSeconds?: number } | undefined;
+	/**
+	 * Per-account facts, or `undefined` when the account is not configured. `org`
+	 * is the canonicalized organization scope ({@link orgLabelOf}), empty for a
+	 * single-org account, so one account email's several org-scoped subscriptions
+	 * each resolve to their own plan/renewal.
+	 */
+	lookup(provider: string, account: string, org: string): { plan?: string; renewsAtSeconds?: number } | undefined;
 	/** Per-plan facts; emitted once per `{provider, plan}`, outside the per-report loop. */
 	plans: ReadonlyArray<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }>;
 }
@@ -172,6 +196,7 @@ export function renderUsageMetrics(
 	reports: readonly UsageReport[],
 	opts: {
 		accountLabel?: (report: UsageReport) => string;
+		orgLabel?: (report: UsageReport) => string;
 		emailLabel?: (report: UsageReport) => string;
 		subscriptions?: SubscriptionLookup;
 		/** Override clock (tests); epoch ms. */
@@ -179,13 +204,15 @@ export function renderUsageMetrics(
 	} = {},
 ): string {
 	const accountLabel = opts.accountLabel ?? accountLabelOf;
+	const orgLabel = opts.orgLabel ?? orgLabelOf;
 	const emailLabel = opts.emailLabel ?? emailLabelOf;
 	const subscriptions = opts.subscriptions ?? { lookup: () => undefined, plans: [] };
 	const nowSec = Math.floor((opts.now ?? Date.now)() / 1000);
 
 	// Families in canonical emission order. `_used`/`_max`/`_remaining` carry an
-	// extra `unit` label; the others key on {provider, account, email, limit_id,
-	// window} (or {provider, account, email} for the per-report families).
+	// extra `unit` label; the others key on {provider, account, org, email,
+	// limit_id, window} (or {provider, account, org, email} for the per-report
+	// families).
 	const families: MetricFamily[] = [
 		{
 			name: "llm_usage_limit_used_fraction",
@@ -274,10 +301,12 @@ export function renderUsageMetrics(
 	for (const report of reports) {
 		const provider = report.provider;
 		const account = accountLabel(report);
+		const org = orgLabel(report);
 		const email = emailLabel(report);
 		const perAccount: readonly Label[] = [
 			["provider", provider],
 			["account", account],
+			["org", org],
 			["email", email],
 		];
 
@@ -287,16 +316,19 @@ export function renderUsageMetrics(
 		}
 
 		// Subscription layer: per-account subscription info + renewal clock. Look
-		// the account up by its opaque {provider, account} identity. The config
-		// `plan` is the source for Claude and the override for Codex; when it is
-		// absent the Codex-parsed `metadata.planType` is the default. Both are
-		// canonicalized identically so the `on(provider, plan)` join matches the
-		// per-plan table below. `add()` no-ops on `undefined`, so a missing plan
-		// or renewal date is skipped and a lookup miss emits neither.
-		// `renewsAtSeconds` is an ANCHOR bill date rolled forward whole calendar
-		// months to the next occurrence at-or-after scrape time (see
-		// nextRenewalSeconds), so the gauge never reports a past renewal.
-		const subscription = subscriptions.lookup(provider, account);
+		// the account up by its opaque {provider, account, org} identity — one
+		// account email can hold several org-scoped subscriptions, each its own
+		// plan/renewal, so the org must scope the lookup or one org's config
+		// applies to both. The config `plan` is the source for Claude and the
+		// override for Codex; when it is absent the Codex-parsed
+		// `metadata.planType` is the default. Both are canonicalized identically
+		// so the `on(provider, plan)` join matches the per-plan table below.
+		// `add()` no-ops on `undefined`, so a missing plan or renewal date is
+		// skipped and a lookup miss emits neither. `renewsAtSeconds` is an ANCHOR
+		// bill date rolled forward whole calendar months to the next occurrence
+		// at-or-after scrape time (see nextRenewalSeconds), so the gauge never
+		// reports a past renewal.
+		const subscription = subscriptions.lookup(provider, account, org);
 		if (subscription) {
 			const rawPlan = subscription.plan ?? report.metadata?.planType;
 			const plan = typeof rawPlan === "string" ? canonicalizePlan(rawPlan) : undefined;
@@ -316,6 +348,7 @@ export function renderUsageMetrics(
 			const base: readonly Label[] = [
 				["provider", provider],
 				["account", account],
+				["org", org],
 				["email", email],
 				["limit_id", limit.id],
 				["window", limit.window?.id ?? ""],
