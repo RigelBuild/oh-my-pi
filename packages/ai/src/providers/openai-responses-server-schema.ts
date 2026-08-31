@@ -294,9 +294,12 @@ export type OpenAIResponsesOutputRefusalBlock = typeof outputRefusalSchema.infer
 export const toolSchema = type({
 	type: "'function'",
 	name: "string >= 1",
-	"description?": "string",
-	"parameters?": type({ "[string]": "unknown" }),
-	"strict?": "boolean",
+	"description?": "string | null",
+	"parameters?": type({ "[string]": "unknown" }).or("null"),
+	// LiteLLM (and other proxies) may forward null for these optional fields; the
+	// SDK wire type declares strict/parameters/description as nullable, so accept
+	// null here and let buildTools coalesce it away (?? "" / ?? {} / drop strict).
+	"strict?": "boolean | null",
 });
 
 const computerToolSchema = type({ type: "'computer'" });
