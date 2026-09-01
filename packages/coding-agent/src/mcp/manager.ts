@@ -123,14 +123,18 @@ const NOTIFICATION_BUFFER_CAP = 100;
  * the reconnect/failure paths ever refetched: the session held zero tools for
  * its whole lifetime. When a connected server yields an empty toolset we
  * re-list on this bounded backoff (epoch- and connection-guarded) until tools
- * appear or the schedule is exhausted. `OMP_MCP_EMPTY_RETRY_MS` overrides the
- * base delay (tests set it small); `0` disables auto-retry entirely.
+ * appear or the schedule is exhausted. A per-manager override (see
+ * {@link MCPManager.setEmptyToolsetRetryScheduleForTests}) or the
+ * `OMP_MCP_EMPTY_RETRY_MS` env var overrides the base delay (tests set it
+ * small); `0` disables auto-retry entirely. The per-manager seam is preferred
+ * in tests: mutating the env is process-global and leaks into any sibling
+ * suite that constructs an MCPManager during the async window.
  */
 const EMPTY_TOOLSET_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 const EMPTY_RETRY_ENV = "OMP_MCP_EMPTY_RETRY_MS";
 
-function resolveEmptyToolsetRetryDelays(): number[] {
-	const raw = Bun.env[EMPTY_RETRY_ENV]?.trim();
+function resolveEmptyToolsetRetryDelays(override?: string): number[] {
+	const raw = (override ?? Bun.env[EMPTY_RETRY_ENV])?.trim();
 	if (raw === undefined || raw === "") return EMPTY_TOOLSET_RETRY_DELAYS_MS;
 	const base = Number(raw);
 	if (!Number.isFinite(base) || base < 0) {
@@ -239,6 +243,17 @@ export class MCPManager {
 		MCPManager.#instance = undefined;
 	}
 
+	/**
+	 * Override this manager's empty-toolset retry schedule. Test-only seam that
+	 * replaces mutating the process-global `OMP_MCP_EMPTY_RETRY_MS` env var: the
+	 * value uses the same string form (`"20"` to anchor the backoff at 20ms,
+	 * `"0"` to disable auto-retry). Scoped to this instance, so it cannot leak
+	 * into a sibling suite that constructs a manager during the async window.
+	 */
+	setEmptyToolsetRetryScheduleForTests(override: string | undefined): void {
+		this.#emptyRetryScheduleOverride = override;
+	}
+
 	#connections = new Map<string, MCPServerConnection>();
 	#tools: CustomTool<TSchema, MCPToolDetails>[] = [];
 	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
@@ -295,6 +310,14 @@ export class MCPManager {
 	 * concurrent refresh already recovered.
 	 */
 	#pendingToolRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void>; dirty: boolean }>();
+	/**
+	 * Per-manager override for the empty-toolset retry schedule, in the same
+	 * `OMP_MCP_EMPTY_RETRY_MS` string form. When set it takes precedence over
+	 * the process-global env var, so a test can shrink or disable the backoff
+	 * for one manager without mutating `Bun.env` (which would leak into any
+	 * sibling suite that constructs a manager during the async window).
+	 */
+	#emptyRetryScheduleOverride?: string;
 
 	constructor(
 		private cwd: string,
@@ -1491,7 +1514,7 @@ export class MCPManager {
 	 * or a loop for this server is already running.
 	 */
 	#scheduleEmptyToolsetRetry(name: string): void {
-		const delays = resolveEmptyToolsetRetryDelays();
+		const delays = resolveEmptyToolsetRetryDelays(this.#emptyRetryScheduleOverride);
 		if (delays.length === 0) return;
 		const connection = this.#connections.get(name);
 		if (!connection) return;

@@ -57,22 +57,29 @@ function createFakeStorage(): AgentStorage & { raw: Map<string, string> } {
 describe("MCP empty-toolset warmup recovery", () => {
 	let workDir: string;
 	let listLog: string;
-	const originalRetryMs = Bun.env.OMP_MCP_EMPTY_RETRY_MS;
 
 	beforeEach(() => {
 		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-warmup-"));
 		listLog = path.join(workDir, "lists.log");
 		fs.writeFileSync(listLog, "");
-		// Keep the auto-retry backoff tiny so the heal fires promptly instead of
-		// waiting out the production schedule.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "20";
 	});
 
 	afterEach(() => {
-		if (originalRetryMs === undefined) delete Bun.env.OMP_MCP_EMPTY_RETRY_MS;
-		else Bun.env.OMP_MCP_EMPTY_RETRY_MS = originalRetryMs;
 		removeSyncWithRetries(workDir);
 	});
+
+	// Construct a manager with a per-instance retry schedule instead of mutating
+	// the process-global `OMP_MCP_EMPTY_RETRY_MS`. The default `"20"` keeps the
+	// auto-retry backoff tiny so a heal fires promptly instead of waiting out the
+	// production schedule; `"0"` disables auto-retry. Scoping the override to the
+	// instance is what makes this file full-suite-safe: a sibling MCP suite
+	// constructing a manager during our async window sees the real schedule, not
+	// ours.
+	function makeManager(retryMs = "20", cache: MCPToolCache | null = null): MCPManager {
+		const manager = new MCPManager(workDir, cache);
+		manager.setEmptyToolsetRetryScheduleForTests(retryMs);
+		return manager;
+	}
 
 	function stdioConfig(): MCPStdioServerConfig {
 		return {
@@ -87,9 +94,36 @@ describe("MCP empty-toolset warmup recovery", () => {
 		return manager.getTools().filter(t => t.name.startsWith("mcp__warmup_"));
 	}
 
+	it("scopes the retry schedule per manager without mutating the process-global env", async () => {
+		// Full-suite-safety contract: shrinking the auto-retry backoff for a test
+		// must not touch `OMP_MCP_EMPTY_RETRY_MS`. Mutating it is process-global,
+		// so a sibling MCP suite constructing a manager during our async window
+		// would inherit our tiny (or disabled) schedule and flake. Construct a
+		// manager with a fast per-instance schedule, heal through it, and assert
+		// the global env is exactly what it was before.
+		const before = Bun.env.OMP_MCP_EMPTY_RETRY_MS;
+		const manager = makeManager("20");
+
+		const healed = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(tools => {
+			if (tools.filter(t => t.name.startsWith("mcp__warmup_")).length === 1) healed.resolve();
+		});
+
+		try {
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			// The per-instance override drove the heal — proof the fast schedule
+			// took effect without any env mutation.
+			await healed.promise;
+			expect(warmupTools(manager)).toHaveLength(1);
+			expect(Bun.env.OMP_MCP_EMPTY_RETRY_MS).toBe(before);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
+
 	it("auto-heals a session that connected during the empty-list window", async () => {
 		const storage = createFakeStorage();
-		const manager = new MCPManager(workDir, new MCPToolCache(storage));
+		const manager = makeManager("20", new MCPToolCache(storage));
 
 		// Await the real signal the heal emits rather than sleep-polling: resolve
 		// once #onToolsChanged reports the warmed tool registered.
@@ -127,8 +161,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 	it("re-lists live connections on refreshAllTools (/mcp refresh primitive)", async () => {
 		// Disable auto-retry so the ONLY thing that can pick up the warmed tool
 		// is the explicit refresh — isolates the manual-recovery contract.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager("0");
 
 		try {
 			const result = await manager.connectServers({ warmup: stdioConfig() }, {});
@@ -154,7 +187,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// recovery. Owner-matching via `mcpServerName` is what makes the loop
 		// terminate. The digit-free tool names keep the tool segment stable, so
 		// the ONLY moving part under test is the server-segment ownership match.
-		const manager = new MCPManager(workDir);
+		const manager = makeManager();
 
 		const healed = Promise.withResolvers<void>();
 		manager.setOnToolsChanged(tools => {
@@ -193,8 +226,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// `refreshServerTools` for the same live connection share one in-flight
 		// request; without the guard each clears `connection.tools` and re-lists
 		// independently, and an older response can overwrite a newer one.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager("0");
 
 		try {
 			await manager.connectServers({ warmup: stdioConfig() }, {});
@@ -227,8 +259,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// already recovered populated tools under the same name. Applying the
 		// stale `[]` unconditionally would wipe the recovered tools permanently.
 		// The connection-identity guard drops the response instead.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager("0");
 
 		try {
 			await manager.connectServers({ warmup: stdioConfig() }, {});
@@ -282,8 +313,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// single-flight overwrite fix), but the newer notification marks the
 		// pending entry dirty so exactly ONE follow-up refresh runs once the
 		// current one settles.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager("0");
 
 		try {
 			await manager.connectServers({ warmup: stdioConfig() }, {});
@@ -348,8 +378,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// Scripted counts model a changed toolset: connect lists 1 tool, the
 		// first refresh re-lists the same 1 (stale), the follow-up lists 2
 		// (fresh). When the coalesced caller resolves, the fresh set must stand.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager("0");
 		const config: MCPStdioServerConfig = {
 			type: "stdio",
 			command: BUN_EXEC,
@@ -404,8 +433,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// follow-up, if wrongly queued, initiates its `tools/list` synchronously
 		// in the pending entry's `.finally` — before the outer await resumes — so
 		// counting initiations catches it without any wall-clock wait.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "0";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager("0");
 
 		try {
 			await manager.connectServers({ warmup: stdioConfig() }, {});
@@ -441,7 +469,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		//
 		// Scripted list counts model the outage: connect lists one tool, the
 		// refresh lists empty, the recovery re-list lists one tool again.
-		const manager = new MCPManager(workDir);
+		const manager = makeManager();
 		const config: MCPStdioServerConfig = {
 			type: "stdio",
 			command: BUN_EXEC,
@@ -503,8 +531,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// attempt for a server that can never produce a tool. Gate scheduling on
 		// the capability, and guard against over-correction: a tools-capable
 		// server that lists empty must still arm recovery.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "20";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager();
 		const resourceOnlyConfig: MCPStdioServerConfig = {
 			type: "stdio",
 			command: BUN_EXEC,
@@ -534,8 +561,7 @@ describe("MCP empty-toolset warmup recovery", () => {
 		// advertise the tools capability and lists `[]` on its first call, so the
 		// recovery loop must still arm — the gate narrows scheduling to
 		// tools-incapable servers, it must not suppress the warmup case.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "20";
-		const manager = new MCPManager(workDir);
+		const manager = makeManager();
 
 		try {
 			const changed = Promise.withResolvers<void>();
