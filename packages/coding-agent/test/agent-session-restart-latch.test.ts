@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -32,8 +32,11 @@ describe("AgentSession restart-latch prompt contract", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let authStorage: AuthStorage;
-	let mock: ReturnType<typeof createMockModel>;
+	let mock: MockModel;
 	let releaseFlush: (() => void) | undefined;
+	// Resolves when the gated flush spy is entered — the exact post-first-check
+	// window a durability failure would strand input over.
+	let flushReached: Promise<void> | undefined;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-restart-latch-");
@@ -62,6 +65,9 @@ describe("AgentSession restart-latch prompt contract", () => {
 		 *  durability barrier (default); "waitForIdle" gates the earlier quiescence
 		 *  wait, leaving sessionManager.flush real for transitions that flush. */
 		gateAt?: "flush" | "waitForIdle";
+		/** When true, releasing the gated flush REJECTS it (a durability failure)
+		 *  instead of resolving, exercising the recoverable catch branch. */
+		flushRejects?: boolean;
 	}): Promise<void> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");
@@ -85,13 +91,21 @@ describe("AgentSession restart-latch prompt contract", () => {
 		});
 
 		const gate = Promise.withResolvers<void>();
-		releaseFlush = gate.resolve;
+		// A rejected gate must not surface as an unhandled rejection before the
+		// awaiting flush observes it; attach a no-op catch to the raw promise.
+		if (config?.flushRejects) gate.promise.catch(() => {});
+		releaseFlush = config?.flushRejects ? () => gate.reject(new Error("durability write failed")) : gate.resolve;
 		// Park #doRequestRestart after latching #restarting but before dispose —
 		// the exact post-latch/pre-dispose window. Released in afterEach.
 		if (config?.gateAt === "waitForIdle") {
 			vi.spyOn(session, "waitForIdle").mockReturnValue(gate.promise);
 		} else {
-			vi.spyOn(sessionManager, "flush").mockReturnValue(gate.promise);
+			const reached = Promise.withResolvers<void>();
+			flushReached = reached.promise;
+			vi.spyOn(sessionManager, "flush").mockImplementation(() => {
+				reached.resolve();
+				return gate.promise;
+			});
 		}
 	}
 
@@ -296,6 +310,45 @@ describe("AgentSession restart-latch prompt contract", () => {
 		// input, and refuses busy.
 		releaseFlush?.();
 		expect(await restart).toEqual({ ok: false, reason: "busy" });
+
+		// The resumed drain must start a turn that consumes the queued input. Poll
+		// until the provider call lands (the drain schedules a post-prompt continue,
+		// so the queue empties a tick before the turn actually reaches the model).
+		for (let i = 0; i < 200 && mock.calls.length === 0; i++) {
+			await scheduler.wait(5);
+		}
+
+		expect(mock.calls.length).toBe(1);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("redrains input queued during a rejected durability flush so a direct SDK restart does not strand the turn", async () => {
+		// Park the restart at the durability flush and make it REJECT. A steer
+		// enqueues while the flush awaits under #restarting; when the flush rejects,
+		// the recoverable catch (dispose never began) unlatches — but a direct SDK
+		// requestRestart() has no restart-tool refusal message to incidentally start
+		// another turn, so unless the catch resumes the drains the queued turn stays
+		// stranded and a host waits forever.
+		await buildSession({ gateAt: "flush", flushRejects: true });
+		const restart = session.requestRestart();
+		// Wait until the barrier has passed its pre-flush #hasUnpersistedInput
+		// checks and entered the (gated) durability flush. Steering earlier would
+		// trip the earlier busy refusal instead of the durability-failure path.
+		await flushReached;
+		// A host/extension steer that calls agent.steer directly (never the
+		// turn-start latch), landing while the durability flush awaits.
+		session.agent.steer({
+			role: "user",
+			content: [{ type: "text", text: "queued during flush" }],
+			timestamp: Date.now(),
+		});
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+
+		// Release the gate as a rejection: #doRequestRestart's catch runs. dispose
+		// never began, so it is the recoverable branch — it must unlatch and resume
+		// the drains, then rethrow.
+		releaseFlush?.();
+		await expect(restart).rejects.toThrow("durability write failed");
 
 		// The resumed drain must start a turn that consumes the queued input. Poll
 		// until the provider call lands (the drain schedules a post-prompt continue,

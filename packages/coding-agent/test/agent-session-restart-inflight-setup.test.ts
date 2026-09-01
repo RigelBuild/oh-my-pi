@@ -17,13 +17,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession restart barrier waits for in-flight prompt setup", () => {
@@ -31,7 +32,7 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 	let session: AgentSession;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
-	let mock: ReturnType<typeof createMockModel>;
+	let mock: MockModel;
 	let releaseApiKey: (() => void) | undefined;
 
 	beforeEach(() => {
@@ -117,5 +118,69 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		expect(await prompt).toBe(true);
 		expect(await restart).toEqual({ ok: true });
 		expect(disposeStarted).toBe(true);
+	});
+
+	it("blocks dispose while a steer parked in queued-input image preprocessing has not enqueued, then refuses busy", async () => {
+		await buildLiveSession();
+
+		// Park the restart at its post-idle quiescence wait so it latches
+		// #restarting and passes its pre-latch #hasUnpersistedInput check BEFORE
+		// the steer's preparation begins. Only then does the steer enter the exact
+		// race: input in async preparation that has passed the latch but reached
+		// neither agent queue nor #promptInFlightCount.
+		const idleGate = Promise.withResolvers<void>();
+		vi.spyOn(session, "waitForIdle").mockReturnValue(idleGate.promise);
+
+		// Gate image normalization so the steer parks inside #queueUserMessage's
+		// async preparation before either agent queue is populated.
+		const normalizeGate = Promise.withResolvers<void>();
+		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			await normalizeGate.promise;
+			return images;
+		});
+
+		// Observe when dispose begins.
+		let disposeStarted = false;
+		const realDispose = session.dispose.bind(session);
+		vi.spyOn(session, "dispose").mockImplementation(options => {
+			disposeStarted = true;
+			return realDispose(options);
+		});
+
+		// Latch the restart; it parks on the gated quiescence wait.
+		const restart = session.requestRestart();
+
+		// A host/extension steer that calls agent.steer directly (never the
+		// turn-start latch), landing after the restart latched. It advances into
+		// #queueUserMessage and parks on the gated normalization — in preparation,
+		// not yet enqueued.
+		const steer = session.steer("resume the work", [image]);
+		for (let i = 0; i < 50; i++) {
+			await scheduler.wait(1);
+		}
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+
+		// Release the quiescence gate: the barrier resumes. #promptInFlightCount is
+		// zero, so only the queued-input preprocessing barrier can keep dispose from
+		// running. Give it ample opportunity to (wrongly) flush and dispose out from
+		// under the still-preparing steer.
+		idleGate.resolve();
+		for (let i = 0; i < 100 && !disposeStarted; i++) {
+			await scheduler.wait(1);
+		}
+		expect(disposeStarted).toBe(false);
+		// The preparing input was not lost to a dead agent: dispose is blocked and
+		// the message still has not reached the queue.
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+
+		// Release the normalization gate: the steer enqueues, the prep barrier
+		// unblocks, and the barrier now observes queued input — so it refuses the
+		// recycle rather than disposing under it.
+		normalizeGate.resolve();
+		await steer;
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+		expect(await restart).toEqual({ ok: false, reason: "busy" });
+		expect(disposeStarted).toBe(false);
 	});
 });

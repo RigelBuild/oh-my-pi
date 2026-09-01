@@ -721,6 +721,14 @@ export class AgentSession {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	// Counts queued-input (steer/follow-up) calls that have passed the #restarting
+	// latch check and are in async preparation — image normalization, vision
+	// description — BEFORE either agent queue is populated. In that window neither
+	// #hasUnpersistedInput() nor #promptInFlightCount observes the pending input, so
+	// the restart barrier could flush/dispose and #queueUserMessage would then
+	// enqueue into a torn-down agent. The barrier and #hasUnpersistedInput() observe
+	// this counter so the input is never lost to a dead agent.
+	#queuedInputPrepCount = 0;
 	#abortInProgress = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
@@ -741,6 +749,11 @@ export class AgentSession {
 	// against a torn-down session. agent.waitForIdle()/recovery-task waits do not
 	// observe this counter, so the barrier must wait on it explicitly.
 	#inFlightIdleWaiters: Array<() => void> = [];
+	// Resolvers awaiting #queuedInputPrepCount draining to 0, mirroring
+	// #inFlightIdleWaiters. The restart barrier parks on these so a steer/follow-up
+	// still normalizing images / building a vision description (before either agent
+	// queue is populated) blocks dispose until it enqueues.
+	#queuedInputPrepWaiters: Array<() => void> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
@@ -853,6 +866,40 @@ export class AgentSession {
 		if (this.#inFlightIdleWaiters.length === 0) return;
 		const waiters = this.#inFlightIdleWaiters;
 		this.#inFlightIdleWaiters = [];
+		for (const resolve of waiters) resolve();
+	}
+
+	// Mark the START of queued-input async preparation (steer/follow-up image
+	// normalization + vision description), BEFORE either agent queue is populated.
+	// Paired with #endQueuedInputPrep in a finally so a preparation that throws
+	// still releases the barrier.
+	#beginQueuedInputPrep(): void {
+		this.#queuedInputPrepCount++;
+	}
+
+	#endQueuedInputPrep(): void {
+		this.#queuedInputPrepCount = Math.max(0, this.#queuedInputPrepCount - 1);
+		if (this.#queuedInputPrepCount !== 0) return;
+		this.#resolveQueuedInputPrepWaiters();
+	}
+
+	/**
+	 * Resolve when no steer/follow-up input is mid-preparation
+	 * (#queuedInputPrepCount === 0). The restart barrier waits on this so it
+	 * cannot dispose the session out from under input that has not yet reached
+	 * either agent queue.
+	 */
+	#waitForQueuedInputPrepIdle(): Promise<void> {
+		if (this.#queuedInputPrepCount === 0) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#queuedInputPrepWaiters.push(resolve);
+		return promise;
+	}
+
+	#resolveQueuedInputPrepWaiters(): void {
+		if (this.#queuedInputPrepWaiters.length === 0) return;
+		const waiters = this.#queuedInputPrepWaiters;
+		this.#queuedInputPrepWaiters = [];
 		for (const resolve of waiters) resolve();
 	}
 
@@ -5027,10 +5074,15 @@ export class AgentSession {
 	 * unfiltered predicate so a non-displayable steer still blocks) AND
 	 * `#pendingNextTurnMessages` (filled by `queueDeferredMessage()` /
 	 * `sendCustomMessage({ deliverAs: "nextTurn" })`). Neither is persisted, so
-	 * recycling with either non-empty would drop it.
+	 * recycling with either non-empty would drop it. Also counts steer/follow-up
+	 * input still in async preparation (`#queuedInputPrepCount`): it has not
+	 * reached either queue yet, but disposing under it would enqueue into a dead
+	 * agent, so treat in-flight preparation as unpersisted input too.
 	 */
 	#hasUnpersistedInput(): boolean {
-		return this.agent.hasQueuedMessages() || this.#pendingNextTurnMessages.length > 0;
+		return (
+			this.agent.hasQueuedMessages() || this.#pendingNextTurnMessages.length > 0 || this.#queuedInputPrepCount > 0
+		);
 	}
 
 	/**
@@ -5069,16 +5121,19 @@ export class AgentSession {
 			// Quiesce the owning turn so the transcript is complete before capture.
 			await this.waitForIdle();
 			// waitForIdle() watches the core agent loop and recovery tasks but NOT
-			// #promptInFlightCount, so a prompt that already passed the #restarting
-			// latch check yet is still in session-level setup (API-key resolution,
-			// @-mention loading, before_agent_start hooks, pre-prompt compaction)
-			// leaves the barrier resolving immediately. Disposing under it would let
-			// that prompt continue into promptAgentWithIdleRetry() and append against
-			// a torn-down session. Wait for the mid-setup prompt to unwind too. Loop:
+			// #promptInFlightCount or #queuedInputPrepCount, so a prompt that already
+			// passed the #restarting latch check yet is still in session-level setup
+			// (API-key resolution, @-mention loading, before_agent_start hooks,
+			// pre-prompt compaction), or a steer/follow-up still in queued-input async
+			// preparation (image normalization, vision description) before either
+			// agent queue is populated, leaves the barrier resolving immediately.
+			// Disposing under either would let that input continue into the agent and
+			// append against a torn-down session. Wait for both to unwind too. Loop:
 			// draining the in-flight prompt can schedule follow-up recovery/agent work
 			// that waitForIdle() must re-settle.
-			while (this.#promptInFlightCount > 0) {
+			while (this.#promptInFlightCount > 0 || this.#queuedInputPrepCount > 0) {
 				await this.#waitForInFlightIdle();
+				await this.#waitForQueuedInputPrepIdle();
 				await this.waitForIdle();
 			}
 			// Re-check the quiescence gate: input queued *during* the wait (a
@@ -5159,6 +5214,14 @@ export class AgentSession {
 			if (!this.#disposeCall) {
 				this.#restarting = false;
 				this.#restartCall = undefined;
+				// Resume the normal queued/IRC drains the latch suppressed. A steer
+				// can enqueue input while the durability flush/ensureOnDisk awaits
+				// above run under #restarting; if that durability op then rejects, the
+				// input stays stranded — a direct SDK requestRestart() has no
+				// restart-tool refusal message to incidentally start another turn, so
+				// without this the host waits indefinitely for an agent_end that never
+				// fires. Mirror the busy-refusal branches above.
+				this.#drainStrandedQueuedMessages();
 			}
 			throw err;
 		}
@@ -6693,34 +6756,44 @@ export class AgentSession {
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed.
 		this.#advisors.autoResumeSuppressed = false;
-		const normalizedImages = await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (normalizedImages?.length) {
-			content.push(...normalizedImages);
-		}
-		// Text-only model + image attachment: describe via a vision model and enqueue the
-		// description as a hidden companion immediately before the user message.
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
-		this.#allowQueuedMessageDrainRetry();
-		if (mode === "followUp") {
-			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-			this.agent.followUp({
-				role: "user",
-				content,
-				attribution: "user",
-				timestamp: timestamp ?? Date.now(),
-			});
-		} else {
-			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
-			this.agent.steer({
-				role: "user",
-				content,
-				steering: true,
-				attribution: "user",
-				timestamp: timestamp ?? Date.now(),
-			});
+		// Track async preparation so the restart barrier and #hasUnpersistedInput()
+		// observe input that has passed the #restarting latch check but has not yet
+		// reached either agent queue. Released in the finally once the synchronous
+		// enqueue below has populated the queue (or the preparation threw), so there
+		// is no window where the barrier sees neither the counter nor the queue.
+		this.#beginQueuedInputPrep();
+		try {
+			const normalizedImages = await this.#normalizeImagesForModel(images);
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+			if (normalizedImages?.length) {
+				content.push(...normalizedImages);
+			}
+			// Text-only model + image attachment: describe via a vision model and enqueue the
+			// description as a hidden companion immediately before the user message.
+			const imageDescriptionNotice = normalizedImages?.length
+				? await this.#buildImageDescriptionNotice(normalizedImages)
+				: undefined;
+			this.#allowQueuedMessageDrainRetry();
+			if (mode === "followUp") {
+				if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
+				this.agent.followUp({
+					role: "user",
+					content,
+					attribution: "user",
+					timestamp: timestamp ?? Date.now(),
+				});
+			} else {
+				if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
+				this.agent.steer({
+					role: "user",
+					content,
+					steering: true,
+					attribution: "user",
+					timestamp: timestamp ?? Date.now(),
+				});
+			}
+		} finally {
+			this.#endQueuedInputPrep();
 		}
 		this.#scheduleIdleQueueDrain();
 	}
