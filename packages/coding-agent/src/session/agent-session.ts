@@ -733,6 +733,14 @@ export class AgentSession {
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
+	// Resolvers awaiting #promptInFlightCount draining to 0. The cooperative
+	// restart barrier (#doRequestRestart) parks on these so a prompt that has
+	// already passed the #restarting latch check but is still in session-level
+	// setup (API-key resolution, @-mention loading, before_agent_start hooks,
+	// pre-prompt compaction) blocks dispose instead of continuing to append
+	// against a torn-down session. agent.waitForIdle()/recovery-task waits do not
+	// observe this counter, so the barrier must wait on it explicitly.
+	#inFlightIdleWaiters: Array<() => void> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
@@ -802,6 +810,7 @@ export class AgentSession {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
+		this.#resolveInFlightIdleWaiters();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
@@ -822,6 +831,29 @@ export class AgentSession {
 				logger.warn("In-flight settle callback failed", { error: String(error) });
 			}
 		}
+	}
+
+	/**
+	 * Resolve when no prompt is mid-flight (#promptInFlightCount === 0). Unlike
+	 * agent.waitForIdle(), which only observes the core agent loop and recovery
+	 * tasks, this covers the session-level setup window a prompt occupies AFTER
+	 * passing the #restarting latch check but BEFORE reaching the agent — API-key
+	 * resolution, @-mention loading, before_agent_start hooks, pre-prompt
+	 * compaction. The restart barrier waits on this so it cannot dispose the
+	 * session out from under a prompt that is still preparing.
+	 */
+	#waitForInFlightIdle(): Promise<void> {
+		if (this.#promptInFlightCount === 0) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#inFlightIdleWaiters.push(resolve);
+		return promise;
+	}
+
+	#resolveInFlightIdleWaiters(): void {
+		if (this.#inFlightIdleWaiters.length === 0) return;
+		const waiters = this.#inFlightIdleWaiters;
+		this.#inFlightIdleWaiters = [];
+		for (const resolve of waiters) resolve();
 	}
 
 	/** A steer/follow-up can land after the agent loop's final queue poll, or
@@ -1003,6 +1035,7 @@ export class AgentSession {
 
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
+		this.#resolveInFlightIdleWaiters();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
@@ -5035,6 +5068,19 @@ export class AgentSession {
 		try {
 			// Quiesce the owning turn so the transcript is complete before capture.
 			await this.waitForIdle();
+			// waitForIdle() watches the core agent loop and recovery tasks but NOT
+			// #promptInFlightCount, so a prompt that already passed the #restarting
+			// latch check yet is still in session-level setup (API-key resolution,
+			// @-mention loading, before_agent_start hooks, pre-prompt compaction)
+			// leaves the barrier resolving immediately. Disposing under it would let
+			// that prompt continue into promptAgentWithIdleRetry() and append against
+			// a torn-down session. Wait for the mid-setup prompt to unwind too. Loop:
+			// draining the in-flight prompt can schedule follow-up recovery/agent work
+			// that waitForIdle() must re-settle.
+			while (this.#promptInFlightCount > 0) {
+				await this.#waitForInFlightIdle();
+				await this.waitForIdle();
+			}
 			// Re-check the quiescence gate: input queued *during* the wait (a
 			// host/extension steer/follow-up that calls agent.steer directly, so
 			// the turn-start latch never saw it) would otherwise be lost across the
