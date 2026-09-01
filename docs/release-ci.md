@@ -43,9 +43,28 @@ already exists. No local toolchain is needed for a release.
 
 Reuse `scripts/release.ts` rather than reimplementing its steps in YAML. The
 script already does everything a release needs; only two steps are wrong for a
-CI host: the local `bun run check` (redundant with the CI run the push
-triggers) and `watchCI` (CI is the watcher now, and its retry instructions at
-`scripts/release.ts:524-530` are addressed to a human at a terminal).
+CI host as written: the local `bun run check` and `watchCI` (CI is the watcher
+now, and its retry instructions at `scripts/release.ts:524-530` are addressed to
+a human at a terminal).
+
+The `bun run check` omission is the subtle one, and it is a timing change, not a
+pure redundancy. `check` fans out to `check:ts` + `check:rs`
+(`package.json:100`); the CI run the push triggers runs only `check:ts` in its
+lint/type job (`ci:check:full = bun run check:ts`, `package.json:120`), with the
+Rust half covered separately by the bazel `rust_validate` job. So coverage is
+approximately equivalent but not the literally-same suite. The real difference is
+*when*: locally, `check` ran AFTER the lockfile regeneration
+(`rm -f bun.lock; bun install; cargo generate-lockfile`,
+`scripts/release.ts:445-449`) and BEFORE the push, so it was the sole gate over a
+freshly regenerated lockfile that may resolve dependency versions no prior CI run
+tested. Omitting the check entirely converts that pre-push gate into post-push
+detection: a failure now lands a tagged bump on `main` and the publish fails
+with the version number already consumed. The native-toolchain failure that
+motivates this design (missing `cmake` for `audiopus_sys`) implicates only
+`check:rs`; `check:ts` (biome + workspace `tsc`, `package.json:101`) needs no
+native toolchain. Whether `prepare` keeps `check:ts` as a pre-push gate (dropping
+only `check:rs`) or omits the check entirely and accepts fix-forward on failure
+is Open Question (f).
 
 Split `cmdRelease` into a `prepare` path invoked as
 `bun scripts/release.ts prepare <version|bump>` that performs, unchanged:
@@ -119,12 +138,21 @@ See Open Questions (a) and (d).
 
 Failure containment: every mutation before the push lives only in the
 ephemeral runner checkout, and the atomic push (`scripts/release.ts:506-511`)
-is the sole externally visible change, so any pre-push failure (a sentinel
+is the sole externally visible change, so any *pre-push* failure (a sentinel
 verify fail, a changelog error, a non-fast-forward race with a human push)
-leaves origin untouched and the version number unconsumed. This is strictly
-safer than the local flow, where a failed run leaves a dirty tree on the
-maintainer's machine. The only non-atomic residue is the local `git tag -f`
-before the push, which is disposable (`scripts/release.ts:486-505`).
+leaves origin untouched and the version number unconsumed. For pre-push
+failures this is strictly safer than the local flow, where a failed run leaves a
+dirty tree on the maintainer's machine. The only non-atomic residue is the local
+`git tag -f` before the push, which is disposable
+(`scripts/release.ts:486-505`). A *post-push* failure is different: once the
+atomic branch-plus-tag push lands, a later publish-side failure leaves a tagged
+bump on `main` with the version consumed. `resolveReleaseVersion` refuses to
+re-cut the same version (`scripts/release.ts:250-252`) and the prepare push
+refspec is unforced, so there is no CI-side equivalent of the local retry
+recipe's force-retag (`scripts/release.ts:520-530`). The recovery story is
+therefore fix-forward to the next patch version, documented in Task 4; Open
+Question (f) (keeping `check:ts` pre-push) directly narrows how often a
+post-push failure can happen.
 
 ## Alternatives considered
 
@@ -190,9 +218,11 @@ Interfaces:
 - Produces: the `chore: bump version to ${version}` commit and `v${version}`
   tag, pushed atomically to origin (or to a release branch, per Open
   Question (a)).
-- Omits: step 6 `bun run check` (`scripts/release.ts:475-478`) and step 9
-  `watchCI` (`scripts/release.ts:513-532`), the latter replaced by the
-  run-started check in Task 2.
+- Omits: step 9 `watchCI` (`scripts/release.ts:513-532`), replaced by the
+  run-started check in Task 2. Step 6 `bun run check`
+  (`scripts/release.ts:475-478`) is narrowed rather than dropped whole per Open
+  Question (f): the recommendation keeps `check:ts` as a pre-push gate over the
+  regenerated lockfile and omits only the toolchain-heavy `check:rs`.
 - Guards: hard-fail when the resolved `latestTag` is empty. `git describe`
   returns nothing on a shallow or tagless checkout (`scripts/release.ts:335-341`,
   `.nothrow()` leaves `latestTag=""`), and an explicit version then takes the
@@ -224,21 +254,42 @@ Interfaces:
   `workflow_dispatch` runs the workflow definition as it exists on the
   dispatched ref, so without this a modified copy on a branch could run with the
   release credentials. Pinning the checkout to `main` alone does not close this.
-- Permissions: `contents: write` at the job level; everything else stays
-  `read`.
+- Permissions: `contents: write` at the job level for the push; and, when Open
+  Question (d) resolves to the chained-dispatch trigger, `actions: write` for the
+  `gh workflow run ci.yml` step. Everything else stays `read`. The chained
+  dispatch is a `POST .../actions/workflows/ci.yml/dispatches` call, which
+  `GITHUB_TOKEN` can make only with `actions: write`, so a `contents: write`-only
+  job would push the tagged bump and then fail at the dispatch step with a 403,
+  manufacturing the exact tagged-bump-with-no-publish state the run-started check
+  below exists to catch. `actions/checkout` must keep its default
+  `persist-credentials: true` so the in-job `GITHUB_TOKEN` can push.
 - Concurrency: a `release-prepare` group with `cancel-in-progress: false` so two
-  dispatches serialize rather than race a push to `main`. Note this serializes,
-  it does not deduplicate: a queued second dispatch with a bump keyword
-  re-resolves against the just-pushed tag (`scripts/release.ts:230-244`) and
-  would cut an unintended second release; an explicit duplicate version fails
-  loudly at the greater-than-latest guard (`scripts/release.ts:250-252`).
-- Run-started check: after the push, poll for a `ci.yml` run matching the pushed
-  sha (`gh run list --commit <sha>`) and fail the job loudly if none appears
-  within a bounded wait. This is the one non-redundant duty of the deleted
-  `watchCI`: a push can succeed while the release run never starts (a token
-  whose semantics suppress the trigger, or a future `on.push` path-filter gap of
-  the kind `.github/workflows/ci.yml:25-27` already records), which otherwise
-  leaves a tagged bump on `main` with no publish and no error anywhere.
+  dispatches serialize rather than race a push to `main`. This serializes but does
+  not deduplicate: a queued second dispatch with a bump keyword re-resolves against
+  the just-pushed tag (`scripts/release.ts:230-244`) and would cut an unintended
+  second release; an explicit duplicate version fails loudly at the
+  greater-than-latest guard (`scripts/release.ts:250-252`). Mitigate the
+  double-dispatch foot-gun by refusing at the top of the job when another
+  `release.yml` run is already `in_progress`/`queued`
+  (`gh run list --workflow release.yml --status in_progress,queued`), so a
+  Actions-UI double-click fails fast instead of cutting a second release
+  unattended.
+- Run-started check: after the push, poll for the triggered `ci.yml` run at the
+  pushed sha (`gh run list --commit <sha>`), then wait for its `release_metadata`
+  job to complete and assert `is-release=true`, not merely that a run exists. A
+  run at the correct sha whose tag probe returns empty (`git tag --points-at HEAD`
+  at `.github/workflows/ci.yml:129`, on any fetch-tags anomaly) yields
+  `is-release=false` and the same silent non-publish, so run-existence alone is too
+  weak a proxy; assert the release condition to match Task 3's verification
+  criterion. Fail the job loudly on either miss. This is the one non-redundant duty
+  of the deleted `watchCI`: a push can succeed while the release run never starts
+  or never recognizes itself as a release (a token whose semantics suppress the
+  trigger, a future `on.push` path-filter gap of the kind
+  `.github/workflows/ci.yml:25-27` records, or the ref-vs-sha race in Open
+  Question (d)), which otherwise leaves a tagged bump on `main` with no publish and
+  no error anywhere. `gh run list --commit` requires gh >= 2.40 (present on hosted
+  `ubuntu-22.04`; verify on `omp-kata` if the runner question resolves that way),
+  and `GH_TOKEN` must be exported for the `gh` calls.
 - LFS: bump commits carry no Git LFS content, so the LFS pre-push hook the
   atomic-push comment describes (`scripts/release.ts:503-505`) is not needed on
   the runner (`actions/checkout` defaults `lfs: false`); note this rather than
@@ -251,17 +302,22 @@ trigger mechanism chosen in Open Question (d).
 
 Interfaces:
 
-- Consumes: the resolution of Open Questions (a) and (d); repo branch
-  protection settings for `main`.
+- Consumes: the resolution of Open Questions (a) and (d). Main's branch
+  protection is now a recorded fact, not an unresolved input: an active ruleset
+  with zero bypass actors (see the load-bearing fact under Open Questions), so
+  any direct-push (a) needs a bypass actor *added*, and a Release-PR (a) needs
+  none.
 - Produces: a working path where the release run starts for the pushed sha,
   verified by the Task 2 run-started check observing a `release_metadata` run
-  with `is-release=true`. The concrete work depends on (d): the
-  `GITHUB_TOKEN` + chained `workflow_dispatch` option needs no stored secret
-  (the workflow pushes, then dispatches `ci.yml` itself); a PAT / deploy key /
-  GitHub App option needs the secret created, stored, its expiry and rotation
-  documented here, and (under direct push) a branch-protection bypass actor
-  configured. Whichever is chosen, record the exact mechanism in this file when
-  implemented.
+  with `is-release=true`. The concrete work depends on (a)/(d): the recommended
+  `GITHUB_TOKEN` + tag-ref chained-dispatch needs no stored secret (the workflow
+  pushes, then dispatches `ci.yml --ref "v${VERSION}"` itself) but does need the
+  workflow identity as a branch-protection bypass actor for the push, gated
+  behind a GitHub Environment approval if (a) resolves that way; a PAT / deploy
+  key / GitHub App option additionally needs the secret created, stored, and its
+  expiry/rotation documented here; a Release-PR (a) replaces the push+dispatch
+  with a branch push + `gh pr create` + the tag-choreography step. Record the
+  exact mechanism in this file when implemented.
 
 ### Task 4: docs and command update
 
@@ -271,9 +327,16 @@ Interfaces:
 - Produces: `.omp/commands/release.md` rewritten from the local-run
   instructions (currently `bun scripts/release.ts $ARGUMENTS` at
   `.omp/commands/release.md:17-19` plus a local retry recipe) to the dispatch
-  invocation (`gh workflow run release.yml -f version=...`) and the
-  CI-failure retry story; a short "how a release works now" section appended
-  to this record.
+  invocation (`gh workflow run release.yml -f version=...`) and the CI-failure
+  retry story. That story must state the post-push protocol explicitly: a failed
+  release run cannot be retried at the same version (`resolveReleaseVersion`
+  rejects it, `scripts/release.ts:250-252`; the prepare push is unforced, so the
+  local force-retag recipe at `scripts/release.ts:520-530` has no CI equivalent),
+  so recovery is fix-forward to the next patch version. The one exception is a
+  ref-vs-sha miss under a `--ref main` dispatch (Open Question (d)), whose
+  recovery is a tag-ref re-dispatch `gh workflow run ci.yml --ref "v${VERSION}"`.
+  Append a short "how a
+  release works now" section to this record.
 
 ### Task 5: end-to-end verification
 
@@ -287,50 +350,72 @@ Interfaces:
 
 ## Tasks
 
-- [ ] Task 1: `prepare` path in `scripts/release.ts`, CLI wiring, check and
-  watch steps omitted, empty-`latestTag` guard
+- [ ] Task 1: `prepare` path in `scripts/release.ts`, CLI wiring, `check:rs`/
+  `watchCI` omitted with `check:ts` kept pre-push per Open Question (f),
+  empty-`latestTag` guard
 - [ ] Task 2: `.github/workflows/release.yml` dispatch workflow with the
-  dispatch-ref guard, serialized concurrency, and the run-started check
-- [ ] Task 3: main-branch trigger path per Open Question (d)
-  (chained dispatch, or a stored credential plus branch-protection bypass)
-- [ ] Task 4: `.omp/commands/release.md` and record update
+  dispatch-ref guard, `contents:write`+`actions:write` permissions, serialized
+  concurrency with the in-flight-run refusal, and the run-started +
+  `is-release=true` check
+- [ ] Task 3: main-branch trigger path per Open Questions (a)/(d)
+  (tag-ref chained dispatch plus the branch-protection bypass actor, gated by an
+  Environment approval, or a Release-PR that needs no bypass)
+- [ ] Task 4: `.omp/commands/release.md` and record update, including the
+  fix-forward post-push failure protocol
 - [ ] Task 5: canary release through the new path
 
 ## Open Questions
 
-Maintainer decisions. (a) and (d) are load-bearing: the workflow's shape,
-permissions, and secrets all depend on them. (b), (c), and (e) are surfaced
-for completeness and can be settled at review.
+Maintainer decisions. (a), (d), and (f) are load-bearing: the workflow's shape,
+permissions, secrets, and the post-push failure surface all depend on them.
+(b), (c), and (e) are surfaced for completeness and can be settled at review.
+
+Load-bearing fact both (a) and (d) turn on: `main` is protected by an active
+repository ruleset (`pull_request`, `non_fast_forward`, `required_status_checks`,
+`deletion`) with **zero bypass actors**. Today nobody, maintainer included, can
+push directly to `main`; every change lands through a reviewed PR. This changes
+the framing of (a) below: "direct push by the workflow" is not a faithful port of
+the current mechanics, because the current mechanics do not permit a direct push
+at all.
 
 ### (a) Where the bump commit lands (load-bearing)
 
-- **Direct push to `main` by the workflow.** Mirrors today's mechanics
-  exactly, just server-side: the same atomic branch-plus-tag push, one CI
-  cycle, no extra human step. Needs `contents: write` and a trigger path per
-  (d). The genuinely new exposure is a standing branch-protection bypass actor
-  for the release workflow: unlike a maintainer's laptop credential, that is a
-  permanent, always-on push-to-`main` capability whose blast radius is any
-  future compromise of the workflow file.
+- **Direct push to `main` by the workflow.** One CI cycle, no extra human step,
+  the same atomic branch-plus-tag push. But given the ruleset above it requires
+  *adding* a standing bypass actor for the release workflow's identity: a new,
+  permanent, always-on push-to-`main` capability that does not exist today, whose
+  blast radius is any future compromise of the workflow file. It also widens the
+  release-capable set: `workflow_dispatch` is open to every write-access user
+  (see (d)), so a bypass exercised on their behalf lets anyone with write access
+  cut a release and land a bump on `main`, which no write user can do today.
 - **Direct push plus a GitHub Environment with required reviewers on the
   release job.** Same single CI cycle and no tag choreography, but the job
   pauses for one approval click in the Actions UI before it pushes. Restores an
-  explicit human gate at the push without the second-CI-cycle and
-  squash-rewrites-the-tag costs of the PR option.
+  explicit human gate at the push and, against the ruleset above, closes both new
+  exposures the bare direct push opens (the standing bypass actor and the widened
+  dispatcher set) for the cost of one click on an infrequent, dispatch-initiated
+  action. Still needs the bypass actor to exist, but gates its use behind an
+  approval.
 - **Release PR the maintainer merges.** The workflow puts the bump commit on
-  a branch and opens a PR; the merge to `main` is the human gate, and no bot
-  ever pushes to `main`. Costs an extra human step and a second CI cycle, and
-  the tag needs care: release detection keys on the commit subject or a tag
+  a branch and opens a PR; the merge to `main` is the human gate, and no bypass
+  actor is ever added. This is the only option that keeps the current
+  zero-bypass ruleset intact. Costs an extra human step and a second CI cycle,
+  and the tag needs care: release detection keys on the commit subject or a tag
   at HEAD (`.github/workflows/ci.yml:74-76`, `:129`), and a squash merge
   rewrites the commit, so this path needs either a merge commit or a
   post-merge step that lays `v${version}` on the merged sha.
-- **Recommendation:** direct push. The honest argument is that the local flow
-  it replaces was already an unreviewed push to `main` (the local script
-  bumps, commits, and pushes straight to `main` with nobody reviewing the
-  mechanical version bumps or the changelog rewrite), so a server-side direct
-  push is a faithful port of the existing trust model, not a new erosion of a
-  review gate that never existed. The one real new cost is the standing bypass
-  actor above; if that is unacceptable, the Environments option restores a
-  human click at the lowest cost.
+- **Recommendation:** the Environments option. The honest argument for a direct
+  push is that the bump content was never reviewed (the local script bumps,
+  commits, and pushes with nobody reviewing the mechanical version bumps or the
+  changelog rewrite), so server-side pushing removes no review gate that existed.
+  But that argument covers *content* review, not *push capability*: the local
+  push ran under a specific maintainer's credential, whereas a bare workflow
+  direct push adds a standing bypass actor and hands push-to-`main`-via-release to
+  every write user. The Environments option keeps the no-second-cycle, no-tag-
+  choreography benefits of a direct push while gating that new capability behind
+  one approval click. The Release-PR option is the most conservative (no bypass
+  actor at all) if the maintainer prefers to preserve the zero-bypass ruleset
+  outright, at the cost of the extra cycle and the tag choreography.
 
 ### (b) Version input shape
 
@@ -364,40 +449,84 @@ when triggered with `GITHUB_TOKEN`
 options:
 
 - **`GITHUB_TOKEN` push, then chained `workflow_dispatch` of `ci.yml`.** The
-  release job pushes with the built-in `GITHUB_TOKEN` (`contents: write`), then
-  runs `gh workflow run ci.yml --ref main` from the same job. No stored secret,
-  no rotation, no expiry cliff. `ci.yml` already accepts `workflow_dispatch`
-  (`.github/workflows/ci.yml:59-64`), already schedules any dispatch into the
-  never-cancel release group (`.github/workflows/ci.yml:74-76`, third
-  disjunct), and `release_metadata` detects the tag at HEAD on a `main`-ref
-  dispatch (`fetch-tags` fires for `refs/heads/main`,
-  `.github/workflows/ci.yml:114-116`, `:129`). Cost: `workflow_dispatch` pins a
-  ref, not a sha, so if a human push lands on `main` between the release push
-  and the dispatched checkout, the run executes at the newer untagged tip,
-  `release_metadata` reports `is-release=false`, and the release silently does
-  not publish. The tag stays on its sha, so a re-dispatch of that sha
-  self-heals, and the Task 2 run-started check catches the miss.
+  release job pushes with the built-in `GITHUB_TOKEN`, then runs
+  `gh workflow run ci.yml` from the same job (needs `contents: write` for the
+  push AND `actions: write` for the dispatch, see Task 2). No stored secret, no
+  rotation, no expiry cliff. `ci.yml` already accepts `workflow_dispatch`
+  (`.github/workflows/ci.yml:59-64`) and schedules any dispatch into the
+  never-cancel release group (`.github/workflows/ci.yml:74-76`, third disjunct).
+  Two sub-choices for the dispatch ref:
+  - **`--ref "v${VERSION}"` (the tag just pushed).** `release_metadata` reads the
+    tag straight from `github.ref_name` on a tag-ref run
+    (`.github/workflows/ci.yml:123-126`), and `fetch-tags` is correctly scoped
+    away from tag refs (`.github/workflows/ci.yml:109-115`). Because the tag was
+    laid on its sha by the atomic push one step earlier, the dispatched run
+    executes at exactly the pushed sha, so there is no ref-vs-sha race at all.
+  - **`--ref main`.** `release_metadata` detects the tag at HEAD via
+    `git tag --points-at HEAD` (`.github/workflows/ci.yml:127-130`), but
+    `workflow_dispatch` resolves a ref at run-creation time, so a human push
+    landing on `main` in the push-to-dispatch window (seconds) makes the run
+    execute at the newer untagged tip, `release_metadata` reports
+    `is-release=false`, and the release silently does not publish. This is *not*
+    self-healing by re-dispatching `main` (a re-dispatch resolves `main` again,
+    to whatever tip it now has); the only recovery that targets the raced sha is
+    dispatching the tag ref, i.e. falling back to the first sub-choice. The Task 2
+    run-started check detects the miss.
 - **Fine-grained PAT (or deploy key) push.** A stored `contents: write`
   credential whose push triggers `ci.yml` via the ordinary `on: push` path.
   No ref-vs-sha race. Cost: a long-lived repo-write secret living on the runner,
   a human rotation loop (in tension with the no-manual-steps principle this
-  design otherwise honors), an expiry cliff, and under direct push a
-  branch-protection bypass configured for the PAT actor.
+  design otherwise honors), and an expiry cliff.
 - **GitHub App installation token.** Best security posture (short-lived
   installation tokens, no expiry cliff), highest setup cost.
-- **Recommendation:** the `GITHUB_TOKEN` + chained-dispatch option. It removes
-  the standing secret, the rotation loop, and Task 3's PAT plumbing entirely;
-  its only cost is the narrow ref-tip race, which is detectable (the Task 2
-  run-started check) and self-healing on re-dispatch. Releases are infrequent
-  and dispatch-initiated, so the racing-human-push window is small.
+- Bypass-actor note: the branch-protection bypass that a push to `main` requires
+  (see the load-bearing fact above (a)) is a property of the *push target*, not
+  the *credential*: every direct-push option here, `GITHUB_TOKEN` included,
+  needs the workflow identity added as a bypass actor. The bypass cost belongs to
+  option (a)'s direct-push choice, not to any one credential in (d). A
+  Release-PR (a) removes the bypass requirement for all of these.
+- **Recommendation:** the `GITHUB_TOKEN` + chained-dispatch option, dispatching
+  the **tag ref** (`--ref "v${VERSION}"`). It removes the standing secret, the
+  rotation loop, and Task 3's PAT plumbing entirely, and the tag-ref dispatch
+  eliminates the ref-vs-sha race rather than merely detecting it. If (a) resolves
+  to Release-PR, this sub-question narrows to how the merged commit gets its tag
+  and CI run, folded into (a)'s tag-choreography step.
 
 ### (e) Runner for the release-prepare job
 
-- `omp-kata` (self-hosted, warm caches) versus hosted `ubuntu-22.04` (ships
-  `cargo`, no kata-pool queueing). `prepare` compiles nothing, so either works;
-  the security angle mildly favors hosted if a stored push credential is chosen
-  in (d), since it keeps a repo-write secret off self-hosted infrastructure.
-  The `GITHUB_TOKEN` + chained-dispatch option in (d) removes that concern.
+- `omp-kata` (self-hosted, warm caches) versus hosted `ubuntu-22.04`. `prepare`
+  compiles nothing, so either works; the security angle mildly favors hosted if a
+  stored push credential is chosen in (d), since it keeps a repo-write secret off
+  self-hosted infrastructure. The `GITHUB_TOKEN` + chained-dispatch option in (d)
+  removes that concern. Note the "ships `cargo`" framing is approximate:
+  `rust-toolchain.toml` pins a toolchain rustup downloads on first `cargo`
+  invocation (a ~1 min network fetch, not a correctness issue), and if Open
+  Question (f) keeps `check:ts` pre-push that step still needs no Rust toolchain.
 - **Recommendation:** hosted `ubuntu-22.04`. `prepare` is a light job and this
   avoids both the kata-pool queue and a secret-on-self-hosted question; revisit
   only if a `prepare` step turns out to need a warm native cache.
+
+### (f) Keep `check:ts` as a pre-push gate (load-bearing)
+
+`prepare` regenerates the lockfile from scratch (`rm -f bun.lock; bun install`,
+`scripts/release.ts:445-449`) immediately before the push. The local flow gated
+that regenerated lockfile behind `bun run check` before pushing; a pure CI-side
+omission moves all validation after the push, where a failure lands a tagged bump
+on `main` with the version consumed (see Failure containment).
+
+- **Keep `check:ts` in `prepare`, drop only `check:rs`.** `check:ts` (biome +
+  workspace `tsc`, `package.json:101`) needs no native toolchain, so it never hits
+  the `cmake`/`audiopus_sys` failure that motivates this design; `check:rs`
+  (`package.json:103`) is the toolchain-heavy half and is covered post-push by the
+  bazel `rust_validate` job. This restores the pre-push gate over the regenerated
+  lockfile at a few minutes' cost and zero toolchain burden.
+- **Omit the check entirely; accept fix-forward.** Smallest `prepare`, but a
+  post-push `check:ts`-class failure (a lockfile resolution no prior CI exercised)
+  is only caught after the tag lands, and recovery is fix-forward to the next
+  patch version (Task 4), never a re-cut of the same version
+  (`scripts/release.ts:250-252`).
+- **Recommendation:** keep `check:ts` pre-push. It is the cheap half, needs no
+  native toolchain, and is the only validation of the freshly regenerated
+  lockfile before the irreversible push; dropping it trades a few CI minutes for a
+  tagged-broken-`main` + burned-version risk on exactly the input `prepare`
+  itself just changed.
