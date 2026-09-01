@@ -5194,6 +5194,26 @@ export class AgentSession {
 				this.#drainStrandedQueuedMessages();
 				return { ok: false, reason: "busy" };
 			}
+			// Another teardown may have won the race: an ordinary host shutdown that
+			// called dispose() (WITHOUT preserveSessionFile) after this restart
+			// latched #restarting but before it reaches the join below already owns
+			// #disposeCall. dispose() coalesces on that promise, so the call below
+			// would merely JOIN the host's disposal rather than run restart's own:
+			// preserveSessionFile:true would be ignored (the host's #doDispose runs
+			// empty-move cleanup and deletes the captured sessionFile), yet this path
+			// would still resetCapabilities() and fire onRestartRequested(), so a
+			// compliant host would recreate the session over a now-deleted file
+			// during shutdown. When a non-restart disposal already owns #disposeCall,
+			// stop the restart: do not dispose or fire the callback. The restart path
+			// has not called dispose() yet, so any existing #disposeCall is external.
+			// Unlatch and clear the coalesce cache (recoverable refusal); the session
+			// is already being torn down, so the queued/IRC drain the other refusal
+			// branches run is moot.
+			if (this.#disposeCall) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				return { ok: false, reason: "busy" };
+			}
 			// Dispose BEFORE the callback: create-before-dispose is unsafe in-process
 			// (AsyncJobManager singleton + lock-free append writer). dispose() is
 			// idempotent. preserveSessionFile suppresses empty-move cleanup so the
@@ -6031,6 +6051,21 @@ export class AgentSession {
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
 		const typedText = text;
+
+		// The manualCompactionCleanup await above is a real yield point: a
+		// concurrent SDK restart can latch #restarting and dispose the session
+		// while it parks here. The slash-command handlers below
+		// (#tryExecuteExtensionCommand / #tryExecuteCustomCommand) run locally and
+		// return WITHOUT reaching #promptWithMessage's shared latch recheck or
+		// #beginInFlight, so an async handler would keep using the disposed
+		// extension/session runtime past the durability barrier. Re-check the latch
+		// (and disposal) here, mirroring the top-of-prompt() guard exactly: hand a
+		// non-synthetic user prompt back through the drop hook with the original
+		// typed text, then no-op signal (return false) rather than throw.
+		if (this.#restarting || this.#isDisposed) {
+			if (!options?.synthetic) this.#promptDropped?.({ text: typedText, images: options?.images });
+			return false;
+		}
 
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {

@@ -14,6 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -359,5 +360,86 @@ describe("AgentSession restart-latch prompt contract", () => {
 
 		expect(mock.calls.length).toBe(1);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("drops a slash-command prompt whose restart latches during the manual-compaction-cleanup await, before the handler runs", async () => {
+		// prompt() awaits #maintenance.manualCompactionCleanup (a real yield point)
+		// BEFORE the local slash-command handlers. A concurrent SDK restart can
+		// latch #restarting during that await; the extension/custom handlers run
+		// locally and return WITHOUT reaching #promptWithMessage's shared recheck or
+		// #beginInFlight, so an async handler would keep using the disposed
+		// extension/session runtime past the durability barrier. The post-await
+		// recheck must observe the latch, hand the typed text back through the drop
+		// hook, and return false — the command handler must never run.
+		const execSpy = vi.fn(() => "do the thing");
+		const command: LoadedCustomCommand = {
+			path: "runme.ts",
+			resolvedPath: "runme.ts",
+			source: "project",
+			command: {
+				name: "runme",
+				description: "a local custom command",
+				execute: execSpy,
+			},
+		};
+		await buildSession({ customCommands: [command] });
+		const dropped: DroppedPrompt[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt));
+
+		// requestRestart() latches #restarting synchronously (before its first
+		// await), so ordering alone opens the window deterministically: prompt()'s
+		// only await before the slash handlers is
+		// `await this.#maintenance.manualCompactionCleanup` (undefined here, so it
+		// yields one microtask). Starting the prompt schedules that continuation;
+		// latching the restart on the SAME synchronous tick sets #restarting before
+		// the continuation runs. When prompt() resumes, the post-await recheck must
+		// see the latch and bail before the command handler.
+		const forwarded = session.prompt("/runme");
+		void session.requestRestart();
+
+		expect(await forwarded).toBe(false);
+		// The command handler never ran — the recheck closed the window before it.
+		expect(execSpy).not.toHaveBeenCalled();
+		// The typed text is handed back for restore/resubmit across the recycle.
+		expect(dropped).toEqual([{ text: "/runme", images: undefined }]);
+	});
+
+	it("cancels the restart when a non-restart teardown already owns disposal, without recreating the session", async () => {
+		// dispose() coalesces via #disposeCall. If an ordinary host shutdown calls
+		// dispose() (WITHOUT preserveSessionFile) after the restart latched
+		// #restarting but before the restart reaches its own dispose, that host
+		// disposal already owns #disposeCall. The restart's dispose would merely
+		// JOIN it — preserveSessionFile ignored — yet the restart would still
+		// resetCapabilities() and fire onRestartRequested(), so a compliant host
+		// recreates the session during shutdown. The guard must detect the
+		// already-owned disposal and refuse recoverably (busy) WITHOUT firing the
+		// restart callback.
+		const onRestart = vi.fn();
+		await buildSession({ onRestartRequested: onRestart });
+		// Materialize the captured file on disk so the recreation-cancellation is
+		// observable against a real reattach target.
+		await session.sessionManager.ensureOnDisk();
+		const capturedFile = session.sessionFile;
+		if (!capturedFile) throw new Error("Expected a persisted session file");
+
+		// Latch the restart; it parks at the gated durability flush, BEFORE the
+		// point where it would join disposal.
+		const restart = session.requestRestart();
+		await flushReached;
+
+		// An ordinary host shutdown wins the disposal race: dispose() (no
+		// preserveSessionFile) synchronously claims #disposeCall. Drive it to
+		// completion so #disposeCall is a settled, non-restart-owned disposal.
+		await session.dispose();
+
+		// Release the restart's flush gate: it resumes and reaches the guard, which
+		// sees the already-owned disposal and refuses.
+		releaseFlush?.();
+
+		expect(await restart).toEqual({ ok: false, reason: "busy" });
+		// The restart did NOT recreate the session over the shutting-down host.
+		expect(onRestart).not.toHaveBeenCalled();
+		// The captured reattach file survives the host's normal disposal.
+		expect(fs.existsSync(capturedFile)).toBe(true);
 	});
 });
