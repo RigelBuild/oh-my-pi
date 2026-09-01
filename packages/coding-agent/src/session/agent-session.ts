@@ -340,6 +340,7 @@ import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
+	type CompactionCheckResult,
 	createCodexCompactionContext as createMaintenanceCodexCompactionContext,
 	SessionMaintenance,
 	type SessionMaintenanceHost,
@@ -3198,7 +3199,7 @@ export class AgentSession {
 							? "successful-yield-active-goal-checkCompaction"
 							: "post-yield-trailing-stop-active-goal-checkCompaction",
 					);
-					const compactionTask = this.#maintenance.checkCompaction(successfulYieldMessage);
+					const compactionTask = this.#checkCompactionUnlessRequested(successfulYieldMessage);
 					this.#trackPostPromptTask(compactionTask);
 					await compactionTask;
 				} else if (successfulYieldMessage) {
@@ -3248,7 +3249,7 @@ export class AgentSession {
 					}
 				}
 				maintenanceRoute("active-goal-pre-empt-checkCompaction");
-				const compactionTask = this.#maintenance.checkCompaction(msg);
+				const compactionTask = this.#checkCompactionUnlessRequested(msg);
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
 				checkedCompaction = true;
@@ -3360,7 +3361,7 @@ export class AgentSession {
 
 			if (!checkedCompaction) {
 				maintenanceRoute("bottom-checkCompaction");
-				const compactionTask = this.#maintenance.checkCompaction(msg);
+				const compactionTask = this.#checkCompactionUnlessRequested(msg);
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
 			}
@@ -3445,6 +3446,25 @@ export class AgentSession {
 					this.#resolvePostPromptTasks();
 				}
 			});
+	}
+
+	/**
+	 * Run the automatic threshold/overflow compaction check UNLESS the settling
+	 * turn also armed a model-requested `compact(instructions)` pass. When the
+	 * final turn is already above the automatic threshold, the tracked
+	 * `agent_end` handler would run `checkCompaction()` and complete its ordinary
+	 * summary rewrite BEFORE the deferred requested pass runs; the requested pass
+	 * then sees the fresh compaction entry and exits as "Already compacted",
+	 * silently discarding the tool's explicit focus instructions. The requested
+	 * pass is scheduled from `onTurnEnd` (which runs before this `agent_end`
+	 * handler) onto `#requestedCompaction`, so its presence here means a directed
+	 * pass owns the rewrite — cede the automatic route to it. The requested pass
+	 * sheds the same context (and honors the focus), so skipping the automatic
+	 * one loses no headroom.
+	 */
+	#checkCompactionUnlessRequested(assistantMessage: AssistantMessage): Promise<CompactionCheckResult> {
+		if (this.#requestedCompaction) return Promise.resolve(COMPACTION_CHECK_NONE);
+		return this.#maintenance.checkCompaction(assistantMessage);
 	}
 
 	#schedulePostPromptTask(

@@ -9,7 +9,10 @@ function createToolSession(overrides: Partial<ToolSession> = {}): ToolSession {
 		hasUI: true,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated(),
+		// Default the opt-in gate on so the top-level/subagent/advisor dimension
+		// tests below exercise that logic rather than the default-off gate; the
+		// gate itself has its own describe block.
+		settings: Settings.isolated({ "compact.enabled": true }),
 		...overrides,
 	};
 }
@@ -36,6 +39,51 @@ describe("compact tool factory (BUILTIN_TOOLS.compact / CompactTool.createIf)", 
 		// and must not receive the compact tool despite its zero depth.
 		expect(CompactTool.createIf(createToolSession({ parentTaskPrefix: "clone", taskDepth: 0 }))).toBeNull();
 		expect(CompactTool.createIf(createToolSession({ parentTaskPrefix: "clone" }))).toBeNull();
+	});
+
+	it("returns null for an advisor tool session (spread from top-level, getAgentId 'advisor')", () => {
+		// The advisor tool session is built by spreading the primary top-level
+		// session, so it inherits taskDepth 0 and no parentTaskPrefix — both the
+		// depth and prefix checks pass. But it runs its own Agent and never runs
+		// the primary's turn-settle marker consumer, so a compact tool there is
+		// inert: it returns "scheduled" while no compaction ever runs. Its
+		// getAgentId === "advisor" is the SDK's own primary/advisor discriminator.
+		const advisorSession = createToolSession({ taskDepth: 0, getAgentId: () => "advisor" });
+		expect(CompactTool.createIf(advisorSession)).toBeNull();
+		// Also with taskDepth left undefined (the plain spread of a top-level session).
+		expect(CompactTool.createIf(createToolSession({ getAgentId: () => "advisor" }))).toBeNull();
+	});
+
+	it("still returns a tool for a top-level session with a non-advisor agent id", () => {
+		// The exclusion must be advisor-specific: a genuine top-level primary
+		// carries getAgentId (e.g. "Main") and must keep the compact tool.
+		expect(CompactTool.createIf(createToolSession({ taskDepth: 0, getAgentId: () => "Main" }))).not.toBeNull();
+	});
+});
+
+describe("compact tool default-off gate (compact.enabled)", () => {
+	it("returns null for a top-level session when compact.enabled is unset (default off)", () => {
+		// The tool ships opt-in: an isolated session with no override must not get
+		// it even though the session is a genuine top-level primary.
+		const session = createToolSession({ settings: Settings.isolated() });
+		expect(CompactTool.createIf(session)).toBeNull();
+	});
+
+	it("returns null for a top-level session when compact.enabled is explicitly false", () => {
+		const session = createToolSession({ settings: Settings.isolated({ "compact.enabled": false }) });
+		expect(CompactTool.createIf(session)).toBeNull();
+	});
+
+	it("returns a tool for a top-level session when compact.enabled is true", () => {
+		const session = createToolSession({ settings: Settings.isolated({ "compact.enabled": true }) });
+		expect(CompactTool.createIf(session)).not.toBeNull();
+	});
+
+	it("keeps excluding a subagent even when compact.enabled is true", () => {
+		// The opt-in gate does not override the top-level guard: a subagent with
+		// the tool explicitly enabled must still be refused.
+		const session = createToolSession({ settings: Settings.isolated({ "compact.enabled": true }), taskDepth: 1 });
+		expect(CompactTool.createIf(session)).toBeNull();
 	});
 });
 

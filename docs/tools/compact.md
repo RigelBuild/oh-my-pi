@@ -13,8 +13,8 @@
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "essential"`. Execution is single-shot; the tool does not stream progress updates.
-- Registration is unconditional for a top-level session; there is no feature flag.
-- `CompactTool.createIf()` returns the tool only for a top-level session (`taskDepth` undefined or `0`). Subagents receive `null`: a subagent hands its result back to its parent and is discarded, so there is no long-lived context worth compacting, and compaction would rewrite the transcript the parent collects.
+- Registration is opt-in: the tool ships default-off behind the `compact.enabled` setting (tab "tools", group "Available Tools"). `isToolAllowed("compact")` gates on it, and `CompactTool.createIf()` refuses when it is unset or false.
+- With the setting enabled, `CompactTool.createIf()` returns the tool only for a genuine top-level session: `taskDepth` undefined or `0`, no `parentTaskPrefix`, and `getAgentId()` not `"advisor"`. Subagents receive `null` (a subagent hands its result back to its parent and is discarded, so there is no long-lived context worth compacting). An advisor tool session is also refused: it is spread from the primary top-level session so it inherits `taskDepth 0` and no `parentTaskPrefix`, but it runs its own Agent and never runs the primary's turn-settle marker consumer, so a compact tool there would be inert.
 
 ## Inputs
 
@@ -54,7 +54,7 @@ The returned result only *signals* intent. The session runs the actual compactio
   - The compaction is deferred to run after the run unwinds. `compact()` aborts the (already-ending) active operation first, which is why it cannot run inline from `execute()`.
 
 ## Limits & Caps
-- Top-level sessions only; subagents never receive the tool.
+- Opt-in via `compact.enabled` (default off). Top-level sessions only; subagents and advisor sessions never receive the tool.
 - Compaction is driven by the shared `compaction` settings (method order, reserve). A directed compaction (focus instructions) requires an LLM summary method rather than the local snapcompact path.
 
 ## Errors

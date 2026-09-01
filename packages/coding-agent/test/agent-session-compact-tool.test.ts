@@ -3,7 +3,10 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -700,5 +703,147 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		expect(order).toContain("compact:done");
 		expect(order).toContain("agent_end");
 		expect(order.indexOf("agent_end")).toBeGreaterThan(order.indexOf("compact:done"));
+	}, 15_000);
+});
+
+// A high-usage stat block: `input` above `compaction.thresholdTokens` makes the
+// settling turn trip the automatic threshold pass, which is exactly the pass
+// that must NOT pre-empt a pending requested compaction.
+function highUsage(input: number) {
+	return {
+		input,
+		output: 100,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: input + 100,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+describe("AgentSession requested compaction owns the rewrite over automatic threshold maintenance (P1)", () => {
+	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
+
+	// Bundled model + real key: unlike the mock provider, an anthropic model is in
+	// `getAvailable()`, so the automatic threshold pass can resolve a candidate and
+	// actually commit a compaction entry — the state that makes a later requested
+	// pass see "Already compacted" pre-fix.
+	async function createThresholdHarness(instructions: string): Promise<AgentSession> {
+		const tempDir = TempDir.createSync("@pi-compact-tool-threshold-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };
+
+		const settings = Settings.isolated({
+			// Auto-compaction ON with a tiny threshold: the settling turn's high
+			// usage trips the automatic pass, reproducing the race.
+			"compaction.enabled": true,
+			"compaction.methodOrder": ["soft"],
+			"compaction.thresholdTokens": 1000,
+			"compaction.thresholdPercent": -1,
+			// Keep the speculation grace band from deferring the blocking pass, and
+			// keep an auto-continuation turn from adding scripted responses.
+			"compaction.asyncEnabled": false,
+			"compaction.autoContinue": false,
+			"contextPromotion.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		// Real CompactTool so its result carries the `requested: true` marker the
+		// onTurnEnd wiring scans for and the focus instructions ride along.
+		const compactTool = new CompactTool(topLevelToolSession()) as AgentTool;
+		const tools: AgentTool[] = [compactTool];
+
+		let call = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
+			convertToLlm,
+			streamFn: () => {
+				const index = call++;
+				const stream = new AssistantMessageEventStream();
+				// Turn 0: call `compact` with focus instructions (mid-loop). Turn 1:
+				// a plain text stop whose high usage trips the automatic threshold at
+				// the settle — the boundary where the requested pass is scheduled.
+				const message =
+					index === 0
+						? {
+								role: "assistant" as const,
+								content: [
+									{
+										type: "toolCall" as const,
+										id: "call_compact",
+										name: "compact",
+										arguments: { instructions },
+									},
+								],
+								api: "anthropic-messages" as const,
+								provider: "anthropic" as const,
+								model: model.id,
+								usage: highUsage(50_000),
+								stopReason: "toolUse" as const,
+								timestamp: Date.now(),
+							}
+						: {
+								role: "assistant" as const,
+								content: [{ type: "text" as const, text: "All done." }],
+								api: "anthropic-messages" as const,
+								provider: "anthropic" as const,
+								model: model.id,
+								usage: highUsage(50_000),
+								stopReason: "stop" as const,
+								timestamp: Date.now(),
+							};
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: message.stopReason, message });
+				});
+				return stream;
+			},
+		});
+
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+		});
+		activeHarnesses.push({ session, authStorage, tempDir });
+		return session;
+	}
+
+	// Stub only the pure LLM summarizer so no network runs; it still commits a real
+	// compaction entry and records the customInstructions each pass passed. Its 4th
+	// argument is the customInstructions.
+	function stubSummarizer(): void {
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+	}
+
+	it("applies the requested focus instructions instead of exiting 'Already compacted'", async () => {
+		const instructions = "keep the failing test";
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+		stubSummarizer();
+		const session = await createThresholdHarness(instructions);
+
+		await session.prompt("do the thing then compact with focus");
+		await session.waitForIdle();
+
+		// Pre-fix the automatic threshold pass commits first with `undefined`, so
+		// the requested pass throws "Already compacted" before it can reach the
+		// summarizer — no call ever carries the focus. Post-fix the automatic route
+		// cedes to the pending requested pass, which owns the rewrite and carries it.
+		const focusInstructions = compactSpy.mock.calls.map(args => args[3]);
+		expect(focusInstructions).toContain(instructions);
 	}, 15_000);
 });

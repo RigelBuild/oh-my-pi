@@ -27,8 +27,17 @@ export interface CompactToolDetails {
  * subagent that carries `parentTaskPrefix` while leaving `taskDepth` at 0, so
  * this mirrors the SDK's `agentKind === "main"` — a session is top-level only
  * when it has no parent-task identity AND zero depth.
+ *
+ * An advisor tool session is a third disqualifying case the depth/prefix checks
+ * alone miss: it is built by spreading the primary top-level session, so it
+ * inherits `taskDepth: 0` and no `parentTaskPrefix`. But it runs its own Agent
+ * (`getAgentId: () => "advisor"`) and never runs the primary session's
+ * turn-settle marker consumer, so a compact tool there returns "scheduled"
+ * while no compaction ever runs. Reuse the SDK's own primary/advisor
+ * discriminator — the advisor session's `getAgentId` — to reject it.
  */
 function isTopLevelSession(session: ToolSession): boolean {
+	if (session.getAgentId?.() === "advisor") return false;
 	if (session.parentTaskPrefix) return false;
 	const depth = session.taskDepth;
 	return depth === undefined || depth === 0;
@@ -60,6 +69,8 @@ export class CompactTool implements AgentTool<typeof compactSchema, CompactToolD
 	}
 
 	static createIf(session: ToolSession): CompactTool | null {
+		// Opt-in: the self-compact tool ships default-off, gated on `compact.enabled`.
+		if (!session.settings.get("compact.enabled")) return null;
 		// Subagents hand their result back to the parent and are discarded; there
 		// is no long-lived context worth compacting, and compaction would rewrite
 		// the transcript the parent collects. Top-level sessions only.
