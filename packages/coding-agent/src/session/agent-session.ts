@@ -866,6 +866,21 @@ export class AgentSession {
 		// after #reconnectToAgent (see compact()'s finally); an explicit prompt flushes it
 		// in every case.
 		if (this.#unsubscribeAgent === undefined) return;
+		// Drop a `compact` request armed on the interrupted turn before resuming a
+		// queued message. A `compact` result captured on a continuing tool turn
+		// arms `#pendingCompactionRequest` but does NOT schedule it — only a
+		// `willContinue === false` settle does (see the onTurnEnd hook). When the
+		// next inference is externally aborted or errors, that clean settle never
+		// runs, so the marker survives. The queued-message resume below reaches
+		// `agent.continue()` WITHOUT the new-prompt `#resetPromptMaintenanceState`,
+		// so a surviving stale marker would then fire at the resumed turn's clean
+		// settle — scheduling the compaction the interrupt should have cancelled.
+		// Any request still pending at a settle drain was never scheduled (its
+		// settle was skipped), so it is always stale; a request legitimately armed
+		// by the resumed turn is captured later, from inside that turn. Clears only
+		// the one-shot marker — an already-scheduled `#requestedCompaction` (and
+		// other maintenance state) is left untouched.
+		this.#pendingCompactionRequest = undefined;
 		// A concern steered into a resumed streaming run after a user interrupt can
 		// strand at the turn tail (steered past the loop's final boundary poll). While
 		// that interrupt's suppression is still in effect, reclaim such advisor steers

@@ -4,7 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -82,7 +82,7 @@ afterEach(async () => {
 });
 
 async function createHarness(
-	responses: MockResponse[],
+	responses: MockHandler[],
 	options: {
 		includeCompactTool?: boolean;
 		extensionRunner?: ExtensionRunner;
@@ -852,6 +852,64 @@ describe("AgentSession cancels a deferred compaction when the session is aborted
 		// The abort invalidated the deferred request: no compaction LLM call fired
 		// and history was not rewritten. RED (revert the captured-generation
 		// check): the deferred run applies anyway and `compact()` is called once.
+		expect(compactSpy).not.toHaveBeenCalled();
+	}, 15_000);
+});
+
+describe("AgentSession clears a stale compact marker before a queued resume", () => {
+	it("does NOT fire a compact armed on the interrupted turn at the settle of a resumed queued turn (P2)", async () => {
+		// A `compact` result is captured on a CONTINUING tool turn (willContinue
+		// true), which arms `#pendingCompactionRequest` but does NOT schedule it —
+		// only a `willContinue === false` settle does. The NEXT inference then
+		// errors while a user steer is queued, so agent-core skips `onTurnEnd` and
+		// the clean settle that would have scheduled the compaction never runs; the
+		// marker survives. The post-settle stranded-message drain resumes the queued
+		// steer through `agent.continue()` — a path that, unlike a fresh prompt, does
+		// NOT run `#resetPromptMaintenanceState`. Pre-fix the stale marker rode into
+		// the resumed turn and fired at ITS clean settle, scheduling the compaction
+		// the interrupt should have cancelled. Clearing the marker in the drain,
+		// before the resume, closes that leak.
+		const harnessRef: { session?: AgentSession } = {};
+		const { session, mock } = await createHarness([
+			// Turn 1: request compaction + a noop, so the turn continues
+			// (willContinue true) and the marker is armed but never scheduled.
+			{
+				content: [
+					{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} },
+					{ type: "toolCall", id: "call_noop", name: "noop", arguments: {} },
+				],
+				stopReason: "toolUse",
+			},
+			// Turn 2: a user steer lands mid-inference, then the inference errors —
+			// the settle that would have scheduled the compaction is skipped.
+			async () => {
+				harnessRef.session?.agent.steer({
+					role: "user",
+					content: [{ type: "text", text: "resume after the interrupt" }],
+					steering: true,
+					attribution: "user",
+					timestamp: Date.now(),
+				});
+				return { throw: "provider exploded after compact" };
+			},
+			// Turn 3: the drain resumes the queued steer; this turn settles cleanly.
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+		harnessRef.session = session;
+
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue(fakeCompaction());
+
+		await session.prompt("compact mid-loop, then the model errors with a steer queued");
+		await session.waitForIdle();
+
+		// The queued steer resumed and its turn settled: three model calls (turn 1,
+		// the errored turn 2, the resumed turn 3). This proves the clean settle that
+		// pre-fix consumed the stale marker actually ran.
+		expect(mock.calls).toHaveLength(3);
+		// Never fired: the stale request armed on the interrupted turn was cleared
+		// before the resume, so the resumed turn's clean settle found nothing to
+		// apply. RED (revert the marker-clear in #drainStrandedQueuedMessages): the
+		// stale compaction fires at the resumed settle → compact called once.
 		expect(compactSpy).not.toHaveBeenCalled();
 	}, 15_000);
 });
