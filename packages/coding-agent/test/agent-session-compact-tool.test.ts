@@ -12,7 +12,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { CompactTool } from "@oh-my-pi/pi-coding-agent/tools/compact";
@@ -703,6 +703,156 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		expect(order).toContain("compact:done");
 		expect(order).toContain("agent_end");
 		expect(order.indexOf("agent_end")).toBeGreaterThan(order.indexOf("compact:done"));
+	}, 15_000);
+});
+
+describe("AgentSession merges every compact request captured before the settle", () => {
+	it("folds parallel compact calls in one batch into a single pending request (P2)", async () => {
+		// A single tool batch carries TWO `compact` calls with distinct focus.
+		// The old `.find()` retained only the first result, so the second call's
+		// focus was silently discarded even though it reported success. The
+		// merge-all folds both into the pending marker, and the settle passes the
+		// combined focus to `compact()`.
+		const { session } = await createHarness([
+			{
+				content: [
+					{
+						type: "toolCall",
+						id: "call_compact_a",
+						name: "compact",
+						arguments: { instructions: "keep the migration plan" },
+					},
+					{
+						type: "toolCall",
+						id: "call_compact_b",
+						name: "compact",
+						arguments: { instructions: "also keep the rollback steps" },
+					},
+				],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue(fakeCompaction());
+
+		await session.prompt("compact twice in one batch with different focus");
+		await session.waitForIdle();
+
+		// Exactly one rewrite, carrying BOTH foci. RED (revert merge-all to
+		// `.find()`): only the first call's focus survives, so the second focus
+		// assertion fails with the compact arg equal to just "keep the migration
+		// plan".
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const focus = compactSpy.mock.calls[0]?.[0];
+		expect(focus).toContain("keep the migration plan");
+		expect(focus).toContain("also keep the rollback steps");
+	}, 15_000);
+
+	it("folds compact calls across separate willContinue turns into one pending request (P2)", async () => {
+		// Two `compact` calls in DIFFERENT tool-loop turns before the genuine
+		// settle. Pre-fix each settle-boundary marker assignment overwrote the
+		// focus captured from the earlier turn; merging combines both.
+		const { session } = await createHarness([
+			{
+				content: [
+					{
+						type: "toolCall",
+						id: "call_compact_1",
+						name: "compact",
+						arguments: { instructions: "keep the failing repro" },
+					},
+					{ type: "toolCall", id: "call_noop_1", name: "noop", arguments: {} },
+				],
+				stopReason: "toolUse",
+			},
+			{
+				content: [
+					{
+						type: "toolCall",
+						id: "call_compact_2",
+						name: "compact",
+						arguments: { instructions: "and the stack trace" },
+					},
+					{ type: "toolCall", id: "call_noop_2", name: "noop", arguments: {} },
+				],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue(fakeCompaction());
+
+		await session.prompt("compact across two turns with different focus");
+		await session.waitForIdle();
+
+		// One rewrite carrying focus from both turns. RED (revert merge-all to
+		// `.find()`): the second turn's assignment replaces the first turn's focus,
+		// so only "and the stack trace" survives.
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const focus = compactSpy.mock.calls[0]?.[0];
+		expect(focus).toContain("keep the failing repro");
+		expect(focus).toContain("and the stack trace");
+	}, 15_000);
+});
+
+describe("AgentSession cancels a deferred compaction when the session is aborted", () => {
+	it("does not fire the requested compaction when an abort bumps the generation before it applies (P2)", async () => {
+		// The compact request is scheduled at settle, but its detached run parks
+		// awaiting the post-prompt tasks (a hanging session_stop pass). An abort
+		// while it is parked bumps `#promptGeneration` — the ONLY cancellation
+		// signal available, since no compaction controller exists yet. The
+		// captured-generation check must observe the bump and bail without ever
+		// calling `compact()` (no LLM summary, no history rewrite).
+		const stopReached = Promise.withResolvers<void>();
+		const stopGate = Promise.withResolvers<undefined>();
+		let sessionStopCalls = 0;
+		const extensionRunner = {
+			emit: async () => undefined,
+			emitBeforeAgentStart: async () => undefined,
+			hasHandlers: (eventType: string) => eventType === "session_stop",
+			// The first (and only) settle parks here so the deferred compaction is
+			// caught mid-wait; resolve the gate from the test only after the abort
+			// has bumped the generation.
+			emitSessionStop: async () => {
+				sessionStopCalls++;
+				stopReached.resolve();
+				return stopGate.promise;
+			},
+		} as unknown as ExtensionRunner;
+
+		const { session } = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			{ extensionRunner },
+		);
+
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue(fakeCompaction());
+
+		const promptPromise = session.prompt("do the thing then compact");
+		// The settle scheduled the deferred compaction; it is now parked awaiting
+		// the hanging session_stop post-prompt task.
+		await stopReached.promise;
+		// Abort bumps `#promptGeneration` synchronously before its first await.
+		const abortPromise = session.abort({ reason: USER_INTERRUPT_LABEL });
+		// Let the session_stop pass return so the post-prompt tasks drain and the
+		// parked deferred run resumes — into the generation check.
+		stopGate.resolve(undefined);
+
+		await abortPromise;
+		await promptPromise;
+		await session.waitForIdle();
+
+		expect(sessionStopCalls).toBe(1);
+		// The abort invalidated the deferred request: no compaction LLM call fired
+		// and history was not rewritten. RED (revert the captured-generation
+		// check): the deferred run applies anyway and `compact()` is called once.
+		expect(compactSpy).not.toHaveBeenCalled();
 	}, 15_000);
 });
 

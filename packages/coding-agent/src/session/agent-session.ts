@@ -1390,16 +1390,28 @@ export class AgentSession {
 			// non-error result under that name. Requiring `details.requested === true`
 			// (the marker the native tool sets) means only a genuine request from the
 			// native tool authorizes a real context rewrite.
-			const compactResult = context?.toolResults.find(
+			// Merge EVERY matching compact result this turn, not just the first. A
+			// single tool batch can carry parallel `compact` calls, and successive
+			// `willContinue` turns each land here — retaining only one result (the
+			// old `.find()`) silently dropped the focus/preservation instructions
+			// the other calls requested even though each reported success. Fold all
+			// of their instructions together with the same `mergeCompactionInstructions`
+			// helper the deferred-pass coalescing uses, and combine with any focus
+			// already armed on the pending marker from an earlier turn.
+			const compactResults = context?.toolResults.filter(
 				result =>
 					result.toolName === "compact" &&
 					!result.isError &&
 					isRecord(result.details) &&
 					result.details.requested === true,
 			);
-			if (compactResult) {
-				const details = compactResult.details;
-				const instructions = details ? stringProperty(details, "instructions")?.trim() || undefined : undefined;
+			if (compactResults && compactResults.length > 0) {
+				let instructions = this.#pendingCompactionRequest?.instructions;
+				for (const result of compactResults) {
+					const details = result.details;
+					const focus = details ? stringProperty(details, "instructions")?.trim() || undefined : undefined;
+					instructions = mergeCompactionInstructions(instructions, focus);
+				}
 				this.#pendingCompactionRequest = { instructions };
 			}
 			// Apply it only at the genuine settle (`willContinue === false`) — never
@@ -7876,6 +7888,14 @@ export class AgentSession {
 			}
 			return;
 		}
+		// Capture the prompt generation now. An abort (Esc/RPC) that lands after
+		// this request is scheduled but before the detached run applies it cannot
+		// cancel the run directly — no compaction controller exists yet, so
+		// `abort()` only bumps `#promptGeneration`. Re-check the captured generation
+		// against the current one below and bail if it advanced, mirroring the
+		// generation guards other post-prompt closures use. Without this, an abort
+		// still triggers the summary LLM call and rewrites session history.
+		const scheduledGeneration = this.#promptGeneration;
 		// Live holder the detached run reads at apply time (not schedule time), so
 		// a later coalesced request that updated `instructions` above is honored.
 		const activeRequest: { instructions?: string } = { instructions: request.instructions };
@@ -7897,6 +7917,11 @@ export class AgentSession {
 			// before the abort fires.
 			if (this.#postPromptTasksPromise) await this.#postPromptTasksPromise;
 			if (this.#isDisposed) return;
+			// An abort bumped the generation while this run was parked/waiting: the
+			// user cancelled after the request was scheduled but before it applied.
+			// Honor that cancellation — do not fire the summary LLM call or rewrite
+			// history for a superseded prompt.
+			if (this.#promptGeneration !== scheduledGeneration) return;
 			// Read from the live holder, not the schedule-time capture: a later
 			// coalesced request may have merged newer focus into it since.
 			await this.#applyRequestedCompaction(activeRequest.instructions);
