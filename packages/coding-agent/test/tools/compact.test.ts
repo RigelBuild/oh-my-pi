@@ -29,6 +29,14 @@ describe("compact tool factory (BUILTIN_TOOLS.compact / CompactTool.createIf)", 
 		expect(CompactTool.createIf(createToolSession({ taskDepth: 1 }))).toBeNull();
 		expect(CompactTool.createIf(createToolSession({ taskDepth: 3 }))).toBeNull();
 	});
+
+	it("returns null for a subagent identity session (parentTaskPrefix set, taskDepth 0)", () => {
+		// A `/tan` background clone copies the parent's tools and sets
+		// parentTaskPrefix but leaves taskDepth at 0. It is a disposable subagent
+		// and must not receive the compact tool despite its zero depth.
+		expect(CompactTool.createIf(createToolSession({ parentTaskPrefix: "clone", taskDepth: 0 }))).toBeNull();
+		expect(CompactTool.createIf(createToolSession({ parentTaskPrefix: "clone" }))).toBeNull();
+	});
 });
 
 describe("compact tool metadata", () => {

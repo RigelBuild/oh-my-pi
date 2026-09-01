@@ -254,6 +254,14 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/**
+	 * Set when this session is a spawned subagent (the parent task's id prefix),
+	 * mirroring the SDK's `agentKind` classification. A `/tan` background clone
+	 * copies the parent's tools and sets this while leaving {@link taskDepth} at
+	 * 0, so identity — not depth alone — distinguishes a disposable subagent from
+	 * a genuine top-level session.
+	 */
+	parentTaskPrefix?: string;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */

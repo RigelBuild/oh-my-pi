@@ -21,8 +21,15 @@ export interface CompactToolDetails {
 	meta?: OutputMeta;
 }
 
-/** Compaction restructures the whole session, so it only runs for a top-level agent. */
+/**
+ * Compaction restructures the whole session, so it only runs for a genuine
+ * top-level agent. Depth alone is not enough: a `/tan` background clone is a
+ * subagent that carries `parentTaskPrefix` while leaving `taskDepth` at 0, so
+ * this mirrors the SDK's `agentKind === "main"` — a session is top-level only
+ * when it has no parent-task identity AND zero depth.
+ */
 function isTopLevelSession(session: ToolSession): boolean {
+	if (session.parentTaskPrefix) return false;
 	const depth = session.taskDepth;
 	return depth === undefined || depth === 0;
 }
