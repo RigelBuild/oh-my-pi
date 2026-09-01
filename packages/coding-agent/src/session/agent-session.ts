@@ -7392,6 +7392,14 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		// A cooperative restart latched between its post-idle wait and dispose
+		// captured the current session file up front; a session transition running
+		// in that window would swap the file out from under it, so #doRequestRestart
+		// would later pair the transitioned session's id with the pre-transition
+		// file and the host would reopen the wrong conversation. Refuse the
+		// transition (clean recoverable no-op) until the latch releases, mirroring
+		// the restart-refusal style used elsewhere.
+		if (this.#restarting) return false;
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -8486,6 +8494,12 @@ export class AgentSession {
 			preserveLocalCwd?: boolean;
 		},
 	): Promise<boolean> {
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, so swapping the file here
+		// would let #doRequestRestart pair the switched session's id with the old
+		// file and reopen the wrong conversation. Clean recoverable no-op until the
+		// latch releases.
+		if (this.#restarting) return false;
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -8839,6 +8853,14 @@ export class AgentSession {
 
 		const selectedText = this.#extractUserMessageText(selectedEntry.message.content);
 		const selectedImages = this.#extractUserMessageImages(selectedEntry.message.content);
+
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, and branch() swaps in a
+		// new session file, so proceeding would let #doRequestRestart pair the
+		// branched session's id with the old file and reopen the wrong
+		// conversation. Report cancelled (clean recoverable no-op) until the latch
+		// releases.
+		if (this.#restarting) return { selectedText, selectedImages, cancelled: true };
 
 		let skipConversationRestore = false;
 

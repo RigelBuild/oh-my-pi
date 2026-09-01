@@ -176,4 +176,44 @@ describe("AgentSession restart-latch prompt contract", () => {
 
 		expect(started).toBe(false);
 	});
+
+	it("refuses newSession while a restart is latched so the transition cannot swap the captured file", async () => {
+		await buildSession();
+		const capturedFile = session.sessionFile;
+		void session.requestRestart();
+
+		const started = await session.newSession();
+
+		expect(started).toBe(false);
+		// The session file the restart captured is untouched: no transition ran,
+		// so #doRequestRestart cannot pair a new id with the old file.
+		expect(session.sessionFile).toBe(capturedFile);
+	});
+
+	it("refuses switchSession while a restart is latched", async () => {
+		await buildSession();
+		const capturedFile = session.sessionFile;
+		void session.requestRestart();
+
+		const switched = await session.switchSession(tempDir.join("other-session.jsonl"));
+
+		expect(switched).toBe(false);
+		expect(session.sessionFile).toBe(capturedFile);
+	});
+
+	it("reports branch as cancelled while a restart is latched", async () => {
+		await buildSession();
+		// A persisted user entry gives branch() a valid target so the latch guard,
+		// not target validation, is what makes it a no-op.
+		session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+		const userEntry = session.sessionManager
+			.getBranch()
+			.find(entry => entry.type === "message" && entry.message.role === "user");
+		if (!userEntry) throw new Error("Expected a persisted user entry");
+		void session.requestRestart();
+
+		const result = await session.branch(userEntry.id);
+
+		expect(result.cancelled).toBe(true);
+	});
 });

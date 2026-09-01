@@ -113,7 +113,7 @@ export type RpcSessionChangeResult =
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
-export type RpcSkillCommandResult = { agentInvoked: true };
+export type RpcSkillCommandResult = { agentInvoked: boolean };
 
 export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
@@ -126,7 +126,12 @@ export async function tryRunRpcSkillCommand(
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return false;
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
-	await session.promptCustomMessage(
+	// Propagate the dispatch outcome. A `false` here means the turn never
+	// started (restart latched, disposal, or a usage-preflight denial): the
+	// custom message was dropped before reaching the agent, so no `agent_end`
+	// will follow. Reporting an unconditional `agentInvoked: true` would leave
+	// the RPC host waiting for that dead event.
+	const agentInvoked = await session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
 			content: built.message,
@@ -136,7 +141,7 @@ export async function tryRunRpcSkillCommand(
 		},
 		{ streamingBehavior },
 	);
-	return { agentInvoked: true };
+	return { agentInvoked };
 }
 
 export function reportLocalOnlyPromptResult(input: {
