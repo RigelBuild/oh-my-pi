@@ -743,10 +743,12 @@ export class AgentSession {
 	 * system prompt, snapshot for change detection across a `refresh`. These
 	 * buckets are reload-stable (a TTSR-conditioned rule is consumed by the
 	 * manager, not re-bucketed — see `bucketRules`), so a name+path compare is a
-	 * sound roster-identity test. Starts empty: the constructor's prompt is
-	 * already current, and the first `refresh` aligns the snapshot to disk.
+	 * sound roster-identity test. Seeded from the session's initial discovered
+	 * roster (`config.initialRosterRules`) so a settings-only refresh re-buckets
+	 * the COMPLETE set — dropping only newly-gated rules — instead of rebuilding
+	 * from TTSR entries alone and wiping every non-TTSR rule.
 	 */
-	#rosterRules: readonly Rule[] = [];
+	#rosterRules: readonly Rule[];
 	/**
 	 * Caller-supplied rule policy (SDK `rules`/`--no-rules`). When set, an
 	 * in-session `refresh` re-buckets these rules instead of scanning disk, so it
@@ -1469,6 +1471,7 @@ export class AgentSession {
 		this.#applyReloadedRoster = config.applyReloadedRoster;
 		this.#onBeforeRefresh = config.onBeforeRefresh;
 		this.#rulesPolicy = config.rules;
+		this.#rosterRules = config.initialRosterRules ?? [];
 		this.#mcpManager = config.mcpManager;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
@@ -5207,8 +5210,17 @@ export class AgentSession {
 			// `createAgentSessionScoped` calls `setInstance` per session, so
 			// `instance()` may be a different session's manager — refreshing session
 			// A would disconnect session B's servers.
+			//
+			// Gate on ownership: a subagent granted the `refresh` tool inherits its
+			// PARENT's manager (`config.mcpManager` set, so `#disconnectOwnedMcpManager`
+			// is undefined). An inherited-manager session MUST NOT disconnect and
+			// rediscover the shared manager — that would interrupt concurrent parent
+			// calls and replace the parent's MCP configuration with the child's
+			// settings/extension scope. Only a session that CREATED its manager (the
+			// same predicate `#disconnectOwnedMcpManager` uses at dispose) reconnects
+			// it; an inherited-manager `refresh('mcp')` is a no-op (result.mcp unset).
 			const mcpManager = this.#mcpManager;
-			if (mcpManager) {
+			if (mcpManager && this.#disconnectOwnedMcpManager) {
 				// Reuse the shared reconnect-and-rebind sequence the /mcp reload and
 				// /reload-plugins surfaces use, so this path cannot drift from them.
 				// It clears the MCP prompt commands (no stale /server:prompt after a

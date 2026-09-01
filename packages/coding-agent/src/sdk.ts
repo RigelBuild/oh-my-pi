@@ -3668,6 +3668,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// instead of re-scanning disk, so it cannot re-enable ambient rules the
 			// session excluded. `undefined` keeps the roster-editing disk re-scan.
 			rules: options.rules,
+			// The session's initial discovered roster (rulebook + always-apply), so
+			// a settings-only `refresh` re-buckets the COMPLETE set against the
+			// reloaded TTSR gating and drops only newly-gated rules — instead of
+			// re-bucketing from TTSR entries alone (empty non-TTSR set) and wiping
+			// every non-TTSR rule from the published active rules and next prompt.
+			initialRosterRules: [...rulebookRules, ...alwaysApplyRules],
 			modelRegistry,
 			toolRegistry,
 			memoryAgentDir: agentDir,

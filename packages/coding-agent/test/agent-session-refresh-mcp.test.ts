@@ -58,7 +58,7 @@ describe("AgentSession.refresh('mcp')", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function makeSession(mcpManager?: MCPManager): Promise<AgentSession> {
+	async function makeSession(mcpManager?: MCPManager, options: { owned?: boolean } = {}): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -67,6 +67,11 @@ describe("AgentSession.refresh('mcp')", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
+		// A top-level session OWNS its manager: the SDK wires
+		// `disconnectOwnedMcpManager` only for a manager this session created, and
+		// the MCP refresh branch gates on that ownership signal. A subagent that
+		// merely inherits its parent's manager leaves it undefined.
+		const owned = options.owned ?? true;
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -75,6 +80,7 @@ describe("AgentSession.refresh('mcp')", () => {
 			toolRegistry: new Map<string, AgentTool>(),
 			extensionRoots: () => roots,
 			mcpManager,
+			disconnectOwnedMcpManager: owned && mcpManager ? async () => {} : undefined,
 		});
 		sessions.push(session);
 		return session;
@@ -190,5 +196,29 @@ describe("AgentSession.refresh('mcp')", () => {
 		expect(a.mcp).toBe(true);
 		expect(b.mcp).toBe(true);
 		expect(manager.discoverAndConnect).toHaveBeenCalledTimes(4);
+	});
+
+	it("does not disconnect or rediscover an inherited (parent's) manager", async () => {
+		// A subagent granted the `refresh` tool inherits its parent's live
+		// manager (SDK passes `mcpManager` but no `disconnectOwnedMcpManager`).
+		// `refresh('mcp')` on that child must NOT touch the shared manager: it
+		// would interrupt concurrent parent calls and replace the parent's MCP
+		// configuration with the child's settings/extension scope.
+		const inherited = fakeManager();
+		const child = await makeSession(inherited as unknown as MCPManager, { owned: false });
+
+		const result = await child.refresh("mcp");
+
+		// Pre-fix (branch ran for any non-null manager), the shared manager was
+		// disconnected and rediscovered under the child's scope.
+		expect(inherited.disconnectAll).not.toHaveBeenCalled();
+		expect(inherited.discoverAndConnect).not.toHaveBeenCalled();
+		expect(result.mcp).toBeUndefined();
+
+		// A session that OWNS its manager still refreshes it.
+		const owned = fakeManager();
+		const top = await makeSession(owned as unknown as MCPManager);
+		expect((await top.refresh("mcp")).mcp).toBe(true);
+		expect(owned.discoverAndConnect).toHaveBeenCalledTimes(1);
 	});
 });

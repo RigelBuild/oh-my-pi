@@ -18,6 +18,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -51,11 +52,16 @@ interface Harness {
 async function makeHarness(
 	overrides: Record<string, unknown> = {},
 	sdkOverrides: Record<string, unknown> = {},
+	seed?: (cwd: string) => Promise<void>,
 ): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-roster-");
 	const cwd = tempDir.path();
 	// A repo root so project-scoped RULES.md discovery walks up and stops here.
 	await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
+	// Stage on-disk config BEFORE the session is constructed, so its initial
+	// roster discovery picks these up (exposing bugs where a later settings-only
+	// refresh must preserve the construction-time roster).
+	if (seed) await seed(cwd);
 	const api = `refresh-roster-${Bun.nanoseconds().toString(36)}`;
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 	authStorage.setRuntimeApiKey("managed-primary", "test-key");
@@ -275,6 +281,47 @@ describe("AgentSession refresh: settings-only TTSR gating reconcile", () => {
 			// refresh), the disabled rule kept triggering.
 			expect(mgr?.hasRule(ruleName)).toBe(false);
 			expect(mgr?.checkDelta(`has ${trigger} token`, { source: "text" })).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("preserves non-TTSR rules on a settings-only refresh, dropping only the newly-gated rule", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const keepName = `keep-me-${marker}`;
+		const ttsrName = `no-foo-${marker}`;
+		const trigger = `FORBIDDEN_${marker}`;
+		// Seed BOTH rules on disk before construction so the session's initial
+		// roster holds the non-TTSR (always-apply) rule AND registers the TTSR
+		// condition rule — never populated by a settings-only refresh.
+		const h = await makeHarness({}, {}, async cwd => {
+			await fs.mkdir(path.join(cwd, ".omp", "rules"), { recursive: true });
+			await fs.writeFile(
+				path.join(cwd, ".omp", "rules", `${keepName}.md`),
+				`---\nname: ${keepName}\nalwaysApply: true\n---\nkeep body\n`,
+			);
+			await fs.writeFile(
+				path.join(cwd, ".omp", "rules", `${ttsrName}.md`),
+				`---\nname: ${ttsrName}\ndescription: blocks\ncondition: "${trigger}"\nscope: "text"\n---\nbody\n`,
+			);
+		});
+		try {
+			// Both rules are live in the published active set after construction.
+			expect(getActiveRules().map(r => r.name)).toEqual(expect.arrayContaining([keepName, ttsrName]));
+
+			// Disable ONLY the TTSR condition rule on disk, then refresh settings —
+			// never the roster.
+			await fs.writeFile(h.settingsPath, `ttsr:\n  disabledRules:\n    - ${ttsrName}\n`);
+			await h.session.refresh("settings");
+
+			const activeNames = getActiveRules().map(r => r.name);
+			// Pre-fix: `#rosterRules` was empty, so the re-bucket rebuilt from TTSR
+			// entries alone and republished an empty rulebook/always set — the
+			// non-TTSR always-apply rule vanished from the active rules.
+			expect(activeNames).toContain(keepName);
+			// The newly-gated TTSR rule is the only one dropped.
+			expect(activeNames).not.toContain(ttsrName);
+			expect(h.session.ttsrManager?.hasRule(ttsrName)).toBe(false);
 		} finally {
 			await h.dispose();
 		}

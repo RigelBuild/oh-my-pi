@@ -177,6 +177,15 @@ export interface AgentSessionConfig {
 	 * excluded. Absent (`undefined`), a refresh re-discovers rules from disk.
 	 */
 	rules?: readonly Rule[];
+	/**
+	 * The session's initial discovered rule roster (rulebook + always-apply
+	 * buckets) snapshot at construction. A settings-only `refresh` re-buckets
+	 * this COMPLETE set against the reloaded TTSR gating, so it can only DROP a
+	 * newly-gated rule — never wipe the non-TTSR rules a roster refresh has not
+	 * yet re-populated. Absent (`undefined`), the roster snapshot starts empty
+	 * and a settings-only refresh cannot re-bucket the non-TTSR rules.
+	 */
+	initialRosterRules?: readonly Rule[];
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
