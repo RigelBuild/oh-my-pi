@@ -45,14 +45,21 @@ function git(args: readonly string[]) {
  *   - HTTP 502 / 503 / 504 (bad gateway, service unavailable, gateway timeout)
  *   - generic "Server Error" wording gh emits for 5xx responses
  *   - connection resets ("connection reset by peer", ECONNRESET)
- *   - timeouts ("timeout", "timed out", "i/o timeout")
+ *   - timeouts, including the Go-runtime wordings gh surfaces
+ *     ("timed out", "i/o timeout", "deadline exceeded", "ETIMEDOUT")
  * Retrying is safe because the CI poll is idempotent: re-running `gh run list`
  * observes the same run set with no side effects. The match is deliberately
- * conservative — genuine failures (404 Not Found, auth required, empty/invalid
+ * conservative: genuine failures (404 Not Found, auth required, empty/invalid
  * output) are NOT transient and must surface immediately.
+ *
+ * Feed this ONLY a gh command's own stderr. It is intentionally broad
+ * ("server error", "timeout"), which is safe against gh's diagnostic text but
+ * would misfire on CI job/log bodies that legitimately contain those words.
  */
 export function isTransientGhError(stderr: string): boolean {
-	return /\bHTTP 50[234]\b|server error|connection reset|econnreset|timed out|i\/o timeout|\btimeout\b/i.test(stderr);
+	return /\bHTTP 50[234]\b|server error|connection reset|econnreset|timed out|i\/o timeout|\btimeout\b|deadline exceeded|etimedout/i.test(
+		stderr,
+	);
 }
 
 /**
@@ -74,6 +81,23 @@ export function ghErrorText(err: unknown): string {
 }
 
 /**
+ * A one-line, human-facing summary of a thrown gh error for a progress log.
+ * `ghErrorText` orders the exit-code message first, so its first line is the
+ * useless "Failed with exit code N"; pick the first line that carries an actual
+ * diagnostic instead, so an operator watching a live release sees the real cause
+ * ("HTTP 502: Server Error"), not the exit-code summary. Falls back to the first
+ * non-empty line when nothing more specific is present.
+ */
+export function ghDiagnosticLine(err: unknown): string {
+	const lines = ghErrorText(err)
+		.split("\n")
+		.map(line => line.trim())
+		.filter(line => line.length > 0);
+	const diagnostic = lines.find(line => !/^Failed with exit code/i.test(line));
+	return (diagnostic ?? lines[0] ?? "").slice(0, 200);
+}
+
+/**
  * Run `attempt()`, retrying on transient errors with bounded backoff. On throw,
  * if the error message is transient (per `isTransient`) and retries remain,
  * sleeps and retries; otherwise rethrows. A persistent transient error is
@@ -86,7 +110,7 @@ export async function runWithTransientRetry<T>(
 	opts?: {
 		maxRetries?: number;
 		isTransient?: (msg: string) => boolean;
-		onRetry?: (attempt: number, msg: string) => void;
+		onRetry?: (attempt: number, maxRetries: number, err: unknown) => void;
 		sleep?: (ms: number) => Promise<void>;
 	},
 ): Promise<T> {
@@ -99,8 +123,9 @@ export async function runWithTransientRetry<T>(
 		} catch (err) {
 			const msg = ghErrorText(err);
 			if (retry >= maxRetries || !isTransient(msg)) throw err;
-			opts?.onRetry?.(retry + 1, msg);
-			// Bounded exponential backoff, capped at 30s.
+			opts?.onRetry?.(retry + 1, maxRetries, err);
+			// Bounded exponential backoff, capped at 30s (the cap only bites when
+			// maxRetries is raised past the default 5; the default tops out at 16s).
 			await sleep(Math.min(1000 * 2 ** retry, 30000));
 		}
 	}
@@ -118,7 +143,8 @@ async function watchCI(): Promise<boolean> {
 		const runsOutput = await runWithTransientRetry(
 			() => $`gh run list --commit ${commitSha} --json databaseId,status,conclusion,name`.text(),
 			{
-				onRetry: (n, msg) => console.log(`  Transient GitHub API error, retrying (${n}/5): ${msg.split("\n")[0]}`),
+				onRetry: (n, max, err) =>
+					console.log(`  Transient GitHub API error, retrying (${n}/${max}): ${ghDiagnosticLine(err)}`),
 			},
 		);
 		const runs: Array<{ databaseId: number; status: string; conclusion: string | null; name: string }> =

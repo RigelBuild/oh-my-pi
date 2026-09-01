@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { $ } from "bun";
 import {
 	applyCargoWorkspaceVersion,
 	applyNativesSentinel,
 	applyPackageVersion,
 	bumpCanaryVersion,
 	bumpVersion,
+	ghDiagnosticLine,
 	ghErrorText,
 	isTransientGhError,
 	resolveReleaseVersion,
@@ -60,6 +62,9 @@ describe("watchCI transient retry", () => {
 		expect(isTransientGhError("failed to get runs: HTTP 502: Server Error (https://api.github.com/...)")).toBe(true);
 		expect(isTransientGhError("failed to get runs: HTTP 503: Server Error")).toBe(true);
 		expect(isTransientGhError("failed to get runs: HTTP 504: Server Error")).toBe(true);
+		// Go-runtime timeout wordings gh can surface for a network blip.
+		expect(isTransientGhError("Get ...: context deadline exceeded")).toBe(true);
+		expect(isTransientGhError("dial tcp: connect: ETIMEDOUT")).toBe(true);
 	});
 
 	test("isTransientGhError does not flag genuine non-transient errors", () => {
@@ -145,6 +150,34 @@ describe("watchCI transient retry", () => {
 		);
 		expect(result).toBe("ok");
 		expect(attempts).toBe(3);
+	});
+
+	test("classifies a genuine Bun ShellError from a failing $ command as transient", async () => {
+		// Pins the extraction to Bun's real error type: a hand-built object literal
+		// would keep passing if ghErrorText ever switched to an instanceof check.
+		let caught: unknown;
+		try {
+			await $`bash -c 'echo "failed to get runs: HTTP 502: Server Error" >&2; exit 1'`.text();
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeDefined();
+		const text = ghErrorText(caught);
+		expect(text).toContain("HTTP 502");
+		expect(isTransientGhError(text)).toBe(true);
+	});
+
+	test("ghDiagnosticLine surfaces the real diagnostic, not the exit-code summary", () => {
+		// The retry-progress log must show the operator the actual cause. A real
+		// ShellError leads with "Failed with exit code N"; the log must skip it.
+		const shellError = {
+			message: "Failed with exit code 1",
+			stderr: Buffer.from("failed to get runs: HTTP 502: Server Error\n"),
+			stdout: Buffer.from(""),
+		};
+		const line = ghDiagnosticLine(shellError);
+		expect(line).toContain("HTTP 502");
+		expect(line).not.toContain("Failed with exit code");
 	});
 });
 
