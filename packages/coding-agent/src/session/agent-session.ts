@@ -101,7 +101,8 @@ import {
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
-import type { Rule } from "../capability/rule";
+import { type Rule, setActiveRules } from "../capability/rule";
+import { bucketRules } from "../capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
@@ -186,7 +187,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
-import { AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -675,6 +676,10 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	// The registry this session was created against (SDK-supplied or the global
+	// fallback). Skill fan-out iterates THIS registry and restricts to this
+	// session's own descendants — never a foreign global tree.
+	#agentRegistry: AgentRegistry;
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -1565,6 +1570,7 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#agentRegistry = config.agentRegistry ?? AgentRegistry.global();
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
@@ -5104,6 +5110,20 @@ export class AgentSession {
 			// runtime behavior would stay frozen at construction until restart. Runs
 			// on a `settings`-only refresh too, which never enters the roster block.
 			if (changed) this.ttsrManager?.reconfigure(this.settings.getGroup("ttsr"));
+			// A settings-only refresh (no roster block below) must still apply the
+			// reloaded TTSR *gating* — `ttsr.disabledRules`/`builtinRules`. These are
+			// bucketing-only levers enforced by `bucketRules`, which the roster path
+			// runs but a `settings` scope does not. Without this, toggling
+			// `disabledRules` + `/refresh settings` leaves a disabled rule still
+			// registered and still triggering. Re-bucket the CURRENT rule set (no
+			// disk rediscovery) against the new gating and retain the survivors.
+			// `scope: all`/`rules` already re-buckets from disk in the roster block,
+			// so this only runs on a settings-only refresh. Boundary: re-ENABLING a
+			// previously-dropped rule (removed from `disabledRules`, or
+			// `builtinRules` flipped back on) needs the roster rediscovery — a
+			// dropped rule is absent from the current set, so a settings-only
+			// refresh cannot resurrect it.
+			if (changed && !doRoster && this.#reconcileRuleGatingFromSettings()) rosterChanged = true;
 			// Sync the MCP notifications flag from the reloaded settings onto THIS
 			// session's manager. Runs on a `settings`-only refresh too (which never
 			// enters the MCP reconnect block): reloading `Settings` alone never calls
@@ -5229,24 +5249,88 @@ export class AgentSession {
 	/**
 	 * Thread a freshly reloaded skills snapshot into this session's per-session
 	 * skills (which `skill://` binds — a `setActiveSkills` global swap alone
-	 * does not reach it) AND into every running subagent's snapshot. Subagents
-	 * each captured their own `this.session.skills` at spawn, so they carry the
-	 * identical staleness; the process-global {@link AgentRegistry} is the only
-	 * handle on those live child sessions. Returns whether the top-level skill
-	 * set actually changed (drives the prompt rebuild).
+	 * does not reach it) AND into every running DESCENDANT subagent's snapshot.
+	 * Subagents each captured their own `this.session.skills` at spawn, so they
+	 * carry the identical staleness.
+	 *
+	 * Fan-out iterates {@link #agentRegistry} — the registry this session was
+	 * created against ({@link CreateAgentSessionOptions.agentRegistry}, else the
+	 * global) — NOT `AgentRegistry.global()` unconditionally. An SDK host that
+	 * supplies its own registry registers its subagents THERE, so iterating the
+	 * global would (a) miss this session's real children and (b) overwrite the
+	 * snapshot of an unrelated session in the global tree with a roster
+	 * discovered from THIS session's cwd. Propagation is further restricted to
+	 * this session's own descendants (by `parentId` chain), so sibling trees
+	 * sharing one registry are never touched. Returns whether the top-level
+	 * skill set actually changed (drives the prompt rebuild).
 	 */
 	applyReloadedSkills(skills: readonly Skill[], skillsSettings?: SkillsSettings): boolean {
 		const changed = this.#tools.applyReloadedSkills(skills, skillsSettings);
-		// Fan out to running subagents. Every alive AgentSession (this one plus
-		// each sub) reads its own frozen snapshot, so update them all. `list()`
-		// returns every registered session including advisors; advisors never
-		// resolve `skill://`, so overwriting their snapshot is a harmless no-op.
-		for (const ref of AgentRegistry.global().list()) {
-			if (ref.session && ref.session !== this) {
-				ref.session.#tools.applyReloadedSkills(skills);
+		const registry = this.#agentRegistry;
+		const selfId = this.#agentId;
+		const refs = registry.list();
+		// Index refs by id once so descendant checks walk the parentId chain in
+		// O(depth) rather than re-scanning the roster per candidate.
+		const byId = new Map(refs.map(ref => [ref.id, ref]));
+		const isDescendant = (ref: AgentRef): boolean => {
+			if (selfId === undefined) return false;
+			let current = ref.parentId;
+			const seen = new Set<string>();
+			while (current !== undefined && !seen.has(current)) {
+				if (current === selfId) return true;
+				seen.add(current);
+				current = byId.get(current)?.parentId;
 			}
+			return false;
+		};
+		for (const ref of refs) {
+			if (!ref.session || ref.session === this) continue;
+			// Restrict to this session's descendants. Advisors never resolve
+			// `skill://`, but a descendant advisor is a harmless no-op either way.
+			if (!isDescendant(ref)) continue;
+			ref.session.#tools.applyReloadedSkills(skills);
 		}
 		return changed;
+	}
+
+	/**
+	 * Apply reloaded TTSR gating (`ttsr.disabledRules`/`builtinRules`) to the
+	 * CURRENT rule set on a settings-only refresh — no disk rediscovery. The
+	 * roster path (`bucketRules`) is what actually enforces these levers, but a
+	 * `settings` scope never runs it, so a newly-disabled rule would stay
+	 * registered and keep triggering. Re-bucket the rules the session already
+	 * holds (rulebook/always snapshot + the manager's TTSR rules) against the
+	 * fresh gating, reconcile the reused manager, and re-publish the roster.
+	 *
+	 * Boundary: this can only DROP a now-gated rule, never resurrect one — a rule
+	 * removed from `disabledRules` (or restored by flipping `builtinRules` on) is
+	 * absent from the current set and needs the `rules`/`all` disk rediscovery.
+	 * Returns whether the rendered roster changed (drives the prompt rebuild).
+	 */
+	#reconcileRuleGatingFromSettings(): boolean {
+		const ttsrManager = this.ttsrManager;
+		if (!ttsrManager) return false;
+		const ttsrSettings = this.settings.getGroup("ttsr");
+		// The full set the last discovery enabled: the non-TTSR roster snapshot
+		// plus the condition-bearing rules the manager holds. Re-bucketing this
+		// against the new gating drops any rule now disabled.
+		const currentRules = [...this.#rosterRules, ...ttsrManager.getRules()];
+		const { rulebookRules, alwaysApplyRules, ttsrRuleNames } = bucketRules(currentRules, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+		});
+		ttsrManager.retainRules(ttsrRuleNames);
+		const activeRules = [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()];
+		setActiveRules(activeRules);
+		const nextRosterRules = [...rulebookRules, ...alwaysApplyRules];
+		const rulesChanged = !rulesEqual(this.#rosterRules, nextRosterRules);
+		this.#rosterRules = nextRosterRules;
+		this.#applyReloadedRoster?.({
+			skills: this.skills,
+			rulebookRules,
+			alwaysApplyRules,
+		});
+		return rulesChanged;
 	}
 
 	/**

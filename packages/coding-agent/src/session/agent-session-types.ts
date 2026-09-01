@@ -36,6 +36,7 @@ import type { RefreshScope } from "../extensibility/reload";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { MCPManager } from "../mcp/manager";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -283,6 +284,14 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/**
+	 * Registry this session is created against (SDK
+	 * `CreateAgentSessionOptions.agentRegistry`, else the global). Skill fan-out
+	 * on refresh iterates THIS registry, restricted to this session's own
+	 * descendants — so a session on a caller-supplied registry never overwrites
+	 * an unrelated global-tree session's snapshot. Default: `AgentRegistry.global()`.
+	 */
+	agentRegistry?: AgentRegistry;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */

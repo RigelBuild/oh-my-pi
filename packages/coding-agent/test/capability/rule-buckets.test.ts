@@ -301,4 +301,66 @@ describe("bucketRules", () => {
 		expect(mgr.getRules()).toEqual([]);
 		expect(mgr.checkDelta("FORBIDDEN", { source: "text" })).toEqual([]);
 	});
+
+	// An in-place edit to a condition rule (same name) must recompile its TTSR
+	// entry on refresh: pre-fix, bucketRules called addRule, which no-ops on an
+	// existing name, so the manager kept matching the OLD condition and rule://
+	// republished the stale rule. addOrUpdateRule recompiles the surviving entry.
+	it("re-triggers an in-place-edited condition rule on the NEW condition after re-bucket", () => {
+		const mgr = new TtsrManager();
+		const original = makeRule({ name: "no-foo", condition: ["OLDWORD"], description: "d" });
+
+		bucketRules([original], mgr);
+		expect(mgr.checkDelta("contains OLDWORD token", { source: "text" }).map(r => r.name)).toEqual(["no-foo"]);
+
+		// Same name, edited condition — the refresh re-buckets against the reused
+		// manager. The OLD condition must stop matching and the NEW one must fire.
+		const edited = makeRule({ name: "no-foo", condition: ["NEWWORD"], description: "d" });
+		const second = bucketRules([edited], mgr);
+
+		expect(second.rulebookRules).toHaveLength(0);
+		expect(second.ttsrRuleNames.has("no-foo")).toBe(true);
+		expect(mgr.checkDelta("contains OLDWORD token", { source: "text" })).toEqual([]);
+		expect(mgr.checkDelta("contains NEWWORD token", { source: "text" }).map(r => r.name)).toEqual(["no-foo"]);
+		// rule:// republishes the fresh object, not the stale one.
+		expect(mgr.getRules().map(r => r.condition?.[0])).toEqual(["NEWWORD"]);
+	});
+
+	// A same-name edit that only changes non-TTSR content (the rulebook body)
+	// must NOT recompile — the entry (and its injection state) is preserved.
+	it("preserves the injection state of a condition rule when only its body changes", () => {
+		const mgr = new TtsrManager();
+		const original = makeRule({ name: "no-foo", condition: ["WORD"], content: "old body", description: "d" });
+
+		bucketRules([original], mgr);
+		mgr.markInjectedByNames(["no-foo"]);
+		expect(mgr.getInjectedRuleNames()).toContain("no-foo");
+
+		const edited = makeRule({ name: "no-foo", condition: ["WORD"], content: "new body", description: "d" });
+		bucketRules([edited], mgr);
+
+		// Same condition → entry kept → injection record survives (an already-
+		// injected rule stays injected; a recompile would have reset that).
+		expect(mgr.getInjectedRuleNames()).toContain("no-foo");
+		expect(mgr.hasRule("no-foo")).toBe(true);
+	});
+
+	// An edit that removes the usable condition drops the rule from TTSR: it must
+	// fall through to the rulebook and stop triggering.
+	it("drops a condition rule from TTSR when the edit removes its condition", () => {
+		const mgr = new TtsrManager();
+		const original = makeRule({ name: "no-foo", condition: ["WORD"], description: "blocks" });
+
+		bucketRules([original], mgr);
+		expect(mgr.hasRule("no-foo")).toBe(true);
+
+		// Condition removed, still a described rule → now a plain rulebook entry.
+		const edited = makeRule({ name: "no-foo", condition: [], description: "blocks" });
+		const second = bucketRules([edited], mgr);
+		mgr.retainRules(second.ttsrRuleNames);
+
+		expect(mgr.hasRule("no-foo")).toBe(false);
+		expect(second.rulebookRules.map(r => r.name)).toEqual(["no-foo"]);
+		expect(mgr.checkDelta("contains WORD token", { source: "text" })).toEqual([]);
+	});
 });

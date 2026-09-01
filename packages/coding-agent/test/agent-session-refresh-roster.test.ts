@@ -239,3 +239,44 @@ describe("AgentSession refresh: roster reaches the prompt", () => {
 		}
 	});
 });
+
+describe("AgentSession refresh: settings-only TTSR gating reconcile", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("stops a disabled condition rule from triggering after refresh('settings')", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const ruleName = `no-foo-${marker}`;
+		const trigger = `FORBIDDEN_${marker}`;
+		const h = await makeHarness();
+		try {
+			// A condition-bearing rule on disk, discovered by a rules refresh: it
+			// registers with the TTSR manager and triggers on its condition.
+			await fs.mkdir(path.join(h.cwd, ".omp", "rules"), { recursive: true });
+			await fs.writeFile(
+				path.join(h.cwd, ".omp", "rules", `${ruleName}.md`),
+				`---\nname: ${ruleName}\ndescription: blocks\ncondition: "${trigger}"\nscope: "text"\n---\nbody\n`,
+			);
+			await h.session.refresh("rules");
+			const mgr = h.session.ttsrManager;
+			expect(mgr).toBeDefined();
+			expect(mgr?.hasRule(ruleName)).toBe(true);
+			expect(mgr?.checkDelta(`has ${trigger} token`, { source: "text" }).map(r => r.name)).toEqual([ruleName]);
+			mgr?.resetBuffer();
+
+			// Disable the rule on disk and refresh ONLY settings — never the roster.
+			// The gating field must take effect without a disk rediscovery.
+			await fs.writeFile(h.settingsPath, `ttsr:\n  disabledRules:\n    - ${ruleName}\n`);
+			await h.session.refresh("settings");
+
+			// Pre-fix (reconfigure stored disabledRules but matching never read it,
+			// and the roster re-bucket that enforces it never runs on a settings
+			// refresh), the disabled rule kept triggering.
+			expect(mgr?.hasRule(ruleName)).toBe(false);
+			expect(mgr?.checkDelta(`has ${trigger} token`, { source: "text" })).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+});

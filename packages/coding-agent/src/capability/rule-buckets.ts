@@ -58,18 +58,20 @@ export function bucketRules(
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
 
 		// A TTSR-conditioned rule is "consumed" by the manager and must not also
-		// appear in the rulebook/always buckets. `addRule` registers it on first
-		// sight but is name-idempotent — on a re-bucket (in-session refresh) it
-		// returns false for an already-registered rule, so gate on `hasRule`
-		// (membership) instead: a rule the manager holds is consumed whether this
-		// call or a prior reload registered it. A rule with conditions the manager
-		// rejected (unreachable scope, empty compile) is not held and correctly
-		// falls through to the buckets below, exactly as at init.
+		// appear in the rulebook/always buckets. On an in-session refresh the
+		// manager is reused, so an EDITED rule keeps its name: a plain `addRule`
+		// would no-op on the existing name and leave the STALE compiled
+		// conditions/scope/globs live (still matched, still republished via
+		// `rule://`). `addOrUpdateRule` recompiles a surviving entry whose
+		// TTSR-relevant content changed while preserving its injection state, and
+		// registers a brand-new rule on first sight. It returns membership (like
+		// `hasRule`): true when the rule is monitored after the call, false when
+		// its conditions/scope were rejected — that rule then falls through to the
+		// buckets below, exactly as at init.
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
 		if (hasTtsrCondition) {
-			ttsrManager.addRule(rule);
-			if (ttsrManager.hasRule(rule.name)) {
+			if (ttsrManager.addOrUpdateRule(rule)) {
 				ttsrRuleNames.add(rule.name);
 				continue;
 			}

@@ -3749,6 +3749,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			// Retain the registry this session was created against so refresh's skill
+			// fan-out targets THIS tree's descendants, not a foreign global tree.
+			agentRegistry,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,

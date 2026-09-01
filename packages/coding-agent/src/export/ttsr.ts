@@ -69,6 +69,36 @@ const DEFAULT_SCOPE: TtsrScope = {
 	toolScopes: [],
 };
 
+/** Order-sensitive equality of two optional string arrays. */
+function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+	if (a === b) return true;
+	if (a === undefined || b === undefined) return false;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
+
+/**
+ * Whether two same-named rules compile to the SAME TTSR registration. Compares
+ * only the fields that feed the compiled entry (conditions, ast conditions,
+ * scope, globs) plus per-rule interrupt override — the inputs to
+ * `#compileConditions`/`#buildScope`/`#compileGlobalPathGlobs`. An edit to any
+ * of these must recompile the entry; an edit to unrelated fields (a rulebook
+ * description, prose body) leaves the monitored behavior unchanged and keeps
+ * the existing entry, so its trigger/injection state is preserved verbatim.
+ */
+function ttsrRuleContentEqual(a: Rule, b: Rule): boolean {
+	return (
+		stringArrayEqual(a.condition, b.condition) &&
+		stringArrayEqual(a.astCondition, b.astCondition) &&
+		stringArrayEqual(a.scope, b.scope) &&
+		stringArrayEqual(a.globs, b.globs) &&
+		a.interruptMode === b.interruptMode
+	);
+}
+
 export class TtsrManager {
 	#settings: Required<TtsrSettings>;
 	readonly #rules = new Map<string, TtsrEntry>();
@@ -359,6 +389,38 @@ export class TtsrManager {
 	}
 
 	/**
+	 * Register a condition-bearing rule, or — when a rule of the SAME name is
+	 * already registered — recompile its entry in place if its TTSR-relevant
+	 * content changed. This is the in-session refresh path: an edited rule keeps
+	 * its name, so {@link addRule} alone returns early (name present) and leaves
+	 * the STALE compiled conditions/scope/globs live — still matched, and still
+	 * republished verbatim via `getRules()`/`rule://`. The injection record is
+	 * keyed by name in a separate map, so replacing the `#rules` entry preserves
+	 * it: an already-injected rule stays injected across the recompile.
+	 *
+	 * Returns whether the rule is registered for monitoring after the call, so a
+	 * caller can bucket it as consumed (mirrors {@link hasRule}).
+	 */
+	addOrUpdateRule(rule: Rule): boolean {
+		if (!this.#settings.enabled) return false;
+		const existing = this.#rules.get(rule.name);
+		if (!existing) return this.addRule(rule);
+		if (ttsrRuleContentEqual(existing.rule, rule)) return true;
+		// Recompile from the edited rule. Drop the stale entry first so `addRule`
+		// (which no-ops on an existing name) proceeds; `#injectionRecords` is
+		// untouched, so the injection state carries over. If the edit removed the
+		// rule's usable condition or reachable scope it is no longer a TTSR rule:
+		// shed its injection record and recompute the arming flags.
+		this.#rules.delete(rule.name);
+		const added = this.addRule(rule);
+		if (!added) {
+			this.#injectionRecords.delete(rule.name);
+			this.#recomputeCanMatchFlags();
+		}
+		return added;
+	}
+
+	/**
 	 * Reconcile the registered rule set against the names still discovered and
 	 * ENABLED on an in-session refresh. A condition-bearing rule deleted from
 	 * disk or added to `ttsr.disabledRules` is no longer in `keep`, so its stale
@@ -375,6 +437,11 @@ export class TtsrManager {
 			this.#rules.delete(name);
 			this.#injectionRecords.delete(name);
 		}
+		this.#recomputeCanMatchFlags();
+	}
+
+	/** Recompute the text/thinking arming flags from the currently registered rules. */
+	#recomputeCanMatchFlags(): void {
 		this.#canMatchText = false;
 		this.#canMatchThinking = false;
 		for (const entry of this.#rules.values()) {

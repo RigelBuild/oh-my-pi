@@ -759,8 +759,22 @@ export class Settings {
 	 * work (model re-resolve, prompt rebuild) on a no-op reload.
 	 */
 	async reload(): Promise<{ changed: boolean }> {
-		const prevModelRoles = this.get("modelRoles");
 		const before = JSON.stringify(this.#merged);
+		if (this.#persist) {
+			// Route the persisted re-read through the hardened primitive, which
+			// FLUSHES any pending debounced save first (so a queued `set()` /
+			// `setModelRole()` write lands on disk before the layers are re-read),
+			// serializes concurrent reloads, and retries around mutation
+			// generations. The raw `#loadReadOnly` path used here previously
+			// clobbered `#global`/`#project` with stale disk values while the
+			// changed paths stayed marked modified, so the later `#saveNow` wrote
+			// the OLD disk value back and discarded the user's pending change.
+			await this.reloadFromDisk();
+			return { changed: JSON.stringify(this.#merged) !== before };
+		}
+		// No persisted layers to flush (in-memory instance): keep the pure
+		// re-read. `#loadReadOnly` still picks up project/overlay dirs on disk.
+		const prevModelRoles = this.get("modelRoles");
 		await this.#loadReadOnly();
 		const changed = JSON.stringify(this.#merged) !== before;
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
