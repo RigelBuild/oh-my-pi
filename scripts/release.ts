@@ -56,6 +56,24 @@ export function isTransientGhError(stderr: string): boolean {
 }
 
 /**
+ * Extract the human-readable failure text from a thrown error. Bun's `$` throws
+ * a `ShellError` whose `.message` is only "Failed with exit code N"; the actual
+ * `gh` diagnostic (e.g. "HTTP 502: Server Error") is written to stderr and
+ * exposed as `.stderr`/`.stdout` buffers. Concatenate all three so the transient
+ * classifier sees the real API error, not just the exit-code summary.
+ */
+export function ghErrorText(err: unknown): string {
+	if (typeof err !== "object" || err === null) return String(err);
+	const parts: string[] = [];
+	const record = err as { message?: unknown; stderr?: unknown; stdout?: unknown };
+	for (const field of [record.message, record.stderr, record.stdout]) {
+		if (field == null) continue;
+		parts.push(typeof field === "string" ? field : field.toString());
+	}
+	return parts.join("\n");
+}
+
+/**
  * Run `attempt()`, retrying on transient errors with bounded backoff. On throw,
  * if the error message is transient (per `isTransient`) and retries remain,
  * sleeps and retries; otherwise rethrows. A persistent transient error is
@@ -79,7 +97,7 @@ export async function runWithTransientRetry<T>(
 		try {
 			return await attempt();
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
+			const msg = ghErrorText(err);
 			if (retry >= maxRetries || !isTransient(msg)) throw err;
 			opts?.onRetry?.(retry + 1, msg);
 			// Bounded exponential backoff, capped at 30s.

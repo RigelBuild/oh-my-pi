@@ -5,6 +5,7 @@ import {
 	applyPackageVersion,
 	bumpCanaryVersion,
 	bumpVersion,
+	ghErrorText,
 	isTransientGhError,
 	resolveReleaseVersion,
 	runWithTransientRetry,
@@ -107,6 +108,43 @@ describe("watchCI transient retry", () => {
 			),
 		).rejects.toThrow("HTTP 502");
 		expect(attempts).toBe(4);
+	});
+
+	test("ghErrorText surfaces stderr from a Bun ShellError whose message is only the exit code", () => {
+		// Bun's `$` throws a ShellError with message "Failed with exit code N" and
+		// the real gh diagnostic on the stderr buffer. Reading .message alone would
+		// miss the HTTP status entirely.
+		const shellError = {
+			message: "Failed with exit code 1",
+			stderr: Buffer.from("failed to get runs: HTTP 502: Server Error\n"),
+			stdout: Buffer.from(""),
+		};
+		const text = ghErrorText(shellError);
+		expect(text).toContain("HTTP 502");
+		expect(isTransientGhError(text)).toBe(true);
+	});
+
+	test("runWithTransientRetry retries a ShellError-shaped transient failure", async () => {
+		// The end-to-end contract: a thrown ShellError (message = exit code, real
+		// error on stderr) must be classified transient and retried, not rethrown
+		// on the first attempt. Pre-fix this rethrew immediately (attempts === 1).
+		let attempts = 0;
+		const result = await runWithTransientRetry(
+			() => {
+				attempts++;
+				if (attempts <= 2) {
+					throw {
+						message: "Failed with exit code 1",
+						stderr: Buffer.from("failed to get runs: HTTP 502: Server Error\n"),
+						stdout: Buffer.from(""),
+					};
+				}
+				return Promise.resolve("ok");
+			},
+			{ sleep: () => Promise.resolve() },
+		);
+		expect(result).toBe("ok");
+		expect(attempts).toBe(3);
 	});
 });
 
