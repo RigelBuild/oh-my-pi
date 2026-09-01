@@ -258,4 +258,147 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		expect(await restart).toEqual({ ok: false, reason: "busy" });
 		expect(disposeStarted).toBe(false);
 	});
+
+	it("blocks dispose while a synthetic follow-up parked in queued-input image preprocessing has not enqueued, then refuses busy", async () => {
+		await buildLiveSession();
+
+		// Park the restart at its post-idle quiescence wait so it latches
+		// #restarting and passes its pre-latch #hasUnpersistedInput check BEFORE
+		// the synthetic follow-up's preparation begins. Only then does the
+		// agent-initiated hidden-developer follow-up (plan-approval execution
+		// directive) enter the exact race: input in async preparation that has
+		// passed the latch but reached neither agent queue nor #promptInFlightCount.
+		const idleGate = Promise.withResolvers<void>();
+		vi.spyOn(session, "waitForIdle").mockReturnValue(idleGate.promise);
+
+		// Gate image normalization so the synthetic follow-up parks inside its
+		// async preparation before the follow-up queue is populated.
+		const normalizeGate = Promise.withResolvers<void>();
+		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			await normalizeGate.promise;
+			return images;
+		});
+
+		// Observe when dispose begins.
+		let disposeStarted = false;
+		const realDispose = session.dispose.bind(session);
+		vi.spyOn(session, "dispose").mockImplementation(options => {
+			disposeStarted = true;
+			return realDispose(options);
+		});
+
+		// Latch the restart; it parks on the gated quiescence wait.
+		const restart = session.requestRestart();
+
+		// An agent-initiated synthetic follow-up (e.g. approved-plan execution
+		// queued behind a busy turn), landing after the restart latched. It
+		// bypasses #queueUserMessage and awaits normalization directly, so it
+		// advances into that preparation window and parks on the gated
+		// normalization — in preparation, not yet enqueued.
+		const followUp = session.followUp("execute the plan", [image], { synthetic: true });
+		for (let i = 0; i < 50; i++) {
+			await scheduler.wait(1);
+		}
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+
+		// Release the quiescence gate: the barrier resumes. #promptInFlightCount is
+		// zero, so only the queued-input preprocessing barrier can keep dispose from
+		// running. Give it ample opportunity to (wrongly) flush and dispose out from
+		// under the still-preparing follow-up.
+		idleGate.resolve();
+		for (let i = 0; i < 100 && !disposeStarted; i++) {
+			await scheduler.wait(1);
+		}
+		expect(disposeStarted).toBe(false);
+		// The preparing input was not lost to a dead agent: dispose is blocked and
+		// the message still has not reached the queue.
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+
+		// Release the normalization gate: the follow-up enqueues, the prep barrier
+		// unblocks, and the barrier now observes queued input — so it refuses the
+		// recycle rather than disposing under it.
+		normalizeGate.resolve();
+		await followUp;
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+		expect(await restart).toEqual({ ok: false, reason: "busy" });
+		expect(disposeStarted).toBe(false);
+	});
+
+	it("blocks dispose while sendCustomMessage is parked in image preprocessing, then appends into the live session", async () => {
+		await buildLiveSession();
+
+		// Park the restart at its post-idle quiescence wait so it latches
+		// #restarting and passes its pre-latch #hasUnpersistedInput check BEFORE
+		// the public sendCustomMessage's preparation begins. Only then does that
+		// path (host/ACP/collaboration) enter the exact race: input in async
+		// normalization that has passed the latch but reached neither agent queue
+		// nor #promptInFlightCount.
+		const idleGate = Promise.withResolvers<void>();
+		vi.spyOn(session, "waitForIdle").mockReturnValue(idleGate.promise);
+
+		// Gate image normalization so sendCustomMessage parks inside its async
+		// preparation before the message is appended to the live session.
+		const normalizeGate = Promise.withResolvers<void>();
+		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			await normalizeGate.promise;
+			return images;
+		});
+
+		// Record whether the append lands while the session is still alive: the
+		// barrier must not dispose out from under the preparing message.
+		let disposeStarted = false;
+		const realDispose = session.dispose.bind(session);
+		vi.spyOn(session, "dispose").mockImplementation(options => {
+			disposeStarted = true;
+			return realDispose(options);
+		});
+		let appendedWhileDisposed: boolean | undefined;
+		const realAppend = session.agent.appendMessage.bind(session.agent);
+		vi.spyOn(session.agent, "appendMessage").mockImplementation(message => {
+			appendedWhileDisposed = disposeStarted;
+			return realAppend(message);
+		});
+
+		// Latch the restart; it parks on the gated quiescence wait.
+		const restart = session.requestRestart();
+
+		// A public sendCustomMessage (host/ACP/collaboration) that awaits image
+		// normalization directly before appending, landing after the restart
+		// latched. It advances into that preparation window and parks on the gated
+		// normalization — in preparation, not yet appended.
+		const custom = session.sendCustomMessage({
+			customType: "collab_prompt",
+			content: [{ type: "text", text: "resume the work" }, image],
+			display: false,
+			details: undefined,
+			attribution: "agent",
+		});
+		for (let i = 0; i < 50; i++) {
+			await scheduler.wait(1);
+		}
+		expect(appendedWhileDisposed).toBeUndefined();
+
+		// Release the quiescence gate: the barrier resumes. #promptInFlightCount is
+		// zero, so only the queued-input preprocessing barrier can keep dispose from
+		// running. Give it ample opportunity to (wrongly) flush and dispose out from
+		// under the still-preparing message.
+		idleGate.resolve();
+		for (let i = 0; i < 100 && !disposeStarted; i++) {
+			await scheduler.wait(1);
+		}
+		expect(disposeStarted).toBe(false);
+		// The preparing input was not lost to a dead agent: dispose is blocked and
+		// the message still has not been appended.
+		expect(appendedWhileDisposed).toBeUndefined();
+
+		// Release the normalization gate: the message appends into the live
+		// session, the prep barrier unblocks, and only then does the barrier
+		// proceed. The append landed before dispose, so it reached a live agent.
+		normalizeGate.resolve();
+		await custom;
+		expect(appendedWhileDisposed).toBe(false);
+		expect(await restart).toEqual({ ok: true });
+	});
 });

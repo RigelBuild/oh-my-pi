@@ -6703,27 +6703,38 @@ export class AgentSession {
 		// Synthetic branch: agent-initiated hidden developer message. Bypass
 		// #queueUserMessage (which clears advisor auto-resume suppression and
 		// enqueues as a user-attributed message) and place the developer message
-		// directly on the follow-up queue.
-		const normalizedImages = await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-		if (normalizedImages?.length) {
-			content.push(...normalizedImages);
+		// directly on the follow-up queue. Track the async preparation so the
+		// restart barrier and #hasUnpersistedInput() observe input that has passed
+		// the #restarting latch check but has not yet reached the agent queue,
+		// mirroring #queueUserMessage/#queueCustomMessage. Released in the finally
+		// once the synchronous enqueue below has populated the queue (or the
+		// preparation threw), so there is no window where the barrier sees neither
+		// the counter nor the queue.
+		this.#beginQueuedInputPrep();
+		try {
+			const normalizedImages = await this.#normalizeImagesForModel(images);
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+			if (normalizedImages?.length) {
+				content.push(...normalizedImages);
+			}
+			const imageDescriptionNotice = normalizedImages?.length
+				? await this.#buildImageDescriptionNotice(normalizedImages)
+				: undefined;
+			this.#allowQueuedMessageDrainRetry();
+			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
+			this.agent.followUp({
+				role: "developer",
+				content,
+				attribution: options.attribution ?? "agent",
+				timestamp: Date.now(),
+				// Run-initiating synthetic prompt (e.g. approved-plan execution queued
+				// behind a busy turn): replay uses the marker to clear the preceding
+				// user's prompt anchor, matching the live agent_start clear.
+				synthetic: true,
+			});
+		} finally {
+			this.#endQueuedInputPrep();
 		}
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
-		this.#allowQueuedMessageDrainRetry();
-		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-		this.agent.followUp({
-			role: "developer",
-			content,
-			attribution: options.attribution ?? "agent",
-			timestamp: Date.now(),
-			// Run-initiating synthetic prompt (e.g. approved-plan execution queued
-			// behind a busy turn): replay uses the marker to clear the preceding
-			// user's prompt anchor, matching the live agent_start clear.
-			synthetic: true,
-		});
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -7093,7 +7104,24 @@ export class AgentSession {
 			attribution: normalizedPayload.attribution,
 			timestamp: Date.now(),
 		};
-		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		// Track the async image-normalization window so the restart barrier and
+		// #hasUnpersistedInput() observe input that has passed the #restarting latch
+		// check but has not yet reached either agent queue or #promptInFlightCount,
+		// mirroring #queueUserMessage/#queueCustomMessage. Without this a host/ACP/
+		// collaboration custom message parked in normalization when requestRestart()
+		// runs would let the barrier dispose under it, and the continuation below
+		// would then enqueue/append/prompt into the torn-down agent. Released in the
+		// finally once normalization resolves (or threw); the dispatch that follows
+		// is synchronous — or, for the turn-starting branches, guarded by
+		// #promptAgentInitiatedMessage's own #restarting check + #beginInFlight — so
+		// there is no window where the barrier sees neither the counter nor the queue.
+		this.#beginQueuedInputPrep();
+		let normalizedAppMessage: CustomMessage<T>;
+		try {
+			normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		} finally {
+			this.#endQueuedInputPrep();
+		}
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
