@@ -4482,7 +4482,12 @@ export class AgentSession {
 		}
 
 		this.#releasePowerAssertion();
-		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
+		// A restart handoff (preserveSessionFile) disposes but keeps the file it just
+		// persisted for reattachment; skipping empty-move cleanup keeps the captured
+		// sessionFile on disk so onRestartRequested's SessionManager.open() succeeds.
+		if (!options.preserveSessionFile) {
+			await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
+		}
 		this.#movedFromEmptySessionFile = undefined;
 		this.#closeAllProviderSessions("dispose");
 		this.#maintenance.cancelSpeculation();
@@ -5191,8 +5196,11 @@ export class AgentSession {
 			}
 			// Dispose BEFORE the callback: create-before-dispose is unsafe in-process
 			// (AsyncJobManager singleton + lock-free append writer). dispose() is
-			// idempotent.
-			await this.dispose();
+			// idempotent. preserveSessionFile suppresses empty-move cleanup so the
+			// file just persisted by ensureOnDisk() survives for onRestartRequested's
+			// SessionManager.open() reattachment — a moved-but-empty session would
+			// otherwise have its captured file deleted here.
+			await this.dispose({ preserveSessionFile: true });
 			// Drop the process-global discovery/capability caches so the host's
 			// rebuild (a fresh createAgentSession over the reopened file) re-reads
 			// on-disk AGENTS.md/skills/rules instead of the bytes this session
@@ -7019,12 +7027,24 @@ export class AgentSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
-		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
-		this.#allowQueuedMessageDrainRetry();
-		if (deliverAs === "followUp") {
-			this.agent.followUp(normalizedAppMessage);
-		} else {
-			this.agent.steer(normalizedAppMessage);
+		// Track async preparation (image normalization) so the restart barrier and
+		// #hasUnpersistedInput() observe this custom prompt after it passes the
+		// #restarting latch check but before it reaches either agent queue, mirroring
+		// #queueUserMessage. Without this an SDK/ACP/collaboration prompt parked in
+		// normalization when requestRestart() runs would dispose under an unseen
+		// prompt, which would then enqueue into the dead agent and be lost. Released
+		// in the finally so a preparation that throws still frees the barrier.
+		this.#beginQueuedInputPrep();
+		try {
+			const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+			this.#allowQueuedMessageDrainRetry();
+			if (deliverAs === "followUp") {
+				this.agent.followUp(normalizedAppMessage);
+			} else {
+				this.agent.steer(normalizedAppMessage);
+			}
+		} finally {
+			this.#endQueuedInputPrep();
 		}
 		this.#scheduleIdleQueueDrain();
 	}

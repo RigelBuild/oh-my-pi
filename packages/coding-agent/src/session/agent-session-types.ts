@@ -58,6 +58,15 @@ export interface AgentSessionDisposeOptions {
 	 * (`/quit`, test teardown, subagent completion).
 	 */
 	reason?: postmortem.Reason;
+	/**
+	 * Skip empty-move-session cleanup during disposal. A restart handoff disposes
+	 * the session but must keep the file it just persisted (`ensureOnDisk()`) so
+	 * `onRestartRequested` can hand it to `SessionManager.open()` for
+	 * reconstruction. Without this an SDK host that MOVED an otherwise empty
+	 * session and then requested a restart would have the captured `sessionFile`
+	 * deleted by `cleanupEmptyMoveSession()`, breaking reattachment.
+	 */
+	preserveSessionFile?: boolean;
 }
 
 /** Listener notified when command metadata changes. */

@@ -183,4 +183,79 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		expect(await restart).toEqual({ ok: false, reason: "busy" });
 		expect(disposeStarted).toBe(false);
 	});
+
+	it("blocks dispose while a custom message parked in queued-input image preprocessing has not enqueued, then refuses busy", async () => {
+		await buildLiveSession();
+
+		// Park the restart at its post-idle quiescence wait so it latches
+		// #restarting and passes its pre-latch #hasUnpersistedInput check BEFORE
+		// the custom prompt's preparation begins. Only then does the custom prompt
+		// (SDK/collaboration path) enter the exact race: input in async preparation
+		// that has passed the latch but reached neither agent queue nor
+		// #promptInFlightCount.
+		const idleGate = Promise.withResolvers<void>();
+		vi.spyOn(session, "waitForIdle").mockReturnValue(idleGate.promise);
+
+		// Gate image normalization so the custom prompt parks inside
+		// #queueCustomMessage's async preparation before either agent queue is
+		// populated.
+		const normalizeGate = Promise.withResolvers<void>();
+		const image = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			await normalizeGate.promise;
+			return images;
+		});
+
+		// Observe when dispose begins.
+		let disposeStarted = false;
+		const realDispose = session.dispose.bind(session);
+		vi.spyOn(session, "dispose").mockImplementation(options => {
+			disposeStarted = true;
+			return realDispose(options);
+		});
+
+		// Latch the restart; it parks on the gated quiescence wait.
+		const restart = session.requestRestart();
+
+		// A host/extension custom prompt (SDK/ACP/collaboration) that queues through
+		// #queueCustomMessage directly, landing after the restart latched. It
+		// advances into #queueCustomMessage and parks on the gated normalization —
+		// in preparation, not yet enqueued.
+		const custom = session.promptCustomMessage(
+			{
+				customType: "collab_prompt",
+				content: [{ type: "text", text: "resume the work" }, image],
+				display: false,
+				details: undefined,
+				attribution: "agent",
+			},
+			{ queueOnly: true, streamingBehavior: "steer" },
+		);
+		for (let i = 0; i < 50; i++) {
+			await scheduler.wait(1);
+		}
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+
+		// Release the quiescence gate: the barrier resumes. #promptInFlightCount is
+		// zero, so only the queued-input preprocessing barrier can keep dispose from
+		// running. Give it ample opportunity to (wrongly) flush and dispose out from
+		// under the still-preparing custom prompt.
+		idleGate.resolve();
+		for (let i = 0; i < 100 && !disposeStarted; i++) {
+			await scheduler.wait(1);
+		}
+		expect(disposeStarted).toBe(false);
+		// The preparing input was not lost to a dead agent: dispose is blocked and
+		// the message still has not reached the queue.
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+
+		// Release the normalization gate: the custom prompt enqueues, the prep
+		// barrier unblocks, and the barrier now observes queued input — so it
+		// refuses the recycle rather than disposing under it.
+		normalizeGate.resolve();
+		await custom;
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+		expect(await restart).toEqual({ ok: false, reason: "busy" });
+		expect(disposeStarted).toBe(false);
+	});
 });
