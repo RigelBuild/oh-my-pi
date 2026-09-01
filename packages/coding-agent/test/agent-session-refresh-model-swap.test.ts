@@ -311,4 +311,37 @@ describe("AgentSession refresh('settings'): model-swap precedence", () => {
 			await h.dispose();
 		}
 	});
+
+	it("resets thinking to the model/default configuration when the default-role suffix is removed", async () => {
+		// Config also pins a distinct global `defaultThinkingLevel` so the fallback
+		// target (used when the model exposes no metadata default) is observably
+		// different from the prior explicit `:high` — proving the reset happened.
+		const h = await makeHarness({ defaultSelector: "anthropic/claude-sonnet-4-5:high" });
+		try {
+			await fs.writeFile(
+				h.settingsPath,
+				`defaultThinkingLevel: low\nmodelRoles:\n  default: ${h.modelA.provider}/${h.modelA.id}:high\n`,
+			);
+			await h.session.refresh("settings");
+			expect(h.session.model?.id).toBe(h.modelA.id);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
+
+			// The default selector drops the `:high` suffix on the SAME model id.
+			await fs.writeFile(
+				h.settingsPath,
+				`defaultThinkingLevel: low\nmodelRoles:\n  default: ${h.modelA.provider}/${h.modelA.id}\n`,
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(result.modelSwapped).toBe(false);
+			// Pre-fix: the re-apply was gated on a defined resolved level, so the
+			// removed suffix left the session stuck at `high`. Post-fix: it falls
+			// back to the model/default thinking configuration (here the global
+			// `defaultThinkingLevel`).
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+		} finally {
+			await h.dispose();
+		}
+	});
 });

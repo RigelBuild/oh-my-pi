@@ -71,6 +71,23 @@ describe("summarizeRefresh", () => {
 		expect(summary.length).toBeLessThan(hostileError.length);
 	});
 
+	it("bounds the assembled failure summary width for many failed servers", () => {
+		// Per-entry sanitization caps each failure, but the JOINED line of every
+		// failed server was never capped — with many servers it spans thousands of
+		// columns and is passed verbatim to the tool result and the `/refresh` TUI.
+		const mcpErrors = new Map<string, string>();
+		for (let i = 0; i < 60; i++) {
+			mcpErrors.set(`server-${i}`, "ECONNREFUSED");
+		}
+		const summary = summarizeRefresh("mcp", { mcp: true, mcpErrors });
+		// The parenthesized detail (the join of all failed-server entries) must be
+		// capped at the standard single-line width. Pre-fix (no cap on the join)
+		// the detail ran the full concatenation of all 60 entries.
+		const detail = summary.match(/error\(s\) \((.*)\)\.$/)?.[1] ?? "";
+		expect(detail.length).toBeGreaterThan(0);
+		expect(detail.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+	});
+
 	it("renders every surface for an 'all' refresh", () => {
 		const result: RefreshResult = {
 			skills: 3,

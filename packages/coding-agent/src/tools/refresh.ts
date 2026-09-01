@@ -20,6 +20,7 @@ import { REFRESH_SCOPES, type RefreshResult, type RefreshScope } from "../extens
 import { formatFailedServer } from "../mcp/startup-events";
 import refreshDescription from "../prompts/tools/refresh.md" with { type: "text" };
 import type { ToolSession } from "./index";
+import { TRUNCATE_LENGTHS, truncateToWidth } from "./render-utils";
 
 const refreshSchema = type({
 	"scope?": type
@@ -50,9 +51,12 @@ export function summarizeRefresh(scope: RefreshScope, result: RefreshResult): st
 			// flattened, embedded home paths shortened, fields width-bounded) so a
 			// hostile server name or a long/absolute-path stderr line cannot corrupt
 			// or overflow the TUI, nor leak local filesystem layout.
-			const detail = [...failed.entries()]
-				.map(([server, error]) => formatFailedServer({ serverName: server, error }))
-				.join("; ");
+			const detail = truncateToWidth(
+				[...failed.entries()]
+					.map(([server, error]) => formatFailedServer({ serverName: server, error }))
+					.join("; "),
+				TRUNCATE_LENGTHS.LINE,
+			);
 			parts.push(`MCP reconnected with ${failed.size} error(s) (${detail})`);
 		} else {
 			parts.push("MCP reconnected");

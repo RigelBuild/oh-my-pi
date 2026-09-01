@@ -5377,10 +5377,19 @@ export class AgentSession {
 		const current = this.model;
 		if (current && current.provider === resolved.provider && current.id === resolved.id) {
 			// Model unchanged, but the configured thinking level may have moved.
-			// Apply it so `/refresh settings` reproduces the explicit `:level`
-			// suffix; the swap short-circuit must not skip a thinking-only change.
-			if (resolvedThinkingLevel !== undefined && this.configuredThinkingLevel() !== resolvedThinkingLevel) {
-				this.setThinkingLevel(resolvedThinkingLevel);
+			// Apply the reloaded selector so `/refresh settings` reproduces the
+			// explicit `:level` suffix; the swap short-circuit must not skip a
+			// thinking-only change. When the suffix was REMOVED (`resolvedThinkingLevel`
+			// is now undefined), fall back to the model/default thinking configuration
+			// — reproducing startup resolution (model metadata default, then the
+			// global `defaultThinkingLevel`) — instead of leaving the prior explicit
+			// level stuck active.
+			const targetThinkingLevel =
+				resolvedThinkingLevel ??
+				resolved.thinking?.defaultLevel ??
+				parseConfiguredThinkingLevel(this.settings.get("defaultThinkingLevel"));
+			if (targetThinkingLevel !== undefined && this.configuredThinkingLevel() !== targetThinkingLevel) {
+				this.setThinkingLevel(targetThinkingLevel);
 			}
 			return false;
 		}
