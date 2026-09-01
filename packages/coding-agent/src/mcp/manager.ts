@@ -280,6 +280,15 @@ export class MCPManager {
 	 */
 	#pendingEmptyRetries = new Map<string, MCPServerConnection>();
 	/**
+	 * Cancellers for the in-flight backoff wait of each empty-toolset re-list
+	 * loop, keyed by server name and guarded by the owning connection. The
+	 * timer behind each wait is `unref()`'d so a pending backoff never holds the
+	 * event loop alive; cancelling it (from either disconnect path) settles the
+	 * wait early so a one-shot/SDK consumer shutting down via `disconnectAll()`
+	 * does not block for up to the full backoff schedule.
+	 */
+	#emptyRetryWaits = new Map<string, { connection: MCPServerConnection; cancel: () => void }>();
+	/**
 	 * In-flight per-server `refreshServerTools` calls, so a manual `/mcp refresh`
 	 * and an automatic empty-toolset re-list serialize onto one `tools/list`
 	 * instead of racing — an older empty response must never overwrite tools a
@@ -932,6 +941,16 @@ export class MCPManager {
 	}
 
 	/**
+	 * Whether an empty-toolset recovery loop currently has an in-flight,
+	 * cancellable backoff wait armed for `name`. Exposes the `#emptyRetryWaits`
+	 * entry so a test can assert the pending timer is cancelled by a disconnect
+	 * without waiting out (or racing) the backoff.
+	 */
+	hasPendingEmptyToolsetWait(name: string): boolean {
+		return this.#emptyRetryWaits.has(name);
+	}
+
+	/**
 	 * Get current connection status for a server.
 	 */
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected" {
@@ -1049,6 +1068,11 @@ export class MCPManager {
 
 		const connection = this.#connections.get(name);
 
+		// Cancel any in-flight empty-toolset backoff for this connection so its
+		// loop exits now instead of after the current delay, and its unref'd
+		// timer is cleared.
+		if (connection) this.#cancelEmptyRetryWait(name, connection);
+
 		const subscribedUris = this.#subscribedResources.get(name);
 		if (subscribedUris && subscribedUris.size > 0 && connection) {
 			void unsubscribeFromResources(connection, Array.from(subscribedUris)).catch(() => {});
@@ -1077,6 +1101,7 @@ export class MCPManager {
 		this.#epoch++;
 		const promises = Array.from(this.#connections, ([name, connection]) => this.#discardConnection(name, connection));
 		await Promise.allSettled(promises);
+		for (const [name, wait] of this.#emptyRetryWaits) this.#cancelEmptyRetryWait(name, wait.connection);
 
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
@@ -1489,7 +1514,12 @@ export class MCPManager {
 		void (async () => {
 			try {
 				for (const wait of delays) {
-					await delay(wait);
+					// Cancellable so a disconnect during this backoff settles the
+					// wait immediately instead of pinning the event loop (and any
+					// one-shot/SDK consumer awaiting `disconnectAll()`) for up to
+					// the full remaining schedule. A cancelled wait means the loop
+					// must exit without re-listing a torn-down connection.
+					if (!(await this.#waitEmptyRetryBackoff(name, connection, wait))) return;
 					if (this.#epoch !== startEpoch) return;
 					// Stop if this name now maps to a different (or no) connection:
 					// a disconnect+reconnect replaced our target, and a fresh loop
@@ -1523,8 +1553,54 @@ export class MCPManager {
 				if (this.#pendingEmptyRetries.get(name) === connection) {
 					this.#pendingEmptyRetries.delete(name);
 				}
+				if (this.#emptyRetryWaits.get(name)?.connection === connection) {
+					this.#emptyRetryWaits.delete(name);
+				}
 			}
 		})();
+	}
+
+	/**
+	 * Sleep `ms` for the empty-toolset retry loop, cancellable per server.
+	 *
+	 * Resolves `true` when the full delay elapsed (loop should continue) or
+	 * `false` when the wait was cancelled by a disconnect (loop should exit
+	 * without re-listing). The backing timer is `unref()`'d so a pending backoff
+	 * never keeps the event loop alive on its own — a one-shot/SDK consumer that
+	 * shuts down via `disconnectAll()` returns promptly instead of blocking on
+	 * the timer, and the disconnect path also cancels early to settle the wait.
+	 */
+	#waitEmptyRetryBackoff(name: string, connection: MCPServerConnection, ms: number): Promise<boolean> {
+		const gate = Promise.withResolvers<boolean>();
+		const timer = setTimeout(() => {
+			if (this.#emptyRetryWaits.get(name)?.connection === connection) {
+				this.#emptyRetryWaits.delete(name);
+			}
+			gate.resolve(true);
+		}, ms);
+		timer.unref();
+		this.#emptyRetryWaits.set(name, {
+			connection,
+			cancel: () => {
+				clearTimeout(timer);
+				gate.resolve(false);
+			},
+		});
+		return gate.promise;
+	}
+
+	/**
+	 * Cancel the in-flight empty-toolset backoff wait for `name` when its owning
+	 * connection matches. The loop's own `finally` clears the map entry, so this
+	 * only fires the canceller and drops the reference the disconnect is
+	 * invalidating.
+	 */
+	#cancelEmptyRetryWait(name: string, connection: MCPServerConnection): void {
+		const wait = this.#emptyRetryWaits.get(name);
+		if (wait?.connection === connection) {
+			this.#emptyRetryWaits.delete(name);
+			wait.cancel();
+		}
 	}
 
 	/**

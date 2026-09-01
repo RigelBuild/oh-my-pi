@@ -547,4 +547,51 @@ describe("MCP empty-toolset warmup recovery", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+
+	it("cancels the in-flight empty-toolset backoff on disconnectAll (no hang, no post-disconnect rebind)", async () => {
+		// A tools-capable server that lists empty arms the recovery loop, which
+		// then sits in a backoff wait. If `disconnectAll()` does not cancel that
+		// wait, its Bun timer keeps the event loop alive until the delay elapses
+		// — up to 15s with the default schedule — so a one-shot/SDK consumer
+		// shutting down blocks on it. Pin the backoff far longer than the test so
+		// the ONLY way disconnect returns promptly is by cancelling the pending
+		// timer; a wall-clock elapse cannot mask a missing cancel.
+		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "100000";
+		const manager = new MCPManager(workDir);
+
+		try {
+			const changed = Promise.withResolvers<void>();
+			manager.setOnToolsChanged(() => changed.resolve());
+			await manager.connectServers({ warmup: stdioConfig() }, {});
+			await changed.promise;
+
+			// The loop armed and is parked in its first backoff wait.
+			expect(warmupTools(manager)).toEqual([]);
+			expect(manager.hasPendingEmptyToolsetWait("warmup")).toBe(true);
+
+			// Any tools-changed after this point would be a post-disconnect rebind
+			// from a loop that failed to exit — the exact bug.
+			let rebindsAfterDisconnect = 0;
+			manager.setOnToolsChanged(tools => {
+				if (tools.some(t => t.name.startsWith("mcp__warmup_"))) rebindsAfterDisconnect++;
+			});
+
+			const start = Date.now();
+			await manager.disconnectAll();
+			const elapsed = Date.now() - start;
+
+			// Cancelled, not waited out: returns far under the 100s backoff.
+			expect(elapsed).toBeLessThan(5_000);
+			expect(manager.hasPendingEmptyToolsetWait("warmup")).toBe(false);
+			expect(manager.getConnectionStatus("warmup")).toBe("disconnected");
+
+			// Flush microtasks so a cancelled loop's `return` (or a buggy loop's
+			// synchronous re-list kickoff) runs; a correctly-cancelled loop exits
+			// without ever touching tools again.
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			expect(rebindsAfterDisconnect).toBe(0);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
 });
