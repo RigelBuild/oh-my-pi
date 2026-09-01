@@ -3547,7 +3547,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				// An explicit startup model (`options.model`, incl. CLI `--model`) is a
+				// user pin, exactly like an in-session `/model` pick: record it with
+				// role `default` so a later `/refresh settings` classifies it as a pin
+				// and does not clobber it. A settings-derived startup stays role-less
+				// (still tracks the configured default and remains swappable).
+				sessionManager.appendModelChange(`${model.provider}/${model.id}`, hasExplicitModel ? "default" : undefined);
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto

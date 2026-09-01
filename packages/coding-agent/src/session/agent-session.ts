@@ -5362,10 +5362,34 @@ export class AgentSession {
 			matchPreferences: getModelMatchPreferences(this.settings),
 		});
 		if (!resolved) return false;
+		// Resolve the default role's FULL specification (model + explicit thinking
+		// suffix) so a selector change that only moves the thinking level — e.g.
+		// `provider/model:low` -> `provider/model:high` on the SAME model — still
+		// re-applies the level, reproducing startup resolution instead of falling
+		// back to the model-metadata default. Only trusted when the default role
+		// resolves to the same model the swap picked; a level from an unrelated
+		// role must not leak onto it.
+		const defaultSpec = this.resolveRoleModelWithThinking("default");
+		const resolvedThinkingLevel =
+			defaultSpec.explicitThinkingLevel && defaultSpec.model && modelsAreEqual(defaultSpec.model, resolved)
+				? defaultSpec.thinkingLevel
+				: undefined;
 		const current = this.model;
-		if (current && current.provider === resolved.provider && current.id === resolved.id) return false;
+		if (current && current.provider === resolved.provider && current.id === resolved.id) {
+			// Model unchanged, but the configured thinking level may have moved.
+			// Apply it so `/refresh settings` reproduces the explicit `:level`
+			// suffix; the swap short-circuit must not skip a thinking-only change.
+			if (resolvedThinkingLevel !== undefined && this.configuredThinkingLevel() !== resolvedThinkingLevel) {
+				this.setThinkingLevel(resolvedThinkingLevel);
+			}
+			return false;
+		}
 		if (!this.#modelRegistry.hasConfiguredAuth(resolved)) return false;
 		await this.setModel(resolved, "default", { settingsTracking: true });
+		// Carry the default role's explicit thinking suffix onto the swapped model,
+		// mirroring role-model application; `setModel` alone only re-clamps to the
+		// new model's metadata default.
+		if (resolvedThinkingLevel !== undefined) this.setThinkingLevel(resolvedThinkingLevel);
 		return true;
 	}
 

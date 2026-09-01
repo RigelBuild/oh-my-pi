@@ -14,6 +14,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -40,7 +41,7 @@ interface Harness {
 	dispose: () => Promise<void>;
 }
 
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(options?: { explicitStartupModel?: boolean; defaultSelector?: string }): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-model-swap-");
 	const cwd = tempDir.path();
 	const modelA = bundledAnthropic("claude-sonnet-4-5");
@@ -50,7 +51,8 @@ async function makeHarness(): Promise<Harness> {
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 	const settingsPath = path.join(cwd, "config.yml");
-	await fs.writeFile(settingsPath, "modelRoles:\n  default: anthropic/claude-sonnet-4-5\n");
+	const defaultSelector = options?.defaultSelector ?? "anthropic/claude-sonnet-4-5";
+	await fs.writeFile(settingsPath, `modelRoles:\n  default: ${defaultSelector}\n`);
 
 	const { session } = await createAgentSession({
 		cwd,
@@ -63,7 +65,10 @@ async function makeHarness(): Promise<Harness> {
 			agentDir: cwd,
 			overrides: { "compaction.enabled": false },
 		}),
-		model: modelA,
+		// Default: settings-derived startup (role-less init model_change, swappable).
+		// Opt into an EXPLICIT startup model (as CLI `--model`/`options.model` does)
+		// to exercise the explicit-startup-is-a-pin path.
+		...(options?.explicitStartupModel ? { model: modelA } : {}),
 		disableExtensionDiscovery: true,
 		contextFiles: [],
 		skills: [],
@@ -255,6 +260,53 @@ describe("AgentSession refresh('settings'): model-swap precedence", () => {
 			// fallback to the underlying pin and preserves it.
 			expect(result.modelSwapped).toBe(false);
 			expect(h.session.model?.id).toBe(h.modelB.id);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("preserves an explicit startup model (--model) across a settings refresh", async () => {
+		const h = await makeHarness({ explicitStartupModel: true });
+		const modelC = bundledAnthropic("claude-haiku-4-5");
+		try {
+			// The session started with an EXPLICIT `options.model` (as CLI `--model`
+			// does). That is a user pin, even though the user made no in-session
+			// pick: SDK init records the startup model_change, and an explicit
+			// startup must survive a later default change.
+			expect(h.session.model?.id).toBe(h.modelA.id);
+
+			// The configured default changes on disk to a THIRD model, then refresh.
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${modelC.provider}/${modelC.id}\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Pre-fix: the init model_change was role-less, so the classifier read it
+			// as still-tracking and the swap clobbered the explicit startup model.
+			// Post-fix: an explicit startup model is a pin — no swap.
+			expect(result.modelSwapped).toBe(false);
+			expect(h.session.model?.id).toBe(h.modelA.id);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("applies a default-role thinking-level change on the same model across a refresh", async () => {
+		const h = await makeHarness({ defaultSelector: "anthropic/claude-sonnet-4-5:low" });
+		try {
+			// Startup resolved the default role's explicit `:low` suffix.
+			expect(h.session.model?.id).toBe(h.modelA.id);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+
+			// The default selector moves to `:high` on the SAME model id.
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${h.modelA.provider}/${h.modelA.id}:high\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// The model id is unchanged, so no swap — but the thinking level must
+			// follow the new selector. Pre-fix: the equality short-circuit exited
+			// before applying the level, leaving the session at `low`.
+			expect(result.modelSwapped).toBe(false);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
 		} finally {
 			await h.dispose();
 		}
