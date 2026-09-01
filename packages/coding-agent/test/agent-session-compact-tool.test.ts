@@ -568,4 +568,137 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		// Marker present → authorization → exactly one rewrite.
 		expect(requestingSpy).toHaveBeenCalledTimes(1);
 	}, 15_000);
+
+	it("does NOT re-fire a stale request on an agent-initiated sendCustomMessage turn after the compacting run errored (P2)", async () => {
+		// A `compact` request is armed, but the FOLLOWING inference errors — so
+		// agent-core skips `onTurnEnd` (see agent-loop `emitTurnEnd`) and the
+		// settle that would have scheduled the compaction never runs, leaving the
+		// marker un-applied. The prompt() entrypoint clears it via
+		// `#resetPromptMaintenanceState`, but an agent-initiated
+		// `sendCustomMessage(..., { triggerTurn: true })` reaches
+		// `#promptAgentInitiatedMessage` WITHOUT `acceptTerminalEmptyStop`, which
+		// pre-fix skipped that reset. Its unrelated clean settle then consumes the
+		// stale marker and rewrites context with no `compact` call in this run.
+		// Clearing the marker at every run entrypoint closes that leak.
+		const { session } = await createHarness([
+			// Prompt 1: request compaction, then the next inference errors out
+			// before the settle can schedule the deferred compaction.
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ throw: "provider exploded after compact" },
+			// The agent-initiated run: a plain noop turn, then a clean text stop.
+			// No compact call of its own.
+			{
+				content: [{ type: "toolCall", id: "call_noop", name: "noop", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["TWO"], stopReason: "stop" },
+		]);
+
+		const compactSpy = vi.spyOn(session, "compact").mockResolvedValue(fakeCompaction());
+
+		// Arm the stale request: the errored inference makes prompt 1 settle
+		// without ever scheduling the compaction, so the marker survives.
+		await session.prompt("compact then the model errors");
+		await session.waitForIdle();
+		expect(compactSpy).not.toHaveBeenCalled();
+
+		// The agent-initiated run (steer/follow-up delivery path, triggerTurn) —
+		// NOT the operator prompt() path. Pre-fix this consumes the stale marker at
+		// its clean settle and fires a rewrite.
+		await session.sendCustomMessage(
+			{ customType: "async-result", content: "unrelated background result" },
+			{ deliverAs: "nextTurn", triggerTurn: true },
+		);
+		await session.waitForIdle();
+
+		// Never fired: the run entrypoint dropped the un-applied request before the
+		// agent-initiated turn began, so its clean settle found nothing to apply.
+		expect(compactSpy).not.toHaveBeenCalled();
+	}, 15_000);
+
+	it("holds the terminal agent_end until the requested compaction completes even when a second settle re-schedules (P1)", async () => {
+		// A model-requested compaction runs the real `compact()` at settle, which
+		// disconnects and calls `abort()`; abort's `#resetInFlight()` flushes the
+		// deferred terminal `agent_end` only while no requested compaction is
+		// pending. When TWO settles each request a compaction — here the first
+		// settle fires a session_stop continuation whose own turn requests
+		// compaction again — the second scheduling must NOT start a rival detached
+		// run. Pre-fix it overwrote `#requestedCompaction`; the rival then saw
+		// `isCompacting` (the first pass's controller), returned fast, and its
+		// `.finally` cleared the gate WHILE the first rewrite was still in flight —
+		// so abort's flush emitted the terminal `agent_end` mid-pass. Coalescing
+		// onto the single in-flight pass keeps the gate held until the rewrite
+		// returns. Drive the REAL compact() (too-small no-op) so the abort +
+		// isCompacting lifecycle is genuine, and bracket it to observe ordering.
+		let sessionStopCalls = 0;
+		const extensionRunner = {
+			emit: async () => undefined,
+			emitBeforeAgentStart: async () => undefined,
+			hasHandlers: (eventType: string) => eventType === "session_stop",
+			// Only the first settle schedules a continuation; the continuation's
+			// own settle returns undefined so the run terminates.
+			emitSessionStop: async () => {
+				sessionStopCalls++;
+				return sessionStopCalls === 1 ? { continue: true, additionalContext: "keep going" } : undefined;
+			},
+		} as unknown as ExtensionRunner;
+
+		const { session } = await createHarness(
+			[
+				// Turn 1: request compaction and stop — this settle schedules run 1
+				// AND fires the session_stop continuation.
+				{
+					content: [{ type: "toolCall", id: "call_compact_1", name: "compact", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["first answer"], stopReason: "stop" },
+				// Turn 2: the hidden session_stop continuation ALSO requests
+				// compaction. Its settle re-enters #scheduleRequestedCompaction while
+				// run 1 is still parked awaiting the post-prompt continuation.
+				{
+					content: [{ type: "toolCall", id: "call_compact_2", name: "compact", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["continuation answer"], stopReason: "stop" },
+			],
+			{ extensionRunner },
+		);
+
+		const order: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") order.push("agent_end");
+		});
+
+		// Call through to the real lifecycle (abort + too-small no-op) but bracket
+		// it so the compaction's completion is observable. `finally` records
+		// completion whether the too-small case throws (swallowed by the settle
+		// path) or returns.
+		const realCompact = session.compact.bind(session);
+		const compactSpy = vi.spyOn(session, "compact").mockImplementation(async instructions => {
+			order.push("compact:start");
+			try {
+				return await realCompact(instructions);
+			} finally {
+				order.push("compact:done");
+			}
+		});
+
+		await session.prompt("do the thing then compact");
+		await session.waitForIdle();
+
+		// The continuation turn ran (session_stop fired at both settles).
+		expect(sessionStopCalls).toBe(2);
+		// Exactly one rewrite pass: the second scheduling coalesced onto the first,
+		// never starting a rival run.
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		// The idle signal must not reach subscribers until the single rewrite pass
+		// is done. RED (overwrite instead of coalesce): the rival run clears the
+		// gate mid-pass, so agent_end precedes compact:done.
+		expect(order).toContain("compact:done");
+		expect(order).toContain("agent_end");
+		expect(order.indexOf("agent_end")).toBeGreaterThan(order.indexOf("compact:done"));
+	}, 15_000);
 });

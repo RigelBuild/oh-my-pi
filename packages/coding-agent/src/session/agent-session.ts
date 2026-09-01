@@ -6728,6 +6728,18 @@ export class AgentSession {
 		this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return;
+			// Consume any compact request left un-applied by a prior run before this
+			// run begins — unconditionally, not only on the acceptTerminalEmptyStop
+			// branch below. A prior `compact` whose following inference errored or
+			// aborted skips `onTurnEnd` (agent-core's `emitTurnEnd`), so the settle
+			// that would have scheduled the compaction never ran and the marker
+			// survives. A plain `sendCustomMessage(..., { triggerTurn: true })`
+			// reaches here WITHOUT acceptTerminalEmptyStop; without this clear its
+			// clean settle would consume the stale marker and rewrite context with
+			// no `compact` call in this run. `#resetPromptMaintenanceState()` clears
+			// the same field, so the acceptTerminalEmptyStop branch stays a no-op
+			// re-clear.
+			this.#pendingCompactionRequest = undefined;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
@@ -7788,6 +7800,18 @@ export class AgentSession {
 		// later unrelated settle can never re-find it (the rewind path clears
 		// `#pendingRewindReport` the same way). A fresh `compact` call re-arms it.
 		this.#pendingCompactionRequest = undefined;
+		// Coalesce onto the single in-flight pass. If a prior requested compaction
+		// is still running, do NOT start a second detached run: overwriting
+		// `#requestedCompaction` below would orphan the first promise, and the
+		// second run — seeing `isCompacting` in `#applyRequestedCompaction` and
+		// returning fast — would clear the gate (its `.finally` sees
+		// `#requestedCompaction === run2`) WHILE the first rewrite is still in
+		// flight. That premature clear lets the first pass's `abort()` flush the
+		// terminal `agent_end` early and `waitForIdle()` return mid-rewrite — the
+		// exact premature-idle bug the deferred gate exists to prevent. The
+		// in-flight pass already sheds the context, so a duplicate is a benign
+		// no-op, mirroring the `isCompacting` guard in `#applyRequestedCompaction`.
+		if (this.#requestedCompaction) return;
 		const run = (async () => {
 			// Wait for the settling run to fully unwind before compacting. The
 			// onTurnEnd hook that scheduled us is still on the agent loop's stack,
