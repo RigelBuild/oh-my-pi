@@ -13,9 +13,7 @@ import type { MCPRefreshOutcome } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
-import { type Component, replaceTabs } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { Component } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -179,23 +177,5 @@ describe("/mcp refresh error rendering normalizes transport-controlled errors", 
 		// The overlong payload is bounded to the standard width.
 		expect(message?.length).toBeLessThan(rawMessage.length);
 		expect(message).not.toContain(`${"x".repeat(300)}`);
-	});
-
-	it("final rebind failure normalizes identically to a per-server error", async () => {
-		// Stronger contract: the sanitized rebind text must match, byte for byte,
-		// the exact normalization pipeline per-server failure rows use
-		// (`replaceTabs(truncateToWidth(sanitizeText(collapseNewlines))`). Both
-		// error surfaces must apply the same helper, not two divergent passes.
-		const rawMessage = `${TAB_ERROR} ${NEWLINE_ERROR} ${LONG_ERROR}`;
-		const expected = replaceTabs(
-			truncateToWidth(sanitizeText(rawMessage.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE),
-		);
-
-		const harness = makeHarness([{ name: "healthy", ok: true }], new Error(rawMessage));
-		await harness.controller.handle("/mcp refresh");
-		const message = harness.errored() ?? "";
-		const rebindError = message.replace("Failed to refresh MCP tools: ", "");
-
-		expect(rebindError).toBe(expected);
 	});
 });

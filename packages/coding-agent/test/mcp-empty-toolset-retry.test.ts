@@ -37,6 +37,8 @@ import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "warmup-empty-tools-mcp.ts");
 const RESOURCE_ONLY_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "resource-only-mcp.ts");
 const BUN_EXEC = process.execPath;
+const PROBE_PATH = path.join(import.meta.dir, "fixtures", "warmup-disconnect-exit-probe.ts");
+const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 
 function createFakeStorage(): AgentStorage & { raw: Map<string, string> } {
 	const raw = new Map<string, string>();
@@ -548,50 +550,61 @@ describe("MCP empty-toolset warmup recovery", () => {
 		}
 	}, 15_000);
 
-	it("cancels the in-flight empty-toolset backoff on disconnectAll (no hang, no post-disconnect rebind)", async () => {
+	it("tears down the in-flight empty-toolset backoff on disconnectAll so shutdown does not hang", async () => {
 		// A tools-capable server that lists empty arms the recovery loop, which
-		// then sits in a backoff wait. If `disconnectAll()` does not cancel that
-		// wait, its Bun timer keeps the event loop alive until the delay elapses
-		// — up to 15s with the default schedule — so a one-shot/SDK consumer
-		// shutting down blocks on it. Pin the backoff far longer than the test so
-		// the ONLY way disconnect returns promptly is by cancelling the pending
-		// timer; a wall-clock elapse cannot mask a missing cancel.
-		Bun.env.OMP_MCP_EMPTY_RETRY_MS = "100000";
-		const manager = new MCPManager(workDir);
-
+		// then parks in a backoff wait. If `disconnectAll()` leaves that wait's
+		// Bun timer live, it keeps the event loop alive until the delay elapses
+		// — so a one-shot/SDK consumer that shuts down blocks on it. Pin the
+		// backoff far longer than the test; the only way the process exits
+		// promptly is if disconnect tears the pending timer down.
+		//
+		// Event-loop keep-alive is observable ONLY across a process boundary (the
+		// test runner's own loop stays alive regardless), so spawn a probe that
+		// arms the loop, disconnects, and returns — then assert it exits rather
+		// than hanging out the pinned backoff. Mirrors the #7235 retained-timer
+		// regression (test/bash-autobg-timer.test.ts), which is only detectable
+		// the same way.
+		const start = performance.now();
+		const proc = Bun.spawn([process.execPath, PROBE_PATH], {
+			cwd: REPO_ROOT,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				// Pinned far longer than the watchdog: a retained timer would hold
+				// the probe ~100s, so a prompt exit can only mean teardown ran.
+				OMP_MCP_EMPTY_RETRY_MS: "100000",
+				OMP_MCP_PROBE_WORKDIR: workDir,
+				OMP_MCP_PROBE_FIXTURE: FIXTURE_PATH,
+				OMP_MCP_PROBE_LIST_LOG: listLog,
+			},
+		});
+		// Real-clock watchdog: the probe's wall-clock exit IS the contract, so
+		// fake timers cannot apply (they cannot drive another process's clock).
+		// This only bounds a wedged probe — a retained backoff timer would
+		// otherwise pin it for the full pinned delay.
+		const watchdog = setTimeout(() => {
+			try {
+				proc.kill("SIGKILL");
+			} catch {}
+		}, 12_000);
 		try {
-			const changed = Promise.withResolvers<void>();
-			manager.setOnToolsChanged(() => changed.resolve());
-			await manager.connectServers({ warmup: stdioConfig() }, {});
-			await changed.promise;
+			const [exitCode, stdout, stderr] = await Promise.all([
+				proc.exited,
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+			]);
+			const elapsedMs = performance.now() - start;
 
-			// The loop armed and is parked in its first backoff wait.
-			expect(warmupTools(manager)).toEqual([]);
-			expect(manager.hasPendingEmptyToolsetWait("warmup")).toBe(true);
-
-			// Any tools-changed after this point would be a post-disconnect rebind
-			// from a loop that failed to exit — the exact bug.
-			let rebindsAfterDisconnect = 0;
-			manager.setOnToolsChanged(tools => {
-				if (tools.some(t => t.name.startsWith("mcp__warmup_"))) rebindsAfterDisconnect++;
-			});
-
-			const start = Date.now();
-			await manager.disconnectAll();
-			const elapsed = Date.now() - start;
-
-			// Cancelled, not waited out: returns far under the 100s backoff.
-			expect(elapsed).toBeLessThan(5_000);
-			expect(manager.hasPendingEmptyToolsetWait("warmup")).toBe(false);
-			expect(manager.getConnectionStatus("warmup")).toBe("disconnected");
-
-			// Flush microtasks so a cancelled loop's `return` (or a buggy loop's
-			// synchronous re-list kickoff) runs; a correctly-cancelled loop exits
-			// without ever touching tools again.
-			for (let i = 0; i < 10; i++) await Promise.resolve();
-			expect(rebindsAfterDisconnect).toBe(0);
+			// The probe reached shutdown (armed the loop, disconnected) and exited
+			// cleanly — not killed by the watchdog after hanging on a live timer.
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			expect(stdout).toContain("DISCONNECTED");
+			expect(elapsedMs).toBeLessThan(10_000);
 		} finally {
-			await manager.disconnectAll();
+			clearTimeout(watchdog);
 		}
-	}, 15_000);
+	}, 20_000);
 });

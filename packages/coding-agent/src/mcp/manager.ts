@@ -941,16 +941,6 @@ export class MCPManager {
 	}
 
 	/**
-	 * Whether an empty-toolset recovery loop currently has an in-flight,
-	 * cancellable backoff wait armed for `name`. Exposes the `#emptyRetryWaits`
-	 * entry so a test can assert the pending timer is cancelled by a disconnect
-	 * without waiting out (or racing) the backoff.
-	 */
-	hasPendingEmptyToolsetWait(name: string): boolean {
-		return this.#emptyRetryWaits.has(name);
-	}
-
-	/**
 	 * Get current connection status for a server.
 	 */
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected" {
