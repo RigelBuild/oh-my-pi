@@ -5043,6 +5043,12 @@ export class AgentSession {
 			if (this.#hasUnpersistedInput()) {
 				this.#restarting = false;
 				this.#restartCall = undefined;
+				// Resume the normal queued/IRC drains the latch suppressed: a direct
+				// SDK requestRestart() has no restart-tool refusal message to
+				// incidentally start another turn, so without this the input that
+				// arrived during the wait stays stranded in the agent queue and a
+				// host waits indefinitely for an agent_end that never fires.
+				this.#drainStrandedQueuedMessages();
 				return { ok: false, reason: "busy" };
 			}
 			// Capture the durable re-attach identity — the file-preserved id
@@ -5062,6 +5068,24 @@ export class AgentSession {
 			if (this.#hasUnpersistedInput()) {
 				this.#restarting = false;
 				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
+				return { ok: false, reason: "busy" };
+			}
+			// Re-attach coherence check: a session transition (fork/move/branch/new/
+			// switch) that passed its own #restarting entry guard *before* this
+			// restart latched can still have been in flight, swapping the current
+			// file/id out from under the captured (sessionFile, sessionId) pair while
+			// the awaits above ran. Handing the host the captured path — one that
+			// moveSession may have renamed away — would reattach to the wrong
+			// conversation or fail outright. Verify the manager still points at the
+			// captured file before the point of no return; if it diverged, refuse
+			// recoverably (unlatch, resume drains) so the host re-requests and
+			// re-captures the current identity.
+			const currentSessionFile = this.sessionManager.getSessionFile();
+			if (currentSessionFile === undefined || path.resolve(currentSessionFile) !== path.resolve(sessionFile)) {
+				this.#restarting = false;
+				this.#restartCall = undefined;
+				this.#drainStrandedQueuedMessages();
 				return { ok: false, reason: "busy" };
 			}
 			// Dispose BEFORE the callback: create-before-dispose is unsafe in-process
@@ -7516,6 +7540,13 @@ export class AgentSession {
 	 */
 	async fork(): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
+		// A cooperative restart latched between its post-idle wait and dispose
+		// captured the current session file up front; forking here would swap the
+		// file/id out from under it, so #doRequestRestart would later pair the
+		// forked session's id with the pre-fork file and the host would reopen the
+		// wrong conversation. Refuse (clean recoverable no-op) until the latch
+		// releases, mirroring the restart-refusal style used elsewhere.
+		if (this.#restarting) return false;
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
 
@@ -7589,6 +7620,12 @@ export class AgentSession {
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, and moveTo renames that
+		// path away, so proceeding would let #doRequestRestart hand the host a path
+		// that no longer exists paired with the current id. Clean recoverable no-op
+		// until the latch releases.
+		if (this.#restarting) return;
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
@@ -8956,6 +8993,13 @@ export class AgentSession {
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
 		const previousSessionFile = this.sessionFile;
+		// Refuse while a cooperative restart is latched: the restart captured the
+		// current session file before its post-idle wait, and branchFromBtw swaps
+		// in a new session file, so proceeding would let #doRequestRestart pair the
+		// branched session's id with the old file and reopen the wrong
+		// conversation. Report cancelled (clean recoverable no-op) until the latch
+		// releases.
+		if (this.#restarting) return { cancelled: true, sessionFile: previousSessionFile };
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
 		}
