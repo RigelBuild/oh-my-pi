@@ -17,6 +17,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { REFRESH_SCOPES, type RefreshResult, type RefreshScope } from "../extensibility/reload";
+import { formatFailedServer } from "../mcp/startup-events";
 import refreshDescription from "../prompts/tools/refresh.md" with { type: "text" };
 import type { ToolSession } from "./index";
 
@@ -44,7 +45,14 @@ export function summarizeRefresh(scope: RefreshScope, result: RefreshResult): st
 	if (result.mcp) {
 		const failed = result.mcpErrors;
 		if (failed && failed.size > 0) {
-			const detail = [...failed.entries()].map(([server, error]) => `${server}: ${error}`).join("; ");
+			// Sanitize each failure through the same helper the MCP connection-status
+			// rows use (control chars/ANSI stripped, tabs expanded, newlines
+			// flattened, embedded home paths shortened, fields width-bounded) so a
+			// hostile server name or a long/absolute-path stderr line cannot corrupt
+			// or overflow the TUI, nor leak local filesystem layout.
+			const detail = [...failed.entries()]
+				.map(([server, error]) => formatFailedServer({ serverName: server, error }))
+				.join("; ");
 			parts.push(`MCP reconnected with ${failed.size} error(s) (${detail})`);
 		} else {
 			parts.push("MCP reconnected");

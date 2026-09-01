@@ -244,6 +244,39 @@ describe("AgentSession refresh: roster reaches the prompt", () => {
 			await h.dispose();
 		}
 	});
+
+	it("notifies command-metadata consumers when a refresh adds a skill (flag unchanged)", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const skillName = `refresh-cmd-skill-${marker}`;
+		// enableSkillCommands defaults to true, so it stays unchanged across the
+		// refresh below — the only signal is the skill-roster change.
+		const h = await makeHarness();
+		try {
+			let notified = 0;
+			const unsubscribe = h.session.subscribeCommandMetadataChanged(() => {
+				notified++;
+			});
+			// A project skill lands on disk AFTER construction, so the next
+			// refresh('all') discovers it: skillsChanged true, flag unchanged.
+			await fs.mkdir(path.join(h.cwd, ".omp", "skills", skillName), { recursive: true });
+			await fs.writeFile(
+				path.join(h.cwd, ".omp", "skills", skillName, "SKILL.md"),
+				`---\nname: ${skillName}\ndescription: ${skillName} fixture\n---\nbody\n`,
+			);
+
+			await h.session.refresh("all");
+
+			expect(h.session.skills.map(s => s.name)).toContain(skillName);
+			// Pre-fix (notify gated on the enable flag alone), a roster change with
+			// commands already enabled left the flag unchanged, so the new
+			// /skill:* command stayed absent from consumers until an unrelated
+			// notification.
+			expect(notified).toBeGreaterThan(0);
+			unsubscribe();
+		} finally {
+			await h.dispose();
+		}
+	});
 });
 
 describe("AgentSession refresh: settings-only TTSR gating reconcile", () => {

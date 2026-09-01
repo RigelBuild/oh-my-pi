@@ -69,3 +69,28 @@ describe("TtsrManager.reconfigure", () => {
 		expect(mgr.hasRule("rule-b")).toBe(true);
 	});
 });
+
+describe("TtsrManager.addOrUpdateRule", () => {
+	it("refreshes the stored rule when only body/description changed (recompilation fields equal)", () => {
+		const mgr = new TtsrManager(fullSettings());
+		const original = conditionRule("rule-a");
+		mgr.addRule(original);
+		mgr.markInjectedByNames(["rule-a"]);
+		expect(mgr.getRules().find(r => r.name === "rule-a")?.content).toBe("body");
+
+		// Same name and identical recompilation-affecting fields (condition,
+		// astCondition, scope, globs, interruptMode) — only the prose body and
+		// description changed, which ttsrRuleContentEqual deliberately omits.
+		const edited: Rule = { ...original, content: "edited body", description: "edited description" };
+		const stillRegistered = mgr.addOrUpdateRule(edited);
+
+		expect(stillRegistered).toBe(true);
+		// Pre-fix, the equal-branch early-returned and kept the STALE object, so
+		// getRules()/rule:// and injected content served the old "body".
+		const stored = mgr.getRules().find(r => r.name === "rule-a");
+		expect(stored?.content).toBe("edited body");
+		expect(stored?.description).toBe("edited description");
+		// The injection record survives the in-place swap (no recompile, no re-arm).
+		expect(mgr.getInjectedRuleNames()).toContain("rule-a");
+	});
+});

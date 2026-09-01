@@ -5175,13 +5175,16 @@ export class AgentSession {
 					// so a refresh cannot re-enable ambient rules the session excluded.
 					rules: this.#rulesPolicy,
 				});
+				const enableSkillCommandsChanged =
+					this.#tools.skillsSettings?.enableSkillCommands !== prevEnableSkillCommands;
 				const skillsChanged = this.applyReloadedSkills(reloaded.activeSkills, freshSkillsSettings);
-				// A change to `skills.enableSkillCommands` flips skill slash-command
-				// availability (available-commands.ts reads the snapshot just updated),
-				// so refresh the command metadata — mirroring `refreshSkills()`, which
-				// always fires it. Skill-set changes rebuild the prompt below; the
-				// command surface has its own notification.
-				if (this.#tools.skillsSettings?.enableSkillCommands !== prevEnableSkillCommands) {
+				// Rebuild the available-command metadata when the skill roster changed
+				// OR the `skills.enableSkillCommands` flag flipped — mirroring
+				// `refreshSkills()`, which always fires it. Gating on the flag alone
+				// left a freshly added/removed/renamed `/skill:*` command absent or
+				// stale until an unrelated notification, because a roster edit with
+				// commands already enabled leaves the flag unchanged.
+				if (skillsChanged || enableSkillCommandsChanged) {
 					this.#notifyCommandMetadataChanged();
 				}
 				// A rules-only change (edited rulebook / new always-apply rule with

@@ -405,7 +405,18 @@ export class TtsrManager {
 		if (!this.#settings.enabled) return false;
 		const existing = this.#rules.get(rule.name);
 		if (!existing) return this.addRule(rule);
-		if (ttsrRuleContentEqual(existing.rule, rule)) return true;
+		if (ttsrRuleContentEqual(existing.rule, rule)) {
+			// Recompilation is unnecessary — the compiled conditions/scope/globs
+			// are unchanged — but `content`/`description` are deliberately omitted
+			// from that predicate, so an edit to only the prose body or the
+			// description would otherwise leave the STALE rule object live: matches
+			// would inject the old `content` and `getRules()`/`rule://` would
+			// republish it. Swap the stored reference to the fresh rule in place so
+			// those fields are current, without touching the compiled entry or
+			// `#injectionRecords`/arming flags.
+			existing.rule = rule;
+			return true;
+		}
 		// Recompile from the edited rule. Drop the stale entry first so `addRule`
 		// (which no-ops on an existing name) proceeds; `#injectionRecords` is
 		// untouched, so the injection state carries over. If the edit removed the

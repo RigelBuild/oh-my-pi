@@ -52,6 +52,23 @@ describe("summarizeRefresh", () => {
 		expect(summarizeRefresh("mcp", { mcp: true, mcpErrors: new Map() })).toBe("Refreshed (mcp): MCP reconnected.");
 	});
 
+	it("sanitizes and bounds hostile MCP failure text in the summary", () => {
+		// A server name and error carrying a tab, CR/LF, and an over-long payload
+		// must not reach the TUI verbatim (they corrupt/overflow the status row);
+		// summarizeRefresh routes each failure through the same sanitize+truncate
+		// helper the MCP connection-status rows use.
+		const hostileError = `boom\thard\r\nsecond line ${"x".repeat(500)}`;
+		const summary = summarizeRefresh("mcp", {
+			mcp: true,
+			mcpErrors: new Map([[`srv\tname`, hostileError]]),
+		});
+		// Pre-fix (raw `${server}: ${error}` interpolation) these leaked straight through.
+		expect(summary).not.toContain("\t");
+		expect(summary).not.toContain("\r");
+		expect(summary).not.toContain("\n");
+		expect(summary.length).toBeLessThan(hostileError.length);
+	});
+
 	it("renders every surface for an 'all' refresh", () => {
 		const result: RefreshResult = {
 			skills: 3,
