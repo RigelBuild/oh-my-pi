@@ -441,6 +441,22 @@ describe("renderUsageMetrics", () => {
 		expect(out).not.toContain('llm_subscription_renews_at_seconds{provider="openai-codex"');
 	});
 
+	test("skips llm_subscription_info when the provider-derived planType is canonically empty", () => {
+		// A renewal-only config entry (no plan) falls back to the report's
+		// planType. A whitespace-only planType canonicalizes to "" and must not
+		// emit `llm_subscription_info{plan=""}`, a series that joins no plan row.
+		const blank = codexReport();
+		blank.metadata = { planType: "   ", accountId: "acct-codex-9", email: "c@example.com" };
+		const subscriptions = {
+			lookup: (provider: string, account: string) =>
+				provider === "openai-codex" && account === "acct-codex-9" ? {} : undefined,
+			plans: [],
+		};
+		const out = renderUsageMetrics([blank], { subscriptions });
+		expect(out).not.toContain("llm_subscription_info");
+		expect(out).not.toContain('plan=""');
+	});
+
 	test("an empty subscription config renders byte-identical to no config", () => {
 		const reports = [claudeReport(), codexReport()];
 		const emptySubscriptions = { lookup: () => undefined, plans: [] };

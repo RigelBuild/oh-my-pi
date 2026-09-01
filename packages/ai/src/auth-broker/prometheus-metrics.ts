@@ -332,7 +332,13 @@ export function renderUsageMetrics(
 		if (subscription) {
 			const rawPlan = subscription.plan ?? report.metadata?.planType;
 			const plan = typeof rawPlan === "string" ? canonicalizePlan(rawPlan) : undefined;
-			if (plan !== undefined) {
+			// A provider-derived fallback (a renewal-only config entry whose plan
+			// comes from the Codex report's `planType`) bypasses the config
+			// parser's empty-plan rejection. An empty/whitespace `planType`
+			// canonicalizes to "" and would emit `llm_subscription_info{plan=""}`,
+			// a series that joins no valid plan table row — skip it when the
+			// canonical plan is empty.
+			if (plan !== undefined && plan.length > 0) {
 				add("llm_subscription_info", [...perAccount, ["plan", plan]], 1);
 			}
 			add(

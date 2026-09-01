@@ -348,8 +348,32 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 				`subscription config ${file}: plan ${key} needs numeric "capacityWeight" and "monthlyPriceUsd"`,
 			);
 		}
+		// A capacity multiplier and a list price are exported straight to
+		// `/metrics`; a negative or non-finite (NaN/Inf) value would publish a
+		// nonsense gauge, so reject it at parse the same way a bad type is. Zero
+		// price is a valid free plan; zero capacityWeight is degenerate but not
+		// invalid on its face, so only strictly-negative and non-finite are
+		// rejected here.
+		if (!Number.isFinite(entry.capacityWeight) || entry.capacityWeight < 0) {
+			throw new Error(
+				`subscription config ${file}: plan ${key} "capacityWeight" must be a non-negative finite number`,
+			);
+		}
+		if (!Number.isFinite(entry.monthlyPriceUsd) || entry.monthlyPriceUsd < 0) {
+			throw new Error(
+				`subscription config ${file}: plan ${key} "monthlyPriceUsd" must be a non-negative finite number`,
+			);
+		}
 		const provider = key.slice(0, sep);
 		const plan = key.slice(sep + 1);
+		// A raw suffix that canonicalizes to empty (e.g. "anthropic:chatgpt_" or
+		// trailing whitespace) passes the separator check above but would export
+		// capacity/price samples with `plan=""` that join no valid account.
+		// Mirror the empty-plan rejection parsePlanRenewal applies to the
+		// account path.
+		if (canonicalizePlan(plan).length === 0) {
+			throw new Error(`subscription config ${file}: plan key ${key} "plan" must not be canonically empty`);
+		}
 		const identity = `${provider}:${canonicalizePlan(plan)}`;
 		if (seenPlanIdentities.has(identity)) {
 			throw new Error(

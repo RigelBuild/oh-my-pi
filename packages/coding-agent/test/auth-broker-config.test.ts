@@ -176,6 +176,33 @@ describe("parseSubscriptionsConfig", () => {
 			"nested org plan empty string",
 			JSON.stringify({ accounts: { a: { provider: "p", orgs: { x: { plan: "" } } } } }),
 		],
+		[
+			"plan key canonically empty (trailing chatgpt_)",
+			JSON.stringify({ plans: { "anthropic:chatgpt_": { capacityWeight: 1, monthlyPriceUsd: 1 } } }),
+		],
+		[
+			"plan key canonically empty (whitespace suffix)",
+			JSON.stringify({ plans: { "anthropic:   ": { capacityWeight: 1, monthlyPriceUsd: 1 } } }),
+		],
+		[
+			"capacityWeight negative",
+			JSON.stringify({ plans: { "anthropic:max": { capacityWeight: -1, monthlyPriceUsd: 1 } } }),
+		],
+		[
+			"capacityWeight non-finite (Infinity)",
+			// JSON has no NaN/Infinity literal; `1e999` overflows to Infinity on
+			// JSON.parse, which is a `number` (passing the type check) but not
+			// finite, so the range guard is what must reject it.
+			'{"plans":{"anthropic:max":{"capacityWeight":1e999,"monthlyPriceUsd":1}}}',
+		],
+		[
+			"monthlyPriceUsd negative",
+			JSON.stringify({ plans: { "anthropic:max": { capacityWeight: 1, monthlyPriceUsd: -0.01 } } }),
+		],
+		[
+			"monthlyPriceUsd non-finite (Infinity)",
+			'{"plans":{"anthropic:max":{"capacityWeight":1,"monthlyPriceUsd":1e999}}}',
+		],
 	];
 
 	for (const [name, raw] of throwCases) {
