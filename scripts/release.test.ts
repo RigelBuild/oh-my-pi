@@ -5,7 +5,9 @@ import {
 	applyPackageVersion,
 	bumpCanaryVersion,
 	bumpVersion,
+	isTransientGhError,
 	resolveReleaseVersion,
+	runWithTransientRetry,
 	validateExplicitVersion,
 } from "./release";
 
@@ -49,6 +51,62 @@ describe("validateExplicitVersion", () => {
 	test("accepts leading v prefix and normalizes to the bare version", () => {
 		expect(validateExplicitVersion("v17.2.8")).toBe("17.2.8");
 		expect(validateExplicitVersion("V17.2.8")).toBe(null);
+	});
+});
+
+describe("watchCI transient retry", () => {
+	test("isTransientGhError flags transient GitHub API failures", () => {
+		expect(isTransientGhError("failed to get runs: HTTP 502: Server Error (https://api.github.com/...)")).toBe(true);
+		expect(isTransientGhError("failed to get runs: HTTP 503: Server Error")).toBe(true);
+		expect(isTransientGhError("failed to get runs: HTTP 504: Server Error")).toBe(true);
+	});
+
+	test("isTransientGhError does not flag genuine non-transient errors", () => {
+		expect(isTransientGhError("gh: Not Found (HTTP 404)")).toBe(false);
+		expect(isTransientGhError("authentication required")).toBe(false);
+		expect(isTransientGhError("")).toBe(false);
+	});
+
+	test("runWithTransientRetry resolves after transient errors clear", async () => {
+		let attempts = 0;
+		const result = await runWithTransientRetry(
+			() => {
+				attempts++;
+				if (attempts <= 2) throw new Error("HTTP 502: Server Error");
+				return Promise.resolve("ok");
+			},
+			{ sleep: () => Promise.resolve() },
+		);
+		expect(result).toBe("ok");
+		expect(attempts).toBe(3);
+	});
+
+	test("runWithTransientRetry rethrows immediately on a non-transient error", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				() => {
+					attempts++;
+					return Promise.reject(new Error("gh: Not Found (HTTP 404)"));
+				},
+				{ sleep: () => Promise.resolve() },
+			),
+		).rejects.toThrow("HTTP 404");
+		expect(attempts).toBe(1);
+	});
+
+	test("runWithTransientRetry gives up after maxRetries on a persistent transient error", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				() => {
+					attempts++;
+					return Promise.reject(new Error("HTTP 502: Server Error"));
+				},
+				{ maxRetries: 3, sleep: () => Promise.resolve() },
+			),
+		).rejects.toThrow("HTTP 502");
+		expect(attempts).toBe(4);
 	});
 });
 

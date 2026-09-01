@@ -39,6 +39,55 @@ function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
 }
 
+/**
+ * True when `stderr` from a `gh` invocation looks like a *transient* GitHub API
+ * failure that is safe to retry. Treated as transient:
+ *   - HTTP 502 / 503 / 504 (bad gateway, service unavailable, gateway timeout)
+ *   - generic "Server Error" wording gh emits for 5xx responses
+ *   - connection resets ("connection reset by peer", ECONNRESET)
+ *   - timeouts ("timeout", "timed out", "i/o timeout")
+ * Retrying is safe because the CI poll is idempotent: re-running `gh run list`
+ * observes the same run set with no side effects. The match is deliberately
+ * conservative — genuine failures (404 Not Found, auth required, empty/invalid
+ * output) are NOT transient and must surface immediately.
+ */
+export function isTransientGhError(stderr: string): boolean {
+	return /\bHTTP 50[234]\b|server error|connection reset|econnreset|timed out|i\/o timeout|\btimeout\b/i.test(stderr);
+}
+
+/**
+ * Run `attempt()`, retrying on transient errors with bounded backoff. On throw,
+ * if the error message is transient (per `isTransient`) and retries remain,
+ * sleeps and retries; otherwise rethrows. A persistent transient error is
+ * surfaced after `maxRetries` retries rather than looping forever, so the
+ * release fails loudly on an unreachable API instead of hanging silently.
+ * `sleep` is injectable for deterministic testing.
+ */
+export async function runWithTransientRetry<T>(
+	attempt: () => Promise<T>,
+	opts?: {
+		maxRetries?: number;
+		isTransient?: (msg: string) => boolean;
+		onRetry?: (attempt: number, msg: string) => void;
+		sleep?: (ms: number) => Promise<void>;
+	},
+): Promise<T> {
+	const maxRetries = opts?.maxRetries ?? 5;
+	const isTransient = opts?.isTransient ?? isTransientGhError;
+	const sleep = opts?.sleep ?? ((ms: number) => Bun.sleep(ms));
+	for (let retry = 0; ; retry++) {
+		try {
+			return await attempt();
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (retry >= maxRetries || !isTransient(msg)) throw err;
+			opts?.onRetry?.(retry + 1, msg);
+			// Bounded exponential backoff, capped at 30s.
+			await sleep(Math.min(1000 * 2 ** retry, 30000));
+		}
+	}
+}
+
 // =============================================================================
 // Shared functions
 // =============================================================================
@@ -48,7 +97,12 @@ async function watchCI(): Promise<boolean> {
 	console.log(`  Commit: ${commitSha.slice(0, 8)}`);
 
 	while (true) {
-		const runsOutput = await $`gh run list --commit ${commitSha} --json databaseId,status,conclusion,name`.text();
+		const runsOutput = await runWithTransientRetry(
+			() => $`gh run list --commit ${commitSha} --json databaseId,status,conclusion,name`.text(),
+			{
+				onRetry: (n, msg) => console.log(`  Transient GitHub API error, retrying (${n}/5): ${msg.split("\n")[0]}`),
+			},
+		);
 		const runs: Array<{ databaseId: number; status: string; conclusion: string | null; name: string }> =
 			JSON.parse(runsOutput);
 
