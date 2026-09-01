@@ -291,6 +291,15 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 		if (entry.org !== undefined && typeof entry.org !== "string") {
 			throw new Error(`subscription config ${file}: account ${account} "org" must be a string`);
 		}
+		// A whitespace-only `org` (e.g. "   ") canonicalizes to the empty scope,
+		// which the lookup below treats as the all-orgs fallback — so a typo would
+		// silently apply this plan/renewal to every org of the account. An org-less
+		// entry (no `org` key, or a legitimately empty "") is the intended
+		// fallback; only a value that was non-empty as written but trims away is
+		// rejected.
+		if (typeof entry.org === "string" && entry.org.length > 0 && entry.org.trim().length === 0) {
+			throw new Error(`subscription config ${file}: account ${account} "org" must not be whitespace-only`);
+		}
 		const org = typeof entry.org === "string" ? entry.org.trim().toLowerCase() : "";
 		accounts.set(`${entry.provider}\x00${account}\x00${org}`, parsePlanRenewal(entry, file, `account ${account}`));
 
@@ -304,6 +313,16 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 			for (const [orgKey, orgEntry] of Object.entries(entry.orgs)) {
 				if (typeof orgEntry !== "object" || orgEntry === null || Array.isArray(orgEntry)) {
 					throw new Error(`subscription config ${file}: account ${account} org ${orgKey} must be an object`);
+				}
+				// A whitespace-only `orgs` key (e.g. "   ") trims to the empty scope,
+				// which — absent a bare entry — the lookup treats as the all-orgs
+				// fallback, so a typo'd key would apply this plan/renewal to unrelated
+				// orgs. An org key is meant to name a specific scope, so reject one
+				// that canonicalizes away entirely.
+				if (orgKey.length > 0 && orgKey.trim().length === 0) {
+					throw new Error(
+						`subscription config ${file}: account ${account} "orgs" key must not be whitespace-only`,
+					);
 				}
 				const orgScope = orgKey.trim().toLowerCase();
 				const key = `${entry.provider}\x00${account}\x00${orgScope}`;

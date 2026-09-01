@@ -177,6 +177,14 @@ describe("parseSubscriptionsConfig", () => {
 			JSON.stringify({ accounts: { a: { provider: "p", orgs: { x: { plan: "" } } } } }),
 		],
 		[
+			"org value whitespace-only (canonicalizes to all-orgs fallback)",
+			JSON.stringify({ accounts: { a: { provider: "p", org: "   ", plan: "max" } } }),
+		],
+		[
+			"orgs key whitespace-only (canonicalizes to all-orgs fallback)",
+			JSON.stringify({ accounts: { a: { provider: "p", org: "team", orgs: { "   ": { plan: "max" } } } } }),
+		],
+		[
 			"plan key canonically empty (trailing chatgpt_)",
 			JSON.stringify({ plans: { "anthropic:chatgpt_": { capacityWeight: 1, monthlyPriceUsd: 1 } } }),
 		],
