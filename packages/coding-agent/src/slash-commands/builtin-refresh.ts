@@ -1,7 +1,23 @@
 import { REFRESH_SCOPES, type RefreshScope } from "../extensibility/reload";
 import { summarizeRefresh } from "../tools/refresh";
+import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
+
+/**
+ * Make a refresh failure safe for a single TUI line. A settings reload throws
+ * with the absolute config path and possibly multiline YAML-parser content, so
+ * forwarding it verbatim leaks the home directory and injects tabs / newlines /
+ * oversized lines into the renderer. Collapse newlines, replace tabs, shorten
+ * any absolute path to `~`, and truncate to the standard line width — the same
+ * treatment other tool renderers apply to wire-delivered error text.
+ */
+function sanitizeRefreshError(err: unknown): string {
+	const singleLine = replaceTabs(errorMessage(err))
+		.replace(/[\r\n]+/g, " ")
+		.replace(/\/[^\s'")\]]+/g, p => shortenPath(p));
+	return truncateToWidth(singleLine, TRUNCATE_LENGTHS.LINE);
+}
 
 /**
  * `/refresh [scope]` — the human surface for the `refresh` tool. Re-reads the
@@ -35,7 +51,7 @@ export const BUILTIN_REFRESH_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const result = await runtime.session.refresh(scope);
 				await runtime.output(summarizeRefresh(scope, result));
 			} catch (err) {
-				return usage(`Refresh failed: ${errorMessage(err)}`, runtime);
+				return usage(`Refresh failed: ${sanitizeRefreshError(err)}`, runtime);
 			}
 			return commandConsumed();
 		},

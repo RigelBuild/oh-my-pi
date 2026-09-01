@@ -5384,9 +5384,14 @@ export class AgentSession {
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i];
 			if (entry.type !== "model_change") continue;
+			// Walk PAST ephemeral retry-fallback transitions to classify the
+			// underlying change: a fallback neither tracks the configured default
+			// nor is a user pin, it just masks whatever sits beneath it. Returning
+			// here would let a fallback appended over an explicit pin read as "no
+			// pin", so a later refresh('settings') would clobber the pin.
+			if (entry.role === EPHEMERAL_MODEL_CHANGE_ROLE) continue;
 			if (entry.settingsTracking === true) return false;
-			const role = entry.role;
-			return !(role === undefined || role === EPHEMERAL_MODEL_CHANGE_ROLE);
+			return entry.role !== undefined;
 		}
 		return false;
 	}

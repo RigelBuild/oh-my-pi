@@ -21,6 +21,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -220,6 +221,40 @@ describe("AgentSession refresh('settings'): model-swap precedence", () => {
 			// so the swap predicate read it as still-tracking and clobbered it.
 			expect(result.modelSwapped).toBe(false);
 			expect(h.session.model?.id).toBe(cycledId);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("preserves a user pin buried beneath an ephemeral retry-fallback entry", async () => {
+		const h = await makeHarness();
+		const modelC = bundledAnthropic("claude-haiku-4-5");
+		try {
+			// The user explicitly pins model-b this session.
+			await h.session.setModel(h.modelB);
+			expect(h.session.model?.id).toBe(h.modelB.id);
+
+			// Retry recovery later appends an ephemeral fallback transition on top
+			// of the pin, exactly as the retry-fallback path records it: role
+			// "fallback", resolvedModelIsFallback true. It masks the pin as the
+			// newest model_change but is not itself a user choice.
+			h.session.sessionManager.appendModelChange(
+				`${modelC.provider}/${modelC.id}`,
+				EPHEMERAL_MODEL_CHANGE_ROLE,
+				true,
+			);
+
+			// The configured default changes on disk, then refresh runs while the
+			// fallback entry is the latest transition.
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${modelC.provider}/${modelC.id}\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Pre-fix: the classifier stopped at the ephemeral entry and read it as
+			// "no pin", so the swap clobbered model-b. Post-fix: it walks past the
+			// fallback to the underlying pin and preserves it.
+			expect(result.modelSwapped).toBe(false);
+			expect(h.session.model?.id).toBe(h.modelB.id);
 		} finally {
 			await h.dispose();
 		}

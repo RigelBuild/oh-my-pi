@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import type { RefreshResult, RefreshScope } from "@oh-my-pi/pi-coding-agent/extensibility/reload";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { RefreshTool, summarizeRefresh } from "@oh-my-pi/pi-coding-agent/tools/refresh";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 
 // summarizeRefresh renders a live refresh into the one-line operator summary.
 // It is the sole surface the `/refresh` command and the RefreshTool print, so
@@ -202,5 +204,45 @@ describe("/refresh scope validation", () => {
 		await executeAcpBuiltinSlashCommand("/refresh", h.runtime);
 
 		expect(refresh).toHaveBeenCalledWith("all");
+	});
+});
+
+// A settings reload throws with the absolute config path plus raw YAML-parser
+// content (tabs, newlines, long lines). The `/refresh` failure branch must run
+// that message through the shared render sanitizers before handing it to the
+// TUI, so the home directory is shortened to `~` and control characters / width
+// can never break the renderer.
+describe("/refresh failure sanitization", () => {
+	it("shortens the home path, strips tabs/newlines, and truncates the reload error", async () => {
+		const home = os.homedir();
+		const configPath = `${home}/.config/omp/config.yml`;
+		// Mimic a real malformed-YAML reload throw: the absolute config path plus
+		// a multiline parser message carrying a tab and an oversized line.
+		const longToken = "x".repeat(400);
+		const err = new Error(
+			`Settings config is invalid: ${configPath}: YAMLParseError: bad indentation\n\tat line 3: ${longToken}`,
+		);
+		const refresh = vi.fn(async (_scope: RefreshScope) => {
+			throw err;
+		});
+		const h = commandRuntime(refresh);
+
+		const result = await executeAcpBuiltinSlashCommand("/refresh settings", h.runtime);
+
+		expect(result).toEqual({ consumed: true });
+		const message = (h.output.mock.calls[0]?.[0] as string) ?? "";
+		expect(message).toStartWith("Refresh failed: ");
+		// Home path shortened to ~ — the absolute home directory never leaks.
+		expect(message).not.toContain(home);
+		expect(message).toContain("~/.config/omp/config.yml");
+		// Tabs and newlines are gone: a single renderable line.
+		expect(message).not.toContain("\t");
+		expect(message).not.toContain("\n");
+		// Width is capped, so the 400-char token cannot spill across the TUI. The
+		// sanitized body is truncated to the line width; the "Refresh failed: "
+		// prefix is the command's own constant framing.
+		const body = message.replace(/^Refresh failed: /, "");
+		expect(body.length).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+		expect(message).not.toContain(longToken);
 	});
 });
