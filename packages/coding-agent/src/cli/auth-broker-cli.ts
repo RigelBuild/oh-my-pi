@@ -314,14 +314,15 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 				if (typeof orgEntry !== "object" || orgEntry === null || Array.isArray(orgEntry)) {
 					throw new Error(`subscription config ${file}: account ${account} org ${orgKey} must be an object`);
 				}
-				// A whitespace-only `orgs` key (e.g. "   ") trims to the empty scope,
-				// which — absent a bare entry — the lookup treats as the all-orgs
-				// fallback, so a typo'd key would apply this plan/renewal to unrelated
+				// An `orgs` key whose canonical (trimmed) scope is empty — the literal
+				// empty string "" or whitespace-only like "   " — canonicalizes to the
+				// empty scope, which, absent a bare entry, the lookup treats as the
+				// all-orgs fallback, so it would apply this plan/renewal to unrelated
 				// orgs. An org key is meant to name a specific scope, so reject one
 				// that canonicalizes away entirely.
-				if (orgKey.length > 0 && orgKey.trim().length === 0) {
+				if (orgKey.trim().length === 0) {
 					throw new Error(
-						`subscription config ${file}: account ${account} "orgs" key must not be whitespace-only`,
+						`subscription config ${file}: account ${account} "orgs" key must name a scope, not be empty or whitespace-only`,
 					);
 				}
 				const orgScope = orgKey.trim().toLowerCase();

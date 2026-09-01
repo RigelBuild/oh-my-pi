@@ -185,6 +185,10 @@ describe("parseSubscriptionsConfig", () => {
 			JSON.stringify({ accounts: { a: { provider: "p", org: "team", orgs: { "   ": { plan: "max" } } } } }),
 		],
 		[
+			"orgs key literal empty string (canonicalizes to all-orgs fallback)",
+			JSON.stringify({ accounts: { a: { provider: "p", org: "team", orgs: { "": { plan: "max" } } } } }),
+		],
+		[
 			"plan key canonically empty (trailing chatgpt_)",
 			JSON.stringify({ plans: { "anthropic:chatgpt_": { capacityWeight: 1, monthlyPriceUsd: 1 } } }),
 		],
@@ -244,7 +248,21 @@ describe("loadSubscriptionsConfig", () => {
 		expect(lookup?.plans).toEqual([{ provider: "anthropic", plan: "max", capacityWeight: 2, monthlyPriceUsd: 200 }]);
 	});
 
-	it("returns undefined when no path is configured", async () => {
-		expect(await loadSubscriptionsConfig(undefined)).toBeUndefined();
+	it("returns undefined when no path is configured, regardless of ambient env", async () => {
+		// `loadSubscriptionsConfig(undefined)` falls back to OMP_AUTH_BROKER_SUBSCRIPTIONS,
+		// so an ambient value would silently exercise the env-configured path (reading
+		// an unrelated host file) instead of the absent branch. Isolate the env var
+		// around the call and restore it exactly, leaking no process-wide state.
+		const ENV = "OMP_AUTH_BROKER_SUBSCRIPTIONS";
+		const prior = process.env[ENV];
+		process.env[ENV] = "/nonexistent/ambient-subs.json";
+		try {
+			delete process.env[ENV];
+			expect(await loadSubscriptionsConfig(undefined)).toBeUndefined();
+		} finally {
+			if (prior === undefined) delete process.env[ENV];
+			else process.env[ENV] = prior;
+		}
+		expect(process.env[ENV] === prior).toBe(true);
 	});
 });
