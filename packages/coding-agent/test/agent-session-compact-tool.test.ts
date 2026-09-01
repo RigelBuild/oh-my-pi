@@ -847,3 +847,320 @@ describe("AgentSession requested compaction owns the rewrite over automatic thre
 		expect(focusInstructions).toContain(instructions);
 	}, 15_000);
 });
+
+describe("AgentSession defers mid-turn maintenance while a compact request is armed (A)", () => {
+	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
+
+	// A big assistant text block on the compact-carrying turn guarantees the
+	// mid-turn cut point lands AFTER the earlier turn, so prepareCompaction has
+	// something to summarize and the automatic mid-turn pass actually commits an
+	// entry (the pre-fix leak) rather than no-opping on a too-small session.
+	const bulkText = "context ".repeat(8000);
+
+	function stubSummarizer(): void {
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+	}
+
+	async function createMidRunHarness(instructions: string): Promise<AgentSession> {
+		const tempDir = TempDir.createSync("@pi-compact-tool-midrun-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };
+
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.methodOrder": ["soft"],
+			"compaction.thresholdTokens": 1000,
+			"compaction.thresholdPercent": -1,
+			// A small keep window forces the cut forward so the mid-turn pass can
+			// summarize the earlier turn instead of finding nothing to compact.
+			"compaction.keepRecentTokens": 100,
+			// Mid-turn maintenance ON: it is the pass under test.
+			"compaction.midTurnEnabled": true,
+			"compaction.asyncEnabled": false,
+			"compaction.autoContinue": false,
+			"contextPromotion.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const compactTool = new CompactTool(topLevelToolSession()) as AgentTool;
+		const tools: AgentTool[] = [noopTool, compactTool];
+
+		let call = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
+			convertToLlm,
+			streamFn: () => {
+				const index = call++;
+				const stream = new AssistantMessageEventStream();
+				// Turn 0: a small noop turn — under threshold, provides the earlier
+				// turn the mid-turn cut later summarizes. Turn 1: call `compact` with
+				// focus AND a paired `noop`, so the loop continues (willContinue true)
+				// at THIS boundary — the mid-turn maintenance boundary. Its bulk text
+				// crosses the threshold and gives the cut a summarizable prefix. Turn
+				// 2: a plain text stop that genuinely settles.
+				const message =
+					index === 0
+						? {
+								role: "assistant" as const,
+								content: [{ type: "toolCall" as const, id: "call_noop_0", name: "noop", arguments: {} }],
+								api: "anthropic-messages" as const,
+								provider: "anthropic" as const,
+								model: model.id,
+								usage: highUsage(200),
+								stopReason: "toolUse" as const,
+								timestamp: Date.now(),
+							}
+						: index === 1
+							? {
+									role: "assistant" as const,
+									content: [
+										{ type: "text" as const, text: bulkText },
+										{
+											type: "toolCall" as const,
+											id: "call_compact",
+											name: "compact",
+											arguments: { instructions },
+										},
+										{ type: "toolCall" as const, id: "call_noop_1", name: "noop", arguments: {} },
+									],
+									api: "anthropic-messages" as const,
+									provider: "anthropic" as const,
+									model: model.id,
+									usage: highUsage(50_000),
+									stopReason: "toolUse" as const,
+									timestamp: Date.now(),
+								}
+							: {
+									role: "assistant" as const,
+									content: [{ type: "text" as const, text: "All done." }],
+									api: "anthropic-messages" as const,
+									provider: "anthropic" as const,
+									model: model.id,
+									usage: highUsage(50_000),
+									stopReason: "stop" as const,
+									timestamp: Date.now(),
+								};
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: message.stopReason, message });
+				});
+				return stream;
+			},
+		});
+
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+		});
+		activeHarnesses.push({ session, authStorage, tempDir });
+		return session;
+	}
+
+	it("does not let the mid-turn pass commit an undirected summary that strips the requested focus", async () => {
+		const instructions = "keep the failing repro";
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+		stubSummarizer();
+		const session = await createMidRunHarness(instructions);
+
+		await session.prompt("work, then compact mid-loop with focus");
+		await session.waitForIdle();
+
+		// Pre-fix the automatic mid-turn pass commits an undirected summary at the
+		// compact-carrying (willContinue) boundary; the deferred requested pass then
+		// exits "Already compacted" and never reaches the summarizer with the focus.
+		// Post-fix the mid-turn pass cedes while the request is armed, so the
+		// requested pass owns the single rewrite and carries the focus.
+		const focusInstructions = compactSpy.mock.calls.map(args => args[3]);
+		expect(focusInstructions).toContain(instructions);
+	}, 15_000);
+});
+
+describe("AgentSession preserves later focus when coalescing compact requests (B)", () => {
+	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
+
+	// Bulk text on the first turn guarantees the deferred requested pass has real
+	// content to summarize, so it reaches the summarizer instead of no-opping.
+	const bulkText = "context ".repeat(8000);
+
+	function stubSummarizer(): void {
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+	}
+
+	async function createCoalesceHarness(firstFocus: string, secondFocus: string): Promise<AgentSession> {
+		const tempDir = TempDir.createSync("@pi-compact-tool-coalesce-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const model = { ...bundled, contextWindow: 200_000, maxTokens: 64_000 };
+
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.methodOrder": ["soft"],
+			"compaction.thresholdTokens": 1000,
+			"compaction.thresholdPercent": -1,
+			"compaction.keepRecentTokens": 100,
+			// The coalescing race is on the deferred SETTLE pass, not the mid-turn
+			// pass — keep mid-turn off so nothing compacts before the settle.
+			"compaction.midTurnEnabled": false,
+			"compaction.asyncEnabled": false,
+			"compaction.autoContinue": false,
+			"contextPromotion.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		// A session_stop hook whose first fire schedules a hidden continuation
+		// turn — that continuation calls `compact` AGAIN with different focus,
+		// re-entering the schedule while the first deferred pass is still parked.
+		let sessionStopCalls = 0;
+		const extensionRunner = {
+			emit: async () => undefined,
+			emitBeforeAgentStart: async () => undefined,
+			hasHandlers: (eventType: string) => eventType === "session_stop",
+			emitSessionStop: async () => {
+				sessionStopCalls++;
+				return sessionStopCalls === 1 ? { continue: true, additionalContext: "keep going" } : undefined;
+			},
+		} as unknown as ExtensionRunner;
+
+		const compactTool = new CompactTool(topLevelToolSession()) as AgentTool;
+		const tools: AgentTool[] = [compactTool];
+
+		let call = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
+			convertToLlm,
+			streamFn: () => {
+				const index = call++;
+				const stream = new AssistantMessageEventStream();
+				// Turn 0: bulk text + `compact` with the FIRST focus. Turn 1: text
+				// stop that settles and schedules the deferred pass (and fires
+				// session_stop → continuation). Turn 2: the continuation calls
+				// `compact` with the SECOND focus while the first pass is parked.
+				// Turn 3: the continuation's own text stop.
+				let message: Record<string, unknown>;
+				if (index === 0) {
+					message = {
+						role: "assistant",
+						content: [
+							{ type: "text", text: bulkText },
+							{
+								type: "toolCall",
+								id: "call_compact_1",
+								name: "compact",
+								arguments: { instructions: firstFocus },
+							},
+						],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: model.id,
+						usage: highUsage(50_000),
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+				} else if (index === 1) {
+					message = {
+						role: "assistant",
+						content: [{ type: "text", text: "first answer" }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: model.id,
+						usage: highUsage(50_000),
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+				} else if (index === 2) {
+					message = {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "call_compact_2",
+								name: "compact",
+								arguments: { instructions: secondFocus },
+							},
+						],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: model.id,
+						usage: highUsage(50_000),
+						stopReason: "toolUse",
+						timestamp: Date.now(),
+					};
+				} else {
+					message = {
+						role: "assistant",
+						content: [{ type: "text", text: "continuation answer" }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: model.id,
+						usage: highUsage(50_000),
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+				}
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message as never });
+					stream.push({ type: "done", reason: message.stopReason as never, message: message as never });
+				});
+				return stream;
+			},
+		});
+
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			extensionRunner,
+		});
+		activeHarnesses.push({ session, authStorage, tempDir });
+		return session;
+	}
+
+	it("merges the later request's focus into the pending pass instead of discarding it", async () => {
+		const firstFocus = "keep the migration plan";
+		const secondFocus = "also keep the rollback steps";
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+		stubSummarizer();
+		const session = await createCoalesceHarness(firstFocus, secondFocus);
+
+		await session.prompt("compact, then compact again with different focus");
+		await session.waitForIdle();
+
+		// The single coalesced rewrite must honor BOTH foci. Pre-fix the second
+		// schedule returns early (`if (#requestedCompaction) return`) and the
+		// pending closure keeps only the first focus, so the later focus is
+		// silently discarded. Post-fix it is merged into the pending pass.
+		const focusInstructions = compactSpy.mock.calls.map(args => String(args[3] ?? ""));
+		expect(focusInstructions.some(focus => focus.includes(secondFocus))).toBe(true);
+		expect(focusInstructions.some(focus => focus.includes(firstFocus))).toBe(true);
+	}, 15_000);
+});

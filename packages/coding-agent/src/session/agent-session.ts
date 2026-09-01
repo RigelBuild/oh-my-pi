@@ -467,6 +467,18 @@ type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]
  * JSON sanitization drops those values; a cyclic/non-JSON value finally degrades
  * to a descriptive string rather than retaining a shared mutable reference.
  */
+/**
+ * Combine the focus instructions of two `compact` requests that coalesced onto
+ * a single deferred pass. Either side may be absent; identical focus is not
+ * duplicated. Distinct foci are concatenated so the one rewrite honors both.
+ */
+function mergeCompactionInstructions(existing: string | undefined, incoming: string | undefined): string | undefined {
+	if (!incoming) return existing;
+	if (!existing) return incoming;
+	if (existing === incoming) return existing;
+	return `${existing}\n\n${incoming}`;
+}
+
 function cloneMessageEndNotificationField(value: unknown): unknown {
 	try {
 		return structuredClone(value);
@@ -738,6 +750,15 @@ export class AgentSession {
 	 * would await itself.
 	 */
 	#requestedCompaction: Promise<void> | undefined = undefined;
+	/**
+	 * Live focus holder for the single deferred requested-compaction pass on
+	 * `#requestedCompaction`. The detached run reads `.instructions` at apply
+	 * time, so a second `compact` request that coalesces onto the pending pass
+	 * (post-prompt continuation, different focus) can merge its focus in before
+	 * the pass starts instead of being silently discarded. Cleared alongside
+	 * `#requestedCompaction` when the pass settles.
+	 */
+	#activeRequestedCompaction: { instructions?: string } | undefined = undefined;
 	/**
 	 * Sticky across an in-flight prompt run: a successful `yield` makes the run
 	 * terminal for execution purposes, so any trailing empty/aborted assistant
@@ -1390,7 +1411,17 @@ export class AgentSession {
 			if (context?.willContinue === false) {
 				this.#scheduleRequestedCompaction();
 			}
-			await this.#maintenance.maintainContextMidRun(messages, signal, context);
+			// A `compact` request armed this turn (marker set above) or already
+			// scheduled onto `#requestedCompaction` owns the eventual rewrite and
+			// carries the tool's focus instructions. Skip the automatic mid-turn
+			// maintenance pass while such a request is outstanding: an undirected
+			// summary committed here would make the deferred requested pass exit
+			// "Already compacted" and silently drop the focus. The requested pass
+			// sheds the same context, so ceding loses no headroom — mirroring the
+			// cede in `#checkCompactionUnlessRequested` for the post-turn route.
+			if (!this.#pendingCompactionRequest && !this.#requestedCompaction) {
+				await this.#maintenance.maintainContextMidRun(messages, signal, context);
+			}
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -7821,7 +7852,7 @@ export class AgentSession {
 		// `#pendingRewindReport` the same way). A fresh `compact` call re-arms it.
 		this.#pendingCompactionRequest = undefined;
 		// Coalesce onto the single in-flight pass. If a prior requested compaction
-		// is still running, do NOT start a second detached run: overwriting
+		// is still parked/running, do NOT start a second detached run: overwriting
 		// `#requestedCompaction` below would orphan the first promise, and the
 		// second run — seeing `isCompacting` in `#applyRequestedCompaction` and
 		// returning fast — would clear the gate (its `.finally` sees
@@ -7831,7 +7862,24 @@ export class AgentSession {
 		// exact premature-idle bug the deferred gate exists to prevent. The
 		// in-flight pass already sheds the context, so a duplicate is a benign
 		// no-op, mirroring the `isCompacting` guard in `#applyRequestedCompaction`.
-		if (this.#requestedCompaction) return;
+		// But its focus instructions are NOT redundant: a post-prompt continuation
+		// can call `compact` again with DIFFERENT focus before the deferred pass
+		// starts. Dropping the second request entirely would silently discard that
+		// later focus. Merge it into the still-pending pass's live instruction
+		// holder instead, so the single rewrite honors both requests' focus.
+		if (this.#requestedCompaction) {
+			if (this.#activeRequestedCompaction) {
+				this.#activeRequestedCompaction.instructions = mergeCompactionInstructions(
+					this.#activeRequestedCompaction.instructions,
+					request.instructions,
+				);
+			}
+			return;
+		}
+		// Live holder the detached run reads at apply time (not schedule time), so
+		// a later coalesced request that updated `instructions` above is honored.
+		const activeRequest: { instructions?: string } = { instructions: request.instructions };
+		this.#activeRequestedCompaction = activeRequest;
 		const run = (async () => {
 			// Wait for the settling run to fully unwind before compacting. The
 			// onTurnEnd hook that scheduled us is still on the agent loop's stack,
@@ -7849,9 +7897,12 @@ export class AgentSession {
 			// before the abort fires.
 			if (this.#postPromptTasksPromise) await this.#postPromptTasksPromise;
 			if (this.#isDisposed) return;
-			await this.#applyRequestedCompaction(request.instructions);
+			// Read from the live holder, not the schedule-time capture: a later
+			// coalesced request may have merged newer focus into it since.
+			await this.#applyRequestedCompaction(activeRequest.instructions);
 		})().finally(() => {
 			if (this.#requestedCompaction === run) this.#requestedCompaction = undefined;
+			if (this.#activeRequestedCompaction === activeRequest) this.#activeRequestedCompaction = undefined;
 		});
 		this.#requestedCompaction = run;
 	}
