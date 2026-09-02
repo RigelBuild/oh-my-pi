@@ -24,10 +24,12 @@ where `check` fans out to the Rust side too (`package.json:100`):
 
 That makes a release depend on the maintainer's local toolchain. The last
 attempt died because the machine lacked `cmake`, needed by the `audiopus_sys`
-crate in the Rust check. The check is also redundant: the push at the end of
-the script triggers a CI run that executes the same suite on `omp-kata`
-runners with a warm toolchain, and the script then just watches that run
-(`scripts/release.ts:513-515`):
+crate in the Rust check. The local check is not a pure redundancy either: it
+is a timing change (see Approach). The push at the end of the script triggers a
+CI run whose lint/type job runs `check:ts` and whose separate `rust_validate`
+job covers the Rust half, so CI's coverage is approximately equivalent but not
+literally-same `bun run check` suite, and it runs *post*-push. The script then
+just watches that run (`scripts/release.ts:513-515`):
 
 ```ts
 // 9. Watch CI
@@ -101,9 +103,9 @@ existing full local `cmdRelease` survives as a command, and whether the omission
 is a subcommand or a flag, is Open Question (c).
 
 A new workflow `.github/workflows/release.yml` exposes `workflow_dispatch`
-with a version input, runs on `omp-kata` (warm bun/cargo/bazel caches; the
-hosted-runner cargo cache is cold, see the comment at
-`.github/workflows/ci.yml:155-160`), configures a git identity, and invokes
+with a version input, runs on the runner settled in Open Question (e)
+(GitHub-hosted `ubuntu-22.04`; the fork has no self-hosted runners, so hosted is
+the only option), configures a git identity, and invokes
 the `prepare` path. The resulting push lands on `main` with the tag, and the
 existing release machinery reacts with no changes:
 
@@ -166,8 +168,9 @@ post-push failure can happen.
 
 - **Keep the local flow and just fix the toolchain (install cmake).** Rejected
   by the maintainer's ruling. It patches one machine; the next maintainer or
-  the next native dependency reintroduces the problem, and the local check
-  remains a redundant copy of what CI runs anyway.
+  the next native dependency reintroduces the problem, and the local check is
+  redundant only for `check:rs` (covered post-push by the `rust_validate` job),
+  while `check:ts` stays a real pre-push gate (see Open Question (f)).
 
 - **Release PR instead of direct push.** Live fork, not rejected; see Open
   Question (a). The workflow would put the bump commit on a branch and open a
@@ -185,11 +188,10 @@ post-push failure can happen.
 - The release-prepare job compiles nothing (`cargo generate-lockfile` is a
   registry-index fetch, `gen-clippy-bazelrc` is pure Bun TOML parsing, the
   nix-bun generator falls back to `bunx bun2nix` when nix is absent), so it is
-  a light job, not a heavy one. The runner (`omp-kata` vs hosted
-  `ubuntu-22.04`, which ships `cargo` and avoids queueing behind the 4-runner
-  kata pool that `.github/workflows/ci.yml:97-99` warns about) is a settle-at-
-  review choice, not the reflexive heavy-job-on-kata rule; see the runner Open
-  Question.
+  a light job, not a heavy one. It runs on GitHub-hosted `ubuntu-22.04`: the
+  fork has no self-hosted runners (all CI runs on GitHub-hosted runners and the
+  `omp-kata` label no longer exists), so hosted is the only option, and a light
+  job is a natural fit for it anyway. See the runner Open Question.
 - The publish half of the release (`release_gate`, `release_binary*`,
   `release_npm`, `release_github`, brew) already lives in `ci.yml` and is out
   of scope. This design only moves the bump/changelog/commit/tag half.
@@ -245,11 +247,11 @@ Interfaces:
   `scripts/release.ts:340` resolves and the empty-`latestTag` guard in Task 1
   cannot trip on a shallow checkout), sets the git author/committer identity,
   runs `bun scripts/release.ts prepare "$VERSION"`.
-- Runner: see the runner Open Question below. `prepare` compiles nothing (it
-  runs `bun install`, `cargo generate-lockfile` which is a registry-index
-  fetch, `generateNixBunDeps`, and `gen-clippy-bazelrc` which is pure Bun TOML
-  parsing), so a hosted `ubuntu-22.04` with `cargo` preinstalled is a candidate
-  alongside `omp-kata`.
+- Runner: GitHub-hosted `ubuntu-22.04` (the fork has no self-hosted runners; see
+  the runner Open Question). `prepare` compiles nothing (it runs `bun install`,
+  `cargo generate-lockfile` which is a registry-index fetch, `generateNixBunDeps`,
+  and `gen-clippy-bazelrc` which is pure Bun TOML parsing), so a light hosted job
+  is a natural fit.
 - Dispatch-ref guard: `if: github.ref == 'refs/heads/main'` at the job level.
   `workflow_dispatch` runs the workflow definition as it exists on the
   dispatched ref, so without this a modified copy on a branch could run with the
@@ -271,7 +273,7 @@ Interfaces:
   greater-than-latest guard (`scripts/release.ts:250-252`). Mitigate the
   double-dispatch foot-gun by refusing at the top of the job when another
   `release.yml` run is already `in_progress`/`queued`
-  (`gh run list --workflow release.yml --status in_progress,queued`), so a
+  (`gh run list --workflow release.yml --status in_progress,queued`), so an
   Actions-UI double-click fails fast instead of cutting a second release
   unattended.
 - Run-started check: after the push, poll for the triggered `ci.yml` run at the
@@ -357,9 +359,11 @@ Interfaces:
   dispatch-ref guard, `contents:write`+`actions:write` permissions, serialized
   concurrency with the in-flight-run refusal, and the run-started +
   `is-release=true` check
-- [ ] Task 3: main-branch trigger path per Open Questions (a)/(d)
-  (tag-ref chained dispatch plus the branch-protection bypass actor, gated by an
-  Environment approval, or a Release-PR that needs no bypass)
+- [ ] Task 3: main-branch trigger path per Open Questions (a)/(d), one of the two
+  feasible pairings: a direct-push/Environments path using a GitHub App bypass
+  identity gated by an Environment approval, or a Release-PR path that needs no
+  bypass actor and pushes with the built-in `GITHUB_TOKEN`; either way the release
+  run is started by a chained tag-ref `workflow_dispatch`
 - [ ] Task 4: `.omp/commands/release.md` and record update, including the
   fix-forward post-push failure protocol
 - [ ] Task 5: canary release through the new path
@@ -372,30 +376,43 @@ permissions, secrets, and the post-push failure surface all depend on them.
 
 Load-bearing fact both (a) and (d) turn on: `main` is protected by an active
 repository ruleset (`pull_request`, `non_fast_forward`, `required_status_checks`,
-`deletion`) with **zero bypass actors**. Today nobody, maintainer included, can
-push directly to `main`; every change lands through a reviewed PR. This changes
-the framing of (a) below: "direct push by the workflow" is not a faithful port of
-the current mechanics, because the current mechanics do not permit a direct push
-at all.
+`deletion`) whose bypass-actor list is **empty**. That empty list is not the same
+as "nobody can push": a repository admin is exempt from a ruleset's `pull_request`
+rule regardless of the bypass list, so the maintainer already direct-pushes
+releases today. The recent `v*` bump commits (`v18.0.3`, `18.0.2`, `18.0.1`, …)
+are single-parent commits authored and committed by the maintainer straight onto
+`main`, and `scripts/release.ts:506-511` direct-pushes the bump+tag atomically —
+the local flow this design ports depends on that admin push working.
+
+So a human-gated direct-push capability exists today; what (a) actually decides
+is whether to hand that capability to an always-on *workflow* identity (which is
+not a repo admin and therefore is bound by the ruleset unless added to the bypass
+list) and, if so, how to keep it human-gated. The security delta is "always-on
+workflow identity vs. human-gated maintainer admin push", not "create a
+direct-push capability from nothing".
 
 ### (a) Where the bump commit lands (load-bearing)
 
 - **Direct push to `main` by the workflow.** One CI cycle, no extra human step,
   the same atomic branch-plus-tag push. But given the ruleset above it requires
   *adding* a standing bypass actor for the release workflow's identity: a new,
-  permanent, always-on push-to-`main` capability that does not exist today, whose
-  blast radius is any future compromise of the workflow file. It also widens the
+  permanent, always-on push-to-`main` capability for a non-human identity, whose
+  blast radius is any future compromise of the workflow file. The maintainer's
+  own admin push is human-gated and case-by-case; this is not. It also widens the
   release-capable set: `workflow_dispatch` is open to every write-access user
   (see (d)), so a bypass exercised on their behalf lets anyone with write access
   cut a release and land a bump on `main`, which no write user can do today.
+  Feasibility constraint (see (d)): the bypass actor must be a ruleset-eligible
+  entity — a GitHub App installation or a bypass-listed user/team — *not* the
+  built-in `GITHUB_TOKEN`, which GitHub does not allow as a ruleset bypass actor.
 - **Direct push plus a GitHub Environment with required reviewers on the
   release job.** Same single CI cycle and no tag choreography, but the job
   pauses for one approval click in the Actions UI before it pushes. Restores an
   explicit human gate at the push and, against the ruleset above, closes both new
   exposures the bare direct push opens (the standing bypass actor and the widened
   dispatcher set) for the cost of one click on an infrequent, dispatch-initiated
-  action. Still needs the bypass actor to exist, but gates its use behind an
-  approval.
+  action. Still needs a ruleset-eligible bypass actor to exist (a GitHub App, not
+  the built-in token), but gates its use behind an approval.
 - **Release PR the maintainer merges.** The workflow puts the bump commit on
   a branch and opens a PR; the merge to `main` is the human gate, and no bypass
   actor is ever added. This is the only option that keeps the current
@@ -404,18 +421,24 @@ at all.
   at HEAD (`.github/workflows/ci.yml:74-76`, `:129`), and a squash merge
   rewrites the commit, so this path needs either a merge commit or a
   post-merge step that lays `v${version}` on the merged sha.
-- **Recommendation:** the Environments option. The honest argument for a direct
-  push is that the bump content was never reviewed (the local script bumps,
-  commits, and pushes with nobody reviewing the mechanical version bumps or the
-  changelog rewrite), so server-side pushing removes no review gate that existed.
-  But that argument covers *content* review, not *push capability*: the local
-  push ran under a specific maintainer's credential, whereas a bare workflow
-  direct push adds a standing bypass actor and hands push-to-`main`-via-release to
-  every write user. The Environments option keeps the no-second-cycle, no-tag-
-  choreography benefits of a direct push while gating that new capability behind
-  one approval click. The Release-PR option is the most conservative (no bypass
-  actor at all) if the maintainer prefers to preserve the zero-bypass ruleset
-  outright, at the cost of the extra cycle and the tag choreography.
+- **Recommendation:** the Environments option, paired with a GitHub App bypass
+  identity in (d) (the two are coupled — see the feasibility note in (d)). The
+  honest argument for a direct push is that the bump content was never reviewed
+  (the local script bumps, commits, and pushes with nobody reviewing the
+  mechanical version bumps or the changelog rewrite), so server-side pushing
+  removes no review gate that existed. But that argument covers *content* review,
+  not *push capability*: the maintainer's admin push is human-gated and
+  case-by-case, whereas a bare workflow direct push adds a standing bypass actor
+  and hands push-to-`main`-via-release to every write user. The Environments
+  option keeps the no-second-cycle, no-tag-choreography benefits of a direct push
+  while gating that new capability behind one approval click. Its cost is the
+  GitHub App setup, since the built-in `GITHUB_TOKEN` cannot be a ruleset bypass
+  actor. If the maintainer prefers to avoid a bypass actor and an App entirely,
+  the Release-PR option is the most conservative — it keeps the empty bypass list
+  intact and pairs cleanly with a plain `GITHUB_TOKEN` in (d), at the cost of the
+  extra cycle and the tag choreography. The two coherent end-to-end pairings are
+  therefore **(a) Environments + (d) GitHub App** or **(a) Release-PR + (d)
+  `GITHUB_TOKEN`**; a direct push with the built-in token is not a valid pairing.
 
 ### (b) Version input shape
 
@@ -479,32 +502,41 @@ options:
   design otherwise honors), and an expiry cliff.
 - **GitHub App installation token.** Best security posture (short-lived
   installation tokens, no expiry cliff), highest setup cost.
-- Bypass-actor note: the branch-protection bypass that a push to `main` requires
-  (see the load-bearing fact above (a)) is a property of the *push target*, not
-  the *credential*: every direct-push option here, `GITHUB_TOKEN` included,
-  needs the workflow identity added as a bypass actor. The bypass cost belongs to
-  option (a)'s direct-push choice, not to any one credential in (d). A
-  Release-PR (a) removes the bypass requirement for all of these.
-- **Recommendation:** the `GITHUB_TOKEN` + chained-dispatch option, dispatching
-  the **tag ref** (`--ref "v${VERSION}"`). It removes the standing secret, the
-  rotation loop, and Task 3's PAT plumbing entirely, and the tag-ref dispatch
-  eliminates the ref-vs-sha race rather than merely detecting it. If (a) resolves
-  to Release-PR, this sub-question narrows to how the merged commit gets its tag
-  and CI run, folded into (a)'s tag-choreography step.
+- Bypass-actor note (feasibility, load-bearing): a push to `main` needs the
+  pushing identity to satisfy the ruleset's `pull_request` rule. Two facts
+  constrain the credential choice here. First, GitHub's ruleset bypass list only
+  accepts specific entities — repository admins, org/enterprise owners, a
+  write-or-higher role, teams, GitHub Apps, and Dependabot. The built-in
+  `GITHUB_TOKEN` (the ephemeral `github-actions[bot]`) is **none** of these, so
+  it **cannot** be granted ruleset bypass; a `GITHUB_TOKEN` direct push to `main`
+  is rejected with a 403. Second, therefore, the only direct-push credentials
+  that work are a **GitHub App installation token** (App is bypass-eligible) or
+  **PAT/deploy key belonging to a bypass-listed user**. A Release-PR (a) removes
+  the bypass requirement entirely, and *only* under Release-PR can the built-in
+  `GITHUB_TOKEN` be the credential (it pushes a branch and dispatches, never
+  touching `main` directly). This couples (a) and (d): `GITHUB_TOKEN` ⇒
+  Release-PR; direct-push/Environments ⇒ GitHub App (or bypass-listed PAT).
+- **Recommendation:** depends on (a), because of the coupling above. If (a) is
+  Release-PR, use the `GITHUB_TOKEN` + chained-dispatch option, dispatching the
+  **tag ref** (`--ref "v${VERSION}"`) once the merged commit is tagged — it
+  removes the standing secret, the rotation loop, and any PAT plumbing, and the
+  tag-ref dispatch eliminates the ref-vs-sha race rather than merely detecting
+  it. If (a) is direct-push/Environments, use a **GitHub App installation token**
+  for the push (short-lived, no expiry cliff, bypass-eligible) and the same
+  chained tag-ref dispatch to start the release run. A stored fine-grained PAT is
+  the fallback only if an App is not viable, and its rotation loop is in tension
+  with the no-manual-steps principle this design otherwise honors.
 
 ### (e) Runner for the release-prepare job
 
-- `omp-kata` (self-hosted, warm caches) versus hosted `ubuntu-22.04`. `prepare`
-  compiles nothing, so either works; the security angle mildly favors hosted if a
-  stored push credential is chosen in (d), since it keeps a repo-write secret off
-  self-hosted infrastructure. The `GITHUB_TOKEN` + chained-dispatch option in (d)
-  removes that concern. Note the "ships `cargo`" framing is approximate:
-  `rust-toolchain.toml` pins a toolchain rustup downloads on first `cargo`
-  invocation (a ~1 min network fetch, not a correctness issue), and if Open
-  Question (f) keeps `check:ts` pre-push that step still needs no Rust toolchain.
-- **Recommendation:** hosted `ubuntu-22.04`. `prepare` is a light job and this
-  avoids both the kata-pool queue and a secret-on-self-hosted question; revisit
-  only if a `prepare` step turns out to need a warm native cache.
+- The fork has no self-hosted runners: all CI now runs on GitHub-hosted runners
+  and the `omp-kata` label no longer exists, so hosted `ubuntu-22.04` is the only
+  option and this question is effectively settled. `prepare` compiles nothing, so
+  a light hosted job is a natural fit anyway. Note the "ships `cargo`" framing is
+  approximate: `rust-toolchain.toml` pins a toolchain rustup downloads on first
+  `cargo` invocation (a ~1 min network fetch, not a correctness issue), and if
+  Open Question (f) keeps `check:ts` pre-push that step needs no Rust toolchain.
+- **Recommendation:** hosted `ubuntu-22.04` (the only available runner).
 
 ### (f) Keep `check:ts` as a pre-push gate (load-bearing)
 
