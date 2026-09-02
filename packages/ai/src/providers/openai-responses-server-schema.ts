@@ -77,6 +77,15 @@ const inputContentBlockSchema = inputTextSchema.or(plainTextSchema).or(inputImag
 
 const outputContentBlockSchema = outputTextSchema.or(plainTextSchema).or(outputRefusalSchema);
 
+// A `function_call_output`'s content blocks. The SDK wire type
+// (ResponseFunctionCallOutputItem) declares these as INPUT-side content
+// (input_text/input_image/input_file), so LiteLLM's chat->Responses bridge
+// forwards a tool result as `input_text`; Codex CLI instead replays it as
+// output_text/text/refusal. Accept both families so neither client fails
+// closed with "must be a valid bridged Responses input item"; the walker's
+// flattenFunctionOutputArray extracts the text from whichever arrives.
+const functionCallOutputContentBlockSchema = outputContentBlockSchema.or(inputTextSchema);
+
 // ─── Input items ────────────────────────────────────────────────────────────
 
 const userMessageItemSchema = type({
@@ -118,8 +127,10 @@ const functionCallItemSchema = type({
 const functionCallOutputItemSchema = type({
 	type: "'function_call_output'",
 	call_id: "string >= 1",
-	// Codex CLI replays multimodal tool results in array form (text + refusal).
-	"output?": type("string").or(outputContentBlockSchema.array()),
+	// Array-form tool results (text family only): LiteLLM forwards input_text,
+	// Codex CLI replays output_text/text/refusal — functionCallOutputContentBlockSchema
+	// accepts both; image/file blocks stay rejected.
+	"output?": type("string").or(functionCallOutputContentBlockSchema.array()),
 });
 
 const customToolCallItemSchema = type({

@@ -290,13 +290,18 @@ function ensureAssistantPlaceholder(messages: Message[], modelId: string, now: n
 	return placeholder;
 }
 
-/** Flatten a function_call_output array form (text + refusal) into a single string. */
+/**
+ * Flatten a function_call_output array form into a single string. Accepts both
+ * content families a client may send: output_text/text/refusal (Codex CLI) and
+ * input_text (LiteLLM's chat->Responses bridge — the SDK wire type declares
+ * function_call_output content as input-side blocks).
+ */
 function flattenFunctionOutputArray(blocks: readonly unknown[]): string {
 	const parts: string[] = [];
 	for (const raw of blocks) {
 		if (!isObj(raw)) continue;
 		const t = raw.type;
-		if (t === "output_text" || t === "text") {
+		if (t === "output_text" || t === "text" || t === "input_text") {
 			const text = asString(raw.text);
 			if (text) parts.push(text);
 		} else if (t === "refusal") {

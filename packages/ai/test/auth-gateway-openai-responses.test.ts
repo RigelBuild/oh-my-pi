@@ -198,6 +198,77 @@ describe("openai-responses parseRequest", () => {
 		).toThrow("prompt_cache_options and prompt_cache_breakpoint are unsupported");
 	});
 
+	it("accepts a function_call_output whose content is input_text (LiteLLM-forwarded) and preserves the text", () => {
+		// LiteLLM converts chat->Responses and forwards a tool RESULT as
+		// `{ type: "input_text", text }`, which the SDK wire type
+		// (ResponseFunctionCallOutputItem = input_text | input_image | input_file)
+		// permits. The inbound schema declared only output_text/text/refusal for
+		// function_call_output content and failed closed with "must be a valid
+		// bridged Responses input item ... output[0].type must be refusal,
+		// output_text or text (was input_text)". Accept input_text, and the walker
+		// must carry its text through rather than silently dropping it.
+		const parsed = parseRequest({
+			model: "gpt-5.6-luna",
+			input: [
+				{ type: "function_call", call_id: "call_ls", name: "list_dir", arguments: "{}" },
+				{
+					type: "function_call_output",
+					call_id: "call_ls",
+					output: [{ type: "input_text", text: "index.ts  package.json  tsconfig.json" }],
+				},
+			],
+			tools: [{ type: "function", name: "list_dir", description: "list a directory", parameters: {} }],
+		});
+		const tr = parsed.context.messages.find(m => m.role === "toolResult");
+		if (!tr || tr.role !== "toolResult") throw new Error("expected a toolResult message");
+		expect(tr.toolCallId).toBe("call_ls");
+		expect(tr.content).toEqual([{ type: "text", text: "index.ts  package.json  tsconfig.json" }]);
+	});
+
+	it("rejects an input_image inside a function_call_output (fail-closed boundary)", () => {
+		// The widening is deliberately text-family only: the walker's
+		// flattenFunctionOutputArray carries text, not images/files. Accepting an
+		// input_image here would validate-then-silently-drop the tool result, so
+		// image/file blocks must keep failing closed. Pin that boundary.
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.6-luna",
+				input: [
+					{ type: "function_call", call_id: "call_img", name: "screenshot", arguments: "{}" },
+					{
+						type: "function_call_output",
+						call_id: "call_img",
+						output: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }],
+					},
+				],
+			}),
+		).toThrow('input[1].output[0].type must be "output_text", "text", "refusal" or "input_text" (was "input_image")');
+	});
+
+	it("flattens an array-form function_call_output mixing output_text and refusal (Codex CLI replay)", () => {
+		// The other content family the schema accepts: Codex CLI replays a tool
+		// result as output_text/text/refusal blocks. Assert concatenation and the
+		// `[refusal: ...]` wrapping the flattener applies.
+		const parsed = parseRequest({
+			model: "gpt-5.6-luna",
+			input: [
+				{ type: "function_call", call_id: "call_mix", name: "run", arguments: "{}" },
+				{
+					type: "function_call_output",
+					call_id: "call_mix",
+					output: [
+						{ type: "output_text", text: "partial output" },
+						{ type: "refusal", refusal: "blocked by policy" },
+					],
+				},
+			],
+			tools: [{ type: "function", name: "run", description: "run", parameters: {} }],
+		});
+		const tr = parsed.context.messages.find(m => m.role === "toolResult");
+		if (!tr || tr.role !== "toolResult") throw new Error("expected a toolResult message");
+		expect(tr.content).toEqual([{ type: "text", text: "partial output[refusal: blocked by policy]" }]);
+	});
+
 	it("accepts a bare string input and rejects a missing model", () => {
 		const parsed = parseRequest({ model: "m", input: "hi" });
 		expect(parsed.context.messages).toHaveLength(1);
