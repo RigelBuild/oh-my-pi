@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { $ } from "bun";
 import {
 	applyCargoWorkspaceVersion,
 	applyNativesSentinel,
 	applyPackageVersion,
 	bumpCanaryVersion,
 	bumpVersion,
+	ghDiagnosticLine,
+	ghErrorText,
+	isTransientGhError,
 	resolveReleaseVersion,
+	runWithTransientRetry,
 	validateExplicitVersion,
 } from "./release";
 
@@ -49,6 +54,130 @@ describe("validateExplicitVersion", () => {
 	test("accepts leading v prefix and normalizes to the bare version", () => {
 		expect(validateExplicitVersion("v17.2.8")).toBe("17.2.8");
 		expect(validateExplicitVersion("V17.2.8")).toBe(null);
+	});
+});
+
+describe("watchCI transient retry", () => {
+	test("isTransientGhError flags transient GitHub API failures", () => {
+		expect(isTransientGhError("failed to get runs: HTTP 502: Server Error (https://api.github.com/...)")).toBe(true);
+		expect(isTransientGhError("failed to get runs: HTTP 503: Server Error")).toBe(true);
+		expect(isTransientGhError("failed to get runs: HTTP 504: Server Error")).toBe(true);
+		// Go-runtime timeout wordings gh can surface for a network blip.
+		expect(isTransientGhError("Get ...: context deadline exceeded")).toBe(true);
+		expect(isTransientGhError("dial tcp: connect: ETIMEDOUT")).toBe(true);
+	});
+
+	test("isTransientGhError does not flag genuine non-transient errors", () => {
+		expect(isTransientGhError("gh: Not Found (HTTP 404)")).toBe(false);
+		expect(isTransientGhError("authentication required")).toBe(false);
+		expect(isTransientGhError("")).toBe(false);
+	});
+
+	test("runWithTransientRetry resolves after transient errors clear", async () => {
+		let attempts = 0;
+		const result = await runWithTransientRetry(
+			() => {
+				attempts++;
+				if (attempts <= 2) throw new Error("HTTP 502: Server Error");
+				return Promise.resolve("ok");
+			},
+			{ sleep: () => Promise.resolve() },
+		);
+		expect(result).toBe("ok");
+		expect(attempts).toBe(3);
+	});
+
+	test("runWithTransientRetry rethrows immediately on a non-transient error", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				() => {
+					attempts++;
+					return Promise.reject(new Error("gh: Not Found (HTTP 404)"));
+				},
+				{ sleep: () => Promise.resolve() },
+			),
+		).rejects.toThrow("HTTP 404");
+		expect(attempts).toBe(1);
+	});
+
+	test("runWithTransientRetry gives up after maxRetries on a persistent transient error", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				() => {
+					attempts++;
+					return Promise.reject(new Error("HTTP 502: Server Error"));
+				},
+				{ maxRetries: 3, sleep: () => Promise.resolve() },
+			),
+		).rejects.toThrow("HTTP 502");
+		expect(attempts).toBe(4);
+	});
+
+	test("ghErrorText surfaces stderr from a Bun ShellError whose message is only the exit code", () => {
+		// Bun's `$` throws a ShellError with message "Failed with exit code N" and
+		// the real gh diagnostic on the stderr buffer. Reading .message alone would
+		// miss the HTTP status entirely.
+		const shellError = {
+			message: "Failed with exit code 1",
+			stderr: Buffer.from("failed to get runs: HTTP 502: Server Error\n"),
+			stdout: Buffer.from(""),
+		};
+		const text = ghErrorText(shellError);
+		expect(text).toContain("HTTP 502");
+		expect(isTransientGhError(text)).toBe(true);
+	});
+
+	test("runWithTransientRetry retries a ShellError-shaped transient failure", async () => {
+		// The end-to-end contract: a thrown ShellError (message = exit code, real
+		// error on stderr) must be classified transient and retried, not rethrown
+		// on the first attempt. Pre-fix this rethrew immediately (attempts === 1).
+		let attempts = 0;
+		const result = await runWithTransientRetry(
+			() => {
+				attempts++;
+				if (attempts <= 2) {
+					throw {
+						message: "Failed with exit code 1",
+						stderr: Buffer.from("failed to get runs: HTTP 502: Server Error\n"),
+						stdout: Buffer.from(""),
+					};
+				}
+				return Promise.resolve("ok");
+			},
+			{ sleep: () => Promise.resolve() },
+		);
+		expect(result).toBe("ok");
+		expect(attempts).toBe(3);
+	});
+
+	test("classifies a genuine Bun ShellError from a failing $ command as transient", async () => {
+		// Pins the extraction to Bun's real error type: a hand-built object literal
+		// would keep passing if ghErrorText ever switched to an instanceof check.
+		let caught: unknown;
+		try {
+			await $`bash -c 'echo "failed to get runs: HTTP 502: Server Error" >&2; exit 1'`.text();
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeDefined();
+		const text = ghErrorText(caught);
+		expect(text).toContain("HTTP 502");
+		expect(isTransientGhError(text)).toBe(true);
+	});
+
+	test("ghDiagnosticLine surfaces the real diagnostic, not the exit-code summary", () => {
+		// The retry-progress log must show the operator the actual cause. A real
+		// ShellError leads with "Failed with exit code N"; the log must skip it.
+		const shellError = {
+			message: "Failed with exit code 1",
+			stderr: Buffer.from("failed to get runs: HTTP 502: Server Error\n"),
+			stdout: Buffer.from(""),
+		};
+		const line = ghDiagnosticLine(shellError);
+		expect(line).toContain("HTTP 502");
+		expect(line).not.toContain("Failed with exit code");
 	});
 });
 
