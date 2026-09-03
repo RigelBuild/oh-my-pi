@@ -211,10 +211,15 @@ jobs:
          # replays cached actions instead of recompiling the workspace cold.
          # save-needed is false on an exact-key hit, so a no-change run is a
          # pure replay that saves nothing.
+         # Quota note: four GiB-scale bazel scopes (linux-rust, linux-natives,
+         # release-darwin-x64, release-darwin-arm64) now share the 10 GiB repo
+         # cache. Adding a fifth needs an eviction plan first, since GitHub
+         # evicts least-recently-used archives silently on overflow.
          - name: Save bazel disk cache
            if: steps.cache.outputs.save-needed == 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
+              # Must mirror the restore path list in the bazel-cache action.
               path: |
                  ~/.cache/omp-bazel-disk
                  ~/.cache/omp-bazel-repo
@@ -333,10 +338,15 @@ jobs:
          # re-syncs crates/** is unchanged, so a later main run replays the
          # cross-compiled addon links instead of paying the multi-GiB rustc
          # cost cold. save-needed is false on an exact-key hit (pure replay).
+         # Quota note: shares the 10 GiB repo cache with the three other
+         # GiB-scale bazel scopes (linux-rust, release-darwin-x64/arm64);
+         # adding a fifth needs an eviction plan first, since GitHub evicts
+         # least-recently-used archives silently on overflow.
          - name: Save bazel disk cache
            if: github.event_name != 'pull_request' && steps.cache.outputs.save-needed == 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
+              # Must mirror the restore path list in the bazel-cache action.
               path: |
                  ~/.cache/omp-bazel-disk
                  ~/.cache/omp-bazel-repo
