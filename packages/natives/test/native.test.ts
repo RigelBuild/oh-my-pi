@@ -1002,6 +1002,9 @@ console.log("ok");
 
 	describe("MacOSPowerAssertion", () => {
 		it("should create a stoppable power assertion handle", () => {
+			// MacOSPowerAssertion is a macOS-only binding; on other platforms the
+			// native addon does not export it. Match the darwin-gated tests above.
+			if (process.platform !== "darwin") return;
 			const assertion = MacOSPowerAssertion.start({ reason: "pi-natives test" });
 			assertion.stop();
 			assertion.stop();
