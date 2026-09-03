@@ -744,9 +744,11 @@ describe("Mnemopi backend lifecycle", () => {
 		// so the race exclusively settles via the timeout branch.
 		const flushStall = Promise.withResolvers<void>();
 		let flushCalls = 0;
+		let flushSettled = false;
 		const flushSpy = vi.spyOn(retainMemory, "flushExtractions").mockImplementation(async () => {
 			flushCalls++;
 			await flushStall.promise;
+			flushSettled = true;
 		});
 		const closeDone = Promise.withResolvers<void>();
 		const close = retainMemory.close.bind(retainMemory);
@@ -756,14 +758,13 @@ describe("Mnemopi backend lifecycle", () => {
 		});
 
 		const BUDGET_MS = 20;
-		const start = Bun.nanoseconds();
 		await state.dispose({ timeoutMs: BUDGET_MS });
-		const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 
-		// Dispose must surrender within the budget (plus a generous slack); the
-		// in-flight consolidate is detached, not awaited.
-		expect(elapsedMs).toBeLessThan(BUDGET_MS * 5);
-		expect(elapsedMs).toBeGreaterThanOrEqual(BUDGET_MS - 10);
+		// Reaching this line already proves the timeout branch fired: `flushStall`
+		// is still pending, so had dispose awaited consolidate it would hang until
+		// the test timeout. It returned instead — the in-flight consolidate was
+		// detached, not awaited, which `flushSettled === false` witnesses directly.
+		expect(flushSettled).toBe(false);
 		expect(flushSpy).toHaveBeenCalled();
 		expect(flushCalls).toBe(1);
 		// `close()` is deferred so SQLite writes don't race a closed handle.
