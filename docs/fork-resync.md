@@ -40,7 +40,7 @@ endpoint, and the fork-novel bugfix PRs, plus harness PR #34.
 | `91737b1b3d` | #24 fix(release): changelog diff floor | **KEEP: re-lay** | Cherry-pick sim: CLEAN. Same tagless-fork rationale as #22 (`resolveSince`/`changelogDiff` still present at `upstream/main:scripts/fix-changelogs.ts:826,914`). |
 | `1726adb5c5` | #27 fix(release): CI-poll transient retry | **KEEP: rework (minor)** | `watchCI` still a bare poll upstream (`scripts/release.ts:46`; no `isTransientGhError`/`runWithTransientRetry` upstream). Sim conflicts only in `release.test.ts`. |
 | `550fc4ba40` | #28 ci: hosted runners | **KEEP: rework** | Upstream `ci.yml` still selects `omp-kata` for all non-PR jobs (`upstream/main:.github/workflows/ci.yml:148,176,222,...`); that runner scale set exists only in can1357's org, so a reset fork without this patch has main/release jobs queueing forever. Sim conflicts in `ci.yml` (moved 1752 commits): re-express the collapse-to-`ubuntu-22.04`, do not cherry-pick. |
-| `269e109c9c` | #29 test(pi-shell): ignore job-control kill test | **KEEP: re-lay** | Sim: CLEAN. Upstream test still exists un-ignored (`crates/pi-shell/src/shell.rs:2809`). |
+| `269e109c9c` | #29 test(pi-shell): ignore job-control kill test | **KEEP: re-lay (in Task 2, CI-survival)** | Sim: CLEAN. Upstream test still un-ignored (`crates/pi-shell/src/shell.rs:2809`); it never completes on a hosted runner, so the first post-reset main-event `rust_validate` (`bazelisk test //crates/...`) hangs to timeout without this `#[ignore]`. Rides in the CI PR (Task 2), not test-hygiene, because Task 2's acceptance gate depends on it. |
 | `fdedd3c7f8` | #31 test(mnemopi→memory-tools): event-gate dispose test | **KEEP: re-lay** | Sim: CLEAN. Upstream `memory-tools.test.ts:836-844` still asserts wall-clock bounds (`elapsedMs < BUDGET_MS * 5`), the exact flake this fixed. |
 | `d9000dfd81` | #33 ci: fork natives scope + cache split (carries #32) | **KEEP: re-lay** | Sim: CLEAN in isolation. Upstream `ci.yml:232` still fetches `@oh-my-pi/pi-natives-linux-x64@latest` (upstream's own scope; correct for them, wrong for the fork). The fork tip is a squash whose diff ALSO contains all of PR #32's content — the `linux`→`linux-rust`/`linux-natives` cache-scope split (`ci.yml @@ -178, @@ -277`) and both `Save bazel disk cache` steps with quota notes (`@@ -206, @@ -316`). So re-laying `d9000dfd81` carries #32; there is no separate #32 cherry-pick. Must follow the #28 rework in sequence, so expect contextual conflicts in the actual re-lay. |
 | `f149ee0664` | PR #32 ci: linux bazel disk cache | **DROP: subsumed by #33** | #32's full content is byte-for-byte inside #33's squash `d9000dfd81` (Matt merged #32 into #33's branch, then #33 to main as one squash). Cherry-picking it after #33 would be an empty commit or a conflict — do NOT schedule it separately. |
@@ -57,7 +57,7 @@ graph TD
   F4[F4 restart #16] --> F5
   F8[F8 requeuePending + hasRule #10] --> F4
   F8 --> F6
-  K7[#7 tool-call ids KEEP-was] -.no edges.- F8
+  D7[#7 tool-call ids DROP: upstreamed] -.no edges.- F8
   K8[#8 metrics KEEP] -.no edges.- F8
 ```
 
@@ -77,6 +77,7 @@ table). Dropping it wholesale cannot break a kept build.
 ## Alternatives considered
 
 ### Merge upstream into fork main (rejected)
+
 Preserves history but forces resolving all ~10 content conflicts, ~8 of which
 sit in code we are dropping anyway (`agent-session.ts` 484 changed lines,
 `sdk.ts`, `acp-permission-gate.ts`, `tools/index.ts`, ...). It also carries the
@@ -85,12 +86,14 @@ conflict cost only for what we keep, which the cherry-pick simulations show is
 small (three reworks, the rest clean).
 
 ### Rebase the 20 commits onto upstream tip (rejected)
+
 Mechanically similar to re-lay but replays the six F-patches (the whole
 conflict surface) just to discard them, and keeps redundant commits (#7, the
 18.0.3 bumps) unless interactively edited. The curated re-lay IS an
 interactive rebase with the edit decisions made up front and recorded here.
 
 ### Merge + revert the F-patches (rejected)
+
 Leaves the refresh/restart code in history as live-then-reverted, confusing
 future upstream re-lands of the same feature, and still requires resolving the
 F-patch conflicts during the merge before reverting them.
@@ -105,17 +108,23 @@ F-patch conflicts during the merge before reverting them.
   `mintaka@rigel.build`, `Co-authored-by: Matt Wilkinson <matt@rigel.build>`
   trailer; Conventional Commits subjects. Zero em-dashes in outbound prose
   (PR bodies, issue comments) per `rule://de-ai-public-prose`.
-- **Version + tag scheme (BLOCKED on OQ1):** the new base is upstream v18.1.7
-  (`c4da0d08e8`); the fork's `@rigelbuild/omp-*` npm line restarts at **18.1.8**
-  (never below the base, monotonic — fork last published 18.0.3). The TAG scheme
-  is an open fork (OQ1): a fork `v18.1.8` git tag collides with upstream's
-  imminent own `v18.1.8`, so the recommendation is a fork-distinct tag prefix
-  (`rigel-v*`) with npm staying `18.1.8`. Tasks 3/7 must not cut a release tag
-  until Matt rules OQ1.
-- **Re-lay order is load-bearing:** base reset → CI (#28 rework + #33, which
-  carries #32's cache split) + release machinery (#20/#22/#23/#24/#27) FIRST, so
-  every subsequent re-laid PR runs on working main-event CI — then metrics (#8),
-  then the harness PR rebases (#21/#26/#34).
+- **Version + tag scheme (npm floor settled; TAG scheme BLOCKED on OQ1):** the
+  new base is upstream v18.1.7 (`c4da0d08e8`); the fork's `@rigelbuild/omp-*` npm
+  line restarts at **18.1.8** (never below the base, monotonic — fork last
+  published 18.0.3). That npm floor is the only settled part. The git-TAG scheme
+  is UNRESOLVED (OQ1) — do NOT encode either option in code until Matt rules: a
+  fork `v18.1.8` git tag collides with upstream's imminent own `v18.1.8`, so the
+  recommendation is a fork-distinct tag prefix (`rigel-v*`) with npm staying
+  `18.1.8`. Under that option the release scripts' `--match v*` globs
+  (`release.ts:265`, `fix-changelogs.ts:806`) must learn the prefix, so Tasks
+  3/7 cannot finalize the tag-resolution steps (#22, #24) until OQ1 lands.
+- **Re-lay order is load-bearing:** base reset → CI (#28 rework + #33 carrying
+  #32's cache split + **#29's `pi-shell` `#[ignore]`, required for the hosted
+  `rust_validate` gate to go green**) + release machinery (#20/#22/#23/#24/#27)
+  FIRST, so every subsequent re-laid PR runs on working main-event CI — then the
+  memory-tools flake fix (#31, Task 4), then metrics (#8), then the harness PR
+  rebases (#21/#26/#34). Note #29 rides in the CI PR (Task 2), not the
+  test-hygiene PR, because Task 2's own acceptance gate depends on it.
 - **Tracker hygiene:** every dropped F-patch gets a status note on RIG-2218
   (scope reduction), not silent abandonment (`rule://own-your-issue`). RIG-1376
   (orion subtree) must be flagged stale after the reset.
@@ -125,6 +134,7 @@ F-patch conflicts during the merge before reverting them.
 ## Plan
 
 ### Task 1: Human-action runbook — reset fork main (Matt)
+
 File a Linear issue (team Rigel, label `human-action`, assigned Matt, project
 per `rule://linear-project-taxonomy`) whose body is this runbook, per
 `skill://human-action-handoff`:
@@ -139,18 +149,37 @@ gh api -X PATCH repos/RigelBuild/oh-my-pi/git/refs/heads/main \
 
 Precondition: Tasks 2-4 branches are prepared (so the fork is not left
 CI-broken longer than necessary — post-reset, main-event CI targets `omp-kata`
-and queues forever until Task 2 merges). NOTE: tag `v18.0.3` points at
-`fdedd3c7f8` (the tip's parent), so the tip commit `d9000dfd81` itself becomes
-unreachable after the reset unless preserved — Matt SHOULD first push a
-`pre-resync-2026-09-03` tag at `d9000dfd81` (OQ6, recommended).
-Interfaces: consumes `upstream/main` SHA; produces reset `origin/main`.
+and queues forever until Task 2 merges). Two artifacts do NOT survive the reset
+by construction and must be preserved first:
+1. **This design record.** `docs/fork-resync.md` lives only on the design branch
+   (`b590093be7`); it is absent from both the reset target (`upstream/main`) and
+   the current fork tip `d9000dfd81`. Merging this PR to main then resetting main
+   DISCARDS the record. It is re-laid onto the reset main by Task 2 (T1b below);
+   the OQ6 safety tag alone does NOT preserve it (that tag is at `d9000dfd81`,
+   which never contained the record).
+2. **The pre-reset tip.** Tag `v18.0.3` points at `fdedd3c7f8` (the tip's
+   parent), so the tip commit `d9000dfd81` becomes unreachable after the reset
+   unless preserved — Matt SHOULD first push a `pre-resync-2026-09-03` tag at
+   `d9000dfd81` (OQ6, recommended). To also preserve the record's own history,
+   tag or keep the design branch head `b590093be7`.
+Interfaces: consumes `upstream/main` SHA; produces reset `origin/main` WITHOUT
+`docs/fork-resync.md` (the record is re-laid by Task 2/T1b).
 
 ### Task 2: Re-lay CI (RIG-3144 survival)
-One PR, **two** commits, first thing onto the reset main:
-1. Re-express #28 (`550fc4ba40`): collapse every `omp-kata` selector in
-   `.github/workflows/ci.yml` to `ubuntu-22.04` (upstream now has 10+ selector
-   sites at lines 148-461 plus `runs-on: omp-kata` at 176; the file moved 1752
-   commits — hand-port, don't cherry-pick).
+
+One PR, **four** commits, first thing onto the reset main:
+0. **T1b — re-add this design record.** Commit `docs/fork-resync.md` back onto
+   the reset main (it did not survive Task 1's reset). This keeps the frozen
+   contract on main for Tasks 3-8 to execute from.
+1. Re-express #28 (`550fc4ba40`): collapse all 11 `runs-on: omp-kata` sites in
+   `.github/workflows/ci.yml` to `ubuntu-22.04` — 10 `github.event_name ==
+   'pull_request' && 'ubuntu-22.04' || 'omp-kata'` ternaries (upstream lines
+   148, 222, 330, 353, 371, 389, 407, 427, 445, 461) plus the bare `runs-on:
+   omp-kata` on `rust_validate` at :176. Do NOT grep-replace repo-wide:
+   `omp-kata` also appears in two prose comments in `ci.yml` (:97, :159),
+   `bazel-cache-warm.yml`, and four `.github/actions/*` composites, which
+   describe the hosted-vs-cluster cache auto-selection and stay as-is. The file
+   moved 1752 commits — hand-port, don't cherry-pick.
 2. Cherry-pick #33 (`d9000dfd81`): repoint the PR-path natives fetch from
    `@oh-my-pi/pi-natives-linux-x64` (upstream `ci.yml:232`) to
    `@rigelbuild/omp-natives-linux-x64`, PLUS the linux-rust/linux-natives cache
@@ -158,15 +187,35 @@ One PR, **two** commits, first thing onto the reset main:
    is inside this squash, so #33 alone carries the RIG-3144 Part 1c cache work.
    There is NO separate #32 cherry-pick (`f149ee0664` is subsumed; cherry-picking
    it would be empty/conflict). Expect contextual conflicts with step 1's edits.
-Interfaces: consumes `.github/workflows/ci.yml`, `bazel-cache-warm.yml`,
-`.github/actions/*`; produces green PR checks on the fork with no self-hosted
-runner dependency. Verify: the PR's own CI run smoke-tests the PR path — but the
-PR path is hosted (`ubuntu-22.04`) upstream ALREADY, so a green PR run does NOT
-prove the `omp-kata`→`ubuntu-22.04` collapse on the main-event/release jobs. That
-is proven only by the first post-merge main-event run (watch it lands green, no
-queued-forever job) — the real Task 2 acceptance gate.
+3. Cherry-pick #29 (`269e109c9c`): `#[ignore]` on
+   `kill_builtin_signals_every_process_in_a_jobspec_pipeline`
+   (`crates/pi-shell/src/shell.rs:2809`, still un-ignored upstream). **This is a
+   CI-survival step, not hygiene:** the first post-merge main-event run executes
+   `rust_validate` (upstream `ci.yml:173-176`, `if: github.event_name !=
+   'pull_request'`), which runs `bazelisk test //crates/...` including
+   `pi-shell`; that job-control test has never completed on a hosted runner
+   (times out under the bazel linux-sandbox), so WITHOUT this `#[ignore]` the
+   Task 2 acceptance gate below can never go green. #31 (the memory-tools TS
+   flake) is NOT here — it is a TS test bucket, not the `rust_validate` blocker,
+   and stays in Task 4.
+Interfaces: edits `.github/workflows/ci.yml` (11 runner selectors + the natives
+fetch), DELETES `.github/actionlint.yaml` (its only content was the now-unused
+`omp-kata` self-hosted-runner label registration; still present upstream),
+updates the `warm_bun` rationale comment in `bazel-cache-warm.yml`
+(comment-only, no job change), touches `crates/pi-shell/src/shell.rs` (the
+`#[ignore]`), and re-adds `docs/fork-resync.md`. No change to `.github/actions/*`
+— the `bazel-cache`/`bazel-natives`/`bun-install` composites already auto-select
+the hosted actions/cache backend when `BAZEL_REMOTE_*` are absent, which is why
+the collapse needs no cache rewiring. Verify: the PR's own CI run smoke-tests the
+PR path — but the PR path is hosted (`ubuntu-22.04`) upstream ALREADY, so a green
+PR run does NOT prove the `omp-kata`→`ubuntu-22.04` collapse on the
+main-event/release jobs, nor that `rust_validate` passes on a hosted runner (it
+is non-PR-only, so it does not even run on the PR). Both are proven only by the
+first post-merge main-event run (watch it lands green, no queued-forever job, no
+`pi-shell` timeout) — the real Task 2 acceptance gate.
 
 ### Task 3: Re-lay release machinery (RIG-2511/RIG-2777 survival)
+
 One PR, commits in order:
 1. Cherry-pick #20 (`83e08681fb`, sim: clean): `scripts/rigel-scope-rename.ts`
    + `packAndPublish` tarball rename.
@@ -178,21 +227,34 @@ One PR, commits in order:
 4. Cherry-pick #24 (`91737b1b3d`, sim: clean): changelog diff floor guard.
 5. Re-apply #27 (`1726adb5c5`, sim: test-file conflict only): `watchCI`
    transient retry (upstream `scripts/release.ts:46` still bare).
-Interfaces: consumes `scripts/release.ts`, `scripts/fix-changelogs.ts`,
-`scripts/ci-release-publish.ts`, `scripts/rigel-scope-rename.ts` (new);
-produces a release pipeline that can cut the first tagless @rigelbuild release
-on the new base. Verify: `bun test scripts/release.test.ts
-scripts/rigel-scope-rename.test.ts` + Task 7 dry-run.
+**Depends on OQ1 (tag scheme).** Steps 2 and 4 touch the tagless-first-release
+path, whose tag resolution keys off `git describe --tags --abbrev=0 --match v*`
+(upstream `release.ts:265`, `fix-changelogs.ts:806`). If Matt rules OQ1 option
+(d) (fork-distinct `rigel-v*` prefix), those two globs must be taught the fork
+prefix — so #22's `resolveReleaseVersion` (step 2) and #24's changelog floor
+(step 4) cannot be finalized until OQ1 lands.
+Interfaces: consumes `scripts/release.ts`, `scripts/release.test.ts`,
+`scripts/fix-changelogs.ts`, `scripts/fix-changelogs.test.ts`,
+`scripts/ci-release-publish.ts`, `scripts/setup-npm-trust.ts` (touched by #20
+alongside ci-release-publish.ts); produces `scripts/rigel-scope-rename.{ts,
+test.ts}` (new) and a release pipeline that can cut the first tagless @rigelbuild
+release on the new base. Verify: `bun test scripts/release.test.ts
+scripts/fix-changelogs.test.ts scripts/rigel-scope-rename.test.ts` + Task 7
+dry-run.
 
-### Task 4: Re-lay CI test-hygiene patches
-Cherry-picks, all sim-clean, one small PR: #29 (`269e109c9c`,
-`#[ignore]` on `kill_builtin_signals_every_process_in_a_jobspec_pipeline`,
-still un-ignored at upstream `crates/pi-shell/src/shell.rs:2809`) and #31
-(`fdedd3c7f8`, event-gate the dispose-timeout test; upstream
-`packages/coding-agent/test/memory-tools.test.ts:836-844` still wall-clock).
-Interfaces: consumes those two test files; produces flake-free hosted-CI runs.
+### Task 4: Re-lay the memory-tools flake fix
+
+Cherry-pick #31 (`fdedd3c7f8`, sim: clean), one small PR: event-gate the
+dispose-timeout test (upstream
+`packages/coding-agent/test/memory-tools.test.ts:836-844` still asserts
+wall-clock bounds `elapsedMs < BUDGET_MS * 5`, the exact flake this fixed). #29
+(the `pi-shell` `#[ignore]`) is NOT here — it moved into Task 2 as a CI-survival
+step, because the hosted `rust_validate` gate cannot pass without it.
+Interfaces: consumes `packages/coding-agent/test/memory-tools.test.ts`; produces
+a flake-free hosted-CI memory-tools run.
 
 ### Task 5: Re-lay the Prometheus metrics endpoint (#8)
+
 Cherry-pick `3f3c9d08f1` onto the new base. Sim shows one conflict
 (`eval-code-mode-declarations.test.ts`, a one-line Map type annotation) but the
 auth-broker moved upstream (remote-store rework; `server.ts` differs +51/-43):
@@ -200,12 +262,21 @@ re-verify route wiring, the dual-token auth union, and
 `auth-broker-cli.ts` flags against the new `server.ts` shape, then run the four
 ported test suites.
 Interfaces: consumes `packages/ai/src/auth-broker/{server,index}.ts`,
-`packages/coding-agent/src/cli/auth-broker-cli.ts`; produces
-`prometheus-metrics.ts` + GET `/metrics` on the new base. Verify: `bun test
-packages/ai/test/auth-broker-metrics*.test.ts
-packages/coding-agent/test/auth-broker-*.test.ts`.
+`packages/coding-agent/src/cli/auth-broker-cli.ts`, and
+`packages/coding-agent/src/commands/auth-broker.ts` (the command-surface wiring
+for the CLI flags — porting `auth-broker-cli.ts` alone leaves the flags
+unwired); produces `packages/ai/src/auth-broker/prometheus-metrics.ts` (+370,
+new) + GET `/metrics` on the new base. Verify: run the four ported suites by
+name — `bun test packages/ai/test/auth-broker-metrics-route.test.ts
+packages/ai/test/auth-broker-metrics.test.ts
+packages/coding-agent/test/auth-broker-config.test.ts
+packages/coding-agent/test/auth-broker-metrics-token.test.ts` — plus
+`packages/coding-agent/test/eval-code-mode-declarations.test.ts`, the one-line
+Map-annotation conflict site the table predicts, so the resolved conflict is
+actually exercised.
 
 ### Task 6: Harness PR dispositions (one task each)
+
 - **6a #30 (RIG-3193): close as redundant.** Evidence in the disposition table
   (upstream schema accepts `input_text` blocks at `:84,132`). Comment the
   evidence on the PR, close it, close/annotate RIG-3193.
@@ -223,6 +294,7 @@ Interfaces per sub-task: the branch named in the table; produces a merged-or-
 closed state for each PR and a matching Linear status.
 
 ### Task 7: Verification on the new base
+
 On the assembled main (all re-lays merged): `bun install` (regen `bun.lock` /
 `nix/bun.nix` if touched), `bun run ci:check:full`, the affected test suites
 (release, scope-rename, auth-broker, memory-tools), and a release **dry-run**
@@ -233,6 +305,7 @@ Interfaces: consumes the merged tree; produces the go/no-go for the first
 @rigelbuild release at the OQ1 version.
 
 ### Task 8: Tracker + cross-lane reconciliation
+
 - RIG-2218: note the scope reduction — F3/F4/F5/F6/F7/F8 dropped from the fork
   (held until they land upstream), #7 superseded by upstream `7bf5230c0d`, #8
   still carried. Do NOT silently close.
@@ -246,9 +319,9 @@ Interfaces: consumes this record; produces updated Linear issues +
 ## Tasks
 
 - [ ] T1: File the human-action reset runbook issue (Matt executes the force-push)
-- [ ] T2: Re-lay CI: #28 rework + #33 cherry-pick (which carries #32's cache split) — one PR, two ordered commits
-- [ ] T3: Re-lay release machinery: #20, #22, #23 (rework), #24, #27
-- [ ] T4: Re-lay test-hygiene: #29, #31
+- [ ] T2: Re-lay CI: re-add this record (T1b) + #28 rework + #33 cherry-pick (carries #32's cache split) + #29 pi-shell `#[ignore]` (required for the hosted rust_validate gate) — one PR, four ordered commits
+- [ ] T3: Re-lay release machinery: #20, #22, #23 (rework), #24, #27 (steps 2/4 blocked on OQ1 tag scheme)
+- [ ] T4: Re-lay the memory-tools flake fix: #31
 - [ ] T5: Re-lay Prometheus /metrics (#8) with auth-broker drift re-verification
 - [ ] T6a: Close PR #30 as redundant (with evidence comment)
 - [ ] T6b: Rebase + merge PR #26
@@ -280,8 +353,9 @@ Interfaces: consumes this record; produces updated Linear issues +
   prefix. Recommendation: **(d) fork-distinct tag prefix + npm `18.1.8`** — it is
   the only option that survives upstream continuing to release into the shared
   namespace. This is a real design fork (tag scheme changes the release scripts'
-  tag-resolution), NOT resolvable by assumption; Global Constraints currently
-  bakes in (b) pending Matt's ruling.
+  tag-resolution), NOT resolvable by assumption. Global Constraints leaves the
+  tag scheme unresolved (npm floor `18.1.8` settled; tag scheme pending this
+  ruling), and Tasks 3/7 gate their tag-resolution steps (#22, #24) on it.
 - **OQ2 (load-bearing): salvage the F6 TTSR re-bucket fix?** Analysis says no:
   the fix (`rule-buckets.ts` gating on `hasRule` membership instead of
   `addRule`'s return) only changes behavior on an in-session **re-bucket**, and
