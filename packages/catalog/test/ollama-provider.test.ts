@@ -107,7 +107,19 @@ describe("ollama tool forcing", () => {
 		let requestBody: OllamaRequestBody | undefined;
 		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
 			requestBody = JSON.parse(String(init?.body ?? "{}")) as OllamaRequestBody;
-			return new Response(`${JSON.stringify({ done: true })}\n`, {
+			// A realistic forced tool-call response: the forcing path must yield a
+			// non-empty completion, not a bare `{done:true}` (which is a degenerate
+			// empty completion that now fails closed after the retry cap, RIG-2806).
+			const chunk = {
+				message: {
+					role: "assistant",
+					content: "",
+					tool_calls: [{ type: "function", function: { name: "write", arguments: { path: "README.md" } } }],
+				},
+				done: true,
+				done_reason: "tool_calls",
+			};
+			return new Response(`${JSON.stringify(chunk)}\n`, {
 				status: 200,
 				headers: { "Content-Type": "application/x-ndjson" },
 			});

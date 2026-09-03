@@ -1921,6 +1921,12 @@ export function convertMessages(
 	}
 
 	let lastRole: string | null = null;
+	// RIG-2806: capture the reasoning of any assistant turn we fully drop, and
+	// remember where the message body begins (after the system prompts pushed
+	// above), so a history that demotes to zero body messages can be recovered
+	// below instead of shipping a 0-token request.
+	let lastDroppedThinkingText: string | null = null;
+	const bodyStartIndex = params.length;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -2222,6 +2228,9 @@ export function convertMessages(
 				assistantMsg.content = ".";
 			}
 			if (!hasContent && !assistantMsg.tool_calls && !hasReasoningField) {
+				if (nonEmptyThinkingBlocks.length > 0) {
+					lastDroppedThinkingText = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
+				}
 				continue;
 			}
 			params.push(assistantMsg);
@@ -2312,6 +2321,23 @@ export function convertMessages(
 					? "developer"
 					: "system"
 				: msg.role;
+	}
+
+	// Fail-safe against the RIG-2806 wedge: if every non-system message was
+	// dropped (e.g. a thinking-only assistant turn demoted to nothing on a
+	// compat that cannot replay bare reasoning) we must not ship a zero-body
+	// request — a valid 200 over an empty prompt tokenizes to 0 input tokens
+	// and loops silently, surviving `--resume`. Recover the dropped reasoning
+	// as a bare-prose assistant turn so the request carries real content.
+	if (params.length === bodyStartIndex && lastDroppedThinkingText) {
+		// Guard on the rendered output, not just the input: renderDemotedThinking
+		// returns "" for falsy/whitespace input, and a strict backend rejects an
+		// empty assistant content string — pushing one would re-create the very
+		// zero-content body this fail-safe exists to prevent.
+		const recovered = renderDemotedThinking(model.id, lastDroppedThinkingText);
+		if (recovered.trim().length > 0) {
+			params.push({ role: "assistant", content: recovered });
+		}
 	}
 
 	return params;
