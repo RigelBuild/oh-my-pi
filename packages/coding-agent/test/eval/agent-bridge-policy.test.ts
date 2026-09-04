@@ -14,7 +14,7 @@ import { disposeAllKernelSessions, executePython } from "../../src/eval/py/execu
 import { AgentProtocolHandler } from "../../src/internal-urls/agent-protocol";
 import { resetRegisteredArtifactDirsForTests } from "../../src/internal-urls/registry-helpers";
 import type { PlanModeState } from "../../src/plan-mode/state";
-import { AgentRegistry } from "../../src/registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as taskDiscovery from "../../src/task/discovery";
 import type { ExecutorOptions } from "../../src/task/executor";
@@ -808,6 +808,57 @@ describe("agent() through eval runtimes", () => {
 			(output): output is Extract<typeof output, { type: "status" }> => output.type === "status",
 		);
 		expect(displayAgentEvents).toHaveLength(1);
+	});
+
+	it("emits one coalesced agent event when a progress snapshot lands before the wait", async () => {
+		// Deterministic guard for the single-emit contract runEvalWait relies on.
+		// Drives runEvalWait directly against a controlled job (no JS VM, no real
+		// subagent) with fake timers, so the 1s heartbeat interval provably cannot
+		// tick and every emit is timing-independent. The job reports one interim
+		// "running" snapshot, parks until released, then reports the final
+		// "completed" snapshot. `await interim` makes latestDetails.progress
+		// populated *before* runEvalWait runs: a re-added eager pre-wait emit would
+		// fire with the "running" snapshot (2 events, red), while the settle-only
+		// path emits once (green).
+		vi.useFakeTimers();
+		const session = makeSession();
+		const manager = session.asyncJobManager;
+		if (!manager) throw new Error("session has no asyncJobManager");
+
+		const released = Promise.withResolvers<void>();
+		const interim = Promise.withResolvers<void>();
+		const progressSnapshot = (status: "running" | "completed", toolCount: number) => ({
+			progress: [{ index: 0, id: "A", agent: "task", status, toolCount, task: "investigate" }],
+		});
+
+		const id = manager.register(
+			"task",
+			"agent",
+			async ({ reportProgress }) => {
+				await reportProgress("running", progressSnapshot("running", 4));
+				interim.resolve();
+				await released.promise;
+				await reportProgress("done", progressSnapshot("completed", 7));
+				return "done";
+			},
+			{ id: "A", agentId: "A", ownerId: MAIN_AGENT_ID },
+		);
+
+		// The eager emit's precondition (a progress snapshot exists) is now met.
+		await interim.promise;
+
+		const events: Array<{ op: string; [key: string]: unknown }> = [];
+		const waiting = runEvalWait(
+			{ items: [{ kind: "agent", id }] },
+			{ session, emitStatus: event => events.push(event) },
+		);
+		released.resolve();
+		await waiting;
+
+		const agentEvents = events.filter(event => event.op === "agent");
+		expect(agentEvents).toHaveLength(1);
+		expect(agentEvents[0]?.status).toBe("completed");
+		expect(agentEvents[0]?.toolCount).toBe(7);
 	});
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
