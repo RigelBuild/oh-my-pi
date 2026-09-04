@@ -5,14 +5,15 @@ Status: Frozen (PR #35). Reconciled 2026-09-04 after execution — see the note 
 > **Reconciliation note (2026-09-04, post-execution).** This record froze via PR
 > #35 as the reset-and-re-lay contract. Between the freeze and the reset, upstream
 > advanced, so the reset actually landed on **v18.1.10 (`ddde7db10a`)**, not the
-> v18.1.7 (`c4da0d08e8`) named in the original body. Three consequences correct the
+> v18.1.7 (`c4da0d08e8`) named in the original body. Four consequences correct the
 > frozen text; the rest of the record stands:
 >
 > 1. **Reset target is v18.1.10 (`ddde7db10a`).** Everywhere the body says v18.1.7
 >    / `c4da0d08e8`, read v18.1.10 / `ddde7db10a`. The Task-1 force-push runbook
 >    below **has already executed** — it is retained for provenance only and its
->    `sha=` is stale; **do not re-run it** (re-running would roll `main` back three
->    tags).
+>    `sha=` has been corrected to the executed target; **do not re-run it**:
+>    re-running would reset `main` back to the reset point and discard every
+>    re-lay merged since.
 > 2. **PR-path natives fetch ships from the UPSTREAM scope, pinned to base
 >    version** (`@oh-my-pi/pi-natives-linux-x64@<base>`, base = the checkout's
 >    version with any `-rigel.N` suffix stripped), not the `@rigelbuild` scope the
@@ -24,8 +25,15 @@ Status: Frozen (PR #35). Reconciled 2026-09-04 after execution — see the note 
 >    of testing silently against upstream semantics.
 > 3. **Version scheme (OQ1 resolved by Matt): `<upstream-version>-rigel.<N>`**
 >    (e.g. `18.1.10-rigel.1`, increment `N` per fork patch, reset on each upstream
->    re-sync base). Supersedes the "npm floor 18.1.8 + `rigel-v*` tag" proposal in
->    the OQ1 section below.
+>    re-sync base). This supersedes the tag-scheme text everywhere it appears —
+>    the OQ1 Open-Questions entry, the "Version + tag scheme" Global Constraints
+>    bullet, and Task 3's "Depends on OQ1" paragraph. OQ1 has landed: Tasks 3/7
+>    are no longer gated on it, and the `--match v*` globs in `scripts/release.ts`
+>    and `scripts/fix-changelogs.ts` need no change under the `-rigel.N` scheme
+>    (a `18.1.10-rigel.N` tag carries no collision with an upstream `v*` tag).
+> 4. **Pre-reset safety tags are pushed (OQ6 done):** `pre-resync-2026-09-03`
+>    (`d9000dfd81`) and `pre-resync-record-2026-09-03` (`b62ebd73`) are both on
+>    origin.
 
 ## Problem / Intent
 
@@ -165,11 +173,13 @@ per `rule://linear-project-taxonomy`) whose body is this runbook, per
 `skill://human-action-handoff`:
 
 > This runbook **has already executed** (2026-09-04) and reset `main` to
-> **v18.1.10 (`ddde7db10a`)** — the SHA below is the stale original target and is
-> commented out so a copy-paste cannot re-run it. Retained for provenance only.
+> **v18.1.10 (`ddde7db10a`)** — the SHA below is the executed target and every line
+> is commented out so a copy-paste cannot re-run it. Retained for provenance only:
+> re-running would reset `main` back to the reset point and discard every re-lay
+> merged since.
 
 ```sh
-# ALREADY EXECUTED 2026-09-04 — DO NOT RE-RUN (would roll main back three tags).
+# ALREADY EXECUTED 2026-09-04 — DO NOT RE-RUN (would discard every post-reset re-lay).
 # Preflight: confirm the SHAs
 # git fetch upstream && git rev-parse upstream/main   # tip at execution: ddde7db10a99273b85dc81eddd8e418061f2553e
 # Reset RigelBuild/oh-my-pi main to upstream tip (admin bypasses branch protection):
