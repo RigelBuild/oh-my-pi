@@ -1,6 +1,31 @@
-# Fork re-sync: reset to upstream v18.1.7 + reduced curated re-lay
+# Fork re-sync: reset to upstream v18.1.10 + reduced curated re-lay
 
-Status: Draft
+Status: Frozen (PR #35). Reconciled 2026-09-04 after execution — see the note below.
+
+> **Reconciliation note (2026-09-04, post-execution).** This record froze via PR
+> #35 as the reset-and-re-lay contract. Between the freeze and the reset, upstream
+> advanced, so the reset actually landed on **v18.1.10 (`ddde7db10a`)**, not the
+> v18.1.7 (`c4da0d08e8`) named in the original body. Three consequences correct the
+> frozen text; the rest of the record stands:
+>
+> 1. **Reset target is v18.1.10 (`ddde7db10a`).** Everywhere the body says v18.1.7
+>    / `c4da0d08e8`, read v18.1.10 / `ddde7db10a`. The Task-1 force-push runbook
+>    below **has already executed** — it is retained for provenance only and its
+>    `sha=` is stale; **do not re-run it** (re-running would roll `main` back three
+>    tags).
+> 2. **PR-path natives fetch ships from the UPSTREAM scope, pinned to base
+>    version** (`@oh-my-pi/pi-natives-linux-x64@<base>`, base = the checkout's
+>    version with any `-rigel.N` suffix stripped), not the `@rigelbuild` scope the
+>    keep/drop rows below specify. Reason: `@rigelbuild/omp-natives-linux-x64` has
+>    only `18.0.3` published, which lacks bindings the v18.1.10 tree calls. The
+>    fetch **flips back to `@rigelbuild`** once the fork cuts its first post-reset
+>    native release (`18.1.10-rigel.1`); that flip also closes the sentinel-bypass
+>    gap, so a fork change to an existing export's behavior fails visibly instead
+>    of testing silently against upstream semantics.
+> 3. **Version scheme (OQ1 resolved by Matt): `<upstream-version>-rigel.<N>`**
+>    (e.g. `18.1.10-rigel.1`, increment `N` per fork patch, reset on each upstream
+>    re-sync base). Supersedes the "npm floor 18.1.8 + `rigel-v*` tag" proposal in
+>    the OQ1 section below.
 
 ## Problem / Intent
 
@@ -139,12 +164,17 @@ File a Linear issue (team Rigel, label `human-action`, assigned Matt, project
 per `rule://linear-project-taxonomy`) whose body is this runbook, per
 `skill://human-action-handoff`:
 
+> This runbook **has already executed** (2026-09-04) and reset `main` to
+> **v18.1.10 (`ddde7db10a`)** — the SHA below is the stale original target and is
+> commented out so a copy-paste cannot re-run it. Retained for provenance only.
+
 ```sh
+# ALREADY EXECUTED 2026-09-04 — DO NOT RE-RUN (would roll main back three tags).
 # Preflight: confirm the SHAs
-git fetch upstream && git rev-parse upstream/main   # must print c4da0d08e8275659f3e09cf381c7df7018a19025
+# git fetch upstream && git rev-parse upstream/main   # tip at execution: ddde7db10a99273b85dc81eddd8e418061f2553e
 # Reset RigelBuild/oh-my-pi main to upstream tip (admin bypasses branch protection):
-gh api -X PATCH repos/RigelBuild/oh-my-pi/git/refs/heads/main \
-  -f sha=c4da0d08e8275659f3e09cf381c7df7018a19025 -F force=true
+# gh api -X PATCH repos/RigelBuild/oh-my-pi/git/refs/heads/main \
+#   -f sha=ddde7db10a99273b85dc81eddd8e418061f2553e -F force=true
 ```
 
 Precondition: Tasks 2-4 branches are prepared (so the fork is not left
