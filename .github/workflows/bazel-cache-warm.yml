@@ -1,10 +1,9 @@
 name: Warm bazel disk cache
 
-# GitHub-hosted runners cannot use the cluster remote cache and only see
-# actions/cache entries created on the default branch, and bazel action keys
-# do not transfer across runner environments (a kata-produced disk cache
-# misses every action on a hosted image) — so seed each hosted consumer from
-# the same image it runs on:
+# GitHub-hosted runners only see actions/cache entries created on the default
+# branch, and bazel action keys do not transfer across runner images (a disk
+# cache produced on one image misses every action on a different one) — so seed
+# each hosted consumer from the same image it runs on:
 #
 #   warm_darwin (macos-*)  -> scopes `release-darwin-*`, consumed by the
 #                             release_binary darwin jobs. Releases are the
