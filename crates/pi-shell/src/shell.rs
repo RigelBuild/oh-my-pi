@@ -2809,9 +2809,10 @@ mod tests {
 	// Disabled on GitHub-hosted CI: this exercises job-control stop/continue
 	// (kill -STOP a pipeline, then `kill %1`) whose SIGSTOP/SIGCONT + process-group
 	// semantics do not hold under the bazel linux-sandbox, so run_string times out
-	// waiting for the suspended pipeline. Re-enable if the shell's job-control is
-	// changed or the CI process model gains full job-control support.
-	#[ignore = "job-control stop/continue unsupported under the CI bazel sandbox"]
+	// waiting for the suspended pipeline. Re-enable tracked by RIG-3249
+	// (root-cause the sandbox job-control gap or make the test deterministic
+	// under it).
+	#[ignore = "RIG-3249: job-control stop/continue unsupported under the CI bazel sandbox"]
 	async fn kill_builtin_signals_every_process_in_a_jobspec_pipeline() {
 		const MARKER: &str = "PI_SHELL_TEST_KILL_JOBSPEC_PIPELINE";
 		if std::env::var_os(MARKER).is_none() {
@@ -2954,7 +2955,14 @@ mod tests {
 	async fn run_isolated_kill_test(test_name: &str, marker: &str, own_process_group: bool) {
 		let mut command =
 			tokio::process::Command::new(std::env::current_exe().expect("current test executable"));
-		command.args(["--exact", test_name]).env(marker, "1");
+		// Pass --include-ignored so an #[ignore]d outer test (e.g. the
+		// jobspec-pipeline case) still executes its body in the re-exec child;
+		// without it the child filters the ignored test out, runs zero tests,
+		// and exits 0, making the outer assert!(status.success()) pass
+		// vacuously. A no-op for the non-ignored callers.
+		command
+			.args(["--include-ignored", "--exact", test_name])
+			.env(marker, "1");
 		#[cfg(unix)]
 		if own_process_group {
 			command.process_group(0);
