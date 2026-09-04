@@ -248,7 +248,12 @@ jobs:
    native_addons:
       name: Build native addons (bazel)
       runs-on: ubuntu-22.04
-      timeout-minutes: 90
+      # 150 gives ~1.8x margin over the measured 84-minute cold cross-compile
+      # (the six addon links, run 33789708655) while still bounding a genuine
+      # hang well inside GitHub's 360-minute ceiling. A tighter bound would kill
+      # a legitimately-cold first post-reset build before the cache-save step,
+      # which never runs on a timeout, so the job would never self-heal.
+      timeout-minutes: 150
       steps:
          - uses: actions/checkout@v4
 
