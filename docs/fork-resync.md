@@ -27,7 +27,7 @@ endpoint, and the fork-novel bugfix PRs, plus harness PR #34.
 | Commit | Subject (PR) | Disposition | Reasoning |
 |---|---|---|---|
 | `9670d742ef` | #7 fix(ai): pair composite Responses tool-call ids | **DROP: redundant** | Upstreamed verbatim as `7bf5230c0d` (in `upstream/main`, `git merge-base --is-ancestor` confirms), same 2-file diff (+438/-31), plus upstream follow-ups `243303d91d` and `3a710cd0f7` that scope the pairing further. Re-laying would regress those follow-ups. |
-| `3f3c9d08f1` | #8 feat(auth-broker): Prometheus /metrics endpoint | **KEEP: re-lay** | Fork-novel: `prometheus-metrics.ts` absent upstream, no `/metrics` route in `upstream/main:packages/ai/src/auth-broker/server.ts`. Cherry-pick sim onto v18.1.7 conflicts only in `eval-code-mode-declarations.test.ts` (a one-line `Map` type annotation). Auth-broker drift upstream (remote-store rework, `server.ts` +51/-43 vs fork) means the route wiring needs re-verification, not redesign. |
+| `3f3c9d08f1` | #8 feat(auth-broker): Prometheus /metrics endpoint | **KEEP: re-lay (rebase until upstream #10290 lands)** | Fork-novel: `prometheus-metrics.ts` absent upstream, no `/metrics` route in `upstream/main:packages/ai/src/auth-broker/server.ts`. Cherry-pick sim onto v18.1.7 conflicts only in `eval-code-mode-declarations.test.ts` (a one-line `Map` type annotation). Auth-broker drift upstream (remote-store rework, `server.ts` +51/-43 vs fork) means the route wiring needs re-verification, not redesign. Already proposed upstream as can1357/oh-my-pi#10290 (open); when that merges the fork carry drops as redundant (OQ3, Task 5). |
 | `f0fa2687bb` | #10 F8 shared infra: requeuePending + hasRule | **DROP** | Only consumers are F6 (`hasRule` at `rule-buckets.ts:64`) and F4 (`requeuePending` at `agent-session.ts:912`, blame = `d15b6072d1`). No KEEP commit references either symbol (grep over `origin/main` `packages/`: all other `hasRule` hits are an unrelated local helper in `packages/ai/test/schema-compatibility.test.ts`). |
 | `74b73bccec` | #11 F6 refresh hints + TTSR re-bucket fix | **DROP** (incl. the TTSR fix; see OQ2) | Refresh hints reference the refresh tool by name (`rule-protocol.ts`, `skill-protocol.ts` error text). The TTSR re-bucket fix gates on F8's `hasRule` and only changes behavior on an in-session re-bucket; the sole re-bucket caller (`extensibility/reload.ts:124`) is introduced by F3. At init the old `addRule`-return gating is equivalent, so without refresh the fix is dead weight. |
 | `2425f98875` | #14 F3 refresh tool keystone | **DROP** | The subsystem root (20 files, +1999): `extensibility/reload.ts`, refresh tool, slash command, `agent-session.ts` +284. Matt-ruled out. |
@@ -260,7 +260,10 @@ Cherry-pick `3f3c9d08f1` onto the new base. Sim shows one conflict
 auth-broker moved upstream (remote-store rework; `server.ts` differs +51/-43):
 re-verify route wiring, the dual-token auth union, and
 `auth-broker-cli.ts` flags against the new `server.ts` shape, then run the four
-ported test suites.
+ported test suites. This endpoint is already proposed upstream as
+can1357/oh-my-pi#10290 (OQ3); the fork carry is a rebased copy kept until that
+PR merges, at which point it becomes redundant and drops (like #7). No new
+upstream PR to open.
 Interfaces: consumes `packages/ai/src/auth-broker/{server,index}.ts`,
 `packages/coding-agent/src/cli/auth-broker-cli.ts`, and
 `packages/coding-agent/src/commands/auth-broker.ts` (the command-surface wiring
@@ -364,12 +367,15 @@ Interfaces: consumes this record; produces updated Linear issues +
   F8's `hasRule` to compile. Recommendation: **drop with the set**; if refresh
   ever lands upstream, the fix travels with it. Confirm Matt agrees "not a
   standalone bugfix".
-- **OQ3 (load-bearing): propose the /metrics endpoint upstream now?** Matt
-  said "hopefully won't be too painful to keep rebasing until it makes it into
-  main", implying an eventual upstream PR. Carrying it costs a re-verify per
-  sync (the auth-broker moved this cycle: remote-store rework). Recommendation:
-  re-lay now (Task 5) AND open the upstream proposal in the same wave, so the
-  treadmill has an exit. Needs Matt's yes on the upstream-PR timing.
+- **OQ3 (RESOLVED, Matt 2026-09-03): the /metrics endpoint is already proposed
+  upstream.** Upstream PR can1357/oh-my-pi#10290 ("feat(auth-broker): add
+  Prometheus /metrics endpoint with scrape-token auth", head
+  `RigelBuild/oh-my-pi:omp-authbroker-metrics`, open since 2026-08-30) carries
+  this endpoint upstream. So Task 5's job is to re-lay the fork copy onto the new
+  base and keep it rebased UNTIL #10290 merges — there is no new upstream PR to
+  open. When #10290 lands, drop the fork carry (it becomes redundant, like #7).
+  Carrying it still costs a re-verify per sync (the auth-broker moved this cycle:
+  remote-store rework), which is the treadmill #10290 exits.
 - **OQ4 (non-load-bearing): keep carrying CI patches vs adopt upstream CI.**
   Upstream CI still hard-requires the `omp-kata` self-hosted runner for non-PR
   events (`ci.yml:148` et al.), which RigelBuild does not have — so adopting
