@@ -2806,7 +2806,7 @@ mod tests {
 
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	// Disabled on GitHub-hosted CI: this exercises job-control stop/continue
+	// Disabled under the CI bazel sandbox: this exercises job-control stop/continue
 	// (kill -STOP a pipeline, then `kill %1`) whose SIGSTOP/SIGCONT + process-group
 	// semantics do not hold under the bazel linux-sandbox, so run_string times out
 	// waiting for the suspended pipeline. Re-enable tracked by RIG-3249
