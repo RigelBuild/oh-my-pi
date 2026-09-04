@@ -189,7 +189,16 @@ export async function runEvalWait(
 	return await withBridgeTimeoutPause(
 		options.emitStatus,
 		async () => {
-			for (const handle of resolved) emitProgress(handle, options.emitStatus);
+			// Heartbeat emits only: the interval covers long waits and the
+			// post-settlement emit below carries the final "latest" snapshot. A
+			// wait that settles inside the first interval window therefore emits at
+			// most once — the latest snapshot at settle time, which is the
+			// completed state on the success path, or the last interim snapshot if
+			// the agent failed before its final progress report; a subagent that
+			// never reported progress emits nothing. An eager emit here would
+			// surface a pre-settlement interim snapshot in addition to the final
+			// one, so a fast agent() would stream two op:"agent" events instead of
+			// the one coalesced "latest" the caller expects.
 			const interval = setInterval(() => {
 				for (const handle of resolved) emitProgress(handle, options.emitStatus);
 			}, 1_000);
