@@ -226,27 +226,36 @@ jobs:
               key: ${{ steps.cache.outputs.cache-key }}
 
    # Provides the native addons every downstream TS job installs. PRs never
-   # build: they fetch the latest release's Linux x64 pair from the fork's own
-   # @rigelbuild/omp-natives-linux-x64 npm leaf instead. The workspace loader
-   # skips its version sentinel for workspace loads, so release addons load
-   # fine under a newer checkout; a PR whose TS tests depend on changed
-   # native behavior fails visibly and the native side lands via main.
-   # Non-PR events build all Linux-hosted targets with bazel (GitHub-hosted
-   # runner, actions/cache disk cache). Job name says "bazel" for continuity
-   # with required checks.
+   # build: they fetch the Linux x64 pair from upstream's
+   # @oh-my-pi/pi-natives-linux-x64 npm leaf, pinned to the checkout's own
+   # upstream base version (the workspace version with any -rigel.N fork
+   # suffix stripped). Immediately after an upstream re-sync the fork's
+   # crates/ tree equals upstream's, so upstream's published addon is the
+   # exact binding match; the fork's own @rigelbuild scope has no addon at
+   # this version until the fork cuts its first post-reset release. The
+   # workspace loader skips its version sentinel for workspace loads, so a
+   # release addon loads fine under a newer checkout; a PR whose TS tests
+   # depend on fork-only native changes fails visibly and the native side
+   # lands via main. Non-PR events build all Linux-hosted targets with bazel
+   # (GitHub-hosted runner, actions/cache disk cache). Job name says "bazel"
+   # for continuity with required checks.
    native_addons:
       name: Build native addons (bazel)
       runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4
 
-         # ---- PR path: latest release addons from npm ----
+         # ---- PR path: upstream release addons, pinned to base version ----
          - name: Fetch release native addons (npm)
            if: github.event_name == 'pull_request'
            shell: bash
            run: |
               set -euo pipefail
-              tarball="$(npm view @rigelbuild/omp-natives-linux-x64@latest dist.tarball)"
+              # Fetch upstream's addon at the checkout's upstream base version,
+              # stripping any -rigel.N fork suffix from the workspace version.
+              version="$(node -p "require('./packages/natives/package.json').version")"
+              base="${version%%-*}"
+              tarball="$(npm view "@oh-my-pi/pi-natives-linux-x64@${base}" dist.tarball)"
               echo "Fetching $tarball"
               curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
               mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
