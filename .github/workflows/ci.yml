@@ -145,6 +145,7 @@ jobs:
    check:
       name: Lint, type check & web build
       runs-on: ubuntu-22.04
+      timeout-minutes: 30
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
@@ -172,6 +173,7 @@ jobs:
       name: Validate Rust workspace (bazel)
       if: github.event_name != 'pull_request'
       runs-on: ubuntu-22.04
+      timeout-minutes: 90
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
@@ -233,15 +235,20 @@ jobs:
    # crates/ tree equals upstream's, so upstream's published addon is the
    # exact binding match; the fork's own @rigelbuild scope has no addon at
    # this version until the fork cuts its first post-reset release. The
-   # workspace loader skips its version sentinel for workspace loads, so a
-   # release addon loads fine under a newer checkout; a PR whose TS tests
-   # depend on fork-only native changes fails visibly and the native side
-   # lands via main. Non-PR events build all Linux-hosted targets with bazel
-   # (GitHub-hosted runner, actions/cache disk cache). Job name says "bazel"
-   # for continuity with required checks.
+   # workspace loader deliberately skips its version sentinel for workspace
+   # loads, so an upstream addon under a fork checkout is NOT validated against
+   # the fork's own bindings. Visible failure is therefore guaranteed only for
+   # a newly-ADDED export (a TS test calling a new function gets a TypeError);
+   # a fork change to the BEHAVIOR of an existing export would silently test
+   # against upstream semantics until the fork publishes its own @rigelbuild
+   # addon (the fork-native release follow-up closes that gap). The native side
+   # lands via main regardless. Non-PR events build all Linux-hosted targets
+   # with bazel (GitHub-hosted runner, actions/cache disk cache). Job name says
+   # "bazel" for continuity with required checks.
    native_addons:
       name: Build native addons (bazel)
       runs-on: ubuntu-22.04
+      timeout-minutes: 90
       steps:
          - uses: actions/checkout@v4
 
