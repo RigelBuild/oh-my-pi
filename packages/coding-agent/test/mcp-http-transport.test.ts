@@ -6,7 +6,12 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 
 const encoder = new TextEncoder();
 const REQUEST_TIMEOUT_MS = 50;
-const GUARD_TIMEOUT_MS = 500;
+// Hang backstop shared by the success-path tests below, not a latency
+// assertion. A healthy localhost resume completes in well under 100ms, so a
+// promise still pending here indicates a stalled listener, not a slow one. Kept
+// generous but under bun's 5000ms default per-test timeout so this labeled
+// failure wins over the runner's generic timeout message.
+const GUARD_TIMEOUT_MS = 4_000;
 
 let server: Bun.Server<undefined> | null = null;
 
@@ -670,7 +675,16 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 				);
 			},
 		});
-		const transport = await connectedTransport();
+		// Positive-path resume: a generous transport timeout keeps the GET
+		// listener startup budget (timeout/4, capped at 1s) well above the 12ms
+		// that the 50ms REQUEST_TIMEOUT_MS would yield and abort under CI load.
+		if (!server) throw new Error("Test server was not started");
+		const transport = new HttpTransport({
+			type: "http",
+			url: `http://127.0.0.1:${server.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		await transport.connect();
 		const notifications: string[] = [];
 		let closed = false;
 		const secondNotification = Promise.withResolvers<void>();
