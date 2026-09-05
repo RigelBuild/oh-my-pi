@@ -30,32 +30,16 @@ on:
          - "package.json"
          - "patches/**"
          - ".github/**"
+   # No `paths:` filter here, unlike `push` above: the branch ruleset requires
+   # the `CI` rollup on every PR, and a path-filtered workflow that never fires
+   # leaves that required check forever pending (GitHub strands it), so a
+   # docs-only PR could never merge. Instead the workflow always runs and the
+   # `setup` job decides, from the PR's own diff, whether the expensive jobs are
+   # relevant; they gate on `needs.setup.outputs.affected` and skip on a
+   # docs-only PR (a skipped job satisfies branch protection). The cheap rollup
+   # still runs and posts `CI`.
    pull_request:
       branches: [main]
-      paths:
-         - "packages/**"
-         - "crates/**"
-         - "scripts/**"
-         - "bazel/**"
-         - "MODULE.bazel"
-         - "MODULE.bazel.lock"
-         - "BUILD.bazel"
-         - ".bazelrc"
-         - ".bazelignore"
-         - ".bazelversion"
-         - "Cargo.toml"
-         - "Cargo.lock"
-         - "deny.toml"
-         - "about.toml"
-         - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
-         - "rust-toolchain.toml"
-         - "rustfmt.toml"
-         - "bun.lock"
-         - "bunfig.toml"
-         - "package.json"
-         - "patches/**"
-         - ".github/**"
    workflow_dispatch:
       inputs:
          skip_npm:
@@ -82,6 +66,31 @@ permissions:
    contents: read
 
 jobs:
+   # Change-detection gate. Runs on every event (no `if:`), cheaply, and decides
+   # whether the expensive jobs below are relevant to this PR's diff. `check`,
+   # `native_addons`, and the test matrix that cascades off native_addons gate on
+   # `outputs.affected`; a docs-only PR skips them. On push/dispatch the script
+   # short-circuits to affected=true, so main and release runs are never gated.
+   setup:
+      name: Detect affected paths
+      runs-on: ubuntu-22.04
+      timeout-minutes: 5
+      outputs:
+         affected: ${{ steps.paths.outputs.affected }}
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              # A PR diff needs both endpoints; fetch-depth 0 gives the base.
+              fetch-depth: 0
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+         - id: paths
+           name: Decide whether the full matrix is affected
+           env:
+              GITHUB_EVENT_NAME: ${{ github.event_name }}
+              PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+           run: bun scripts/ci-paths-affected.ts
+
    # scripts/release.ts pushes the version-bump commit and its `v*` tag
    # atomically (`git push --atomic origin refs/heads/main:refs/heads/main
    # <sha>:refs/tags/v<version>`), so a release now arrives as a single `push` to
@@ -144,6 +153,8 @@ jobs:
 
    check:
       name: Lint, type check & web build
+      needs: [setup]
+      if: ${{ needs.setup.outputs.affected == 'true' }}
       runs-on: ubuntu-22.04
       timeout-minutes: 30
       steps:
@@ -247,6 +258,8 @@ jobs:
    # "bazel" for continuity with required checks.
    native_addons:
       name: Build native addons (bazel)
+      needs: [setup]
+      if: ${{ needs.setup.outputs.affected == 'true' }}
       runs-on: ubuntu-22.04
       # 150 gives ~1.8x margin over the measured 84-minute cold cross-compile
       # (the six addon links, run 33789708655) while still bounding a genuine
@@ -1034,24 +1047,34 @@ jobs:
               git push origin HEAD:main
 
    # Aggregate gate: the single status context the branch ruleset requires
-   # (`CI`). Green only when every PR-relevant job it needs succeeds, so the
-   # required-check list stays one stable name instead of a hand-maintained
-   # per-job enumeration. rust_validate and native_addons are intentionally
-   # absent: rust_validate is `if: github.event_name != 'pull_request'` (a skip
-   # on PRs would strand this gate), and native_addons is covered transitively
-   # because every test job below `needs` it.
+   # (`CI`). Requiring THIS one rollup instead of each work job keeps the
+   # ruleset's required-check list at one stable name — a job can be split or
+   # renamed and only this `needs` list changes, in the same reviewed file.
    #
-   # `if: !cancelled()` makes this job run even when a need fails, so whenever
-   # the workflow runs it posts a `CI` check-run: a red need yields `CI` =
-   # failure (a clear signal) rather than a never-created, forever-pending
-   # required context. The step then fails closed on any non-success need result.
+   # `if: !cancelled()` (not the default `success()`, not `always()`): the
+   # default would SKIP this job when a need fails, and branch protection treats
+   # a skipped required check as passing — so a red work job would be mergeable.
+   # `!cancelled()` still runs on a need failure and inspects results below,
+   # reding `CI`. It differs from `always()` only when the RUN is cancelled (a
+   # superseding push): then this rollup skips and `CI` goes neutral on the
+   # superseded commit rather than a false red, while the ref's tip run still
+   # gets a real verdict.
+   #
+   # `setup` and the ungated jobs must plainly succeed. The affected-gated jobs
+   # (`check`, `native_addons`, and the eight that cascade off native_addons)
+   # legitimately SKIP on a docs-only PR — but a skip is accepted ONLY when
+   # `setup.outputs.affected == 'false'` said so. A failed `setup` leaves that
+   # output empty, so `'' != 'false'`, an excused skip is not granted, and the
+   # rollup reds: never a blanket skipped-is-green.
    ci:
       name: CI
       runs-on: ubuntu-22.04
       timeout-minutes: 5
       if: ${{ !cancelled() }}
       needs:
+         - setup
          - check
+         - native_addons
          - test_workspace
          - test_coding_agent_singleton
          - test_ts_native
@@ -1062,13 +1085,53 @@ jobs:
          - install_methods
       steps:
          - name: Verify all required CI jobs succeeded
+           env:
+              AFFECTED: ${{ needs.setup.outputs.affected }}
+              SETUP: ${{ needs.setup.result }}
+              CHECK: ${{ needs.check.result }}
+              NATIVE_ADDONS: ${{ needs.native_addons.result }}
+              TEST_WORKSPACE: ${{ needs.test_workspace.result }}
+              TEST_SINGLETON: ${{ needs.test_coding_agent_singleton.result }}
+              TEST_TS_NATIVE: ${{ needs.test_ts_native.result }}
+              TEST_UI: ${{ needs.test_coding_agent_ui.result }}
+              TEST_RUNTIME: ${{ needs.test_coding_agent_runtime.result }}
+              TEST_NATIVE: ${{ needs.test_coding_agent_native.result }}
+              TEST_SMOKE: ${{ needs.test_smoke.result }}
+              INSTALL_METHODS: ${{ needs.install_methods.result }}
            run: |
-              results='${{ join(needs.*.result, ' ') }}'
-              echo "required job results: $results"
-              for result in $results; do
-                 if [ "$result" != "success" ]; then
-                    echo "::error::a required CI job did not succeed (got '$result')"
-                    exit 1
+              echo "affected=$AFFECTED setup=$SETUP"
+              rc=0
+              # setup must plainly succeed: every gated verdict below trusts it.
+              if [ "$SETUP" != "success" ]; then
+                 echo "::error::setup did not succeed (result=$SETUP)"
+                 rc=1
+              fi
+              # A gated job passes on success, or on skipped ONLY when setup
+              # explicitly reported affected=false. Empty AFFECTED (failed setup)
+              # never excuses a skip.
+              require_gated() {
+                 name="$1"
+                 result="$2"
+                 if [ "$result" = "success" ]; then
+                    return
                  fi
-              done
-              echo "all required CI jobs passed"
+                 if [ "$result" = "skipped" ] && [ "$AFFECTED" = "false" ]; then
+                    return
+                 fi
+                 echo "::error::$name did not succeed (result=$result, affected=$AFFECTED)"
+                 rc=1
+              }
+              require_gated check "$CHECK"
+              require_gated native_addons "$NATIVE_ADDONS"
+              require_gated test_workspace "$TEST_WORKSPACE"
+              require_gated test_coding_agent_singleton "$TEST_SINGLETON"
+              require_gated test_ts_native "$TEST_TS_NATIVE"
+              require_gated test_coding_agent_ui "$TEST_UI"
+              require_gated test_coding_agent_runtime "$TEST_RUNTIME"
+              require_gated test_coding_agent_native "$TEST_NATIVE"
+              require_gated test_smoke "$TEST_SMOKE"
+              require_gated install_methods "$INSTALL_METHODS"
+              if [ "$rc" -eq 0 ]; then
+                 echo "all required CI jobs passed (affected=$AFFECTED)"
+              fi
+              exit "$rc"
