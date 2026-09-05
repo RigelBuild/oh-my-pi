@@ -37,7 +37,9 @@ on:
    # `setup` job decides, from the PR's own diff, whether the expensive jobs are
    # relevant; they gate on `needs.setup.outputs.affected` and skip on a
    # docs-only PR (a skipped job satisfies branch protection). The cheap rollup
-   # still runs and posts `CI`.
+   # still runs and posts `CI`. (nix.yml deliberately keeps its own `paths:`
+   # filter: none of its jobs is a ruleset-required context, so it cannot strand
+   # a required check the way a path-filtered `CI` would — do not "align" it.)
    pull_request:
       branches: [main]
    workflow_dispatch:
@@ -1055,7 +1057,7 @@ jobs:
    # default would SKIP this job when a need fails, and branch protection treats
    # a skipped required check as passing — so a red work job would be mergeable.
    # `!cancelled()` still runs on a need failure and inspects results below,
-   # reding `CI`. It differs from `always()` only when the RUN is cancelled (a
+   # reddening `CI`. It differs from `always()` only when the RUN is cancelled (a
    # superseding push): then this rollup skips and `CI` goes neutral on the
    # superseded commit rather than a false red, while the ref's tip run still
    # gets a real verdict.
@@ -1066,6 +1068,11 @@ jobs:
    # `setup.outputs.affected == 'false'` said so. A failed `setup` leaves that
    # output empty, so `'' != 'false'`, an excused skip is not granted, and the
    # rollup reds: never a blanket skipped-is-green.
+   #
+   # MAINTENANCE: adding a gated work job needs THREE edits kept in sync — a
+   # `needs:` entry here, an `env:` mapping below, and a matching `require_gated`
+   # call. Miss the `require_gated` call and the job is waited on but never
+   # inspected, so a red new job would leave `CI` green (silent fail-open).
    ci:
       name: CI
       runs-on: ubuntu-22.04

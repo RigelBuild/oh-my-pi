@@ -18,10 +18,22 @@
  * minutes; it can never let untested code merge.
  */
 
+import { appendFile } from "node:fs/promises";
+
 /**
- * Path prefixes and exact files that require the full CI matrix. Mirrors the
- * `pull_request.paths` list ci.yml carried before the filter moved here. A
- * trailing `/` marks a directory prefix; everything else is an exact file.
+ * Path prefixes and exact files that require the full CI matrix. Started as the
+ * `pull_request.paths` list ci.yml carried before the filter moved here, but a
+ * gate is stricter than a trigger: a trigger that misses a path merely fails to
+ * START a workflow (leaving the required check pending), whereas this gate lets
+ * the paired job be SKIPPED and the rollup then excuses that skip. So it must
+ * also list every input the gated jobs read — notably the root TS/lint config
+ * the `check` job consumes (tsconfig*, oxlint/oxfmt config, the `types/` root),
+ * or a config-only regression would skip `check` and merge with `CI` green.
+ *
+ * A trailing `/` marks a directory prefix; everything else is an exact file.
+ * When in doubt, ADD a pattern: over-running the matrix wastes minutes; an
+ * omission lets untested code merge. Keep in sync with any new gated job's
+ * inputs.
  */
 const CODE_PATHS: readonly string[] = [
 	"packages/",
@@ -30,6 +42,7 @@ const CODE_PATHS: readonly string[] = [
 	"bazel/",
 	"patches/",
 	".github/",
+	"types/",
 	"MODULE.bazel",
 	"MODULE.bazel.lock",
 	"BUILD.bazel",
@@ -47,6 +60,11 @@ const CODE_PATHS: readonly string[] = [
 	"bun.lock",
 	"bunfig.toml",
 	"package.json",
+	"tsconfig.json",
+	"tsconfig.base.json",
+	"tsconfig.tools.json",
+	".oxlintrc.json",
+	".oxfmtrc.json",
 ];
 
 /** Whether a single changed path matches any code-relevant pattern. */
@@ -67,7 +85,12 @@ export function diffIsAffected(changedPaths: readonly string[], patterns: readon
 }
 
 async function changedFiles(baseSha: string, headSha: string): Promise<string[]> {
-	const proc = Bun.spawn(["git", "diff", "--name-only", "-z", `${baseSha}...${headSha}`], {
+	// `--no-renames` is load-bearing: with git's default rename detection,
+	// `--name-only` prints only a rename's DESTINATION, so moving code out of a
+	// gated directory (e.g. packages/x.ts -> docs/x.md) would report only the
+	// docs path and wrongly skip the matrix while deleting imported code.
+	// Decomposing renames into delete+add makes the source path visible.
+	const proc = Bun.spawn(["git", "diff", "--name-only", "--no-renames", "-z", `${baseSha}...${headSha}`], {
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -82,7 +105,7 @@ async function changedFiles(baseSha: string, headSha: string): Promise<string[]>
 async function writeOutput(affected: boolean): Promise<void> {
 	const line = `affected=${affected ? "true" : "false"}\n`;
 	const target = process.env.GITHUB_OUTPUT;
-	if (target) await Bun.write(target, Bun.file(target).size ? (await Bun.file(target).text()) + line : line);
+	if (target) await appendFile(target, line);
 	console.log(`affected=${affected}`);
 }
 
@@ -105,9 +128,16 @@ async function main(): Promise<void> {
 
 	try {
 		const files = await changedFiles(baseSha, headSha);
-		const affected = files.length === 0 ? false : diffIsAffected(files);
-		if (files.length === 0) console.error("empty diff; skipping the matrix.");
-		await writeOutput(affected);
+		// An empty file list is doubt, not proof of "no code changed" — it is
+		// equally the signature of a force-push race or a botched merge-base — so
+		// fail safe and run the matrix. (diffIsAffected([]) is already false; the
+		// explicit branch is what keeps that from becoming a silent skip.)
+		if (files.length === 0) {
+			console.error("empty diff (unexpected for a PR); running the full matrix (fail-safe).");
+			await writeOutput(true);
+			return;
+		}
+		await writeOutput(diffIsAffected(files));
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(`change detection failed; running the full matrix (fail-safe): ${message}`);

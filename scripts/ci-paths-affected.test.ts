@@ -1,4 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { diffIsAffected, pathIsCodeRelevant } from "./ci-paths-affected";
 
 describe("pathIsCodeRelevant", () => {
@@ -7,6 +10,7 @@ describe("pathIsCodeRelevant", () => {
 		expect(pathIsCodeRelevant("crates/pi-natives/src/vcs.rs")).toBe(true);
 		expect(pathIsCodeRelevant("scripts/release.ts")).toBe(true);
 		expect(pathIsCodeRelevant(".github/workflows/ci.yml")).toBe(true);
+		expect(pathIsCodeRelevant("types/assets/index.d.ts")).toBe(true);
 	});
 
 	it("matches exact-file patterns only on the whole path", () => {
@@ -15,8 +19,18 @@ describe("pathIsCodeRelevant", () => {
 		expect(pathIsCodeRelevant("bun.lock")).toBe(true);
 		// An exact pattern must not match a same-named file in a subdirectory:
 		// that is a package-local manifest, not the root one the matrix cares about.
-		expect(pathIsCodeRelevant("packages/foo/package.json")).toBe(true); // still true via packages/ prefix
+		expect(pathIsCodeRelevant("sub/Cargo.toml")).toBe(false);
 		expect(pathIsCodeRelevant("docs/package.json")).toBe(false);
+	});
+
+	it("gates on the config inputs the `check` job reads", () => {
+		// A regression that loosens tsconfig or disables a lint rule must run the
+		// matrix, not skip `check` and merge with `CI` green.
+		expect(pathIsCodeRelevant("tsconfig.base.json")).toBe(true);
+		expect(pathIsCodeRelevant("tsconfig.json")).toBe(true);
+		expect(pathIsCodeRelevant("tsconfig.tools.json")).toBe(true);
+		expect(pathIsCodeRelevant(".oxlintrc.json")).toBe(true);
+		expect(pathIsCodeRelevant(".oxfmtrc.json")).toBe(true);
 	});
 
 	it("rejects non-code paths", () => {
@@ -44,11 +58,117 @@ describe("diffIsAffected", () => {
 		expect(diffIsAffected(["docs/a.md", "README.md", "notes/plan.md"])).toBe(false);
 	});
 
-	it("is false for an empty diff", () => {
+	it("is false for an empty array (main() treats this as doubt → fail-safe)", () => {
+		// The pure predicate is false; main() overrides an empty *diff* to true.
 		expect(diffIsAffected([])).toBe(false);
 	});
 
 	it("mixed docs+code PR runs the matrix", () => {
 		expect(diffIsAffected(["docs/fork-resync.md", ".github/workflows/ci.yml"])).toBe(true);
+	});
+});
+
+// End-to-end contract tests: drive the script's `main()` as a subprocess against
+// a real temp git repo, exercising the git invocation + env contract where both
+// fail-open bugs (rename detection, empty-diff, event/SHA fail-safes) live.
+describe("main() end-to-end", () => {
+	const scriptPath = join(import.meta.dir, "ci-paths-affected.ts");
+	let repo: string;
+	let outFile: string;
+
+	async function git(...args: string[]): Promise<void> {
+		const proc = Bun.spawn(["git", ...args], {
+			cwd: repo,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: "t",
+				GIT_AUTHOR_EMAIL: "t@t",
+				GIT_COMMITTER_NAME: "t",
+				GIT_COMMITTER_EMAIL: "t@t",
+			},
+		});
+		const code = await proc.exited;
+		if (code !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${await new Response(proc.stderr).text()}`);
+		}
+	}
+
+	async function headSha(): Promise<string> {
+		const proc = Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" });
+		await proc.exited;
+		return (await new Response(proc.stdout).text()).trim();
+	}
+
+	async function commitAll(message: string): Promise<string> {
+		await git("add", "-A");
+		await git("commit", "-m", message);
+		return headSha();
+	}
+
+	// Run main() as a subprocess and return the `affected=` value it wrote to
+	// GITHUB_OUTPUT.
+	async function runMain(env: Record<string, string>): Promise<string> {
+		await Bun.write(outFile, "");
+		const proc = Bun.spawn(["bun", scriptPath], {
+			cwd: repo,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, GITHUB_OUTPUT: outFile, ...env },
+		});
+		const code = await proc.exited;
+		if (code !== 0) {
+			throw new Error(`main() exited ${code}: ${await new Response(proc.stderr).text()}`);
+		}
+		const out = await Bun.file(outFile).text();
+		const match = out.match(/^affected=(true|false)$/m);
+		if (!match) throw new Error(`no affected= line in GITHUB_OUTPUT: ${JSON.stringify(out)}`);
+		return match[1];
+	}
+
+	beforeAll(async () => {
+		repo = await mkdtemp(join(tmpdir(), "ci-paths-"));
+		outFile = join(repo, "gh_output");
+		await git("init", "-q", "-b", "main");
+		await Bun.write(join(repo, "packages/app/index.ts"), "export const x = 1;\n");
+		await Bun.write(join(repo, "README.md"), "# base\n");
+		await commitAll("base");
+	});
+
+	afterAll(async () => {
+		await rm(repo, { recursive: true, force: true });
+	});
+
+	it("a docs-only diff yields affected=false", async () => {
+		const base = await headSha();
+		await Bun.write(join(repo, "README.md"), "# changed\n");
+		const head = await commitAll("docs change");
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("false");
+	});
+
+	it("a code diff yields affected=true", async () => {
+		const base = await headSha();
+		await Bun.write(join(repo, "packages/app/index.ts"), "export const x = 2;\n");
+		const head = await commitAll("code change");
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("true");
+	});
+
+	// Regression for the rename fail-open: moving code OUT of a gated directory
+	// must still run the matrix. Fails without `--no-renames` (git reports only
+	// the docs destination), passes with it.
+	it("a code→docs MOVE yields affected=true (rename fail-open guard)", async () => {
+		const base = await headSha();
+		await git("mv", "packages/app/index.ts", "README-moved.md");
+		const head = await commitAll("move code to docs");
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("true");
+	});
+
+	it("a push event always runs the matrix (fail-safe)", async () => {
+		expect(await runMain({ GITHUB_EVENT_NAME: "push" })).toBe("true");
+	});
+
+	it("unset base/head SHA runs the matrix (fail-safe)", async () => {
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request" })).toBe("true");
 	});
 });
