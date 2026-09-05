@@ -32,8 +32,12 @@ import { appendFile } from "node:fs/promises";
  *
  * A trailing `/` marks a directory prefix; everything else is an exact file.
  * When in doubt, ADD a pattern: over-running the matrix wastes minutes; an
- * omission lets untested code merge. Keep in sync with any new gated job's
- * inputs.
+ * omission lets untested code merge. Adding a gated job to ci.yml means auditing
+ * what it READS (its `run:` steps, its config files, its workspace members) and
+ * adding those inputs here — a missed input is a silent skip, not a pending
+ * check. Cargo config (`.cargo/`) and bun workspace members feed the `check` and
+ * install steps, so they belong here even though the old trigger never listed
+ * them.
  */
 const CODE_PATHS: readonly string[] = [
 	"packages/",
@@ -43,6 +47,8 @@ const CODE_PATHS: readonly string[] = [
 	"patches/",
 	".github/",
 	"types/",
+	".cargo/",
+	"python/robomp/web/",
 	"MODULE.bazel",
 	"MODULE.bazel.lock",
 	"BUILD.bazel",

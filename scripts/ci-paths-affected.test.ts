@@ -31,6 +31,10 @@ describe("pathIsCodeRelevant", () => {
 		expect(pathIsCodeRelevant("tsconfig.tools.json")).toBe(true);
 		expect(pathIsCodeRelevant(".oxlintrc.json")).toBe(true);
 		expect(pathIsCodeRelevant(".oxfmtrc.json")).toBe(true);
+		// Cargo config and the bun workspace member both feed gated jobs (cargo
+		// fetch/deny in `check`, `bun install --frozen-lockfile` in every job).
+		expect(pathIsCodeRelevant(".cargo/config.toml")).toBe(true);
+		expect(pathIsCodeRelevant("python/robomp/web/package.json")).toBe(true);
 	});
 
 	it("rejects non-code paths", () => {
@@ -74,6 +78,7 @@ describe("diffIsAffected", () => {
 describe("main() end-to-end", () => {
 	const scriptPath = join(import.meta.dir, "ci-paths-affected.ts");
 	let repo: string;
+	let outDir: string;
 	let outFile: string;
 
 	async function git(...args: string[]): Promise<void> {
@@ -83,6 +88,9 @@ describe("main() end-to-end", () => {
 			stderr: "pipe",
 			env: {
 				...process.env,
+				GIT_CONFIG_GLOBAL: "/dev/null",
+				GIT_CONFIG_SYSTEM: "/dev/null",
+				GIT_CONFIG_NOSYSTEM: "1",
 				GIT_AUTHOR_NAME: "t",
 				GIT_AUTHOR_EMAIL: "t@t",
 				GIT_COMMITTER_NAME: "t",
@@ -96,9 +104,12 @@ describe("main() end-to-end", () => {
 	}
 
 	async function headSha(): Promise<string> {
-		const proc = Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe" });
-		await proc.exited;
-		return (await new Response(proc.stdout).text()).trim();
+		const proc = Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		if (code !== 0) {
+			throw new Error(`git rev-parse HEAD failed: ${await new Response(proc.stderr).text()}`);
+		}
+		return out.trim();
 	}
 
 	async function commitAll(message: string): Promise<string> {
@@ -129,7 +140,10 @@ describe("main() end-to-end", () => {
 
 	beforeAll(async () => {
 		repo = await mkdtemp(join(tmpdir(), "ci-paths-"));
-		outFile = join(repo, "gh_output");
+		// GITHUB_OUTPUT lives OUTSIDE the fixture repo: inside it, `git add -A`
+		// would track it and it would show up in the diff under test.
+		outDir = await mkdtemp(join(tmpdir(), "ci-paths-out-"));
+		outFile = join(outDir, "gh_output");
 		await git("init", "-q", "-b", "main");
 		await Bun.write(join(repo, "packages/app/index.ts"), "export const x = 1;\n");
 		await Bun.write(join(repo, "README.md"), "# base\n");
@@ -138,6 +152,7 @@ describe("main() end-to-end", () => {
 
 	afterAll(async () => {
 		await rm(repo, { recursive: true, force: true });
+		await rm(outDir, { recursive: true, force: true });
 	});
 
 	it("a docs-only diff yields affected=false", async () => {
@@ -170,5 +185,24 @@ describe("main() end-to-end", () => {
 
 	it("unset base/head SHA runs the matrix (fail-safe)", async () => {
 		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request" })).toBe("true");
+	});
+
+	it("a cargo-config change yields affected=true (F1 gated-input guard)", async () => {
+		const base = await headSha();
+		await Bun.write(join(repo, ".cargo/config.toml"), "[build]\n");
+		const head = await commitAll("cargo config change");
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("true");
+	});
+
+	it("an unresolvable base SHA runs the matrix (fail-safe)", async () => {
+		const head = await headSha();
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: "0".repeat(40), PR_HEAD_SHA: head })).toBe(
+			"true",
+		);
+	});
+
+	it("an empty diff (same base and head) runs the matrix (fail-safe)", async () => {
+		const head = await headSha();
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: head, PR_HEAD_SHA: head })).toBe("true");
 	});
 });
