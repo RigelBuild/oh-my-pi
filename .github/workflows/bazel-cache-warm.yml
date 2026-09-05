@@ -1,10 +1,9 @@
 name: Warm bazel disk cache
 
-# GitHub-hosted runners cannot use the cluster remote cache and only see
-# actions/cache entries created on the default branch, and bazel action keys
-# do not transfer across runner environments (a kata-produced disk cache
-# misses every action on a hosted image) — so seed each hosted consumer from
-# the same image it runs on:
+# GitHub-hosted runners only see actions/cache entries created on the default
+# branch, and bazel action keys do not transfer across runner images (a disk
+# cache produced on one image misses every action on a different one) — so seed
+# each hosted consumer from the same image it runs on:
 #
 #   warm_darwin (macos-*)  -> scopes `release-darwin-*`, consumed by the
 #                             release_binary darwin jobs. Releases are the
@@ -86,9 +85,11 @@ jobs:
               targets: ${{ matrix.target }}
               cache-scope: ${{ matrix.scope }}
 
-   # Produces the shared bun store entry PR jobs restore. bun-install's save
-   # half only runs on non-PR events, and main CI jobs run on omp-kata (PVC
-   # store, no GitHub cache), so this is the sole hosted-runner producer.
+   # Proactively seeds the shared bun store entry PR jobs restore, so a PR does
+   # not cold-miss it. Since main-event CI jobs now run on GitHub-hosted runners
+   # they also select cache=gha and their bun-install save step produces the same
+   # entry; the shared cache key plus the cache-hit guard make the duplicate
+   # producers benign (redundant saves are skipped).
    warm_bun:
       name: Seed bun store cache
       runs-on: ubuntu-22.04
