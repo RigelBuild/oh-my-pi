@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { diffIsAffected, pathIsCodeRelevant } from "./ci-paths-affected";
 
 describe("pathIsCodeRelevant", () => {
@@ -35,6 +35,11 @@ describe("pathIsCodeRelevant", () => {
 		// fetch/deny in `check`, `bun install --frozen-lockfile` in every job).
 		expect(pathIsCodeRelevant(".cargo/config.toml")).toBe(true);
 		expect(pathIsCodeRelevant("python/robomp/web/package.json")).toBe(true);
+		// Repo-root fixtures read by gated test suites: docs/tools pages
+		// (tool-doc coverage test) and assets (terminal-image test). Only the
+		// tools subtree is gated — a plain docs page stays excluded (below).
+		expect(pathIsCodeRelevant("docs/tools/read.md")).toBe(true);
+		expect(pathIsCodeRelevant("assets/python.webp")).toBe(true);
 	});
 
 	it("rejects non-code paths", () => {
@@ -81,6 +86,15 @@ describe("main() end-to-end", () => {
 	let outDir: string;
 	let outFile: string;
 
+	// Hermetic git config so the developer's or CI's global/system gitconfig
+	// (a stray `diff.renames`, alias, or hook) cannot skew what the fixture
+	// diffs. Shared by every git spawn below.
+	const HERMETIC_GIT_ENV = {
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_SYSTEM: "/dev/null",
+		GIT_CONFIG_NOSYSTEM: "1",
+	} as const;
+
 	async function git(...args: string[]): Promise<void> {
 		const proc = Bun.spawn(["git", ...args], {
 			cwd: repo,
@@ -88,9 +102,7 @@ describe("main() end-to-end", () => {
 			stderr: "pipe",
 			env: {
 				...process.env,
-				GIT_CONFIG_GLOBAL: "/dev/null",
-				GIT_CONFIG_SYSTEM: "/dev/null",
-				GIT_CONFIG_NOSYSTEM: "1",
+				...HERMETIC_GIT_ENV,
 				GIT_AUTHOR_NAME: "t",
 				GIT_AUTHOR_EMAIL: "t@t",
 				GIT_COMMITTER_NAME: "t",
@@ -104,12 +116,33 @@ describe("main() end-to-end", () => {
 	}
 
 	async function headSha(): Promise<string> {
-		const proc = Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+		const proc = Bun.spawn(["git", "rev-parse", "HEAD"], {
+			cwd: repo,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, ...HERMETIC_GIT_ENV },
+		});
 		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
 		if (code !== 0) {
 			throw new Error(`git rev-parse HEAD failed: ${await new Response(proc.stderr).text()}`);
 		}
 		return out.trim();
+	}
+
+	// The exact file list `main()` diffs, computed the way the script does
+	// (three-dot, --no-renames). Lets a test pin that a fixture change touches
+	// only its intended path — if GITHUB_OUTPUT or any stray file leaked into the
+	// worktree, `git add -A` would track it and this list would grow.
+	async function diffNames(base: string, head: string): Promise<string[]> {
+		const proc = Bun.spawn(["git", "diff", "--name-only", "--no-renames", "-z", `${base}...${head}`], {
+			cwd: repo,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, ...HERMETIC_GIT_ENV },
+		});
+		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+		if (code !== 0) throw new Error(`git diff failed: ${await new Response(proc.stderr).text()}`);
+		return out.split("\0").filter(Boolean);
 	}
 
 	async function commitAll(message: string): Promise<string> {
@@ -126,7 +159,14 @@ describe("main() end-to-end", () => {
 			cwd: repo,
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, GITHUB_OUTPUT: outFile, ...env },
+			env: {
+				...process.env,
+				PR_BASE_SHA: "",
+				PR_HEAD_SHA: "",
+				GITHUB_EVENT_NAME: "",
+				GITHUB_OUTPUT: outFile,
+				...env,
+			},
 		});
 		const code = await proc.exited;
 		if (code !== 0) {
@@ -144,6 +184,10 @@ describe("main() end-to-end", () => {
 		// would track it and it would show up in the diff under test.
 		outDir = await mkdtemp(join(tmpdir(), "ci-paths-out-"));
 		outFile = join(outDir, "gh_output");
+		// F3 guard: the output file must not live under the fixture worktree, or
+		// `git add -A` would track it and pollute the diff. Reds if outFile is
+		// ever moved back inside `repo`.
+		expect(outFile.startsWith(`${repo}${sep}`)).toBe(false);
 		await git("init", "-q", "-b", "main");
 		await Bun.write(join(repo, "packages/app/index.ts"), "export const x = 1;\n");
 		await Bun.write(join(repo, "README.md"), "# base\n");
@@ -159,6 +203,8 @@ describe("main() end-to-end", () => {
 		const base = await headSha();
 		await Bun.write(join(repo, "README.md"), "# changed\n");
 		const head = await commitAll("docs change");
+		// The fixture diffs exactly the intended path — nothing stray tracked.
+		expect(await diffNames(base, head)).toEqual(["README.md"]);
 		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("false");
 	});
 
@@ -183,14 +229,45 @@ describe("main() end-to-end", () => {
 		expect(await runMain({ GITHUB_EVENT_NAME: "push" })).toBe("true");
 	});
 
-	it("unset base/head SHA runs the matrix (fail-safe)", async () => {
+	// The short-circuit is `!baseSha || !headSha`; pin all three unset shapes so
+	// a regression that checks only one still reds. runMain defaults both SHAs to
+	// empty, so each case opts in to exactly the one it provides.
+	it("both SHAs unset runs the matrix (fail-safe)", async () => {
 		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request" })).toBe("true");
+	});
+
+	it("base set but head unset runs the matrix (fail-safe)", async () => {
+		const head = await headSha();
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: head })).toBe("true");
+	});
+
+	it("head set but base unset runs the matrix (fail-safe)", async () => {
+		const head = await headSha();
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_HEAD_SHA: head })).toBe("true");
 	});
 
 	it("a cargo-config change yields affected=true (F1 gated-input guard)", async () => {
 		const base = await headSha();
 		await Bun.write(join(repo, ".cargo/config.toml"), "[build]\n");
 		const head = await commitAll("cargo config change");
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("true");
+	});
+
+	// docs/tools pages feed the gated tool-doc coverage test; a docs-only rename
+	// of one must still run the matrix.
+	it("a docs/tools page change yields affected=true (H1 gated-input guard)", async () => {
+		const base = await headSha();
+		await Bun.write(join(repo, "docs/tools/read.md"), "# read\n");
+		const head = await commitAll("docs/tools change");
+		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("true");
+	});
+
+	// assets/ feed the gated terminal-image test; an assets-only change must
+	// still run the matrix.
+	it("an assets change yields affected=true (M1 gated-input guard)", async () => {
+		const base = await headSha();
+		await Bun.write(join(repo, "assets/python.webp"), "x\n");
+		const head = await commitAll("assets change");
 		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("true");
 	});
 

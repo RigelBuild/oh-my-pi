@@ -36,8 +36,10 @@ import { appendFile } from "node:fs/promises";
  * what it READS (its `run:` steps, its config files, its workspace members) and
  * adding those inputs here — a missed input is a silent skip, not a pending
  * check. Cargo config (`.cargo/`) and bun workspace members feed the `check` and
- * install steps, so they belong here even though the old trigger never listed
- * them.
+ * install steps; gated test suites also read repo-root fixtures outside their
+ * package (`docs/tools/` for the tool-doc coverage test, `assets/` for the
+ * terminal-image test), so those belong here too — even though the old trigger
+ * never listed any of them.
  */
 const CODE_PATHS: readonly string[] = [
 	"packages/",
@@ -49,6 +51,8 @@ const CODE_PATHS: readonly string[] = [
 	"types/",
 	".cargo/",
 	"python/robomp/web/",
+	"docs/tools/",
+	"assets/",
 	"MODULE.bazel",
 	"MODULE.bazel.lock",
 	"BUILD.bazel",
