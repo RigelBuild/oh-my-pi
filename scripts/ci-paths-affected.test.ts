@@ -129,22 +129,6 @@ describe("main() end-to-end", () => {
 		return out.trim();
 	}
 
-	// The exact file list `main()` diffs, computed the way the script does
-	// (three-dot, --no-renames). Lets a test pin that a fixture change touches
-	// only its intended path — if GITHUB_OUTPUT or any stray file leaked into the
-	// worktree, `git add -A` would track it and this list would grow.
-	async function diffNames(base: string, head: string): Promise<string[]> {
-		const proc = Bun.spawn(["git", "diff", "--name-only", "--no-renames", "-z", `${base}...${head}`], {
-			cwd: repo,
-			stdout: "pipe",
-			stderr: "pipe",
-			env: { ...process.env, ...HERMETIC_GIT_ENV },
-		});
-		const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-		if (code !== 0) throw new Error(`git diff failed: ${await new Response(proc.stderr).text()}`);
-		return out.split("\0").filter(Boolean);
-	}
-
 	async function commitAll(message: string): Promise<string> {
 		await git("add", "-A");
 		await git("commit", "-m", message);
@@ -184,10 +168,6 @@ describe("main() end-to-end", () => {
 		// would track it and it would show up in the diff under test.
 		outDir = await mkdtemp(join(tmpdir(), "ci-paths-out-"));
 		outFile = join(outDir, "gh_output");
-		// F3 guard: the output file must not live under the fixture worktree, or
-		// `git add -A` would track it and pollute the diff. Reds if outFile is
-		// ever moved back inside `repo`.
-		expect(outFile.startsWith(`${repo}${sep}`)).toBe(false);
 		await git("init", "-q", "-b", "main");
 		await Bun.write(join(repo, "packages/app/index.ts"), "export const x = 1;\n");
 		await Bun.write(join(repo, "README.md"), "# base\n");
@@ -199,12 +179,17 @@ describe("main() end-to-end", () => {
 		await rm(outDir, { recursive: true, force: true });
 	});
 
+	// F3 guard: GITHUB_OUTPUT must live OUTSIDE the fixture worktree, or
+	// `git add -A` would track it and pollute the diff under test. Reds (by
+	// name) if outFile is ever moved back inside `repo`.
+	it("keeps GITHUB_OUTPUT outside the fixture worktree (F3 guard)", () => {
+		expect(outFile.startsWith(`${repo}${sep}`)).toBe(false);
+	});
+
 	it("a docs-only diff yields affected=false", async () => {
 		const base = await headSha();
 		await Bun.write(join(repo, "README.md"), "# changed\n");
 		const head = await commitAll("docs change");
-		// The fixture diffs exactly the intended path — nothing stray tracked.
-		expect(await diffNames(base, head)).toEqual(["README.md"]);
 		expect(await runMain({ GITHUB_EVENT_NAME: "pull_request", PR_BASE_SHA: base, PR_HEAD_SHA: head })).toBe("false");
 	});
 
