@@ -1032,3 +1032,42 @@ jobs:
                   -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                   commit -m "omp ${{ needs.release_metadata.outputs.release-tag }}" -- Formula/omp.rb
               git push origin HEAD:main
+
+   # Aggregate gate: the single status context the branch ruleset requires
+   # (`CI`). Green only when every PR-relevant job it needs succeeds, so the
+   # required-check list stays one stable name instead of a hand-maintained
+   # per-job enumeration. rust_validate and native_addons are intentionally
+   # absent: rust_validate is `if: github.event_name != 'pull_request'` (a skip
+   # on PRs would strand this gate), and native_addons is covered transitively
+   # because every test job below `needs` it.
+   #
+   # `if: !cancelled()` makes this job run even when a need fails, so it always
+   # posts a `CI` check-run: a red need yields `CI` = failure (a clear signal)
+   # rather than a never-created, forever-pending required context. The step
+   # then fails closed on any non-success need result.
+   ci:
+      name: CI
+      runs-on: ubuntu-22.04
+      if: ${{ !cancelled() }}
+      needs:
+         - check
+         - test_workspace
+         - test_coding_agent_singleton
+         - test_ts_native
+         - test_coding_agent_ui
+         - test_coding_agent_runtime
+         - test_coding_agent_native
+         - test_smoke
+         - install_methods
+      steps:
+         - name: Verify all required CI jobs succeeded
+           run: |
+              results='${{ join(needs.*.result, ' ') }}'
+              echo "required job results: $results"
+              for result in $results; do
+                 if [ "$result" != "success" ]; then
+                    echo "::error::a required CI job did not succeed (got '$result')"
+                    exit 1
+                 fi
+              done
+              echo "all required CI jobs passed"
