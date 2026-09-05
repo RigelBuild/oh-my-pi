@@ -30,32 +30,18 @@ on:
          - "package.json"
          - "patches/**"
          - ".github/**"
+   # No `paths:` filter here, unlike `push` above: the branch ruleset requires
+   # the `CI` rollup on every PR, and a path-filtered workflow that never fires
+   # leaves that required check forever pending (GitHub strands it), so a
+   # docs-only PR could never merge. Instead the workflow always runs and the
+   # `setup` job decides, from the PR's own diff, whether the expensive jobs are
+   # relevant; they gate on `needs.setup.outputs.affected` and skip on a
+   # docs-only PR (a skipped job satisfies branch protection). The cheap rollup
+   # still runs and posts `CI`. (nix.yml deliberately keeps its own `paths:`
+   # filter: none of its jobs is a ruleset-required context, so it cannot strand
+   # a required check the way a path-filtered `CI` would — do not "align" it.)
    pull_request:
       branches: [main]
-      paths:
-         - "packages/**"
-         - "crates/**"
-         - "scripts/**"
-         - "bazel/**"
-         - "MODULE.bazel"
-         - "MODULE.bazel.lock"
-         - "BUILD.bazel"
-         - ".bazelrc"
-         - ".bazelignore"
-         - ".bazelversion"
-         - "Cargo.toml"
-         - "Cargo.lock"
-         - "deny.toml"
-         - "about.toml"
-         - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
-         - "rust-toolchain.toml"
-         - "rustfmt.toml"
-         - "bun.lock"
-         - "bunfig.toml"
-         - "package.json"
-         - "patches/**"
-         - ".github/**"
    workflow_dispatch:
       inputs:
          skip_npm:
@@ -82,6 +68,31 @@ permissions:
    contents: read
 
 jobs:
+   # Change-detection gate. Runs on every event (no `if:`), cheaply, and decides
+   # whether the expensive jobs below are relevant to this PR's diff. `check`,
+   # `native_addons`, and the test matrix that cascades off native_addons gate on
+   # `outputs.affected`; a docs-only PR skips them. On push/dispatch the script
+   # short-circuits to affected=true, so main and release runs are never gated.
+   setup:
+      name: Detect affected paths
+      runs-on: ubuntu-22.04
+      timeout-minutes: 5
+      outputs:
+         affected: ${{ steps.paths.outputs.affected }}
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              # A PR diff needs both endpoints; fetch-depth 0 gives the base.
+              fetch-depth: 0
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+         - id: paths
+           name: Decide whether the full matrix is affected
+           env:
+              GITHUB_EVENT_NAME: ${{ github.event_name }}
+              PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+              PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+           run: bun scripts/ci-paths-affected.ts
+
    # scripts/release.ts pushes the version-bump commit and its `v*` tag
    # atomically (`git push --atomic origin refs/heads/main:refs/heads/main
    # <sha>:refs/tags/v<version>`), so a release now arrives as a single `push` to
@@ -94,9 +105,8 @@ jobs:
    # ref (or from a tagged main HEAD) is also treated as a release.
    release_metadata:
       name: Resolve release metadata
-      # Hosted, not omp-kata: this ~20 s git-tag probe gates the whole release
-      # chain, and queueing it behind the 4-runner kata pool adds dead minutes
-      # to the darwin critical path.
+      # This ~20 s git-tag probe gates the whole release chain, so it stays on
+      # a fast GitHub-hosted runner off the darwin critical path.
       runs-on: ubuntu-22.04
       outputs:
          is-release: ${{ steps.detect.outputs.is-release }}
@@ -145,7 +155,10 @@ jobs:
 
    check:
       name: Lint, type check & web build
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [setup]
+      if: ${{ needs.setup.outputs.affected == 'true' }}
+      runs-on: ubuntu-22.04
+      timeout-minutes: 30
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
@@ -153,11 +166,10 @@ jobs:
            run: |
               cargo install --locked --version 0.20.2 cargo-deny
               # `--offline` needs every workspace crate already in the registry
-              # cache. PR runs use a fresh GitHub-hosted runner (see runs-on
-              # above), where the only prior cargo work is the cargo-deny
-              # install, so nothing populates the index for our own graph and
-              # resolution fails. Non-PR events land on omp-kata, whose Cargo
-              # cache is warm, which is why main stayed green. Fetch first.
+              # cache. These runs use a fresh GitHub-hosted runner, where the
+              # only prior cargo work is the cargo-deny install, so nothing
+              # populates the index for our own graph and resolution fails.
+              # Fetch first.
               cargo fetch --locked
               cargo deny --locked --offline check licenses sources
          - name: Type check workspace
@@ -168,19 +180,20 @@ jobs:
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (kata remote cache, warm) and again at
-   # release. A skipped required check still satisfies branch protection.
+   # validated post-merge on main and again at release. A skipped required
+   # check still satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
       if: github.event_name != 'pull_request'
-      runs-on: omp-kata
+      runs-on: ubuntu-22.04
+      timeout-minutes: 90
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
          - id: cache
            uses: ./.github/actions/bazel-cache
            with:
-              scope: linux
+              scope: linux-rust
          - name: Rust tests
            # The ulimit guard runs in the step that launches the bazel server
            # (limits are per-process and the server persists across steps).
@@ -208,28 +221,68 @@ jobs:
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-ported --
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
+         # Persist the Rust action + repo cache so a subsequent main run
+         # (unchanged crates/** — the common case between upstream re-syncs)
+         # replays cached actions instead of recompiling the workspace cold.
+         # save-needed is false on an exact-key hit, so a no-change run is a
+         # pure replay that saves nothing.
+         # Quota note: four GiB-scale bazel scopes (linux-rust, linux-natives,
+         # release-darwin-x64, release-darwin-arm64) now share the 10 GiB repo
+         # cache. Adding a fifth needs an eviction plan first, since GitHub
+         # evicts least-recently-used archives silently on overflow.
+         - name: Save bazel disk cache
+           if: steps.cache.outputs.save-needed == 'true'
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              # Must mirror the restore path list in the bazel-cache action.
+              path: |
+                 ~/.cache/omp-bazel-disk
+                 ~/.cache/omp-bazel-repo
+              key: ${{ steps.cache.outputs.cache-key }}
 
    # Provides the native addons every downstream TS job installs. PRs never
-   # build: they fetch the latest release's Linux x64 pair from the
-   # @oh-my-pi/pi-natives-linux-x64 npm leaf instead. The workspace loader
-   # skips its version sentinel for workspace loads, so release addons load
-   # fine under a newer checkout; a PR whose TS tests depend on changed
-   # native behavior fails visibly and the native side lands via main.
-   # Main (kata, cluster remote cache) builds all Linux-hosted targets with
-   # bazel. Job name says "bazel" for continuity with required checks.
+   # build: they fetch the Linux x64 pair from upstream's
+   # @oh-my-pi/pi-natives-linux-x64 npm leaf, pinned to the checkout's own
+   # upstream base version (the workspace version with any -rigel.N fork
+   # suffix stripped). Immediately after an upstream re-sync the fork's
+   # crates/ tree equals upstream's, so upstream's published addon is the
+   # exact binding match; the fork's own @rigelbuild scope has no addon at
+   # this version until the fork cuts its first post-reset release. The
+   # workspace loader deliberately skips its version sentinel for workspace
+   # loads, so an upstream addon under a fork checkout is NOT validated against
+   # the fork's own bindings. Visible failure is therefore guaranteed only for
+   # a newly-ADDED export (a TS test calling a new function gets a TypeError);
+   # a fork change to the BEHAVIOR of an existing export would silently test
+   # against upstream semantics until the fork publishes its own @rigelbuild
+   # addon (the fork-native release follow-up closes that gap). The native side
+   # lands via main regardless. Non-PR events build all Linux-hosted targets
+   # with bazel (GitHub-hosted runner, actions/cache disk cache). Job name says
+   # "bazel" for continuity with required checks.
    native_addons:
       name: Build native addons (bazel)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [setup]
+      if: ${{ needs.setup.outputs.affected == 'true' }}
+      runs-on: ubuntu-22.04
+      # 150 gives ~1.8x margin over the measured 84-minute cold cross-compile
+      # (the six addon links, run 33789708655) while still bounding a genuine
+      # hang well inside GitHub's 360-minute ceiling. A tighter bound would kill
+      # a legitimately-cold first post-reset build before the cache-save step,
+      # which never runs on a timeout, so the job would never self-heal.
+      timeout-minutes: 150
       steps:
          - uses: actions/checkout@v4
 
-         # ---- PR path: latest release addons from npm ----
+         # ---- PR path: upstream release addons, pinned to base version ----
          - name: Fetch release native addons (npm)
            if: github.event_name == 'pull_request'
            shell: bash
            run: |
               set -euo pipefail
-              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+              # Fetch upstream's addon at the checkout's upstream base version,
+              # stripping any -rigel.N fork suffix from the workspace version.
+              version="$(node -p "require('./packages/natives/package.json').version")"
+              base="${version%%-*}"
+              tarball="$(npm view "@oh-my-pi/pi-natives-linux-x64@${base}" dist.tarball)"
               echo "Fetching $tarball"
               curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
               mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
@@ -278,7 +331,7 @@ jobs:
            if: github.event_name != 'pull_request'
            uses: ./.github/actions/bazel-cache
            with:
-              scope: linux
+              scope: linux-natives
          - name: Build native addons once
            if: github.event_name != 'pull_request'
            run: |
@@ -286,7 +339,7 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               # The addon cdylib links each peak at several GiB of rustc RSS;
               # the aggregate //:natives-linux-all build runs all six
-              # concurrently, which OOMs the kata pod and takes the bazel
+              # concurrently, which OOMs the runner and takes the bazel
               # server with it (exit 37 "Server terminated abruptly", runs
               # 30556752623 / 30557524371). Build one addon per invocation —
               # analysis and cached actions are shared through the persistent
@@ -317,6 +370,24 @@ jobs:
               summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
               echo "::notice title=Bazel build summary::${summary:-no process summary found}"
 
+         # Persist the native-addon action + repo cache. Between upstream
+         # re-syncs crates/** is unchanged, so a later main run replays the
+         # cross-compiled addon links instead of paying the multi-GiB rustc
+         # cost cold. save-needed is false on an exact-key hit (pure replay).
+         # Quota note: shares the 10 GiB repo cache with the three other
+         # GiB-scale bazel scopes (linux-rust, release-darwin-x64/arm64);
+         # adding a fifth needs an eviction plan first, since GitHub evicts
+         # least-recently-used archives silently on overflow.
+         - name: Save bazel disk cache
+           if: github.event_name != 'pull_request' && steps.cache.outputs.save-needed == 'true'
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              # Must mirror the restore path list in the bazel-cache action.
+              path: |
+                 ~/.cache/omp-bazel-disk
+                 ~/.cache/omp-bazel-repo
+              key: ${{ steps.cache.outputs.cache-key }}
+
          - name: Upload native addon artifacts
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
@@ -327,7 +398,7 @@ jobs:
 
    test_workspace:
       name: Test TS workspace fast
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
@@ -346,11 +417,11 @@ jobs:
               # Not `test:scripts`: scripts/musl-release.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
+              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/ci-paths-affected.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
@@ -368,7 +439,7 @@ jobs:
 
    test_ts_native:
       name: Test TS native/integration packages
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -386,7 +457,7 @@ jobs:
 
    test_coding_agent_ui:
       name: Test coding-agent UI/TUI (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -404,7 +475,7 @@ jobs:
 
    test_coding_agent_runtime:
       name: Test coding-agent runtime/session (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -424,7 +495,7 @@ jobs:
 
    test_coding_agent_native:
       name: Test coding-agent native/unit (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
@@ -442,7 +513,7 @@ jobs:
 
    test_smoke:
       name: Test CLI smoke (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 15
@@ -458,7 +529,7 @@ jobs:
 
    install_methods:
       name: Install method smoke tests
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_addons]
       if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
       steps:
@@ -976,3 +1047,98 @@ jobs:
                   -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                   commit -m "omp ${{ needs.release_metadata.outputs.release-tag }}" -- Formula/omp.rb
               git push origin HEAD:main
+
+   # Aggregate gate: the single status context the branch ruleset requires
+   # (`CI`). Requiring THIS one rollup instead of each work job keeps the
+   # ruleset's required-check list at one stable name — a job can be split or
+   # renamed and only this `needs` list changes, in the same reviewed file.
+   #
+   # `if: !cancelled()` (not the default `success()`, not `always()`): the
+   # default would SKIP this job when a need fails, and branch protection treats
+   # a skipped required check as passing — so a red work job would be mergeable.
+   # `!cancelled()` still runs on a need failure and inspects results below,
+   # reddening `CI`. It differs from `always()` only when the RUN is cancelled (a
+   # superseding push): then this rollup skips and `CI` goes neutral on the
+   # superseded commit rather than a false red, while the ref's tip run still
+   # gets a real verdict.
+   #
+   # `setup` and the ungated jobs must plainly succeed. The affected-gated jobs
+   # (`check`, `native_addons`, and the eight that cascade off native_addons)
+   # legitimately SKIP on a docs-only PR — but a skip is accepted ONLY when
+   # `setup.outputs.affected == 'false'` said so. A failed `setup` leaves that
+   # output empty, so `'' != 'false'`, an excused skip is not granted, and the
+   # rollup reds: never a blanket skipped-is-green.
+   #
+   # MAINTENANCE: adding a gated work job needs THREE edits kept in sync — a
+   # `needs:` entry here, an `env:` mapping below, and a matching `require_gated`
+   # call. Miss the `require_gated` call and the job is waited on but never
+   # inspected, so a red new job would leave `CI` green (silent fail-open).
+   ci:
+      name: CI
+      runs-on: ubuntu-22.04
+      timeout-minutes: 5
+      if: ${{ !cancelled() }}
+      needs:
+         - setup
+         - check
+         - native_addons
+         - test_workspace
+         - test_coding_agent_singleton
+         - test_ts_native
+         - test_coding_agent_ui
+         - test_coding_agent_runtime
+         - test_coding_agent_native
+         - test_smoke
+         - install_methods
+      steps:
+         - name: Verify all required CI jobs succeeded
+           env:
+              AFFECTED: ${{ needs.setup.outputs.affected }}
+              SETUP: ${{ needs.setup.result }}
+              CHECK: ${{ needs.check.result }}
+              NATIVE_ADDONS: ${{ needs.native_addons.result }}
+              TEST_WORKSPACE: ${{ needs.test_workspace.result }}
+              TEST_SINGLETON: ${{ needs.test_coding_agent_singleton.result }}
+              TEST_TS_NATIVE: ${{ needs.test_ts_native.result }}
+              TEST_UI: ${{ needs.test_coding_agent_ui.result }}
+              TEST_RUNTIME: ${{ needs.test_coding_agent_runtime.result }}
+              TEST_NATIVE: ${{ needs.test_coding_agent_native.result }}
+              TEST_SMOKE: ${{ needs.test_smoke.result }}
+              INSTALL_METHODS: ${{ needs.install_methods.result }}
+           run: |
+              echo "affected=$AFFECTED setup=$SETUP"
+              rc=0
+              # setup must plainly succeed: every gated verdict below trusts it.
+              if [ "$SETUP" != "success" ]; then
+                 echo "::error::setup did not succeed (result=$SETUP)"
+                 rc=1
+              fi
+              # A gated job passes on success, or on skipped ONLY when setup
+              # explicitly reported affected=false. Empty AFFECTED (failed setup)
+              # never excuses a skip.
+              require_gated() {
+                 name="$1"
+                 result="$2"
+                 if [ "$result" = "success" ]; then
+                    return
+                 fi
+                 if [ "$result" = "skipped" ] && [ "$AFFECTED" = "false" ]; then
+                    return
+                 fi
+                 echo "::error::$name did not succeed (result=$result, affected=$AFFECTED)"
+                 rc=1
+              }
+              require_gated check "$CHECK"
+              require_gated native_addons "$NATIVE_ADDONS"
+              require_gated test_workspace "$TEST_WORKSPACE"
+              require_gated test_coding_agent_singleton "$TEST_SINGLETON"
+              require_gated test_ts_native "$TEST_TS_NATIVE"
+              require_gated test_coding_agent_ui "$TEST_UI"
+              require_gated test_coding_agent_runtime "$TEST_RUNTIME"
+              require_gated test_coding_agent_native "$TEST_NATIVE"
+              require_gated test_smoke "$TEST_SMOKE"
+              require_gated install_methods "$INSTALL_METHODS"
+              if [ "$rc" -eq 0 ]; then
+                 echo "all required CI jobs passed (affected=$AFFECTED)"
+              fi
+              exit "$rc"
