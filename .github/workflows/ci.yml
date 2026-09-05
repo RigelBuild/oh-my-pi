@@ -1041,13 +1041,14 @@ jobs:
    # on PRs would strand this gate), and native_addons is covered transitively
    # because every test job below `needs` it.
    #
-   # `if: !cancelled()` makes this job run even when a need fails, so it always
-   # posts a `CI` check-run: a red need yields `CI` = failure (a clear signal)
-   # rather than a never-created, forever-pending required context. The step
-   # then fails closed on any non-success need result.
+   # `if: !cancelled()` makes this job run even when a need fails, so whenever
+   # the workflow runs it posts a `CI` check-run: a red need yields `CI` =
+   # failure (a clear signal) rather than a never-created, forever-pending
+   # required context. The step then fails closed on any non-success need result.
    ci:
       name: CI
       runs-on: ubuntu-22.04
+      timeout-minutes: 5
       if: ${{ !cancelled() }}
       needs:
          - check
