@@ -177,7 +177,6 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.extra).toBeUndefined();
 	});
 
-
 	it("preserves canonical multimodal order and nullable fallback sources", () => {
 		const imageData = Buffer.from("tool image").toString("base64");
 		const parsed = parseRequest({
@@ -490,7 +489,6 @@ describe("openai-responses parseRequest", () => {
 		expect(tool.parameters).toEqual({});
 		expect(tool.strict).toBe(false);
 	});
-
 
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
 		expect(() =>
