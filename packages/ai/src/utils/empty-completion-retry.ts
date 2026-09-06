@@ -140,8 +140,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// Load-bearing for the compiler as well as the runtime shape check: this
 				// is the conjunct that narrows `completedMessage` for every use below,
 				// including the `...completedMessage` spread in the fail-closed block.
-				// Removing it is TS18048 x4 + TS2345 + TS2322 (that last one lands on
-				// the spread itself). Do not "simplify" it away.
+				// Removing it is TS18048 x4 + TS2345 + TS2322 (that last one comes from
+				// the spread below, but is reported on the `errored` declaration).
+				// Do not "simplify" it away.
 				completedMessage !== undefined &&
 				completedMessage.stopReason === "stop" &&
 				completedMessage.stopDetails?.type !== "pause_turn" &&
