@@ -317,6 +317,12 @@ export async function resolveEffectiveSubagentPolicy(
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
+		// So a suffixed self alias (`*:xhigh`) re-tiers an inherited SELECTOR but
+		// leaves an inherited literal id (`nanogpt/coding-router:low`) alone —
+		// rewriting that suffix names a different model, not a new tier. A session
+		// with no registry has no catalog to check the inherited pattern against,
+		// so every pattern reads as a selector.
+		availableModels: request.session.modelRegistry?.getAvailable() ?? [],
 	};
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the

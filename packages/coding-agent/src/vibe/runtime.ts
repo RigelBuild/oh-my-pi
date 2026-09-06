@@ -97,6 +97,13 @@ export interface VibeParentSession {
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
+	/**
+	 * Parent catalog, so worker model resolution can tell an inherited literal
+	 * model id from a thinking selector. Optional on the interface because a
+	 * lifecycle-only caller (scope suspension, tombstoning) never resolves a
+	 * worker; a caller that spawns or rehydrates one must supply it.
+	 */
+	modelRegistry?: ToolSession["modelRegistry"];
 }
 
 interface VibeRestoreCandidate {
@@ -407,6 +414,10 @@ export class VibeSessionRegistry {
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
+			// So a suffixed self alias (`*:xhigh`) re-tiers an inherited SELECTOR but
+			// leaves an inherited literal id (`nanogpt/coding-router:low`) alone —
+			// rewriting that suffix names a different model, not a new tier.
+			availableModels: session.modelRegistry?.getAvailable() ?? [],
 		});
 		return { agent, modelOverride: patterns, modelRole: role };
 	}

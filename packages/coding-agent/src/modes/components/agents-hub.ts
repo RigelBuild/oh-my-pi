@@ -404,6 +404,9 @@ export class AgentsHubComponent implements Component {
 			settings: this.#settings,
 			activeModelPattern: this.#modelContext.activeModelPattern,
 			fallbackModelPattern: this.#modelContext.defaultModelPattern,
+			// So a suffixed self alias re-tiers an inherited SELECTOR but leaves an
+			// inherited literal id (`nanogpt/coding-router:low`) alone.
+			availableModels: this.#modelContext.modelRegistry?.getAvailable() ?? [],
 		});
 	}
 

@@ -151,6 +151,33 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 );
 
 /**
+ * Every provider {@link ModelRegistry.refresh} can discover through a built-in
+ * model manager, rather than a models.yml `discovery:` block or an extension's
+ * runtime manager: the standard descriptors, the bespoke special managers, and
+ * the bundled catalog-only providers that get the shared models.dev layer with
+ * no endpoint manager of their own. Mirrors the three sources
+ * `#collectBuiltInModelManagerOptions` draws from, so
+ * {@link ModelRegistry.hasRefreshableProviders} cannot under-report what a
+ * refresh would actually cover.
+ */
+const REFRESHABLE_BUILT_IN_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
+	Object.fromEntries(
+		(() => {
+			const bundledProviderIds: Record<string, true> = Object.create(null);
+			for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
+			return [
+				...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+				...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
+				...MODELS_DEV_CATALOG_PROVIDER_IDS.filter(
+					providerId =>
+						BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] !== true && bundledProviderIds[providerId] === true,
+				),
+			].map(providerId => [providerId, true as const]);
+		})(),
+	),
+);
+
+/**
  * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
  * that a provider override left unset so an override never clobbers an
  * existing value with `undefined`.
@@ -2363,6 +2390,36 @@ export class ModelRegistry {
 		return this.#discoverableProviders
 			.filter(provider => !disabledProviders.has(provider.provider))
 			.map(provider => provider.provider);
+	}
+
+	/**
+	 * Whether {@link refresh} has any catalog left to discover: a config-declared
+	 * discovery provider, a runtime provider an extension registered through
+	 * `fetchDynamicModels`, or an eligible built-in model manager. `refresh`
+	 * covers all three — {@link getDiscoverableProviders} reports only the
+	 * config-declared half, so a guard written against it skips the refresh for a
+	 * catalog only an extension or a built-in descriptor supplies, exactly the
+	 * case whose cache is cold at session creation.
+	 *
+	 * A built-in provider counts only when its discoveries could actually be
+	 * selected: {@link getAvailable} drops every model whose provider has no
+	 * credential, so an uncredentialed descriptor can never contribute a
+	 * candidate however much it discovers. Gating on the same availability test
+	 * keeps a credential-less cold start off a pointless synchronous online
+	 * pass, while a newly-discovered Codex or Copilot model — whose provider is
+	 * authed by definition — still gets one.
+	 */
+	hasRefreshableProviders(): boolean {
+		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+		if (this.#discoverableProviders.some(provider => !disabledProviders.has(provider.provider))) return true;
+		for (const provider of this.#runtimeModelManagers.keys()) {
+			if (!disabledProviders.has(provider)) return true;
+		}
+		const isProviderAvailable = this.#createProviderAvailabilityCheck();
+		for (const provider in REFRESHABLE_BUILT_IN_PROVIDER_IDS) {
+			if (isProviderAvailable(provider)) return true;
+		}
+		return false;
 	}
 
 	/**
