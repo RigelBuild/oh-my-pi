@@ -8,6 +8,8 @@ The RIG-3144 fork re-sync dropped the auth-broker Prometheus `/metrics` feature 
 
 All facts below were read at fork main `08e04cec` ("feat(coding-agent): add --reapply-config … (RIG-3225) (#34)", the current `main@origin` head) against the reference implementation in the orion monorepo subtree `oss/forks/oh-my-pi/` (referred to as "subtree" throughout).
 
+**Line-reference convention (load-bearing for implementers):** a line ref is a property of a **tree**, not of a symbol — the same symbol sits at different lines in the two trees this record cites. Refs labeled **"fork main"** are measured at `origin/main` (`08e04cec`), the tree the re-lay is written AGAINST — these are the numbers an implementer edits at. Refs labeled **"subtree"** are the orion reference implementation (`oss/forks/oh-my-pi/`), the **post-re-lay shape** ported FROM — at fork main those constructs do not exist yet or sit elsewhere. Concretely for the central function: `isAuthorized` is defined at fork main `server.ts:100` (fail-open `:101`) with ONE call site (`:679`, passing `tokens`) and ZERO `metricsTokens` occurrences; in the subtree it is defined at `:110` (fail-open `:111`) with TWO call sites — `:692` passing `metricsTokens` and `:716` passing `tokens`. Neither set of numbers is valid in the other tree.
+
 1. **`packages/ai/src/auth-broker/` has exactly 9 files and no `prometheus-metrics.ts`**: `client.ts`, `discover.ts`, `index.ts`, `refresher.ts`, `remote-store.ts`, `server.ts`, `snapshot-cache.ts`, `types.ts`, `wire-schemas.ts`. The subtree's `prometheus-metrics.ts` (15,390 B) is absent.
 
 2. **`index.ts` lost the export.** Fork main `packages/ai/src/auth-broker/index.ts` (200 B) has 7 `export * from` lines; the subtree copy (238 B) has 8 — the missing one is:
@@ -82,6 +84,7 @@ function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 ```
 
 - **The empty-set fail-open is ambient, not introduced by this re-lay.** `if (tokens.size === 0) return true;` sits at fork main today with zero `metricsTokens` occurrences anywhere in the file — it predates and is independent of the metrics work, and it governs the vault routes too.
+- **But the re-lay WIDENS RIG-3359's blast radius — the two issues are coupled, not independent.** At fork main the fail-open branch has exactly one caller (`:679`, the vault-route gate). The re-lay adds a second call site — the metrics route, passing a **different** token set through the **same** fail-open branch (subtree `:692`) — and that metrics set is precisely the one that is empty when `serve` fails to wire the minted scrape token, i.e. the exact regression this re-lay fixes. So today the fail-open governs one route; after RIG-3358 it governs two. This coupling is why Test B's characterization is **tripwired** to flip 200 → 401 the moment RIG-3359 lands (Task 4 clause 5), rather than the flip being an unanchored deferral: the re-lay itself increases the exposure the tripwire watches.
 - **The metrics set deliberately unions in the master bearers** (subtree `:661-662`, quoted in Problem §3). The least-privilege claim (subtree CLI `:100`) is one-directional: a scrape token never reaches the vault routes; `/metrics` accepts either credential. A test asserting master → 401 would fail against correct code and pin a boundary the design does not claim.
 - **The fail-open is structurally unreachable through the CLI `serve` path.** Subtree CLI `:139-145`: `ensureTokenFile` cannot return empty (`if (existing) return existing;` else `generateToken()` + write), and `runServe` always passes `bearerTokens: [token]` (`:276`) — so on `serve` the master set has size ≥ 1 and the metrics union inherits it. A garbage-bearer request through `serve` exercises the `tokens.has(…)` rejection branch, **never** the `tokens.size === 0` branch. This is why the coverage splits into two tests (below): mislabeling a CLI-path 401 case as "covers the fail-open" would be the exact justification a later refactor uses to delete the only real fail-open guard as redundant.
 - Consequence of the union: the metrics set is non-empty whenever the master set is, so the shipped regression (unwired `metricsTokens`, master still wired) yields **401** on the minted scrape bearer, not a fail-open 200. Fail-open requires **both** sets empty — reachable only by direct server construction.
@@ -119,6 +122,9 @@ Ordering: the `packages/ai` slice first (renderer + server + its two tests are s
 - The union semantics of the metrics token set (master bearers satisfy `/metrics`) are a frozen design decision — no task may "tighten" it.
 - The ambient `tokens.size === 0` fail-open is pre-existing upstream behavior; this re-lay pins it (Test B) but does not change it (see the deferred item under Open Questions).
 - Every new test's docstring MUST name which branch of `isAuthorized` (fork main `server.ts:100-106`) it pins, so the branch↔test mapping is checkable rather than inferred from test names.
+- **Both net-new tests carry a required red-check** proving they observe the real thing: Test A's wiring red-check (delete `metricsTokens: [metricsToken]` → A1 fails, Task 3) and Test B's execution-proof red-check (invert the expectation → status-mismatch failure, Task 4). A test green because it never ran — a renamed symbol or wrong arity throwing before the assertion — reads identically to a passing test in suite output and is worse than an absent one.
+- **Report verification numbers with the commit they were measured at**: run `jj log -r @` first and state "N pass at `<sha>`" — a green count measured against the wrong tree (e.g. after a rebase moved `@`) manufactures agreement instead of evidence.
+- Line refs follow the per-tree convention in Problem — fork-main numbers are where implementers edit; subtree numbers describe the source being ported and the post-re-lay shape. Never cite either unqualified.
 
 ## Tasks
 
@@ -161,22 +167,33 @@ Ordering: the `packages/ai` slice first (renderer + server + its two tests are s
 - Both named test files pass under `bun test`.
 - `tsgo --noEmit` clean for `packages/coding-agent`.
 
-### Task 3 — Test A: CLI-path mint→consume seam test (net-new, REQUIRED)
+### Task 3 — Test A: CLI-path mint→consume seam test + serve-core extraction (net-new, REQUIRED)
 
-**File:** ADD `packages/coding-agent/test/auth-broker-serve-metrics-seam.test.ts`.
+**Files:** EDIT `packages/coding-agent/src/cli/auth-broker-cli.ts` (the extraction below); ADD `packages/coding-agent/test/auth-broker-serve-metrics-seam.test.ts`.
 
-**Question the test answers:** does `serve` wire the minted scrape token into the server? Mint via the CLI (`runAuthBrokerCommand({ action: "token", flags: { metrics: true } })` against an isolated `OMP_AGENT_DIR`, as the token test does at `:29-33`), start the broker **via the CLI serve path** (see Open Questions OQ1 for the mechanism; the task executes whichever resolution is frozen), scrape `http://<bind>/metrics`, and assert four cases:
+**Mechanism (frozen — OQ1 ruled, option (a)): extract a testable core from `runServe`.**
+
+- Split `runServe` into an exported core, named **`startAuthBrokerService(flags)`** — everything through the `startAuthBroker` call plus the two "token loaded" log lines, returning `{ handle, storage, close }`. Do NOT name a production symbol "ForTest": the test-only affordance is that the core **returns** instead of blocking, not its name.
+- `runServe` becomes a thin blocking wrapper over the core that retains, verbatim:
+  - the **signal handlers** (`process.once("SIGINT"/"SIGTERM")`, fork main `:189-190`);
+  - the **`credentialDisabledUnsub()` teardown** on shutdown (fork main `:184`) — the disabled-credential warning subscription must still be released;
+  - **`process.exit(0)`** in the wrapper's shutdown (fork main `:187`) — never in the core, or the seam test kills the runner;
+  - the **forever-await** `await new Promise<never>(() => {})` (fork main `:193`).
+- The core MUST preserve fork main's `new AuthStorage(store, { refreshOAuthCredential: … refreshBrokerOAuthCredential … })` construction (`:164-167`, the issue #8933 MCP-refresh fix) — do NOT regress to the subtree's bare `new AuthStorage(store)` (`:265`).
+
+**Accepted risk (stated per the ruling):** this refactor touches the very control flow the seam test exists to protect — a mistake in the extraction is a mistake in the thing under test. Mitigation is the red-check ordering below: the red-check runs **after** the extraction, proving the test observes the real wiring through the refactored path rather than an artifact of the harness.
+
+**Question the test answers:** does `serve` wire the minted scrape token into the server? Mint via the CLI (`runAuthBrokerCommand({ action: "token", flags: { metrics: true } })` against an isolated `OMP_AGENT_DIR`, as the token test does at `:29-33`), start the broker in-process via `startAuthBrokerService`, scrape `http://<bind>/metrics`, and assert four cases:
 
 - **A1. minted scrape bearer → 200** — catches unwired `metricsTokens` (the shipped regression). Docstring: pins the `tokens.has(…)` acceptance branch through the CLI wiring.
 - **A2. garbage/wrong bearer → 401** — docstring MUST state: pins the `tokens.has(…)` **rejection** branch, and explicitly that this does **NOT** cover the `tokens.size === 0` fail-open, because `serve` always mints (`ensureTokenFile` cannot return empty, subtree `:139-145`; `bearerTokens: [token]` at `:276`), so `tokens.size >= 1` always holds via the CLI. Test B owns the fail-open.
 - **A3. no `Authorization` header → 401** — docstring: pins the `!header` branch (fork main `server.ts:103`).
 - **A4. master bearer (read from `auth-broker.token`) → 200** — docstring: pins the deliberate union (subtree `server.ts:661-662`) so a future "tighten least-privilege" refactor must confront the design instead of silently breaking the fleet's master-bearer path.
 
-If the frozen OQ1 mechanism makes any case genuinely unreachable, the implementer must say so explicitly in the PR rather than dropping it silently.
-
 **Acceptance:**
 - Test A passes under `bun test`; each case's docstring names its `isAuthorized` branch per Global Constraints.
-- **Red-check (required):** temporarily delete the line `metricsTokens: [metricsToken],` from `runServe` in `packages/coding-agent/src/cli/auth-broker-cli.ts` → **A1 MUST fail** (expected observation: 401 on the minted scrape bearer, per the union analysis in Approach) → restore the line → all four cases green again. The PR description must state the red-check was performed and what failed.
+- **Red-check (required, run AFTER the extraction):** temporarily delete the line `metricsTokens: [metricsToken],` from the extracted core in `packages/coding-agent/src/cli/auth-broker-cli.ts` → **A1 MUST fail** (expected observation: 401 on the minted scrape bearer, per the union analysis in Approach) → restore the line → all four cases green again. The PR description must state the red-check was performed and what failed.
+- **Wrapper behavior-preservation (reviewed-by-inspection):** the wrapper still blocks forever, still installs both signal handlers, still runs `credentialDisabledUnsub()` and exits 0 on SIGTERM. This CANNOT be asserted in-process without the subprocess harness the ruling rejected (asserting `process.exit` requires surviving it), so it is explicitly a reviewed-by-inspection item, NOT test coverage: the implementer states in the PR that the wrapper diff is signal-handler + teardown + forever-await only, and the reviewer confirms the wrapper contains no logic beyond delegation to the core.
 
 ### Task 4 — Test B: route-level fail-open characterization test (net-new, REQUIRED)
 
@@ -189,9 +206,11 @@ If the frozen OQ1 mechanism makes any case genuinely unreachable, the implemente
 - **Name**: a characterization of CURRENT behavior carrying both the word "currently" and the issue ref, e.g. `"empty token sets currently fail OPEN — GET /metrics serves unauthenticated (RIG-3359)"`.
 - **Docstring**, stating in this order: (1) this pins CURRENT behavior, NOT desired behavior; (2) the mechanism — `server.ts:100-101` `if (tokens.size === 0) return true;` — is ambient at fork main, independent of the metrics work, so the re-lay neither introduces nor endorses it; (3) the same branch governs the VAULT routes, so an empty `bearerTokens` serves credential endpoints unauthenticated; (4) flipping to fail-closed is tracked in RIG-3359 and is a human call; (5) when RIG-3359 lands, THIS TEST MUST FLIP to expect 401 — its failure at that point is the intended signal, not a regression.
 
-Clause (5) is what makes the characterization load-bearing rather than merely descriptive: the test is the tripwire that makes a future fail-closed change visible, failing the moment someone changes the default — the same rationale that earns case A4 (master → 200) its place.
+Clause (5) is what makes the characterization load-bearing rather than merely descriptive: the test is the tripwire that makes a future fail-closed change visible, failing the moment someone changes the default — the same rationale that earns case A4 (master → 200) its place. The tripwire is not optional politeness: the re-lay itself adds the second `isAuthorized` call site that widens the fail-open's blast radius (see Approach), so this change is what makes the RIG-3359 exposure larger — it owes the alarm.
 
-**Acceptance:** Test B passes under `bun test` (green against current code — no red-check applies; its tripwire fires only when the default changes); its name and docstring satisfy the neutralization spec above, name the `tokens.size === 0` branch, and state the CLI-unreachability rationale (see Approach).
+**Acceptance:**
+- Test B passes under `bun test`; its name and docstring satisfy the neutralization spec above, name the `tokens.size === 0` branch, and state the CLI-unreachability rationale (see Approach).
+- **Execution-proof red-check (required):** show the test actually REACHES its assertion, not merely that the file is green — temporarily invert the expectation (`expect(res.status).toBe(401)`) → the test MUST fail with a status-mismatch (`received 200`), proving the request executed and the assertion ran → restore → green. A test that throws before its assertion (renamed symbol, wrong arity, unreachable fixture) reads as green in a passing suite while never having executed once; a green-because-never-ran test is worse than an absent one. The PR description must state this check was performed and what the inverted failure showed.
 
 ### Task 5 — changelogs + targeted verification sweep
 
@@ -201,22 +220,14 @@ Clause (5) is what makes the characterization load-bearing rather than merely de
 
 ## Open Questions
 
-### OQ1 (load-bearing, design fork — needs a ruling before Task 3 dispatch)
-
-**How Test A drives the CLI serve path.** Fork main's `runServe` is structurally untestable in-process: it ends with `await new Promise<never>(() => {})` and its shutdown path calls `process.exit(0)` (`packages/coding-agent/src/cli/auth-broker-cli.ts:182-194`) — awaiting it hangs the test, and signaling it kills the test runner. The subtree copy has the same shape (`:289-301`), which is presumably why the original test set never crossed this seam. Two options:
-
-- **(a) Extract a testable core — recommended.** Split `runServe` into an exported `startServeForTest(flags)` (everything through `startAuthBroker` + log lines, returning `{ handle, storage, close }`) and a thin blocking wrapper that adds the signal handlers and the forever-await. Test A calls the core in-process, exactly as the token tests call `runAuthBrokerCommand`. Cost: a small production refactor whose only behavioral risk is the seam it exists to test. All four cases reachable.
-- **(b) Subprocess.** `Bun.spawn` the CLI (`serve` action) as a child process, poll `/v1/healthz`, scrape, then SIGTERM. Zero production refactor, but slower, signal/teardown-flaky, and it needs a resolvable CLI entrypoint under `bun test` — a heavier harness for the same four assertions.
-
-Recommendation: **(a)**. Tasks are written mechanism-agnostic; freeze the choice here before dispatching Task 3.
-
 ### OQ2 (surfaced and deferred — explicitly out of scope for this re-lay)
 
-**The ambient `tokens.size === 0` fail-open** (fork main `server.ts:101`) predates the metrics work and governs the **vault routes** too: an empty `bearerTokens` would serve credential endpoints unauthenticated. Test B *characterizes* the current behavior for `/metrics` only (asserting 200, the observable the fail-open produces — see Task 4). Whether the default should be fail-closed is a security-posture question about pre-existing upstream behavior, outside a re-lay's scope; it is tracked separately as **RIG-3359** for a human ruling. This record deliberately does not change it; when RIG-3359 lands, Test B flips to expect 401 as its intended signal.
+**The ambient `tokens.size === 0` fail-open** (fork main `server.ts:101`) predates the metrics work and governs the **vault routes** too: an empty `bearerTokens` would serve credential endpoints unauthenticated. Test B *characterizes* the current behavior for `/metrics` only (asserting 200, the observable the fail-open produces — see Task 4). Whether the default should be fail-closed is a security-posture question about pre-existing upstream behavior, outside a re-lay's scope; it is tracked separately as **RIG-3359** for a human ruling. This record deliberately does not change it — but note the coupling stated in Approach: the re-lay **widens** RIG-3359's blast radius by adding the second `isAuthorized` call site (metrics route, subtree `:692`), taking the fail-open from one governed route to two, and the newly governed set is exactly the one left empty by the regression this record fixes. RIG-3358 and RIG-3359 are not independent findings side by side. When RIG-3359 lands, Test B flips to expect 401 as its intended signal.
 
 ### Resolved during design (recorded, not open)
 
 - **Master bearer must NOT be asserted → 401 on `/metrics`.** The union is deliberate (subtree `server.ts:661-662`); least-privilege is one-directional. Case A4 pins it as intentional.
+- **OQ1 RULED (human decision): the seam test drives `serve` via an extracted core, not a subprocess.** `runServe` was structurally untestable in-process — it ends with `await new Promise<never>(() => {})` and its shutdown calls `process.exit(0)` (fork main `cli/auth-broker-cli.ts:182-194`; the subtree has the same shape at `:289-301`, presumably why the original test set never crossed this seam). The alternative (a `Bun.spawn` subprocess harness polling `/v1/healthz` then SIGTERM) was rejected: slower, signal/teardown-flaky, and a heavier harness for the same four assertions. The frozen mechanism, name (`startAuthBrokerService`), wrapper-preservation constraints, the accepted extraction risk, and its red-check-after-extraction mitigation are specified in Task 3.
 - **Test B asserts 200 (characterization), not 401 (aspiration).** A MUST-401 assertion would be red-on-arrival against correct-per-current-semantics code — the next person deletes it or "fixes" it by changing `isAuthorized`, silently pulling the RIG-3359 posture decision into a regression-restore. Asserting current behavior with the Task-4 neutralization spec (name + ordered docstring + flip-on-RIG-3359 clause) keeps the test green today and makes it the tripwire for any future default change.
 - **A CLI-path 401 case must not be labeled as fail-open coverage.** The fail-open is unreachable through `serve` (`ensureTokenFile` cannot return empty, subtree `:139-145`); a mislabel would be the justification a later refactor uses to delete the real guard as redundant. Hence the A2/Test-B split and the docstring-names-the-branch constraint.
 - **The predicted `eval-code-mode-declarations.test.ts` conflict is void at the current base** (see Plan) — the prediction predates the fork's history reset; the file has no subtree counterpart and the re-lay is a hand-port, not a merge.
