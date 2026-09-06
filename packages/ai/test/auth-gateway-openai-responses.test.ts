@@ -490,22 +490,30 @@ describe("openai-responses parseRequest", () => {
 		expect(tool.strict).toBe(false);
 	});
 
+	// The two accept tests above only assert what the widening ADMITS, so on their
+	// own they would stay green if someone loosened the tool schema wholesale.
+	// These pin the other edge: `null` is accepted, a wrong type is still refused.
+	//
+	// The schema is a union, and its message depends on whether the union has
+	// already been exercised in this module instance: warm it names the field
+	// (`tools[0].strict must be ...`), cold it reports only the generic arm. So
+	// the assertion accepts either. What it must NOT accept is a bare field name
+	// anywhere in the text -- the generic message echoes the whole tool object, so
+	// `/tools\[0\].*\bstrict\b/` is satisfied by the fixture we sent rather than by
+	// the validator's conclusion, and would match \bname\b or \btype\b just as
+	// happily. Both alternatives below are contiguous diagnostic prefixes.
+	//
+	// Coverage this does not have, stated rather than implied: cold, every field
+	// yields the same generic message, so a case asserting one field while
+	// breaking another passes. Field identity is verified only in the warm run --
+	// which is the whole-file run CI performs, and where all six wrong pairings
+	// are caught. Closing the cold gap needs a field-level error from the schema,
+	// not a stronger pattern here.
 	it.each([
 		["strict", { strict: "yes" }],
 		["description", { description: 7 }],
 		["parameters", { parameters: "not-an-object" }],
 	] as const)("still rejects a wrong-typed %s after the null widening", (field, override) => {
-		// The two tests above only assert what the widening ADMITS, so on their own
-		// they would stay green if someone loosened the tool schema wholesale. This
-		// pins the other edge: `null` is accepted, a wrong type is still refused.
-		//
-		// Match on the field name rather than the validator's exact wording. The
-		// tool schema is a union, and which arm it reports depends on whether the
-		// union has already been exercised in this module instance -- so an
-		// exact-message assertion passes only in committed file order and goes red
-		// under `-t`, `.only`, or any reordering. Both arms name the offending
-		// field; only the phrasing around it moves. The invariant under test is
-		// the rejection, not the phrasing.
 		expect(() =>
 			parseRequest({
 				model: "gpt-5.6-luna",
@@ -520,7 +528,7 @@ describe("openai-responses parseRequest", () => {
 					},
 				],
 			}),
-		).toThrow(new RegExp(`tools\\[0\\].*\\b${field}\\b`));
+		).toThrow(new RegExp(`tools\\[0\\](\\.${field} must be| must be a valid bridged Responses tool)`));
 	});
 
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
