@@ -88,9 +88,13 @@ function recorderDefinition(session: ToolSession, calls: unknown[]): EvalPrelude
 	};
 }
 
+// Bounded for the same reason as this file's other deadlines, even though it
+// launches no browser: it awaits real VM and kernel-session disposal, and
+// unbounded it would inherit whatever `--timeout` the invocation supplies (30s
+// under CI, 5s under a bare `bun test`) and fail without naming a deadline.
 afterAll(async () => {
 	await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
-});
+}, 30_000);
 
 describe("browser JavaScript facade", () => {
 	it("builds handles, chains, markers, and direct values against the shipped VM prelude", async () => {

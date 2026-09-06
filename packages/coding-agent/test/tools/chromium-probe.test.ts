@@ -44,9 +44,13 @@ const BLOCK_S = 10;
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "chromium-probe-test-"));
 
+// Bounded like the tests: an unbounded hook takes whatever `--timeout` the
+// invocation supplies (30s under CI, 5s bare), which is the inheritance this
+// file exists to remove — and a hook that trips it fails as "a
+// beforeEach/afterEach hook timed out", naming no deadline.
 afterAll(async () => {
 	await fs.rm(dir, { recursive: true, force: true });
-});
+}, 30_000);
 
 async function script(name: string, body: string): Promise<string> {
 	const file = path.join(dir, name);
@@ -112,14 +116,18 @@ test.skipIf(process.platform !== "linux")(
 test.skipIf(process.platform !== "linux")(
 	"bounds a binary that ignores SIGTERM",
 	async () => {
-		// The default kill signal would leave `exited` pending here, degrading the
-		// bound to no bound; the probe uses SIGKILL for exactly this shape.
+		// The probe uses SIGKILL for this shape. Measured, the default SIGTERM
+		// still answers at the bound — the deadline resolves the race either way —
+		// but it leaves `exited` pending, so the ignoring process survives the
+		// verdict and leaks. SIGKILL reaps it.
 		//
-		// This one cannot `exec` — the point is a process that IGNORES SIGTERM, and
-		// the trap lives in the wrapper. So SIGKILL reaps the wrapper and its
-		// `sleep` grandchild survives to exit on its own. That is accepted: it is
-		// orphaned, not awaited, so it holds nothing up.
-		const stubborn = await script("stubborn.sh", `trap "" TERM\nsleep ${BLOCK_S}`);
+		// `exec` after the trap, like the sibling fixture: a SIG_IGN disposition is
+		// inherited across execve (POSIX: ignored signals stay ignored, only
+		// handled ones reset to default), so the exec'd `sleep` still ignores
+		// SIGTERM — verified via its /proc SigIgn mask — while being the process
+		// the probe's SIGKILL actually reaps. Without `exec` the wrapper dies and
+		// its `sleep` grandchild outlives the run.
+		const stubborn = await script("stubborn.sh", `trap "" TERM\nexec sleep ${BLOCK_S}`);
 		expect(await chromiumCanLaunch(async () => stubborn, BOUND_MS)).toBe(false);
 	},
 	30_000,
