@@ -2751,3 +2751,195 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 		expect(properties?.outputSchema).toBe(true);
 	});
 });
+
+describe("never serialize a zero-body request over demotable history (RIG-2806)", () => {
+	// The live wedge: claude-opus over litellm resolves every thinking-emit
+	// compat flag false (requiresThinkingAsText / replayReasoningContent /
+	// requiresReasoningContentForToolCalls all false), so a thinking-only
+	// assistant turn is fully dropped. When that turn is the whole non-system
+	// history, convertMessages used to return only the system prompt — a valid
+	// 200 over an empty prompt tokenizes to 0 input tokens and loops silently.
+	function claudeLitellmModel(): Model<"openai-completions"> {
+		const {
+			compat: _r,
+			compatConfig,
+			...rest
+		} = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
+		return buildModel({
+			...rest,
+			id: "claude-opus-4-8",
+			name: "Claude Opus",
+			api: "openai-completions",
+			provider: "litellm",
+			reasoning: true,
+			compat: compatConfig,
+		} as ModelSpec<"openai-completions">);
+	}
+
+	function thinkingOnlyAssistant(thinking = "reasoning with no visible answer"): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "thinking", thinking }],
+			api: "openai-completions",
+			provider: "litellm",
+			model: "claude-opus-4-8",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+	}
+
+	// These assert on `convertMessages`' return value, which becomes the request
+	// body: `buildParams` assigns it to `params.messages`
+	// (openai-completions.ts:1810). The steps after it only ENRICH that array --
+	// `maybeAddAnthropicCacheControl` (:1809) mutates it in place to attach
+	// cache markers, restructuring a string into a one-element text part, and
+	// `markLatestStableChatCompletionsCacheBreakpoint` (:1639) adds breakpoint
+	// markers. No step removes a message, so a non-empty body here is a
+	// non-empty body on the wire. The end-to-end test below pins that
+	// separately, so a future mutator that drops messages cannot pass silently.
+	it("recovers dropped thinking so a thinking-only history never ships an empty body", () => {
+		const model = claudeLitellmModel();
+		const messages = convertMessages(
+			model,
+			{ systemPrompt: ["you are a helpful assistant"], messages: [thinkingOnlyAssistant()] },
+			model.compat,
+		);
+		const nonSystem = messages.filter(m => m.role !== "system" && m.role !== "developer");
+		expect(nonSystem.length).toBeGreaterThan(0);
+		const assistant = nonSystem.find(m => m.role === "assistant");
+		expect(assistant).toBeDefined();
+		expect(typeof assistant?.content === "string" ? assistant.content.length : 0).toBeGreaterThan(0);
+	});
+
+	it("does not synthesize an assistant turn when real history already remains", () => {
+		const model = claudeLitellmModel();
+		const messages = convertMessages(
+			model,
+			{
+				systemPrompt: ["you are a helpful assistant"],
+				messages: [
+					{
+						role: "user",
+						content: "hello",
+						timestamp: Date.now(),
+					},
+					thinkingOnlyAssistant(),
+				],
+			},
+			model.compat,
+		);
+		// The user turn survives, so the safety net must not fire: exactly one
+		// user message, no synthesized assistant turn recovering the dropped
+		// thinking.
+		const users = messages.filter(m => m.role === "user");
+		expect(users).toHaveLength(1);
+		const assistants = messages.filter(m => m.role === "assistant");
+		expect(assistants).toHaveLength(0);
+	});
+
+	it("recovers the last dropped turn's reasoning when several thinking-only turns are the whole history", () => {
+		const model = claudeLitellmModel();
+		const messages = convertMessages(
+			model,
+			{
+				systemPrompt: ["you are a helpful assistant"],
+				messages: [
+					thinkingOnlyAssistant("first buried reasoning"),
+					thinkingOnlyAssistant("second buried reasoning"),
+					thinkingOnlyAssistant("final buried reasoning"),
+				],
+			},
+			model.compat,
+		);
+		// All three assistant turns drop, leaving an empty body; the safety net
+		// recovers exactly one turn, carrying the LAST dropped reasoning (the
+		// most recent thought), not an earlier one.
+		const nonSystem = messages.filter(m => m.role !== "system" && m.role !== "developer");
+		const assistants = nonSystem.filter(m => m.role === "assistant");
+		expect(assistants).toHaveLength(1);
+		const content = typeof assistants[0]?.content === "string" ? assistants[0].content : "";
+		expect(content).toContain("final buried reasoning");
+		expect(content).not.toContain("first buried reasoning");
+		expect(content).not.toContain("second buried reasoning");
+	});
+
+	it("never ends the recovered turn with trailing whitespace", () => {
+		// Anthropic rejects a terminal assistant message ending in whitespace
+		// ("final assistant content cannot end with trailing whitespace"), and
+		// bare Anthropic-dialect demotion copies the thinking text verbatim — so
+		// reasoning that ends in whitespace would ship it. The recovered turn is
+		// by construction the LAST message, i.e. exactly that case. Red-check:
+		// dropping the `.trimEnd()` in the recovery path fails this.
+		const model = claudeLitellmModel();
+		const messages = convertMessages(
+			model,
+			{
+				systemPrompt: ["you are a helpful assistant"],
+				messages: [thinkingOnlyAssistant("reasoning that ends in whitespace\n\n  ")],
+			},
+			model.compat,
+		);
+		const last = messages[messages.length - 1];
+		expect(last?.role).toBe("assistant");
+		const content = typeof last?.content === "string" ? last.content : "";
+		expect(content.length).toBeGreaterThan(0);
+		expect(content).not.toMatch(/\s$/);
+	});
+
+	it("serializes a non-empty message body to the wire over thinking-only history", async () => {
+		// The end-to-end contract the intermediate-array assertions above cannot
+		// pin: a zero-body request is what actually tokenizes to 0 input tokens
+		// and wedges the loop, so assert on the serialized request the provider
+		// would receive, not on `convertMessages`' return value. This is also the
+		// only guard against a future `buildParams` step that drops messages
+		// after `convertMessages` returns.
+		const model = claudeLitellmModel();
+		let captured: Record<string, unknown> | undefined;
+		const fetchImpl: FetchImpl = async (_url, init) => {
+			captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(
+				'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+				{
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
+		};
+		const stream = streamOpenAICompletions(
+			model,
+			{ systemPrompt: ["you are a helpful assistant"], messages: [thinkingOnlyAssistant()] },
+			// `apiKey` is required: without it the request fails on the missing-key
+			// check before `fetch` is reached, so `captured` stays undefined and the
+			// assertions below read 0 in any environment lacking a provider key.
+			{ apiKey: "test-key", fetch: fetchImpl },
+		);
+		await stream.result();
+
+		expect(captured).toBeDefined();
+		const wire = (captured?.messages ?? []) as { role: string; content?: unknown }[];
+		const body = wire.filter(m => m.role !== "system" && m.role !== "developer");
+		expect(body.length).toBeGreaterThan(0);
+		// Both shapes the comment above documents: a plain string, or the
+		// one-element text array `maybeAddAnthropicCacheControl` restructures it
+		// into when the model's compat row sets `cacheControlFormat`. Asserting
+		// only the string form would report a zero body on an enriched request.
+		const carriesContent = body.some(m =>
+			typeof m.content === "string"
+				? m.content.trim().length > 0
+				: Array.isArray(m.content) &&
+					m.content.some(p => {
+						const part = p as { type?: string; text?: string };
+						return part.type === "text" && (part.text?.trim().length ?? 0) > 0;
+					}),
+		);
+		expect(carriesContent).toBe(true);
+	});
+});

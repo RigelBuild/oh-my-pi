@@ -133,17 +133,20 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
-			const retryEmpty =
+			const isRetryableEmpty =
 				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
+				// Narrows `completedMessage` for the conjuncts below and for the
+				// `...completedMessage` spread in the fail-closed block, so deleting
+				// it does not typecheck. Not just a runtime shape check.
 				completedMessage !== undefined &&
 				completedMessage.stopReason === "stop" &&
 				completedMessage.stopDetails?.type !== "pause_turn" &&
 				!completedMessage.errorMessage &&
 				(completedMessage.usage?.output ?? 0) <= 1 &&
-				!hasVisibleAssistantContent(completedMessage) &&
-				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
+				!hasVisibleAssistantContent(completedMessage);
+			const retryEmpty = isRetryableEmpty && emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
 			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
@@ -181,6 +184,33 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			flush();
+			// Fail-closed: the retry cap is exhausted and the completion is still a
+			// degenerate empty stop. Delivering the benign `done` terminal as-is
+			// lets the agent loop accept a 0-token no-op turn and idle silently —
+			// a wedge that survives `--resume`. Surface it as a loud error terminal
+			// instead so the turn errors visibly. `rule://no-retries`: a swallowed
+			// empty completion is the fail-open pattern to reject.
+			if (
+				// Shape-only, NOT `retryEmpty`: that carries the cap conjunct, which is
+				// false exactly when the cap is exhausted — i.e. here. Retains the
+				// `acceptEmptyResponse` / `retryEmptyCompletion` terms, so opt-out
+				// callers never reach this.
+				isRetryableEmpty &&
+				// An aborted turn (e.g. the backoff-abort path above) delivers its
+				// terminal as-is; relabeling it a provider error would blame the
+				// provider for the caller's cancellation.
+				!signal?.aborted
+			) {
+				const errored: AssistantMessage = {
+					...completedMessage,
+					stopReason: "error",
+					errorMessage:
+						"Provider returned an empty completion (no content, 0 generated tokens) " +
+						`after ${emptyRetries + 1} attempts.`,
+				};
+				outer.push({ type: "error", reason: "error", error: errored });
+				return;
+			}
 			if (terminal) {
 				outer.push(terminal);
 			} else if (!outer.done) {

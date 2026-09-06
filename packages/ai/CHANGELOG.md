@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a wedge where a provider returning an empty 0-token completion left the agent loop idling silently across a resume; the exhausted retry now surfaces a visible error, and history that demotes to an empty request body recovers the dropped reasoning instead of sending an empty prompt.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

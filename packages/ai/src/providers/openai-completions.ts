@@ -2015,6 +2015,12 @@ export function convertMessages(
 	}
 
 	let lastRole: string | null = null;
+	// Capture the reasoning of any assistant turn we fully drop, and
+	// remember where the message body begins (after the system prompts pushed
+	// above), so a history that demotes to zero body messages can be recovered
+	// below instead of shipping a 0-token request.
+	let lastDroppedThinkingText: string | null = null;
+	const bodyStartIndex = params.length;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -2318,6 +2324,9 @@ export function convertMessages(
 				assistantMsg.content = ".";
 			}
 			if (!hasContent && !assistantMsg.tool_calls && !hasReasoningField) {
+				if (nonEmptyThinkingBlocks.length > 0) {
+					lastDroppedThinkingText = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
+				}
 				continue;
 			}
 			params.push(assistantMsg);
@@ -2408,6 +2417,31 @@ export function convertMessages(
 					? "developer"
 					: "system"
 				: msg.role;
+	}
+
+	// Fail-safe against the empty-body wedge: if every non-system message was
+	// dropped (e.g. a thinking-only assistant turn demoted to nothing on a
+	// compat that cannot replay bare reasoning) we must not ship a zero-body
+	// request — a valid 200 over an empty prompt tokenizes to 0 input tokens
+	// and loops silently, surviving `--resume`. Recover the dropped reasoning
+	// as a bare-prose assistant turn so the request carries real content.
+	if (params.length === bodyStartIndex && lastDroppedThinkingText) {
+		// `trimEnd` matches the guard in transform-messages.ts: bare Anthropic-dialect
+		// demotion copies the thinking text verbatim, and Anthropic rejects a terminal
+		// assistant message whose text ends with trailing whitespace ("final assistant
+		// content cannot end with trailing whitespace"). The recovered turn is by
+		// construction the last message here, so it is exactly that case. Trimming is
+		// safe: demoted text is synthesized context, never byte-exact replay material.
+		const recovered = renderDemotedThinking(model.id, lastDroppedThinkingText).trimEnd();
+		// Belt-and-braces: `nonEmptyThinkingBlocks` is already filtered on
+		// `thinking.trim().length > 0`, so the input cannot be blank today. This
+		// guards a future feeder change — `renderDemotedThinking` returns "" only for
+		// FALSY input, passing whitespace through (and wrapping it in `<think>` on
+		// non-Anthropic dialects), so an empty assistant content string would
+		// otherwise re-create the very zero-content body this fail-safe prevents.
+		if (recovered.length > 0) {
+			params.push({ role: "assistant", content: recovered });
+		}
 	}
 
 	return params;
