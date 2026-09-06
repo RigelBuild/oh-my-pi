@@ -170,10 +170,12 @@ describe("browser init deadline carry-over", () => {
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 	}, 90_000);
 
-	// Bounded like its sibling: a killing `releaseBrowser` can spend ~7.5s across
-	// the 5s close timeout and a ~2.5s graceful tree kill, then an unbounded
-	// recursive profile removal that runs on every platform (only its ~2s retry
-	// window is win32-gated). Rationale in full on that sibling's `afterAll`.
+	// Bounded like its sibling: on the WEDGED-Chromium path a killing
+	// `releaseBrowser` can spend ~7.5s — a 5s close timeout, then a ~2.5s graceful
+	// tree kill only in that timeout's catch — followed by an unbounded recursive
+	// profile removal that runs on every platform (only its ~2s retry window is
+	// win32-gated). A healthy close pays neither in full. Rationale in full on
+	// that sibling's `afterAll`.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 	}, 30_000);
@@ -241,10 +243,17 @@ describe("visible OMP-owned browser tabs", () => {
 	// `browser.open` tool wrapper, so there is no tool budget to separate from the
 	// `it()` bound — the fix shape used elsewhere in this file does not apply.
 	// They are still in scope: the second is gated on `CHROMIUM_AVAILABLE`, so it
-	// runs in the same CI bucket as the flaking tests. The exposure is additive —
-	// a launch surviving to the ~30s ceiling plus a full `acquireTab`
-	// (`timeoutMs: 30_000`) is ~60s — so both bounds are 90_000 to match the
-	// sibling describes rather than sitting under the sum. RIG-3377.
+	// runs in the same CI bucket as the flaking tests.
+	//
+	// The exposure is additive, and 90_000 does NOT cover the first test's true
+	// worst case. It calls `acquireTab` twice and its `finally` closes two tabs
+	// and kills the browser: ~30s launch ceiling + 2x(30_000 + GRACE_MS 750,
+	// tab-supervisor.ts) + 2x5_000 (DEFAULT_TAB_CLOSE_TIMEOUT_MS) + ~7.5s wedged
+	// teardown is ~109s. The second test has one `acquireTab`, so it computes to
+	// ~73s and does fit. 90_000 is a deliberate partial cover for the first: it
+	// clears every single-phase stall and the old 45_000 coincidence, while a run
+	// that maxes every phase at once is a hang worth failing on rather than
+	// waiting out. RIG-3377.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {

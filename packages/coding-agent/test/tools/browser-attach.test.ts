@@ -125,14 +125,16 @@ describe("pickElectronTarget", () => {
 	}, 90_000);
 
 	// Bounded for the same reason as the hook above, and sized for the worst-case
-	// teardown, which has three components: `releaseBrowser(…, { kill: true })`
-	// spends a 5s close timeout (HEADLESS_CLOSE_TIMEOUT_MS, registry.ts), then a
-	// ~2.5s graceful tree kill on that timeout (2000ms grace + 500ms hard-kill,
-	// attach.ts) — ~7.5s, already over a bare `bun test`'s 5s default — and then
-	// an UNBOUNDED recursive profile removal (`removeUserDataDir`, registry.ts),
-	// which runs on every platform. Only its ~2s retry window is win32-gated
-	// (`shouldRetryRemove`, utils/src/temp.ts). 30_000's margin over the ~7.5s
-	// exists to absorb that removal, since it is the component that can grow.
+	// teardown — which is the WEDGED-Chromium path, not the normal cost.
+	// `releaseBrowser(…, { kill: true })` spends up to a 5s close timeout
+	// (HEADLESS_CLOSE_TIMEOUT_MS, registry.ts) and then, ONLY in that timeout's
+	// catch, a ~2.5s graceful tree kill (2000ms grace + 500ms hard-kill,
+	// attach.ts): ~7.5s when Chromium is wedged, already over a bare
+	// `bun test`'s 5s default, while a healthy close pays neither in full.
+	// Then an UNBOUNDED recursive profile removal (`removeUserDataDir`,
+	// registry.ts) runs on every platform; only its ~2s retry window is
+	// win32-gated (`shouldRetryRemove`, utils/src/temp.ts). 30_000's margin over
+	// the ~7.5s exists to absorb that removal — the one component that can grow.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 	}, 30_000);
@@ -312,7 +314,8 @@ describe("pickElectronTarget", () => {
 				// difference: this site passes `app.cdp_url`, so it ATTACHES to an
 				// already-running browser rather than launching one. No launch ceiling
 				// applies, and the 45s genuinely governs the whole open. The attach path
-				// carries its own bound — `waitForCdp`'s 5s (registry.ts) — well clear
+				// carries its own bound — `waitForCdp`'s 5s on the `connected` branch
+				// (registry.ts; the file's other call sites use different bounds) — clear
 				// of the 45s, so the two do not coincide.
 				await invokeBrowser({
 					action: "open",

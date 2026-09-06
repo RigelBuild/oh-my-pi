@@ -1,6 +1,10 @@
 import * as fs from "node:fs/promises";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 
+// A working `chromium --version` answers in well under a second; this only has
+// to be clear of a loaded runner, not of a slow launch.
+const VERSION_PROBE_TIMEOUT_MS = 10_000;
+
 /**
  * Whether the Chromium puppeteer resolves can actually execute on this host.
  * CI runners without Chrome's system libraries (libnspr4 & co.) hold the
@@ -15,14 +19,27 @@ async function chromiumCanLaunch(): Promise<boolean> {
 		// GUI application path, and running it is the hazard
 		// `isChromiumExecutable()` already refuses for the same reason (#8445): a
 		// GUI `chrome.exe --version` prints nothing to a detached stdout and does
-		// not exit, so this spawnSync never returns and every importing suite
+		// not exit, so the probe below would never answer and every importing suite
 		// hangs during module evaluation. Check the file instead, so a stale
 		// PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
 		// back unvalidated — still skips the suites rather than failing them at
 		// launch.
 		if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
-		const probe = Bun.spawnSync([executable, "--version"], { stdout: "ignore", stderr: "ignore" });
-		return probe.exitCode === 0;
+		// Bounded, and deliberately not `spawnSync`: this runs during MODULE
+		// EVALUATION of every importing suite (`await chromiumAvailable()` at
+		// module scope), which no test bound can wrap and which the harness
+		// `--timeout` does not govern either — measured, a suite whose module scope
+		// blocks for 25s finishes in 25s under `--timeout=2000`. So a Chromium slow
+		// enough to stall `--version` would hang the run with no deadline to cut
+		// it and no failure text naming one. Treat unanswered as unusable, which
+		// is this function's existing contract for a binary that cannot exec.
+		const probe = Bun.spawn([executable, "--version"], { stdout: "ignore", stderr: "ignore" });
+		const timer = setTimeout(() => probe.kill(), VERSION_PROBE_TIMEOUT_MS);
+		try {
+			return (await probe.exited) === 0;
+		} finally {
+			clearTimeout(timer);
+		}
 	} catch {
 		return false;
 	}
