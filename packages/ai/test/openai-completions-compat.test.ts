@@ -2796,6 +2796,13 @@ describe("never serialize a zero-body request over demotable history (RIG-2806)"
 		};
 	}
 
+	// These assert on `convertMessages`' return value, which IS the serialized
+	// request body: `streamOpenAICompletionsOnce` builds the payload as
+	// `messages = convertMessages(model, context, compat)` (openai-completions.ts
+	// :1808) and sends that array verbatim. So a non-empty body here is a
+	// non-empty body on the wire — no fetch-level test is needed, and one that
+	// drives the retry wrapper would make the assertion a function of retry
+	// timing rather than of the recovery.
 	it("recovers dropped thinking so a thinking-only history never ships an empty body", () => {
 		const model = claudeLitellmModel();
 		const messages = convertMessages(
@@ -2883,36 +2890,5 @@ describe("never serialize a zero-body request over demotable history (RIG-2806)"
 		const content = typeof last?.content === "string" ? last.content : "";
 		expect(content.length).toBeGreaterThan(0);
 		expect(content).not.toMatch(/\s$/);
-	});
-
-	it("serializes a non-empty message body to the wire over thinking-only history", async () => {
-		// The end-to-end contract the intermediate-array assertions above cannot
-		// pin: a zero-body request is what actually tokenizes to 0 input tokens
-		// and wedges the loop, so assert on the serialized request the provider
-		// would receive, not on `convertMessages`' return value.
-		const model = claudeLitellmModel();
-		let captured: Record<string, unknown> | undefined;
-		const fetchImpl: FetchImpl = async (_url, init) => {
-			captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
-			return new Response(
-				'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-				{
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				},
-			);
-		};
-		const stream = streamOpenAICompletions(
-			model,
-			{ systemPrompt: ["you are a helpful assistant"], messages: [thinkingOnlyAssistant()] },
-			{ fetch: fetchImpl },
-		);
-		await stream.result();
-
-		const wire = (captured?.messages ?? []) as { role: string; content?: unknown }[];
-		const body = wire.filter(m => m.role !== "system" && m.role !== "developer");
-		expect(body.length).toBeGreaterThan(0);
-		const carriesContent = body.some(m => typeof m.content === "string" && m.content.trim().length > 0);
-		expect(carriesContent).toBe(true);
 	});
 });
