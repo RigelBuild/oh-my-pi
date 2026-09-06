@@ -2752,7 +2752,7 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 	});
 });
 
-describe("RIG-2806: never serialize a zero-body request over demotable history", () => {
+describe("never serialize a zero-body request over demotable history (RIG-2806)", () => {
 	// The live wedge: claude-opus over litellm resolves every thinking-emit
 	// compat flag false (requiresThinkingAsText / replayReasoningContent /
 	// requiresReasoningContentForToolCalls all false), so a thinking-only
