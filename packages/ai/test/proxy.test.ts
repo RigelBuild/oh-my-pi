@@ -105,8 +105,9 @@ function proxyEnvKeys(): Set<string> {
 // memoizes a miss, so a provider resolved before its var is set stays
 // undefined for the rest of the module however the env changes afterwards --
 // which makes a test's outcome depend on whether anything resolved that same
-// id earlier. Unique provider ids are not enough on their own: a real id like
-// github-copilot is reachable from any other test in the file.
+// id earlier. Unique provider ids are not enough on their own: the resolver
+// cache isolation tests below deliberately share one id across two cases,
+// which is the only shape that can observe a stale entry.
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -150,6 +151,20 @@ describe("getProxyForProvider", () => {
 
 	it("returns undefined when neither var is set", () => {
 		expect(getProxyForProvider("none-prov")).toBeUndefined();
+	});
+});
+
+// Shares one provider id across two cases on purpose: the cache is keyed by
+// provider id, so an id resolved exactly once per file can never read a stale
+// entry back and would leave the beforeEach reset unobservable.
+describe("resolver cache isolation", () => {
+	it("does not serve a provider proxy memoized by an earlier test", () => {
+		expect(getProxyForProvider("github-copilot")).toBeUndefined();
+	});
+
+	it("does not serve a memoized miss after the variable is set", () => {
+		Bun.env.PI_PROXY_GITHUB_COPILOT = PROXY;
+		expect(getProxyForProvider("github-copilot")).toBe(PROXY);
 	});
 });
 
