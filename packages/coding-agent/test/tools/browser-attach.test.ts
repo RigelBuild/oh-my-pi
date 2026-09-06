@@ -94,10 +94,15 @@ async function spawnDisposableExecutable(args: string[] = []): Promise<Disposabl
 }
 
 describe("pickElectronTarget", () => {
+	// The hook LAUNCHES a real Chromium, so it needs its own bound: an unbounded
+	// `beforeAll` inherits bun's 5s hook default, well under a cold start on a
+	// loaded runner, and the failure surfaces as "a beforeEach/afterEach hook
+	// timed out" against no named deadline — the same coincident-deadline defect
+	// as the test bodies, in the one place no `it()` bound covers.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	});
+	}, 60_000);
 
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
@@ -271,10 +276,15 @@ describe("pickElectronTarget", () => {
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			try {
+				// Explicit budget, strictly below the `it()` bound: the implicit default
+				// is 30s (`clampTimeout`), which equalled the old test bound and left the
+				// tool and runner deadlines expiring together. The sibling suites already
+				// pass an inner budget for exactly this reason.
 				await invokeBrowser({
 					action: "open",
 					name: tabName,
 					url: requested,
+					timeout: 60,
 					app: { cdp_url: `http://${endpoint.host}` },
 				});
 				opened = true;
@@ -288,7 +298,7 @@ describe("pickElectronTarget", () => {
 				if (opened) await invokeBrowser({ action: "close", name: tabName });
 			}
 		},
-		30_000,
+		90_000,
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(

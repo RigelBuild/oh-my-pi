@@ -320,8 +320,24 @@ describe("browser facade Chromium helper E2E", () => {
 			runInContext(prelude.javascript, context);
 
 			try {
+				// Two separate requirements, both violated by the implicit default.
+				//
+				// 1. The `open` budget must not EQUAL the `it()` bound. Left implicit it
+				//    is 30s (`clampTimeout`, tools/tool-timeouts.ts) — exactly the old
+				//    test bound — so the tool and runner deadlines expired together and
+				//    a slow Chromium start raced two timers. Whichever won was the
+				//    failure you saw: bun reported "this test timed out", the tool
+				//    reported "Browser open timed out". Both were that coincidence, not
+				//    a code defect, which is how one commit went red and green in
+				//    adjacent CI runs.
+				// 2. The budget must exceed what a LOADED runner needs. Cold Chromium
+				//    startup here is ~7s unloaded; CI observed >30s. A budget set at the
+				//    observed failure point has no headroom by construction.
+				//
+				// So: an explicit inner budget with real headroom, and an `it()` bound
+				// strictly above it so the tool always reports first and names the cause.
 				await runInContext(
-					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__ }); })()",
+					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 60 }); })()",
 					context,
 				);
 				await runInContext('__e2eTab.click("text/Go")', context);
@@ -355,6 +371,6 @@ describe("browser facade Chromium helper E2E", () => {
 					.catch(() => undefined);
 			}
 		},
-		30_000,
+		90_000,
 	);
 });
