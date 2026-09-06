@@ -137,6 +137,10 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
+				// Load-bearing for the compiler as well as the runtime shape check: this
+				// is the conjunct that narrows `completedMessage` for every use below,
+				// including the `...completedMessage` spread in the fail-closed block.
+				// Removing it is TS18048 x4 + TS2345. Do not "simplify" it away.
 				completedMessage !== undefined &&
 				completedMessage.stopReason === "stop" &&
 				completedMessage.stopDetails?.type !== "pause_turn" &&
@@ -193,11 +197,6 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// `acceptEmptyResponse` / `retryEmptyCompletion` terms, so opt-out
 				// callers never reach this.
 				isRetryableEmpty &&
-				// Redundant at runtime (`isRetryableEmpty` carries this conjunct), but
-				// load-bearing for the compiler: narrowing does not propagate through
-				// that intermediate boolean, so dropping this re-check un-narrows the
-				// `...completedMessage` spread below. Do not "simplify" it away.
-				completedMessage !== undefined &&
 				// An aborted turn (e.g. the backoff-abort path above) delivers its
 				// terminal as-is; relabeling it a provider error would blame the
 				// provider for the caller's cancellation.
