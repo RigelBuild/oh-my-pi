@@ -289,10 +289,16 @@ describe("withReplaySafeStreamRetry", () => {
 		const controller = new AbortController();
 		controller.abort();
 		let attempts = 0;
-		const stream = withEmptyCompletionRetry({}, CTX, { signal: controller.signal }, () => {
-			attempts++;
-			return emptyAttempt();
-		});
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ signal: controller.signal },
+			() => {
+				attempts++;
+				return emptyAttempt();
+			},
+			{ retryEmptyCompletion: true },
+		);
 
 		const events = await drain(stream);
 		const result = await stream.result();
