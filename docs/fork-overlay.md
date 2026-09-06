@@ -60,6 +60,7 @@ next re-sync:
 | 7 | fork-resync T5 | `9d55e0a600` (`upstream-omp/rig-3144-resync-metrics`) | feat(auth-broker): Prometheus /metrics (#8) | CLEAN (rc=0); already rebased onto `ddde7db10a`, 1 commit ahead |
 | 8 | NEW (this record) | n/a | feat(release): `-rigel.N` version scheme (spec in §2) | new work |
 | 9 | NEW (this record, D3) | n/a | feat(update): re-point `omp update` to the `@rigelbuild` fork scope + RigelBuild repo | new work (spec in §2, Task 2b) |
+| 10 | RIG-3339 (PR #40) | `supervisor/rig-3339-fable-51-cacheread` | fix(catalog): gate fable/mythos 5.1 cache-read to 0.25 (KDL `revision ">=5.1"`) | authored by supervisor; carried here because the defect is UPSTREAM's (see below) |
 
 Bookmark-name reconciliation (from `jj bookmark list --all` this session):
 
@@ -86,6 +87,41 @@ Bookmark-name reconciliation (from `jj bookmark list --all` this session):
   `omp-authbroker-metrics` (`9cb92019`, 9 ahead of an even older base; it is
   the HEAD of upstream PR can1357/oh-my-pi#10290 and stays untouched for that
   purpose).
+- **Row 10 fable/mythos cache-read (RIG-3339):** this row exists because the
+  defect is UPSTREAM's, not the fork's, which is exactly what makes a
+  main-only fix unsafe. Verified this session:
+  `packages/catalog/src/compat/rules/classes/anthropic.kdl` is the SAME GIT
+  BLOB (`eb2920ed34bbb8ef400e8db4748e08c6109eb521`) at fork main
+  `08e04cecbc` and at `upstream/main` `b2f25dbfe1e3` — the fork never
+  diverged here, it inherited the unconditional `cache-read 1.0` on the
+  `fable` (`:141-145`) and `mythos` (`:153-157`) families verbatim. A reset
+  sets main to the upstream tip, and the upstream tip still carries that
+  blob, so a fix landed only as a commit on main is DETERMINISTICALLY
+  reverted by the next reset — silently: no conflict, no test red, just a
+  restored 4x cache-read overbill. That is the precise failure class this
+  overlay exists to prevent, so the fix is carried as an overlay row rather
+  than left as a one-off main commit.
+  - The fix must restate ALL FOUR cost fields (input 10.0, output 50.0,
+    cache-read 0.25, cache-write 12.5) in the `revision ">=5.1"` block:
+    `cost-patch` is ONE cascade axis and object axes REPLACE rather than
+    merge (`contest()` keeps a single winner per axis), so a cache-read-only
+    block resolves to `{cacheRead: 0.25}` alone and silently drops the other
+    three to upstream values — worse than the original bug, and green under
+    a naive cacheRead-only check.
+  - Both families are affected; a fable-only fix leaves half the overbill
+    live. No `AmbiguousOverlapError` risk: revision-constrained rules score
+    `dimensions=4` vs `3` for the bare-family block, and `rankCompare` is
+    `exactness || dimensions || priority`, so the ranking is unambiguous.
+  - A generation-time fix in `generated-policies.ts` does NOT work and must
+    not be attempted: `buildModel` applies `costPatch` at RUNTIME
+    (`packages/catalog/src/build.ts:113-124`), so a corrected spec is
+    overwritten back to `1` by the KDL rule.
+  - **Lifecycle:** the permanent home is upstream (their bug, their file),
+    but no agent can push to `can1357` (push-guard allows only the
+    `mattwilkinsonn/*` and `RigelBuild/*` owners), so it ships via the
+    human-action upstream-PR queue. When upstream takes it, row 10 drops as
+    redundant — the same
+    lifecycle as row 7 (/metrics) against `can1357#10290`.
 - **T3 release machinery (rows 2-5):** no live rebased bookmark exists (the
   four SHAs #22/#23/#24/#27 sit on the old base `160ed439ac`); the overlay
   construction cherry-picks/reworks them directly, in the order above (#22
