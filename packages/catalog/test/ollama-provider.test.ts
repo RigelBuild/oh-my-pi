@@ -131,9 +131,11 @@ describe("ollama tool forcing", () => {
 		let requestBody: OllamaRequestBody | undefined;
 		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
 			requestBody = JSON.parse(String(init?.body ?? "{}")) as OllamaRequestBody;
-			// A realistic forced tool-call response: the forcing path must yield a
-			// non-empty completion, not a bare `{done:true}` (which is a degenerate
-			// empty completion that now fails closed after the retry cap, RIG-2806).
+			// A realistic forced tool-call response: the forcing path yields a
+			// tool call with empty text content, which is what a real host sends
+			// here. (This fixture is not load-bearing for the empty-completion
+			// fail-closed path — a single attempt never exhausts the retry cap,
+			// so that branch is unreachable from this test either way.)
 			const chunk = {
 				message: {
 					role: "assistant",
