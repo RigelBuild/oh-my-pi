@@ -125,7 +125,14 @@ Bookmark-name reconciliation (from `jj bookmark list --all` this session):
       `packages/stats/src/db.ts:346-352` prices from exactly that row. So the
       KDL fix alone leaves the stats/cost-reporting path billing 4x — the
       same silent failure this row exists to prevent, with no conflict and no
-      test red.
+      test red. Scope: this is a ONE-LINE change to
+      `claude-fable-5-1`, because the bundle carries only
+      `claude-fable-5`, `claude-fable-5-1` and `claude-mythos-5` — there is
+      no `claude-mythos-5-1` row to rebake. Mythos 5.1 is therefore covered
+      by the KDL commit alone, and verifying it requires resolving through
+      the cascade; a `models.json` check structurally cannot see it. The
+      sibling `claude-fable-5` correctly stays at `cacheRead 1` (the
+      negative control: a blanket sweep that also moved 5.0 would be wrong).
     - `0598ac138f` — the bake/rule cost-parity guard in
       `compat-parity.test.ts`. This is the ONLY automated detector of a stale
       bundle: neither `gen:models` nor `gen:compat` runs in CI, so without it
