@@ -106,7 +106,7 @@ function proxyEnvKeys(): Set<string> {
 // undefined for the rest of the module however the env changes afterwards --
 // which makes a test's outcome depend on whether anything resolved that same
 // id earlier. Unique provider ids are not enough on their own: the resolver
-// cache isolation tests below own a dedicated id and deliberately resolve it
+// cache isolation tests below own a dedicated id per direction and resolve it
 // in consecutive cases, the only shape that can observe a stale entry.
 let saved: Record<string, string | undefined>;
 
@@ -163,9 +163,16 @@ describe("getProxyForProvider", () => {
 // an unresolved one alike, and one id cannot witness both: whichever entry is
 // planted first is the one every later case reads back, so the second direction
 // would pass on the leak it is meant to catch.
+//
+// All four cases are load-bearing. Each "memoizes" case plants the entry its
+// successor reads back, so deleting one blinds that direction; both resolve
+// twice across an env change to assert the memoization itself, which is what
+// makes them fail rather than go quiet if the cache is ever removed.
 describe("resolver cache isolation", () => {
 	it("memoizes a resolved provider proxy within a test", () => {
 		Bun.env.PI_PROXY_CACHE_PROBE_HIT = PROXY;
+		expect(getProxyForProvider("cache-probe-hit")).toBe(PROXY);
+		delete Bun.env.PI_PROXY_CACHE_PROBE_HIT;
 		expect(getProxyForProvider("cache-probe-hit")).toBe(PROXY);
 	});
 
@@ -174,6 +181,8 @@ describe("resolver cache isolation", () => {
 	});
 
 	it("memoizes an unresolved provider within a test", () => {
+		expect(getProxyForProvider("cache-probe-miss")).toBeUndefined();
+		Bun.env.PI_PROXY_CACHE_PROBE_MISS = PROXY;
 		expect(getProxyForProvider("cache-probe-miss")).toBeUndefined();
 	});
 
