@@ -296,7 +296,10 @@ export const toolSchema = type({
 	name: "string >= 1",
 	"description?": "string",
 	"parameters?": type({ "[string]": "unknown" }),
-	"strict?": "boolean",
+	// Proxies converting Chat Completions to Responses may forward `strict: null`;
+	// the SDK wire type declares `strict: boolean | null`, so accept null here and
+	// let buildTools drop it.
+	"strict?": "boolean | null",
 });
 
 const computerToolSchema = type({ type: "'computer'" });

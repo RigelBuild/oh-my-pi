@@ -729,6 +729,25 @@ describe("openai-responses parseRequest", () => {
 			}),
 		).toThrow(/computer_call|call_id|valid bridged Responses input item/);
 	});
+
+	it("accepts strict:null on a function tool (proxy-forwarded shape) and drops it", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			input: "hi",
+			tools: [
+				{
+					type: "function",
+					name: "read",
+					description: "read a file",
+					parameters: { type: "object", properties: { path: { type: "string" } } },
+					strict: null,
+				},
+			],
+		});
+		expect(parsed.context.tools).toHaveLength(1);
+		expect(parsed.context.tools?.[0]).toMatchObject({ name: "read" });
+		expect(parsed.context.tools?.[0]?.strict).toBeUndefined();
+	});
 });
 
 describe("openai-responses encodeResponse", () => {
