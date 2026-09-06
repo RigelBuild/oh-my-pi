@@ -117,12 +117,17 @@ describe("pickElectronTarget", () => {
 	//
 	// Separately, `scripts/ci-test-ts.ts`'s watchdog (`chunkTimeoutMs`, 600_000)
 	// SIGKILLs the whole chunk it spawns — up to `chunkSize` (10) files — so its
-	// failure names no test and is reported as a 137 alongside genuine OOM kills.
-	// These bounds do not and cannot make a chunk fit under it: this bucket runs
-	// 75 chunks of 10, every one of which already admits far more than 600s from
-	// the 30s harness default alone, before any browser bound is counted. What
-	// the budget buys is that a SINGLE wedged launch fails as a named timeout at
-	// 180s, well inside the watchdog, instead of anonymously at 600s.
+	// failure names no individual test. (The runner does distinguish it from an
+	// OOM kill: `describeChunkFailure`, ci-test-ts.ts:518-525, reports a watchdog
+	// kill and a bare 137 as different failures, because the fix differs.)
+	//
+	// These bounds do not and cannot make a chunk fit under that window: at the
+	// 30s harness default every test AND every hook in a chunk gets its own 30s,
+	// so a chunk's admitted time runs from ~840s on the smallest of this bucket's
+	// chunks to far more on the largest — all already past 600s before a single
+	// browser bound is counted. What the budget buys is that a SINGLE wedged
+	// launch fails as a named timeout at 180s instead of anonymously whenever the
+	// chunk's watchdog window runs out.
 	//
 	// Giving the launch a caller-reachable bound is a src change (RIG-3406),
 	// which also carries the phase table and measurements; the launch mechanism

@@ -31,8 +31,16 @@ import { chromiumCanLaunch } from "./chromium-probe";
 // invocation happens to supply — 30s under CI, 5s under a bare `bun test` — and
 // a 4s body under a 5s default is a race, not a test. State the bound; never
 // inherit it.
+//
+// Three clocks meet in this file, and the invariant is that no two of them can
+// race: BOUND_MS << BLOCK_S << the runner bound. BLOCK_S only has to be far
+// enough above BOUND_MS that a blocking fixture cannot answer inside the
+// probe's deadline; it does NOT want to approach the runner bound. At 30 it sat
+// numerically ON the 30_000 bound — the fixture finished ~6ms past it, the
+// tightest coincidence in this PR and the very defect the PR removes — so it is
+// 10, giving 5x above BOUND_MS and 3x below the runner bound.
 const BOUND_MS = 2_000;
-const BLOCK_S = 30;
+const BLOCK_S = 10;
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "chromium-probe-test-"));
 
@@ -92,7 +100,10 @@ test("reports an unresolvable executable as unavailable", async () => {
 test.skipIf(process.platform !== "linux")(
 	"bounds a binary that never answers --version",
 	async () => {
-		const hang = await script("hang.sh", `sleep ${BLOCK_S}`);
+		// `exec` so the bash wrapper is REPLACED by the sleep: the probe's SIGKILL
+		// then reaps the sleep itself rather than only its parent, leaving no
+		// grandchild to outlive the test process.
+		const hang = await script("hang.sh", `exec sleep ${BLOCK_S}`);
 		expect(await chromiumCanLaunch(async () => hang, BOUND_MS)).toBe(false);
 	},
 	30_000,
@@ -103,6 +114,11 @@ test.skipIf(process.platform !== "linux")(
 	async () => {
 		// The default kill signal would leave `exited` pending here, degrading the
 		// bound to no bound; the probe uses SIGKILL for exactly this shape.
+		//
+		// This one cannot `exec` — the point is a process that IGNORES SIGTERM, and
+		// the trap lives in the wrapper. So SIGKILL reaps the wrapper and its
+		// `sleep` grandchild survives to exit on its own. That is accepted: it is
+		// orphaned, not awaited, so it holds nothing up.
 		const stubborn = await script("stubborn.sh", `trap "" TERM\nsleep ${BLOCK_S}`);
 		expect(await chromiumCanLaunch(async () => stubborn, BOUND_MS)).toBe(false);
 	},
@@ -158,6 +174,7 @@ test.skipIf(process.platform !== "linux")(
 			errors.push(args.map(String).join(" "));
 		};
 		let idle: Subprocess | undefined;
+
 		try {
 			const available = await chromiumCanLaunch(async () => {
 				throw new Error("resolve failed immediately");
@@ -174,3 +191,28 @@ test.skipIf(process.platform !== "linux")(
 	},
 	30_000,
 );
+
+test("announces the skip when nothing answers within the bound", async () => {
+	// The mirror of the silence tests, and the one that makes the notice load
+	// bearing: with only the negative cases, deleting the `console.error` outright
+	// left all of them green. `chromiumAvailable()` memoizes its verdict
+	// process-wide, so a single transient overrun pins every browser E2E to
+	// skipped for the rest of the run — a silent skip reads as a fast green
+	// having tested nothing. Pin the text CI logs are actually grepped for.
+	//
+	// A resolve that never settles puts the assertion squarely on the deadline
+	// path with no timing guesswork.
+	const errors: string[] = [];
+	const original = console.error;
+	console.error = (...args: unknown[]) => {
+		errors.push(args.map(String).join(" "));
+	};
+	let available: boolean;
+	try {
+		available = await chromiumCanLaunch(() => Promise.withResolvers<string | undefined>().promise, BOUND_MS);
+	} finally {
+		console.error = original;
+	}
+	expect(available).toBe(false);
+	expect(errors.filter(line => /no answer within 2000ms.*SKIPPING/.test(line))).toHaveLength(1);
+}, 30_000);
