@@ -133,7 +133,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
-			const retryEmpty =
+			const isRetryableEmpty =
 				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
@@ -142,8 +142,8 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				completedMessage.stopDetails?.type !== "pause_turn" &&
 				!completedMessage.errorMessage &&
 				(completedMessage.usage?.output ?? 0) <= 1 &&
-				!hasVisibleAssistantContent(completedMessage) &&
-				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
+				!hasVisibleAssistantContent(completedMessage);
+			const retryEmpty = isRetryableEmpty && emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
 			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
@@ -184,20 +184,21 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			// Fail-closed: the retry cap is exhausted and the completion is still a
 			// degenerate empty stop. Delivering the benign `done` terminal as-is
 			// lets the agent loop accept a 0-token no-op turn and idle silently —
-			// a wedge that survives `--resume` (RIG-2806). Surface it as a loud
-			// error terminal instead so the turn errors visibly. `rule://no-retries`:
-			// a swallowed empty completion is the fail-open pattern to reject. Gated
-			// on `isRetryableEmpty`, so `acceptEmptyResponse` callers are unaffected;
-			// and on `!signal?.aborted`, so an aborted turn (like the backoff-abort
-			// path above) delivers its terminal as-is rather than being relabeled a
-			// provider error.
-			if (isRetryableEmpty && message !== undefined && !signal?.aborted) {
+			// a wedge that survives `--resume`. Surface it as a loud error terminal
+			// instead so the turn errors visibly. `rule://no-retries`: a swallowed
+			// empty completion is the fail-open pattern to reject. Gated on the
+			// shape-only `isRetryableEmpty` (not `retryEmpty`, whose cap conjunct is
+			// false exactly when the cap is exhausted), so `acceptEmptyResponse`
+			// callers are unaffected; and on `!signal?.aborted`, so an aborted turn
+			// (like the backoff-abort path above) delivers its terminal as-is rather
+			// than being relabeled a provider error.
+			if (isRetryableEmpty && completedMessage !== undefined && !signal?.aborted) {
 				const errored: AssistantMessage = {
-					...message,
+					...completedMessage,
 					stopReason: "error",
 					errorMessage:
 						"Provider returned an empty completion (no content, 0 generated tokens) " +
-						`after ${emptyAttempt + 1} attempts.`,
+						`after ${emptyRetries + 1} attempts.`,
 				};
 				outer.push({ type: "error", reason: "error", error: errored });
 				return;
