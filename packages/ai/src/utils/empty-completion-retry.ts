@@ -137,12 +137,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
-				// Load-bearing for the compiler as well as the runtime shape check: this
-				// is the conjunct that narrows `completedMessage` for every use below,
-				// including the `...completedMessage` spread in the fail-closed block.
-				// Removing it is TS18048 x4 + TS2345 + TS2322 (that last one comes from
-				// the spread below, but is reported on the `errored` declaration).
-				// Do not "simplify" it away.
+				// Narrows `completedMessage` for the conjuncts below and for the
+				// `...completedMessage` spread in the fail-closed block, so deleting
+				// it does not typecheck. Not just a runtime shape check.
 				completedMessage !== undefined &&
 				completedMessage.stopReason === "stop" &&
 				completedMessage.stopDetails?.type !== "pause_turn" &&
