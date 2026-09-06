@@ -2894,10 +2894,13 @@ describe("RIG-2806: never serialize a zero-body request over demotable history",
 		let captured: Record<string, unknown> | undefined;
 		const fetchImpl: FetchImpl = async (_url, init) => {
 			captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
-			return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
-				status: 200,
-				headers: { "content-type": "text/event-stream" },
-			});
+			return new Response(
+				'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+				{
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
 		};
 		const stream = streamOpenAICompletions(
 			model,
@@ -2909,9 +2912,7 @@ describe("RIG-2806: never serialize a zero-body request over demotable history",
 		const wire = (captured?.messages ?? []) as { role: string; content?: unknown }[];
 		const body = wire.filter(m => m.role !== "system" && m.role !== "developer");
 		expect(body.length).toBeGreaterThan(0);
-		const carriesContent = body.some(
-			m => typeof m.content === "string" && m.content.trim().length > 0,
-		);
+		const carriesContent = body.some(m => typeof m.content === "string" && m.content.trim().length > 0);
 		expect(carriesContent).toBe(true);
 	});
 });
