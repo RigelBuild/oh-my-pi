@@ -60,7 +60,7 @@ next re-sync:
 | 7 | fork-resync T5 | `9d55e0a600` (`upstream-omp/rig-3144-resync-metrics`) | feat(auth-broker): Prometheus /metrics (#8) | CLEAN (rc=0); already rebased onto `ddde7db10a`, 1 commit ahead |
 | 8 | NEW (this record) | n/a | feat(release): `-rigel.N` version scheme (spec in §2) | new work |
 | 9 | NEW (this record, D3) | n/a | feat(update): re-point `omp update` to the `@rigelbuild` fork scope + RigelBuild repo | new work (spec in §2, Task 2b) |
-| 10 | RIG-3339 (PR #40) | `supervisor/rig-3339-fable-51-cacheread` | fix(catalog): gate fable/mythos 5.1 cache-read to 0.25 (KDL `revision ">=5.1"`) | authored by supervisor; carried here because the defect is UPSTREAM's (see below) |
+| 10 | RIG-3339 (PR #40) | `0598ac138f` (`supervisor/rig-3339-fable-51-cacheread`, 3 commits from `fdeeed6d73`) | fix(catalog): gate fable/mythos 5.1 cache-read to 0.25 + bundle rebake + parity guard | N/A — branch is based directly on `08e04cecbc`, applies without rebase |
 
 Bookmark-name reconciliation (from `jj bookmark list --all` this session):
 
@@ -112,13 +112,34 @@ Bookmark-name reconciliation (from `jj bookmark list --all` this session):
     live. No `AmbiguousOverlapError` risk: revision-constrained rules score
     `dimensions=4` vs `3` for the bare-family block, and `rankCompare` is
     `exactness || dimensions || priority`, so the ranking is unambiguous.
-  - A generation-time fix in `generated-policies.ts` does NOT work and must
-    not be attempted: `buildModel` applies `costPatch` at RUNTIME
-    (`packages/catalog/src/build.ts:113-124`), so a corrected spec is
-    overwritten back to `1` by the KDL rule.
+  - **The fix is THREE commits and the overlay carries all three.** A KDL
+    change alone is NOT sufficient, because two different code paths read the
+    cost and only one of them goes through the cascade:
+    - `fdeeed6d73` — the KDL `revision ">=5.1"` blocks on both families, plus
+      the `gen:compat` recompile of `rules.json`. This fixes the RUNTIME path
+      (`buildModel` → `applyCatalogCorrections`).
+    - `7e01125f5b` — **rebake `models.json` (REQUIRED, not a duplicate of the
+      above).** `getBundledModel` (`packages/catalog/src/models.ts:38-41`)
+      returns the bundled row VERBATIM with no `buildModel` call (rows are
+      pre-baked to keep startup allocation-free), and
+      `packages/stats/src/db.ts:346-352` prices from exactly that row. So the
+      KDL fix alone leaves the stats/cost-reporting path billing 4x — the
+      same silent failure this row exists to prevent, with no conflict and no
+      test red.
+    - `0598ac138f` — the bake/rule cost-parity guard in
+      `compat-parity.test.ts`. This is the ONLY automated detector of a stale
+      bundle: neither `gen:models` nor `gen:compat` runs in CI, so without it
+      a future rule change silently desynchronizes from the bake.
+  - Narrow scope note on generated output: patching
+    `generated-policies.ts` is the no-op to avoid — `buildModel` applies
+    `costPatch` at RUNTIME (`packages/catalog/src/build.ts:113-124`), so a
+    corrected spec is overwritten back to `1` by the KDL rule. Rebaking
+    `models.json` from the corrected rules is a different thing and is
+    REQUIRED, per the commit above. "Do not patch the policy generator" does
+    not mean "do not touch generated output".
   - **Lifecycle:** the permanent home is upstream (their bug, their file),
-    but no agent can push to `can1357` (push-guard allows only the
-    `mattwilkinsonn/*` and `RigelBuild/*` owners), so it ships via the
+    but no agent can push to `can1357` — it is not in the push-guard owner
+    allowlist (`push-guard/index.ts` `ALLOWED_OWNERS`) — so it ships via the
     human-action upstream-PR queue. When upstream takes it, row 10 drops as
     redundant — the same
     lifecycle as row 7 (/metrics) against `can1357#10290`.
@@ -490,9 +511,10 @@ non-`latest` tag breaks self-update for fork installs. Recommendation stays
 ### Task 1: Construct the overlay bookmark
 
 Build `fork/overlay` (D4) on top of `main@origin` (`08e04cecbc`)
-in a dedicated jj workspace, as the 8 existing source commits in the Approach
-table's order (table rows 1a-7, which is 8 commits since row 1 splits into
-1a/1b; rows 8-9 are Tasks 2-4/2b's output, not Task 1's):
+in a dedicated jj workspace, as the 11 existing source commits in the Approach
+table's order (table rows 1a-7 plus row 10's three commits; rows 1a-7 are 8
+commits since row 1 splits into 1a/1b; rows 8-9 are Tasks 2-4/2b's output,
+not Task 1's):
 
 1. Cherry-pick `6983e32e52` (#20) then `8427aa4acf` (its private-manifest
    collision-guard follow-up), both from
@@ -512,15 +534,23 @@ table's order (table rows 1a-7, which is 8 commits since row 1 splits into
 7. Cherry-pick `9d55e0a600` (/metrics, sim clean) from
    `upstream-omp/rig-3144-resync-metrics`; re-run its four suites (named in
    fork-resync Task 5) since the auth-broker context is now v18.1.10.
+8. Cherry-pick row 10's three RIG-3339 commits in order — `fdeeed6d73` (KDL
+   `revision ">=5.1"` + `gen:compat` recompile), `7e01125f5b` (rebake
+   `models.json` + bake/rule parity guard), `0598ac138f` (parity-guard
+   documentation) — from `supervisor/rig-3339-fable-51-cacheread`. That
+   branch is based directly on `08e04cecbc`, so all three apply without
+   rebase. All three are REQUIRED: the KDL fixes the runtime path and the
+   rebake fixes the verbatim bundled-row path that `packages/stats` prices
+   from (see the row-10 note in §1). Re-run `bun test packages/catalog`.
 
 Sim status for rows 1a/1b is re-established here (the recorded sims ran
 against the superseded SHA); a conflict means rework in place, same as steps
 3 and 5.
 No pushes to main; the bookmark is submitted in Task 5.
-Interfaces: consumes the 8 source SHAs + `origin/main`; produces the ordered
+Interfaces: consumes the 11 source SHAs + `origin/main`; produces the ordered
 `fork/overlay` bookmark. Verify at the bookmark tip: `bun run ci:check:full`
 (lint + typecheck only — it resolves to `check:ts`, so it runs NO tests) PLUS
-the carried suites: `bun test scripts/release.test.ts` and the memtools +
+the carried suites: `bun test scripts/release.test.ts`, `bun test packages/catalog`, and the memtools +
 auth-broker suites named in fork-resync Task 5.
 Depends on: none (D4 fixes the name `fork/overlay`).
 
@@ -774,7 +804,7 @@ Depends on: Task 5 merged.
 
 ## Tasks
 
-- [ ] T1: Construct `fork/overlay` from the 8 reconciled source commits (rows 1a-7; 2 reworks). Rows 8-9 land in T2/T2b/T3/T4
+- [ ] T1: Construct `fork/overlay` from the 11 reconciled source commits (rows 1a-7 plus row 10's three RIG-3339 commits; 2 reworks). Rows 8-9 land in T2/T2b/T3/T4
 - [ ] T2: `-rigel.N` acceptance in `release.ts` + install-test sentinel ROUND-TRIP fix + `rigel` bump keyword (D5)
 - [ ] T2b: Re-point `omp update` constants to the `@rigelbuild` fork scope + RigelBuild repo, incl. the ~41 existing test assertions (D3)
 - [ ] T3: Tag-lineage isolation: `--match "v*-rigel.*"` in `release.ts:265` + `fix-changelogs.ts:806`

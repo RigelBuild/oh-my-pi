@@ -1,7 +1,7 @@
 # Fork re-sync: reset to upstream v18.1.10 + reduced curated re-lay
 
-Status: Frozen (PR #35). Reconciled 2026-09-04 after execution — see the note below.
-Task-state note added 2026-09-05 — see "Task state" immediately below.
+Status: Frozen (PR #35). Two post-freeze notes follow, newest first: the task
+state (2026-09-05), then the execution reconciliation (2026-09-04).
 
 > **Task state (2026-09-05).** The T1-T8 checkboxes further down are the FROZEN
 > contract as written and are deliberately left untouched; this note is the
