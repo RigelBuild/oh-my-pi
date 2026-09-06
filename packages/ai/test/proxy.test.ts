@@ -106,8 +106,8 @@ function proxyEnvKeys(): Set<string> {
 // undefined for the rest of the module however the env changes afterwards --
 // which makes a test's outcome depend on whether anything resolved that same
 // id earlier. Unique provider ids are not enough on their own: the resolver
-// cache isolation tests below deliberately share one id across two cases,
-// which is the only shape that can observe a stale entry.
+// cache isolation tests below own a dedicated id and deliberately resolve it
+// in consecutive cases, the only shape that can observe a stale entry.
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -154,17 +154,32 @@ describe("getProxyForProvider", () => {
 	});
 });
 
-// Shares one provider id across two cases on purpose: the cache is keyed by
-// provider id, so an id resolved exactly once per file can never read a stale
-// entry back and would leave the beforeEach reset unobservable.
+// Owns both probe ids outright: every case that resolves them is in this block,
+// so the pair that observes a leak is the pair that plants it. An id shared with
+// a test elsewhere in the file would work today and shift which case fails the
+// moment that test is re-idded or deleted.
+//
+// Each direction gets its own id because the cache stores a resolved value and
+// an unresolved one alike, and one id cannot witness both: whichever entry is
+// planted first is the one every later case reads back, so the second direction
+// would pass on the leak it is meant to catch.
 describe("resolver cache isolation", () => {
-	it("does not serve a provider proxy memoized by an earlier test", () => {
-		expect(getProxyForProvider("github-copilot")).toBeUndefined();
+	it("memoizes a resolved provider proxy within a test", () => {
+		Bun.env.PI_PROXY_CACHE_PROBE_HIT = PROXY;
+		expect(getProxyForProvider("cache-probe-hit")).toBe(PROXY);
 	});
 
-	it("does not serve a memoized miss after the variable is set", () => {
-		Bun.env.PI_PROXY_GITHUB_COPILOT = PROXY;
-		expect(getProxyForProvider("github-copilot")).toBe(PROXY);
+	it("does not serve the hit memoized by the previous test", () => {
+		expect(getProxyForProvider("cache-probe-hit")).toBeUndefined();
+	});
+
+	it("memoizes an unresolved provider within a test", () => {
+		expect(getProxyForProvider("cache-probe-miss")).toBeUndefined();
+	});
+
+	it("does not serve the miss memoized by the previous test", () => {
+		Bun.env.PI_PROXY_CACHE_PROBE_MISS = PROXY;
+		expect(getProxyForProvider("cache-probe-miss")).toBe(PROXY);
 	});
 });
 
