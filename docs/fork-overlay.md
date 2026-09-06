@@ -122,6 +122,17 @@ re-lay from here on:
    admin-API mechanism as fork-resync Task 1:
    `gh api -X PATCH repos/RigelBuild/oh-my-pi/git/refs/heads/main -f sha=<new-base> -F force=true`;
    agents never force-push main).
+   Tag disposition across the reset: prior `v*-rigel.*` tags are RETAINED but
+   become orphaned (they point at commits on the abandoned pre-reset history,
+   since `release.ts:430` pushed them to origin). Retention is safe and is the
+   same mechanism the tagless path relies on: `git describe` only considers
+   ANCESTORS, so an orphaned tag can never be selected as `latestTag`, and the
+   per-base `N`-resets-to-1 rule means the next lineage mints a fresh name
+   (`v18.1.11-rigel.1`) that cannot collide with a retained one. One caveat to
+   watch: `ci.yml:139`'s release detector matches ANY v-prefixed tag at HEAD
+   (`git tag --points-at HEAD | grep -E '^v[0-9]'`), so if a retained tag ever
+   lands on a re-created commit it would trigger a spurious release run; delete
+   an orphaned tag if that ever happens rather than pre-emptively pruning.
 5. One PR: `jj-vine submit fork/overlay` back onto the reset main. Review
    fixes are additive commits on the bookmark (never amend+force-push while
    the PR is open). Merge; delete nothing — the bookmark stays and tracks the
@@ -157,8 +168,7 @@ integer, starts at 1 per base, increments per fork release, resets to 1 when a
 re-sync advances the base. Git tag = `v<base>-rigel.<N>` (e.g.
 `v18.1.10-rigel.1`). npm publishes under the `@rigelbuild` scope (overlay
 rows 1a/1b), so npm versions never collide with upstream's `@oh-my-pi` scope;
-the git
-TAG namespace is the collision surface, handled below.
+the git TAG namespace is the collision surface, handled below.
 
 **Why `compareVersions` needs NO change.** `packages/utils/src/version.ts:11-12`:
 
@@ -280,18 +290,53 @@ segments), so `__piNativesV18_1_10_rigel_1` does not match,
 `nativeVersionFromExports` returns undefined, and the CLI throws "Native
 addon has no unique release version sentinel" (`native-version.ts:20`),
 failing `ci:test:install-methods` (`package.json:124`, `ci.yml:545`) on the
-first rigel release commit and blocking the release. Fix in Task 2: widen
-`VERSION_SENTINEL_RE` to accept the suffix (e.g.
-`/^__piNativesV(\d+)_(\d+)_(\d+)(?:_rigel_(\d+))?$/`) or derive the expected
-sentinel from package.json the way the runtime loader does
-(`loader-state.js:840`). Only this harness regex needs the change.
+first rigel release commit and blocking the release. Fix in Task 2: the
+harness must round-trip the FULL version, suffix included. Do NOT widen
+`VERSION_SENTINEL_RE` by adding an optional `(?:_rigel_(\d+))?` group: the
+capture is discarded, because `native-version.ts:10` rebuilds the version from
+only the first three groups
+(``.map(match => `${match[1]}.${match[2]}.${match[3]}`)``), so
+`__piNativesV18_1_10_rigel_1` would yield the TRUNCATED `18.1.10`. That
+truncation fails a second time, further downstream and with a misleading
+diagnosis: `run-ci.sh:67` feeds the value to `align_native_manifest`, whose
+`:78-82` comparison sees `declared_version 18.1.10-rigel.1` !=
+`addon_version 18.1.10` and REWRITES `packages/natives/package.json` down to
+`18.1.10`; `loader-state.js:840` then derives `__piNativesV18_1_10`, which the
+addon does not export, so `validateLoadedBindings` (`:685-728`) fails the
+strict path. Worse, the `:706` `diskHasExpectedSentinel` check uses
+`.includes()` on the raw file bytes and `__piNativesV18_1_10` IS a substring of
+`__piNativesV18_1_10_rigel_1`, so it evaluates TRUE and routes into the
+`:714` branch that throws the wrong error ("omp was upgraded while this
+session was running; restart omp") instead of a version mismatch. PRESCRIBED
+fix: make the sentinel-to-version inverse preserve the suffix, either by
+deriving the expected sentinel from `packages/natives/package.json` the way the
+runtime loader does (`loader-state.js:840`), or by inverting the sentinel
+directly (`sentinel.slice("__piNativesV".length).replace(/_/g, ".")`
+constrained to a `-rigel.N` shape) so the returned value is
+`18.1.10-rigel.1`. Only this harness needs the change.
 
-**Accepted degradation (nice-to-have): changelog roll-forward.**
-`scripts/ci-release-notes.ts:223` filters release tags with
-`/^v\d+\.\d+\.\d+$/`, which excludes `v*-rigel.*`, so `resolveFloor` stays in
-single-version mode on the fork (the silent-tag changelog roll-forward is
-disabled). Either widen that regex in a follow-up or accept it; nothing in
-the release path breaks. Recorded as accepted for now.
+**GitHub release notes: a second regex needs the suffix (Task 4 scope).** Two
+`-rigel.N`-blind regexes sit in `scripts/ci-release-notes.ts`, and the second
+one is the consequential one:
+
+- `:223` filters the release list with `/^v\d+\.\d+\.\d+$/`, excluding
+  `v*-rigel.*`, so `resolveFloor` stays in single-version mode (the silent-tag
+  changelog roll-forward is disabled). Low impact on its own.
+- `:66` `enumerateChangelogVersions` matches headings with
+  `/^## \[(\d+\.\d+\.\d+)\]/` (three bare numeric segments, no prerelease). But
+  `release.ts:169` writes the heading as ``` `## [${version}] - ${date}` ``` =
+  `## [18.1.10-rigel.1] - <date>`, which that regex does NOT match (verified).
+  So every package yields an empty section, `main()` takes the
+  `sections.length === 0` branch (`:265-269`), and an EMPTY `release-notes.md`
+  is written. `ci.yml:885` feeds that file to the `softprops/action-gh-release`
+  step (`:906-910`) as the release body, so **every fork GitHub release would
+  ship with no notes.**
+
+The release does not FAIL either way, but empty notes on every release is not
+an acceptable steady state, and widening `:66` (plus `:223`) to accept the
+optional `-rigel.N` suffix is a two-regex change. Fold both into Task 4
+alongside the `npmDistTag` mapping, with T6 coverage asserting a
+`## [18.1.10-rigel.1]` heading is enumerated and its section renders non-empty.
 
 **No-change-needed spots (verified this session):**
 
@@ -386,8 +431,9 @@ non-`latest` tag breaks self-update for fork installs. Recommendation stays
 ### Task 1: Construct the overlay bookmark
 
 Build `fork/overlay` (D4) on top of `main@origin` (`08e04cecbc`)
-in a dedicated jj workspace, as the 7 existing source commits in the Approach
-table's order (rows 1a-7; rows 8-9 are Tasks 2-4/2b's output):
+in a dedicated jj workspace, as the 8 existing source commits in the Approach
+table's order (table rows 1a-7, which is 8 commits since row 1 splits into
+1a/1b; rows 8-9 are Tasks 2-4/2b's output, not Task 1's):
 
 1. Cherry-pick `6983e32e52` (#20) then `8427aa4acf` (its private-manifest
    collision-guard follow-up), both from
@@ -413,9 +459,10 @@ against the superseded SHA); a conflict means rework in place, same as steps
 3 and 5.
 No pushes to main; the bookmark is submitted in Task 5.
 Interfaces: consumes the 8 source SHAs + `origin/main`; produces the ordered
-`fork/overlay` bookmark whose tree passes `bun test scripts/release.test.ts`
-and the memtools + auth-broker suites. Verify: `bun run ci:check:full` at the
-bookmark tip.
+`fork/overlay` bookmark. Verify at the bookmark tip: `bun run ci:check:full`
+(lint + typecheck only — it resolves to `check:ts`, so it runs NO tests) PLUS
+the carried suites: `bun test scripts/release.test.ts` and the memtools +
+auth-broker suites named in fork-resync Task 5.
 Depends on: none (D4 fixes the name `fork/overlay`).
 
 ### Task 2: `-rigel.N` version acceptance in `scripts/release.ts`
@@ -433,23 +480,31 @@ One commit atop Task 1 (overlay row 8, part 1):
   bump keyword (D5): `-rigel.(\d+)$` present → increment `N`; tagless (fresh
   base) → read the base from `packages/coding-agent/package.json` and mint
   `<base>-rigel.1`.
-- Widen the install-test sentinel matcher:
-  `scripts/install-tests/native-version.ts:3` `VERSION_SENTINEL_RE` from
-  `/^__piNativesV(\d+)_(\d+)_(\d+)$/` to accept the fork suffix (e.g.
-  `/^__piNativesV(\d+)_(\d+)_(\d+)(?:_rigel_(\d+))?$/`), or derive the
-  expected sentinel from package.json as the runtime loader does
-  (`packages/natives/native/loader-state.js:840`). The runtime loader is
-  already tolerant (`loader-state.js:667,698`); only this harness regex
-  blocks. Without it, `nativeVersionFromExports` returns undefined on
-  `__piNativesV18_1_10_rigel_1`, the CLI throws at `native-version.ts:20`,
-  and `ci:test:install-methods` (`package.json:124`, `ci.yml:545`) fails on
-  the first rigel release commit.
+- Fix the install-test sentinel round-trip:
+  `scripts/install-tests/native-version.ts` must return the FULL version
+  including the `-rigel.N` suffix. Do NOT just add an optional
+  `(?:_rigel_(\d+))?` group to `VERSION_SENTINEL_RE` (`:3`): `:10` rebuilds
+  from groups 1-3 only, so the capture is dropped and the value truncates to
+  `18.1.10`, which fails again downstream with a misleading diagnosis (full
+  chain in Approach §2). Instead derive the expected sentinel from
+  `packages/natives/package.json` as the runtime loader does
+  (`packages/natives/native/loader-state.js:840`), or invert the sentinel
+  directly so `__piNativesV18_1_10_rigel_1` maps to `18.1.10-rigel.1`. The
+  runtime loader is already tolerant (`loader-state.js:667,698`); only this
+  harness blocks. Without the fix, `nativeVersionFromExports` returns
+  undefined, the CLI throws at `native-version.ts:20`, and
+  `ci:test:install-methods` (`package.json:124`, `ci.yml:545`) fails on the
+  first rigel release commit.
 
 Interfaces: consumes/produces `scripts/release.ts` exports
 `validateExplicitVersion`, `parseVersion`, `bumpVersion`,
-`bumpCanaryVersion` (+ new `bumpRigelVersion`); consumed by Task 6 tests and
-the CLI dispatch (`:459-486`). Verify: red-green in Task 6; smoke via
-`bun scripts/release.ts 18.1.10` (must now refuse) — no full run.
+`bumpCanaryVersion` (+ new `bumpRigelVersion`), and
+`scripts/install-tests/native-version.ts` `nativeVersionFromExports`; consumed
+by Task 6 tests and the CLI dispatch (`:459-486`). Verify: red-green in Task 6.
+Note the smoke `bun scripts/release.ts 18.1.10` refuses at the CLI DISPATCH
+(`:476` returns null → the `else` at `:479-483`), so it never reaches
+`cmdRelease`'s rewritten error text at `:237`; cover that path with a T6 unit
+assertion instead of relying on the smoke.
 Depends on: Task 1 step 3 (the #23 rework touches the same lines).
 
 ### Task 2b: Re-point `omp update` to the fork (D3, overlay row 9)
@@ -471,16 +526,43 @@ resolves the fork, not upstream:
   covers npm + GitHub-release self-update, the channels fork installs use).
 - The published-tarball rename (`rigel-scope-rename.ts`) already rewrites the
   package NAMES at publish; this task aligns the source-of-truth constants the
-  running binary reads so the two agree. Confirm the rename rule's output names
-  match these literals exactly (a mismatch silently breaks self-update).
+  running binary reads so the two agree. The mapping is fixed by
+  `renameSegment` (strip a leading `pi-`/`omp-`, re-prefix `@rigelbuild/omp-`):
+  `@oh-my-pi/pi-coding-agent` -> `@rigelbuild/omp-coding-agent` and
+  `@oh-my-pi/pi-natives` -> `@rigelbuild/omp-natives`. Those are the
+  authoritative literals; anywhere else in this record naming a bare
+  `@rigelbuild/omp` is wrong (Task 7's verify command is corrected to match).
+  T6 pins `renamePackageName(PACKAGE)` equal to the new `PACKAGE` constant so
+  the two can never drift silently.
+- **Update the existing tests that hard-assert the upstream literals.** This is
+  the task's real blast radius: 41 assertions across two files pin the current
+  values, and every one fails the moment the constants move.
+  `packages/coding-agent/test/update-cli.test.ts` (33 hits) includes
+  `:429-430` `buildHomebrewUpdateArgs(false)` toEqual
+  `["upgrade", "can1357/tap/omp"]`, `:434-435` `buildMiseUpgradeArgs()` toEqual
+  `["upgrade", "github:can1357/oh-my-pi", "--bump"]`, `:443-445`
+  `buildNpmInstallArgs` toContain `@oh-my-pi/pi-coding-agent@…`, and `:486-499`
+  `buildRenameCleanupPackages` toEqual lists derived from the constants
+  (`update-cli.ts:1420-1425`).
+  `packages/coding-agent/test/cli/update-cli.test.ts` (8 hits) includes
+  `:60-98` `stubRegistry` manifest keys and `:72`/`:83` asserting the exact URL
+  `https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest`. All run in the
+  coding-agent CI buckets (`scripts/ci-test-ts.ts:336-338`, `ci.yml`
+  `test_coding_agent_*`), which are `release_gate` dependencies
+  (`ci.yml:552-563`) — so skipping them red-gates the release chain.
 
 Interfaces: consumes/produces `update-cli.ts` module constants
 `REPO`/`PACKAGE`/`NATIVES_PACKAGE`/`HOMEBREW_FORMULA`/`MISE_TOOL` and
-`CURRENT_PACKAGES`; consumed by `getLatestRelease`/`resolveUpdateTarget`.
-Verify: a T6 assertion that the constants resolve to the `@rigelbuild` scope +
-RigelBuild repo, and that `buildBunInstallArgs`/`buildNpmInstallArgs` emit the
-fork package names. Cross-check the emitted names against
-`rigel-scope-rename.ts`'s deterministic rule.
+`CURRENT_PACKAGES`; consumed by `getLatestRelease`/`resolveUpdateTarget`;
+updates `packages/coding-agent/test/update-cli.test.ts` and
+`packages/coding-agent/test/cli/update-cli.test.ts`.
+Verify: run the actual bucket, not just static checks —
+`bun test packages/coding-agent/test/update-cli.test.ts packages/coding-agent/test/cli/update-cli.test.ts`
+must be green. Note `bun run ci:check:full` resolves to `check:ts`
+(lint + typecheck only, no test execution), so it would NOT catch any of this.
+Plus the T6 assertions that the constants resolve to the `@rigelbuild` scope +
+RigelBuild repo and that `buildBunInstallArgs`/`buildNpmInstallArgs` emit the
+fork package names.
 Depends on: Task 1 (row 1a/1b scope-rename must be present to confirm the
 name mapping).
 
@@ -507,16 +589,31 @@ mechanism (Approach §2): `.nothrow()` describe + `resolveReleaseVersion`'s
 release.
 Depends on: Task 1 (rows 2 and 4 must be present), Task 2.
 
-### Task 4: `npmDistTag` mapping for `-rigel.N`
+### Task 4: npm dist-tag + release-notes suffix awareness
 
-One commit (overlay row 8, part 3): in `scripts/ci-release-publish.ts`
-`npmDistTag` (`:139-145`), insert
-`if (/^\d+\.\d+\.\d+-rigel\.\d+$/.test(version)) return "latest";` before the
-unsupported-prerelease throw; update the function doc (`:135-138`). D2 settled
-`latest` (not a dedicated `rigel` tag), consistent with the re-pointed
-`omp update` (D3/Task 2b) reading the fork's `/latest`.
+One commit (overlay row 8, part 3). Two files:
+
+- `scripts/ci-release-publish.ts` `npmDistTag` (`:139-145`): insert
+  `if (/^\d+\.\d+\.\d+-rigel\.\d+$/.test(version)) return "latest";` before the
+  unsupported-prerelease throw; update the function doc (`:135-138`). D2 settled
+  `latest` (not a dedicated `rigel` tag), consistent with the re-pointed
+  `omp update` (D3/Task 2b) reading the fork's `/latest`.
+- `scripts/ci-release-notes.ts`: teach both `-rigel.N`-blind regexes the
+  optional suffix (rationale + verified failure chain in Approach §2).
+  `:66` `enumerateChangelogVersions` (`/^## \[(\d+\.\d+\.\d+)\]/`) is the
+  consequential one: without it every fork release publishes EMPTY GitHub
+  release notes, because `release.ts:169` writes `## [18.1.10-rigel.1] - <date>`
+  which the regex misses, every section renders empty, `main()` takes the
+  `sections.length === 0` branch (`:265-269`), and `ci.yml:885` feeds the empty
+  file to `softprops/action-gh-release` (`:906-910`) as the release body. Also
+  widen `:223`'s release-list filter (`/^v\d+\.\d+\.\d+$/`) so `resolveFloor`
+  can floor on a prior rigel release.
+
 Interfaces: consumes/produces `scripts/ci-release-publish.ts` export
-`npmDistTag`; consumed by the publish workflow. Verify: Task 6 red-green.
+`npmDistTag` and `scripts/ci-release-notes.ts` `enumerateChangelogVersions` /
+`resolveFloor`; consumed by the publish + release-notes workflow steps.
+Verify: Task 6 red-green, including a `## [18.1.10-rigel.1]` heading that
+enumerates and renders a non-empty section.
 Depends on: D2 (`latest`).
 
 ### Task 5: Submit the overlay PR
@@ -549,9 +646,12 @@ main, verified `git rev-parse origin/main:scripts/release.test.ts`):
   `v17.2.8` are currently expected to be ACCEPTED and must be rewritten to
   expect null. The canary-bump cases at `:47-66` survive unchanged
   (`bumpVersion`/`bumpCanaryVersion` stay exported).
-- Sentinel matcher (install-test harness):
-  `nativeVersionFromExports(["__piNativesV18_1_10_rigel_1"])` returns the
-  version (red before the Task 2 regex widening, green after).
+- Sentinel round-trip (install-test harness): assert the EXACT value, not just
+  truthiness —
+  `nativeVersionFromExports(["__piNativesV18_1_10_rigel_1"])` must equal
+  `"18.1.10-rigel.1"`, NOT `"18.1.10"`. A truncating implementation satisfies a
+  "returns the version" assertion vacuously and would ship green (see Approach
+  §2 for the downstream failure it causes).
 - `parseVersion`: `18.1.10-rigel.3` → `[18, 1, 10]`.
 - `bumpRigelVersion` (D5): `v18.1.10-rigel.1` → `18.1.10-rigel.2`;
   tagless + pkg `18.1.10` → `18.1.10-rigel.1`.
@@ -562,10 +662,24 @@ main, verified `git rev-parse origin/main:scripts/release.test.ts`):
   `18.1.10-rigel.1 < 18.1.10` documented as the reason for Task 3's glob.
 - `npmDistTag`: `18.1.10-rigel.1` → `latest` (D2);
   `18.1.10-rc.1` still throws; `18.1.11-canary.1` → `canary`.
+- Release notes (Task 4): a changelog containing `## [18.1.10-rigel.1] - <date>`
+  is enumerated by `enumerateChangelogVersions` and its section renders
+  non-empty (red before the `:66` regex widening, green after).
+- `omp update` constants (Task 2b): `PACKAGE`/`NATIVES_PACKAGE` resolve to the
+  `@rigelbuild` scope and `REPO` to `RigelBuild/oh-my-pi`;
+  `buildBunInstallArgs`/`buildNpmInstallArgs` emit the fork package names; and
+  `renamePackageName(PACKAGE)` equals the new `PACKAGE` constant (pins the
+  source constants to `rigel-scope-rename.ts`'s rule so they cannot drift).
+  Plus the ~41 EXISTING assertions in
+  `packages/coding-agent/test/update-cli.test.ts` and
+  `packages/coding-agent/test/cli/update-cli.test.ts` updated to the fork
+  literals (enumerated in Task 2b).
 
-Interfaces: consumes the Task 2-4 exports; produces `scripts/release.test.ts`
-coverage. Verify: `bun test scripts/release.test.ts` red before each change,
-green after.
+Interfaces: consumes the Task 2-4/2b exports; produces coverage in
+`scripts/release.test.ts`, the install-test harness, and the two update-cli
+test files. Verify: `bun test scripts/release.test.ts` plus
+`bun test packages/coding-agent/test/update-cli.test.ts packages/coding-agent/test/cli/update-cli.test.ts`
+red before each change, green after. Do NOT rely on `ci:check:full` (no tests).
 
 ### Task 7: Release + runbook handoff
 
@@ -587,16 +701,17 @@ follow-up PR, gated on the publish existing.
 Interfaces: consumes the merged overlay + this record; produces the Linear
 runbook issue and (post-release) the natives-fetch flip PR. Verify: Matt's
 release run completes `=== Released v18.1.10-rigel.1 ===` and
-`npm view @rigelbuild/omp@18.1.10-rigel.1 dist-tags` shows the chosen tag.
+`npm view @rigelbuild/omp-coding-agent@18.1.10-rigel.1 dist-tags` shows
+`latest` (the authoritative package literal per Task 2b's rename mapping).
 Depends on: Task 5 merged.
 
 ## Tasks
 
-- [ ] T1: Construct `fork/overlay` from the 9 reconciled commits (rows 1a-9; 2 reworks)
-- [ ] T2: `-rigel.N` acceptance in `release.ts` + install-test sentinel widening + `rigel` bump keyword (D5)
-- [ ] T2b: Re-point `omp update` constants to the `@rigelbuild` fork scope + RigelBuild repo (D3)
+- [ ] T1: Construct `fork/overlay` from the 8 reconciled source commits (rows 1a-7; 2 reworks). Rows 8-9 land in T2/T2b/T3/T4
+- [ ] T2: `-rigel.N` acceptance in `release.ts` + install-test sentinel ROUND-TRIP fix + `rigel` bump keyword (D5)
+- [ ] T2b: Re-point `omp update` constants to the `@rigelbuild` fork scope + RigelBuild repo, incl. the ~41 existing test assertions (D3)
 - [ ] T3: Tag-lineage isolation: `--match "v*-rigel.*"` in `release.ts:265` + `fix-changelogs.ts:806`
-- [ ] T4: `npmDistTag` maps `-rigel.N` → `latest` (D2)
+- [ ] T4: `npmDistTag` maps `-rigel.N` → `latest` (D2) + `ci-release-notes.ts` `:66`/`:223` suffix awareness (else empty release notes)
 - [ ] T5: Submit the single overlay PR as a merge commit (D1); post-merge bookmark cleanup
 - [ ] T6: Red-green tests in `scripts/release.test.ts` + sentinel matcher (lands with T2-T4)
 - [ ] T7: Human-action handoff: first `18.1.10-rigel.1` release (D6) + recurring re-sync runbook; then the natives-fetch scope flip
