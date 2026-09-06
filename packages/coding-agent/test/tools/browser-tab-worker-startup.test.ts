@@ -162,15 +162,18 @@ describe("browser init deadline carry-over", () => {
 	// As in that hook, 90_000 leaves ~3x slack over the ~30s launch ceiling
 	// (puppeteer's default on the WS-endpoint wait — the full mechanism, and why
 	// the second spend contributes ~0ms here, is documented on that hook; see also
-	// RIG-3406).
+	// RIG-3406). The deferral holds because this hook passes `acquireBrowser` the
+	// same args as that one (`{ kind: "headless", headless: true }`, `cwd` only),
+	// so the same ceiling applies; diverge either call and document it here.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 	}, 90_000);
 
 	// Bounded like its sibling: a killing `releaseBrowser` can spend ~7.5s across
-	// close timeout and graceful tree kill (plus ~2s of profile-removal retries on
-	// win32 only).
+	// the 5s close timeout and a ~2.5s graceful tree kill, then an unbounded
+	// recursive profile removal that runs on every platform (only its ~2s retry
+	// window is win32-gated). Rationale in full on that sibling's `afterAll`.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 	}, 30_000);
@@ -234,6 +237,14 @@ describe("browser init deadline carry-over", () => {
 	);
 });
 describe("visible OMP-owned browser tabs", () => {
+	// These two launch Chromium DIRECTLY via `acquireBrowser`, bypassing the
+	// `browser.open` tool wrapper, so there is no tool budget to separate from the
+	// `it()` bound — the fix shape used elsewhere in this file does not apply.
+	// They are still in scope: the second is gated on `CHROMIUM_AVAILABLE`, so it
+	// runs in the same CI bucket as the flaking tests. The exposure is additive —
+	// a launch surviving to the ~30s ceiling plus a full `acquireTab`
+	// (`timeoutMs: 30_000`) is ~60s — so both bounds are 90_000 to match the
+	// sibling describes rather than sitting under the sum. RIG-3377.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
@@ -281,7 +292,7 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		45_000,
+		90_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps deterministic viewport emulation for hidden launches",
@@ -307,6 +318,6 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		45_000,
+		90_000,
 	);
 });

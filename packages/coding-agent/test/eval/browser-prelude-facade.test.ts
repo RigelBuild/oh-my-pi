@@ -326,17 +326,23 @@ describe("browser facade Chromium helper E2E", () => {
 				// bound — so both deadlines expired together and a slow start raced two
 				// timers, which is why one commit went red and green in adjacent runs.
 				//
-				// The 45s governs the post-launch remainder: CDP connect, queued tab
-				// acquisition, worker init, and navigation, whose SUM was crossing 30s.
-				// It does NOT buy 45s of startup. This call supplies no `app.cdp_url`, so
-				// it LAUNCHES, and the launch phase sits outside this budget — capped at
-				// ~30s by puppeteer's default on the WS-endpoint wait, which is BELOW the
-				// 45s. So on a cold launch the ceiling preempts the tool budget and the
-				// failure is puppeteer's WS-endpoint TimeoutError, not the tool's message
-				// (measured: ~1-3s idle; a 29s delay passes at ~30.1s; a 31s delay throws
-				// at ~30.2s). Raising the budget cannot move that — RIG-3406. 45s is
-				// chosen to clear the old 30s coincidence while staying strictly under
-				// the 90s `it()` bound. Incident history: RIG-3377.
+				// The 45s covers the WHOLE open, launch included: `openBrowser`
+				// (src/tools/browser.ts:224-236) builds one `AbortSignal.timeout` from
+				// this value and threads it through both `acquireBrowser` and
+				// `acquireTab`, so CDP connect, queued tab acquisition, worker init and
+				// navigation all share it with the launch. It does NOT buy 45s of
+				// startup: this call supplies no `app.cdp_url`, so it LAUNCHES, and two
+				// deadlines are live at once — this 45s and puppeteer's ~30s default on
+				// the WS-endpoint wait. The smaller one fires, so on a cold launch the
+				// ceiling wins and the failure is puppeteer's WS-endpoint TimeoutError
+				// rather than the tool's own message (measured on this path: ~1-3s idle;
+				// a 29s delay passes at ~30.1s; a 31s delay throws at ~31.0s. Dropping
+				// the budget to 32s still throws the ceiling's TimeoutError at ~30.7s,
+				// and only a budget BELOW the ceiling surfaces the tool's message — a
+				// 20s delay under a 10s budget gives "Browser open timed out after
+				// 10000ms" at ~10.0s). Raising the budget cannot move the ~30s ceiling —
+				// RIG-3406. 45s is chosen to clear the old 30s coincidence while staying
+				// strictly under the 90s `it()` bound. Incident history: RIG-3377.
 				await runInContext(
 					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 45 }); })()",
 					context,
