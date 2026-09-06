@@ -44,6 +44,29 @@ test("reports a working binary as available", async () => {
 	expect(await chromiumCanLaunch(async () => ok, BOUND_MS)).toBe(true);
 });
 
+test("stays silent when the probe succeeds", async () => {
+	// The deadline's abort listener runs even after a fast success, because
+	// `AbortSignal.timeout` cannot be cancelled. Unguarded it announced a skip on
+	// every healthy run — six per suite — which is worse than saying nothing: a
+	// real skip becomes indistinguishable from the noise. Nothing else here
+	// asserts the stderr contract, which is why that regression shipped.
+	const ok = await script("ok-silent.sh", 'echo "Chromium 150.0.0.0"');
+	const errors: string[] = [];
+	const original = console.error;
+	console.error = (...args: unknown[]) => {
+		errors.push(args.map(String).join(" "));
+	};
+	try {
+		expect(await chromiumCanLaunch(async () => ok, BOUND_MS)).toBe(true);
+		// Outlive the deadline: the listener fires at BOUND_MS, after the verdict.
+		const idle = Bun.spawn(["sleep", String((BOUND_MS * 2) / 1000)]);
+		await idle.exited;
+	} finally {
+		console.error = original;
+	}
+	expect(errors.filter(line => line.includes("SKIPPING"))).toEqual([]);
+});
+
 test("reports a non-zero exit as unavailable", async () => {
 	const bad = await script("bad.sh", "exit 127");
 	expect(await chromiumCanLaunch(async () => bad, BOUND_MS)).toBe(false);

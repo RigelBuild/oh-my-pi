@@ -38,14 +38,23 @@ export async function chromiumCanLaunch(
 	// is the one outcome worse than a failure here, because the required gate
 	// goes green having tested nothing. Say so on stderr so it is visible in the
 	// CI log rather than inferred from a suspiciously fast green.
+	// `AbortSignal.timeout` cannot be cancelled, so the abort listener still runs
+	// after a fast, successful probe — hence the `settled` guard. Without it the
+	// diagnostic fires on every healthy run and claims the suites were skipped
+	// when they ran, which destroys the signal it exists to give.
 	const deadline = AbortSignal.timeout(timeoutMs);
+	let settled = false;
 	try {
 		return await Promise.race([
-			probeExecutable(resolve, deadline),
+			probeExecutable(resolve, deadline).then(verdict => {
+				settled = true;
+				return verdict;
+			}),
 			new Promise<boolean>(resolveRace => {
 				deadline.addEventListener(
 					"abort",
 					() => {
+						if (settled) return;
 						console.error(
 							`chromium-probe: no answer within ${timeoutMs}ms; treating Chromium as unavailable and SKIPPING the browser suites`,
 						);
@@ -56,6 +65,7 @@ export async function chromiumCanLaunch(
 			}),
 		]);
 	} catch {
+		settled = true;
 		return false;
 	}
 }

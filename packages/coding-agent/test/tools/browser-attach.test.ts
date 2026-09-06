@@ -103,19 +103,24 @@ describe("pickElectronTarget", () => {
 	// "a beforeEach/afterEach hook timed out" naming no deadline at all.
 	//
 	// The bound is explicit so the hook is never silently governed by a harness
-	// flag, and it must clear the launch's real ceiling — which is ~120s, not the
-	// ~30s of puppeteer's WS-endpoint default. `puppeteer.launch` spends three
-	// additive phases on two clocks (WS line wait 30s; CDP handshake on our own
-	// `protocolTimeout` 60s; then a fresh 30s `waitForPageTarget`), and this call
-	// is bare `acquireBrowser` with no tool budget outside it, so it is exposed to
-	// the sum. Measured warm against a CDP tarpit: 60155ms idle, 89607ms behind a
-	// 29.5s WS delay. A 90_000 bound sat ~400ms from that — the very coincidence
-	// this file exists to remove, so 180_000. Ahead of all three phases sits an
-	// unbounded executable resolve, so no test-side bound can be a true ceiling;
-	// giving the launch a real one is a src change (RIG-3406), which is why this
-	// bound is sized to stop racing rather than to cover every case. The phase
-	// table and measurements live there; the mechanism is written out once on
-	// browser-prelude-facade.test.ts's `browser.open`.
+	// flag. It is NOT sized to clear the launch's ceiling, because there is no
+	// ceiling to clear: the launch's phases are additive, two of its segments
+	// have no deadline, and each restated "real ceiling" here has been falsified
+	// by the next measurement — ~30s, then ~120s, then ~238s. Sizing a test bound
+	// to outbid that estimate is how this file drifted toward asserting nothing
+	// but "eventually finishes"; the arithmetic is deliberately gone.
+	//
+	// So the bound answers a different question: how long may a hook hold the
+	// runner before failing is more useful than waiting? The ceiling on that is
+	// `scripts/ci-test-ts.ts`'s per-chunk watchdog (`chunkTimeoutMs`, 600_000).
+	// Exceed it and the chunk is killed with no per-test attribution, which is
+	// strictly worse than a named hook timeout — so every bound in this bucket
+	// must sum well under it. 180_000 is a deliberate budget, not a prediction:
+	// past it, the launch is wedged behind an unbounded segment and more waiting
+	// buys nothing. Giving the launch a caller-reachable bound is a src change
+	// (RIG-3406), which also carries the phase table and measurements; the
+	// mechanism is written out once on browser-prelude-facade.test.ts's
+	// `browser.open`.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
@@ -251,8 +256,9 @@ describe("pickElectronTarget", () => {
 	// phases apply — no WS-endpoint wait, no CDP handshake, no page target. What
 	// 10_000 has to cover is a bun spawn plus one loopback fetch (~100ms here),
 	// and no operation inside carries a bound near it, so there is nothing to
-	// separate. Add a Chromium launch to either and it inherits the ~120s ceiling
-	// documented on the hook above.
+	// separate. Add a Chromium launch to either and this bound is wrong: it then
+	// inherits the unbounded launch exposure described on the hook above, and
+	// belongs on that hook's bound instead.
 	test("launches an isolated user-data-dir beside a running executable", async () => {
 		const existing = await spawnDisposableExecutable();
 		const { promise: launched, resolve: markLaunched } = Promise.withResolvers<void>();

@@ -159,13 +159,12 @@ describe("browser init deadline carry-over", () => {
 	// deadline. This file shares a CI bucket with the other two browser E2Es, so
 	// leaving it unbounded would keep reddening the same required gate.
 	//
-	// As in that hook, 180_000 to clear the launch's real ~120s ceiling — three
-	// additive phases on two clocks, not puppeteer's ~30s WS-endpoint default
-	// alone (measured 89607ms behind a 29.5s WS delay, which a 90_000 bound raced
-	// by ~400ms). The deferral holds because this hook passes `acquireBrowser` the
-	// same args as that one (`{ kind: "headless", headless: true }`, `cwd` only),
-	// so the same phases apply; diverge either call and document it here. Phase
-	// table: RIG-3406.
+	// As in that hook, 180_000 — the bucket's single bound, sized as a budget
+	// against the 600_000 per-chunk watchdog rather than as a prediction of the
+	// launch's cost, for the reasons written out on the `it.skipIf` below. The
+	// deferral holds because this hook passes `acquireBrowser` the same args as
+	// that one (`{ kind: "headless", headless: true }`, `cwd` only), so the same
+	// phases apply; diverge either call and document it here. RIG-3406.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
@@ -246,19 +245,24 @@ describe("visible OMP-owned browser tabs", () => {
 	// They are still in scope: the second is gated on `CHROMIUM_AVAILABLE`, so it
 	// runs in the same CI bucket as the flaking tests.
 	//
-	// The exposure is additive. From the bounded phases alone the first test has a
-	// FLOOR of ~199s: it calls `acquireTab` twice and its `finally` closes two
-	// tabs and kills the browser, so ~120s launch (three additive phases, not the
-	// ~30s WS-endpoint default alone) + 2x`initBudgetMs` (`timeoutMs + GRACE_MS`
-	// = 30_750 total per init, tab-supervisor.ts) + 2x`DEFAULT_TAB_CLOSE_TIMEOUT_MS`
-	// (5_000) + ~7.5s wedged teardown. There is no ceiling above that floor: the
-	// executable resolve ahead of each launch carries no deadline (RIG-3406). The
-	// second test inits once, so its floor is ~163s.
+	// Neither bound is a prediction of how long the work takes. Earlier revisions
+	// of this comment computed a "floor" from the bounded phases (~199s and
+	// ~163s) and then picked a bound above it; every such figure was falsified by
+	// the next measurement, because the launch's unbounded segments mean the sum
+	// has no upper limit to compute (RIG-3406 carries the phase table). Bidding
+	// above the latest estimate also converges on asserting only "eventually
+	// finishes", which is the opposite of this file's purpose.
 	//
-	// So no test-side bound can be a true cover here, and 240_000 is chosen for
-	// what it CAN do: sit clear of every bounded phase and of their sum, so the
-	// runner deadline never races an operation deadline. A run that exceeds it is
-	// a hang worth failing on rather than waiting out. RIG-3377.
+	// The bound is a budget instead. Its outer constraint is the per-chunk
+	// watchdog in `scripts/ci-test-ts.ts` (`chunkTimeoutMs`, 600_000): overrun
+	// that and the whole chunk dies with no per-test attribution, which is worse
+	// than any named timeout. 180_000 matches the hooks so this bucket has ONE
+	// number rather than a ladder of individually-argued ones, and it is well
+	// clear of every individual bounded phase, so a runner deadline never races
+	// an operation deadline — the defect this file exists to remove. If more than
+	// one bound in a chunk is consumed to exhaustion the sum can still reach the
+	// watchdog; that is a wedge, and the watchdog is the correct backstop for a
+	// wedge. RIG-3377.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
@@ -306,7 +310,7 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		240_000,
+		180_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps deterministic viewport emulation for hidden launches",
@@ -332,6 +336,6 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		240_000,
+		180_000,
 	);
 });

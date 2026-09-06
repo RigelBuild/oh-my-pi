@@ -329,30 +329,21 @@ describe("browser facade Chromium helper E2E", () => {
 				// The 45s is the OUTER bound and covers the whole open, launch included:
 				// `openBrowser` (src/tools/browser.ts:224-225) builds one
 				// `AbortSignal.timeout` from this value and threads it through both
-				// `acquireBrowser` (:238) and `acquireTab` (:269). It does NOT buy 45s of
-				// startup, and the launch inside it has NO single ceiling — three
-				// sequential phases, on two different clocks, none of them the caller's:
+				// `acquireBrowser` (:227-228) and `acquireTab` (:253-254). It does NOT
+				// buy 45s of startup, and it is not a ceiling on the launch: the launch
+				// has NO ceiling any bound here can cover. Several of its phases run on
+				// clocks that are not the caller's, at least two segments have no
+				// deadline at all, and the per-CDP-command phases are additive. Measured
+				// rejections on this path range from ~60s to ~238s depending only on
+				// WHICH segment stalls. Phase table, constants and measurements live in
+				// RIG-3406, which also carries the src-side fix; they are deliberately
+				// not restated here, because three files each holding a copy is how a
+				// corrected figure kept surviving in one of them.
 				//
-				//   1. the WS-endpoint line wait, `timeout` (puppeteer default 30s);
-				//   2. the CDP handshake (`TargetManager.initialize`), governed by our
-				//      own `protocolTimeout` = BROWSER_PROTOCOL_TIMEOUT_MS = 60_000
-				//      (src/tools/browser/launch.ts, passed at the `puppeteer.launch`
-				//      call);
-				//   3. `waitForPageTarget`, a FRESH `timeout` window, not a remainder.
-				//
-				// They ADD: measured warm, a fixture that prints a WS endpoint and then
-				// never answers CDP rejects at 60155ms idle, 80066ms behind a 20s WS
-				// delay, and 89607ms behind a 29.5s one. So the warm launch ceiling is
-				// ~120s, not ~30s. Ahead of all three sits an unbounded
-				// `ensureChromiumExecutable()` resolve (it spawns `--version` per PATH
-				// candidate and can download Chromium), so the offset at which phase 1's
-				// clock even starts is unbounded too.
-				//
-				// Which deadline fires is therefore decided by WHERE time is spent, not
-				// by comparing numbers: a warm phase-1 stall surfaces puppeteer's
-				// WS-endpoint TimeoutError; a phase-2 stall surfaces a ProtocolError at
-				// ~60s; a slow resolve or a post-launch stall surfaces the tool's own
-				// "Browser open timed out". Full phase table and measurements: RIG-3406.
+				// So which deadline fires is decided by WHERE time is spent, never by
+				// comparing numbers: a phase-1 stall surfaces puppeteer's WS-endpoint
+				// TimeoutError, a handshake stall a ProtocolError, a slow resolve or a
+				// post-launch stall the tool's own "Browser open timed out".
 				//
 				// 45s is chosen to clear the old 30s coincidence while staying strictly
 				// under the `it()` bound. Incident history: RIG-3377.
