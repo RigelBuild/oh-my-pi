@@ -31,12 +31,28 @@ export async function chromiumCanLaunch(
 	// since it sets no `PUPPETEER_EXECUTABLE_PATH`. Treat unanswered as unusable,
 	// which is this function's existing contract for a binary that cannot exec:
 	// a Chromium too slow to answer should SKIP the suites, never hang the run.
+	//
+	// But a timeout is NOT the same evidence as "cannot exec", and
+	// `chromiumAvailable()` memoizes this verdict for the process — so a resolve
+	// that transiently overruns pins every browser E2E to skipped. A silent skip
+	// is the one outcome worse than a failure here, because the required gate
+	// goes green having tested nothing. Say so on stderr so it is visible in the
+	// CI log rather than inferred from a suspiciously fast green.
 	const deadline = AbortSignal.timeout(timeoutMs);
 	try {
 		return await Promise.race([
 			probeExecutable(resolve, deadline),
 			new Promise<boolean>(resolveRace => {
-				deadline.addEventListener("abort", () => resolveRace(false), { once: true });
+				deadline.addEventListener(
+					"abort",
+					() => {
+						console.error(
+							`chromium-probe: no answer within ${timeoutMs}ms; treating Chromium as unavailable and SKIPPING the browser suites`,
+						);
+						resolveRace(false);
+					},
+					{ once: true },
+				);
 			}),
 		]);
 	} catch {

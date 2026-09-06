@@ -1,3 +1,4 @@
+import type { Subprocess } from "bun";
 import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -14,12 +15,16 @@ import { chromiumCanLaunch } from "./chromium-probe";
 // spawn leaves that prefix ungoverned during module evaluation, which no test
 // bound and not the harness `--timeout` can cut.
 //
-// The bound is injected rather than exercised at its real 10s: these assert
-// that a deadline fires and is honoured, which a short one shows just as well
-// while keeping the suite off the wall clock. The blocking fixtures below sleep
-// far past the injected bound, so a regression that drops the deadline fails
+// Every test injects the bound rather than exercising the real 10s default:
+// these assert that a deadline fires and is honoured, which a short one shows
+// just as well while keeping the suite off the wall clock. Injecting it in the
+// PASSING tests too matters for the same reason this file exists — left on the
+// 10s default they would carry an inner bound above a bare `bun test`'s 5s
+// harness default, which is a coincident pair of exactly the shape this PR
+// removes. 2s is well clear of spawning a bash script (~5ms here) while far
+// under the blocking fixtures, so a regression that drops the deadline fails
 // them on the bound rather than racing it.
-const BOUND_MS = 250;
+const BOUND_MS = 2_000;
 const BLOCK_S = 30;
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "chromium-probe-test-"));
@@ -36,16 +41,16 @@ async function script(name: string, body: string): Promise<string> {
 
 test("reports a working binary as available", async () => {
 	const ok = await script("ok.sh", 'echo "Chromium 150.0.0.0"');
-	expect(await chromiumCanLaunch(async () => ok)).toBe(true);
+	expect(await chromiumCanLaunch(async () => ok, BOUND_MS)).toBe(true);
 });
 
 test("reports a non-zero exit as unavailable", async () => {
 	const bad = await script("bad.sh", "exit 127");
-	expect(await chromiumCanLaunch(async () => bad)).toBe(false);
+	expect(await chromiumCanLaunch(async () => bad, BOUND_MS)).toBe(false);
 });
 
 test("reports an unresolvable executable as unavailable", async () => {
-	expect(await chromiumCanLaunch(async () => undefined)).toBe(false);
+	expect(await chromiumCanLaunch(async () => undefined, BOUND_MS)).toBe(false);
 });
 
 test.skipIf(process.platform !== "linux")("bounds a binary that never answers --version", async () => {
@@ -64,12 +69,23 @@ test.skipIf(process.platform !== "linux")("bounds a slow resolve, not just the v
 	// The CI-shaped hazard: resolution itself is slow (it probes candidates), and
 	// the executable it eventually returns is fine. A bound armed only around the
 	// spawn would let this run for the full resolve.
+	//
+	// The blocker is the test's own child, not the probe's, so the probe's
+	// `signal:`/`killSignal` cannot reap it. Left alive it keeps this process up
+	// for its full sleep — a green, fast-looking test that stalls the chunk by
+	// BLOCK_S. This bucket runs `parallel: 1`, so that is added wall clock in the
+	// very job this file exists to keep green. Kill it explicitly.
 	const ok = await script("ok-after-slow-resolve.sh", 'echo "Chromium 150.0.0.0"');
-	const available = await chromiumCanLaunch(async () => {
-		const { promise, resolve } = Promise.withResolvers<string>();
-		const blocker = Bun.spawn(["sleep", String(BLOCK_S)]);
-		void blocker.exited.then(() => resolve(ok));
-		return promise;
-	}, BOUND_MS);
-	expect(available).toBe(false);
+	let blocker: Subprocess | undefined;
+	try {
+		const available = await chromiumCanLaunch(async () => {
+			const { promise, resolve } = Promise.withResolvers<string>();
+			blocker = Bun.spawn(["sleep", String(BLOCK_S)]);
+			void blocker.exited.then(() => resolve(ok));
+			return promise;
+		}, BOUND_MS);
+		expect(available).toBe(false);
+	} finally {
+		blocker?.kill();
+	}
 });

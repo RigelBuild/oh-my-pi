@@ -330,21 +330,32 @@ describe("browser facade Chromium helper E2E", () => {
 				// `openBrowser` (src/tools/browser.ts:224-225) builds one
 				// `AbortSignal.timeout` from this value and threads it through both
 				// `acquireBrowser` (:238) and `acquireTab` (:269). It does NOT buy 45s of
-				// startup. Puppeteer's ~30s WS-endpoint default is an INNER bound, and
-				// the two are nested rather than racing: the inner clock does not start
-				// until `launchHeadlessBrowser` reaches `puppeteer.launch`, after an
-				// `ensureChromiumExecutable()` resolve that is itself unbounded (it
-				// spawns `--version` per PATH candidate, and can download Chromium).
-				// So the offset between the two starts is unbounded, and it — not the
-				// magnitudes — decides which fires. Warm resolve, the normal case: a
-				// launch stall hits the ~30s inner bound and surfaces puppeteer's
-				// WS-endpoint TimeoutError. Slow resolve or a post-launch stall: the
-				// outer 45s expires first and surfaces the tool's "Browser open timed
-				// out". Raising the budget cannot move the inner ceiling. Both intervals,
-				// with measurements: RIG-3406.
+				// startup, and the launch inside it has NO single ceiling — three
+				// sequential phases, on two different clocks, none of them the caller's:
+				//
+				//   1. the WS-endpoint line wait, `timeout` (puppeteer default 30s);
+				//   2. the CDP handshake (`TargetManager.initialize`), governed by our
+				//      own `protocolTimeout` = BROWSER_PROTOCOL_TIMEOUT_MS = 60_000
+				//      (src/tools/browser/launch.ts, passed at the `puppeteer.launch`
+				//      call);
+				//   3. `waitForPageTarget`, a FRESH `timeout` window, not a remainder.
+				//
+				// They ADD: measured warm, a fixture that prints a WS endpoint and then
+				// never answers CDP rejects at 60155ms idle, 80066ms behind a 20s WS
+				// delay, and 89607ms behind a 29.5s one. So the warm launch ceiling is
+				// ~120s, not ~30s. Ahead of all three sits an unbounded
+				// `ensureChromiumExecutable()` resolve (it spawns `--version` per PATH
+				// candidate and can download Chromium), so the offset at which phase 1's
+				// clock even starts is unbounded too.
+				//
+				// Which deadline fires is therefore decided by WHERE time is spent, not
+				// by comparing numbers: a warm phase-1 stall surfaces puppeteer's
+				// WS-endpoint TimeoutError; a phase-2 stall surfaces a ProtocolError at
+				// ~60s; a slow resolve or a post-launch stall surfaces the tool's own
+				// "Browser open timed out". Full phase table and measurements: RIG-3406.
 				//
 				// 45s is chosen to clear the old 30s coincidence while staying strictly
-				// under the 90s `it()` bound. Incident history: RIG-3377.
+				// under the `it()` bound. Incident history: RIG-3377.
 				await runInContext(
 					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 45 }); })()",
 					context,

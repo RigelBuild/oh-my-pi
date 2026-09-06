@@ -159,22 +159,23 @@ describe("browser init deadline carry-over", () => {
 	// deadline. This file shares a CI bucket with the other two browser E2Es, so
 	// leaving it unbounded would keep reddening the same required gate.
 	//
-	// As in that hook, 90_000 leaves ~3x slack over the ~30s launch ceiling
-	// (puppeteer's default on the WS-endpoint wait — the full mechanism, and why
-	// the second spend contributes ~0ms here, is documented on that hook; see also
-	// RIG-3406). The deferral holds because this hook passes `acquireBrowser` the
+	// As in that hook, 180_000 to clear the launch's real ~120s ceiling — three
+	// additive phases on two clocks, not puppeteer's ~30s WS-endpoint default
+	// alone (measured 89607ms behind a 29.5s WS delay, which a 90_000 bound raced
+	// by ~400ms). The deferral holds because this hook passes `acquireBrowser` the
 	// same args as that one (`{ kind: "headless", headless: true }`, `cwd` only),
-	// so the same ceiling applies; diverge either call and document it here.
+	// so the same phases apply; diverge either call and document it here. Phase
+	// table: RIG-3406.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	}, 90_000);
+	}, 180_000);
 
 	// Bounded like its sibling: on the WEDGED-Chromium path a killing
 	// `releaseBrowser` can spend ~7.5s — a 5s close timeout, then a ~2.5s graceful
 	// tree kill only in that timeout's catch — followed by an unbounded recursive
-	// profile removal that runs on every platform (only its ~2s retry window is
-	// win32-gated). A healthy close pays neither in full. Rationale in full on
+	// profile removal that runs on every platform (its ~2s retry loop is win32-only
+	// and does not run elsewhere). A healthy close pays neither in full. In full on
 	// that sibling's `afterAll`.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
@@ -245,18 +246,19 @@ describe("visible OMP-owned browser tabs", () => {
 	// They are still in scope: the second is gated on `CHROMIUM_AVAILABLE`, so it
 	// runs in the same CI bucket as the flaking tests.
 	//
-	// The exposure is additive and 90_000 does not cover it. From the bounded
-	// phases alone the first test has a FLOOR of ~109s: it calls `acquireTab`
-	// twice and its `finally` closes two tabs and kills the browser, so ~30s warm
-	// launch ceiling + 2x`initBudgetMs` (`timeoutMs + GRACE_MS` = 30_750 total per
-	// init, tab-supervisor.ts) + 2x`DEFAULT_TAB_CLOSE_TIMEOUT_MS` (5_000) + ~7.5s
-	// wedged teardown. It has no ceiling above that floor, because the executable
-	// resolve ahead of each launch carries no deadline (RIG-3406). The second test
-	// inits once, so its floor is ~73s.
+	// The exposure is additive. From the bounded phases alone the first test has a
+	// FLOOR of ~199s: it calls `acquireTab` twice and its `finally` closes two
+	// tabs and kills the browser, so ~120s launch (three additive phases, not the
+	// ~30s WS-endpoint default alone) + 2x`initBudgetMs` (`timeoutMs + GRACE_MS`
+	// = 30_750 total per init, tab-supervisor.ts) + 2x`DEFAULT_TAB_CLOSE_TIMEOUT_MS`
+	// (5_000) + ~7.5s wedged teardown. There is no ceiling above that floor: the
+	// executable resolve ahead of each launch carries no deadline (RIG-3406). The
+	// second test inits once, so its floor is ~163s.
 	//
-	// 90_000 is therefore chosen on what it can honestly claim: it clears every
-	// single-phase stall and the old 45_000 coincidence. A run that maxes several
-	// phases at once is a hang worth failing on rather than waiting out. RIG-3377.
+	// So no test-side bound can be a true cover here, and 240_000 is chosen for
+	// what it CAN do: sit clear of every bounded phase and of their sum, so the
+	// runner deadline never races an operation deadline. A run that exceeds it is
+	// a hang worth failing on rather than waiting out. RIG-3377.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
@@ -304,7 +306,7 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		90_000,
+		240_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps deterministic viewport emulation for hidden launches",
@@ -330,6 +332,6 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		90_000,
+		240_000,
 	);
 });

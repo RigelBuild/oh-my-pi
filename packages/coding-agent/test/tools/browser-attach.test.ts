@@ -103,20 +103,23 @@ describe("pickElectronTarget", () => {
 	// "a beforeEach/afterEach hook timed out" naming no deadline at all.
 	//
 	// The bound is explicit so the hook is never silently governed by a harness
-	// flag, and 90_000 leaves ~3x slack over the ~30s warm launch ceiling —
-	// puppeteer's default on the WS-endpoint wait, since `puppeteer.launch` is
-	// passed no `timeout`. The ceiling is only the WARM figure: the resolve ahead
-	// of the launch is unbounded, so a cold resolve adds to it. Nesting, the
-	// second (inert) spend, and the measurements: RIG-3406, and the mechanism is
-	// written out once on browser-prelude-facade.test.ts's `browser.open`.
-	//
-	// Note the ~30s ceiling is numerically identical to CI's own `--timeout=30000`
-	// — the same coincidence class this file exists to remove. An explicit bound
-	// overrides the flag, so any browser-launching test added here needs one.
+	// flag, and it must clear the launch's real ceiling — which is ~120s, not the
+	// ~30s of puppeteer's WS-endpoint default. `puppeteer.launch` spends three
+	// additive phases on two clocks (WS line wait 30s; CDP handshake on our own
+	// `protocolTimeout` 60s; then a fresh 30s `waitForPageTarget`), and this call
+	// is bare `acquireBrowser` with no tool budget outside it, so it is exposed to
+	// the sum. Measured warm against a CDP tarpit: 60155ms idle, 89607ms behind a
+	// 29.5s WS delay. A 90_000 bound sat ~400ms from that — the very coincidence
+	// this file exists to remove, so 180_000. Ahead of all three phases sits an
+	// unbounded executable resolve, so no test-side bound can be a true ceiling;
+	// giving the launch a real one is a src change (RIG-3406), which is why this
+	// bound is sized to stop racing rather than to cover every case. The phase
+	// table and measurements live there; the mechanism is written out once on
+	// browser-prelude-facade.test.ts's `browser.open`.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	}, 90_000);
+	}, 180_000);
 
 	// Bounded for the same reason as the hook above, and sized for the worst-case
 	// teardown — which is the WEDGED-Chromium path, not the normal cost.
@@ -126,9 +129,10 @@ describe("pickElectronTarget", () => {
 	// attach.ts): ~7.5s when Chromium is wedged, already over a bare
 	// `bun test`'s 5s default, while a healthy close pays neither in full.
 	// Then an UNBOUNDED recursive profile removal (`removeUserDataDir`,
-	// registry.ts) runs on every platform; only its ~2s retry window is
-	// win32-gated (`shouldRetryRemove`, utils/src/temp.ts). 30_000's margin over
-	// the ~7.5s exists to absorb that removal — the one component that can grow.
+	// registry.ts) runs on every platform; its bounded retry loop (40 x 50ms ~ 2s,
+	// `shouldRetryRemove`, utils/src/temp.ts) is win32-only and does not run at
+	// all elsewhere, so off Windows the removal is a single `fs.rm`. 30_000's
+	// margin over the ~7.5s absorbs that removal — the one component that can grow.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 	}, 30_000);
@@ -240,6 +244,15 @@ describe("pickElectronTarget", () => {
 		}
 	}, 10_000);
 
+	// These `kind: "spawned"` acquisitions are the one real-acquisition shape in
+	// this file that is NOT `CHROMIUM_AVAILABLE`-gated, so they run on every
+	// runner. They are deliberately out of the deadline audit: the spawned
+	// executable is a disposable `bun --eval`, not Chromium, so none of the launch
+	// phases apply — no WS-endpoint wait, no CDP handshake, no page target. What
+	// 10_000 has to cover is a bun spawn plus one loopback fetch (~100ms here),
+	// and no operation inside carries a bound near it, so there is nothing to
+	// separate. Add a Chromium launch to either and it inherits the ~120s ceiling
+	// documented on the hook above.
 	test("launches an isolated user-data-dir beside a running executable", async () => {
 		const existing = await spawnDisposableExecutable();
 		const { promise: launched, resolve: markLaunched } = Promise.withResolvers<void>();
@@ -309,7 +322,7 @@ describe("pickElectronTarget", () => {
 				// already-running browser rather than launching one. No launch ceiling
 				// applies, and the 45s genuinely governs the whole open. The attach path
 				// carries its own bound — `waitForCdp`'s 5s on the `connected` branch
-				// (registry.ts; the file's other call sites use different bounds) — clear
+				// (registry.ts:200; the file's other sites use different bounds) — clear
 				// of the 45s, so the two do not coincide.
 				await invokeBrowser({
 					action: "open",
