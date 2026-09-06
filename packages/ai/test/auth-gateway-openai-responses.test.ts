@@ -490,6 +490,27 @@ describe("openai-responses parseRequest", () => {
 		expect(tool.strict).toBe(false);
 	});
 
+	it("still rejects a wrong-typed strict after the null widening", () => {
+		// The two tests above only assert what the widening ADMITS, so on their own
+		// they would stay green if someone loosened the tool schema wholesale. This
+		// pins the other edge: `null` is accepted, a non-boolean is still refused.
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.6-luna",
+				input: "hi",
+				tools: [
+					{
+						type: "function",
+						name: "read",
+						description: "read a file",
+						parameters: { type: "object" },
+						strict: "yes",
+					},
+				],
+			}),
+		).toThrow("tools[0].strict must be boolean or null (was a string)");
+	});
+
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
 		expect(() =>
 			parseRequest({
