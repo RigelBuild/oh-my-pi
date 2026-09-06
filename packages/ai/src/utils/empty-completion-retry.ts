@@ -186,13 +186,19 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			// lets the agent loop accept a 0-token no-op turn and idle silently —
 			// a wedge that survives `--resume`. Surface it as a loud error terminal
 			// instead so the turn errors visibly. `rule://no-retries`: a swallowed
-			// empty completion is the fail-open pattern to reject. Gated on the
-			// shape-only `isRetryableEmpty` (not `retryEmpty`, whose cap conjunct is
-			// false exactly when the cap is exhausted), so `acceptEmptyResponse`
-			// callers are unaffected; and on `!signal?.aborted`, so an aborted turn
-			// (like the backoff-abort path above) delivers its terminal as-is rather
-			// than being relabeled a provider error.
-			if (isRetryableEmpty && completedMessage !== undefined && !signal?.aborted) {
+			// empty completion is the fail-open pattern to reject.
+			if (
+				// Shape-only, NOT `retryEmpty`: that carries the cap conjunct, which is
+				// false exactly when the cap is exhausted — i.e. here. Retains the
+				// `acceptEmptyResponse` / `retryEmptyCompletion` terms, so opt-out
+				// callers never reach this.
+				isRetryableEmpty &&
+				completedMessage !== undefined &&
+				// An aborted turn (e.g. the backoff-abort path above) delivers its
+				// terminal as-is; relabeling it a provider error would blame the
+				// provider for the caller's cancellation.
+				!signal?.aborted
+			) {
 				const errored: AssistantMessage = {
 					...completedMessage,
 					stopReason: "error",
