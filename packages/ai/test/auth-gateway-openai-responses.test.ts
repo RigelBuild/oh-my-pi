@@ -768,25 +768,24 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.context.tools?.[0]?.parameters).toEqual({});
 	});
 
-	it("still rejects a wrong-typed strict after the null widening", () => {
+	it("still rejects wrong types on all three widened tool fields", () => {
 		// The two tests above only assert what the widening ADMITS, so on their own
 		// they would stay green if someone loosened the tool schema wholesale. This
-		// pins the other edge: `null` is accepted, a non-boolean is still refused.
-		expect(() =>
-			parseRequest({
-				model: "gpt-5.4",
-				input: "hi",
-				tools: [
-					{
-						type: "function",
-						name: "read",
-						description: "read a file",
-						parameters: { type: "object" },
-						strict: "yes",
-					},
-				],
-			}),
-		).toThrow("tools[0].strict must be boolean or null (was a string)");
+		// pins the other edge for each widened field: `null` is accepted, a
+		// wrong-typed value is still refused.
+		//
+		// Assert only that the field name appears in the rejection. The tool schema
+		// is a union, and which arm arktype reports depends on whether the union has
+		// already been exercised in this module instance — so an exact message match
+		// here passes in a whole-file run and fails under `-t`, reordering, or a
+		// future insertion above it. The invariant under test is the rejection.
+		const withTool = (tool: Record<string, unknown>) => () =>
+			parseRequest({ model: "gpt-5.4", input: "hi", tools: [tool] });
+		const base = { type: "function", name: "read", description: "read a file", parameters: { type: "object" } };
+
+		expect(withTool({ ...base, strict: "yes" })).toThrow(/strict/);
+		expect(withTool({ ...base, description: 42 })).toThrow(/description/);
+		expect(withTool({ ...base, parameters: "x" })).toThrow(/parameters/);
 	});
 
 	it("still rejects a function tool whose name is absent", () => {
