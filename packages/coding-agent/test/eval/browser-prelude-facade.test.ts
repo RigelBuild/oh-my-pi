@@ -326,15 +326,16 @@ describe("browser facade Chromium helper E2E", () => {
 				// bound — so both deadlines expired together and a slow start raced two
 				// timers, which is why one commit went red and green in adjacent runs.
 				//
-				// The 45s governs the WHOLE open: CDP connect, queued tab acquisition,
-				// worker init, and navigation, whose SUM was crossing 30s. It does NOT buy
-				// 45s of startup — the launch phase sits outside this budget entirely,
-				// capped by puppeteer's own bound, which it spends TWICE in sequence (the
-				// WS-endpoint wait, then `waitForPageTarget`) for a real ceiling near 60s;
-				// measured 33.0s idle and 59.9s at a 29s startup delay (RIG-3406). A
-				// launch slower than that fails with puppeteer's WS-endpoint TimeoutError
-				// rather than the tool's message. 45s deliberately avoids both 30s (the
-				// old coincidence) and ~60s (the launch ceiling), and stays strictly under
+				// The 45s governs the post-launch remainder: CDP connect, queued tab
+				// acquisition, worker init, and navigation, whose SUM was crossing 30s.
+				// It does NOT buy 45s of startup. This call supplies no `app.cdp_url`, so
+				// it LAUNCHES, and the launch phase sits outside this budget — capped at
+				// ~30s by puppeteer's default on the WS-endpoint wait, which is BELOW the
+				// 45s. So on a cold launch the ceiling preempts the tool budget and the
+				// failure is puppeteer's WS-endpoint TimeoutError, not the tool's message
+				// (measured: ~1-3s idle; a 29s delay passes at ~30.1s; a 31s delay throws
+				// at ~30.2s). Raising the budget cannot move that — RIG-3406. 45s is
+				// chosen to clear the old 30s coincidence while staying strictly under
 				// the 90s `it()` bound. Incident history: RIG-3377.
 				await runInContext(
 					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 45 }); })()",

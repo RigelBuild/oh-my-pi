@@ -103,24 +103,31 @@ describe("pickElectronTarget", () => {
 	// "a beforeEach/afterEach hook timed out" naming no deadline at all.
 	//
 	// The bound is explicit so the hook is never silently governed by a harness
-	// flag. It is 90_000 to clear the launch ceiling with slack: `acquireBrowser`
-	// reaches `puppeteer.launch`, which is passed no `timeout`, so puppeteer
-	// applies its default 30_000 TWICE in sequence — the WS-endpoint wait, then
-	// `waitForPageTarget` (`waitForInitialPage` also defaults on) — making the real
-	// launch ceiling ~60s, not 30s. Measured directly against
-	// `launchHeadlessBrowser`: 33.0s with no induced delay, 59.9s at a 29s startup
-	// delay. A 60s bound here would sit ON that ceiling, re-creating exactly the
-	// coincidence this file is fixing. Threading a launch budget through is a src
-	// change (RIG-3406).
+	// flag, and 90_000 leaves ~3x slack over the launch ceiling. That ceiling is
+	// puppeteer's default 30_000 on the WS-endpoint wait: `acquireBrowser` reaches
+	// `puppeteer.launch`, which is passed no `timeout`. Measured against
+	// `launchHeadlessBrowser` on this path: ~1-3s idle, a 29s startup delay still
+	// succeeds at ~30.1s, and a 31s delay throws at ~30.2s with puppeteer's
+	// WS-endpoint TimeoutError.
+	//
+	// puppeteer spends that same 30_000 a second time in `waitForPageTarget`, and
+	// the phases ARE additive — but it contributes ~0ms here, because a normal
+	// launch already has an initial page target. It only becomes visible under
+	// `--no-startup-window`, which only the shared-daemon spec passes, never this
+	// path. Threading a launch budget through is a src change (RIG-3406).
+	//
+	// Note the ceiling (~30s) is numerically identical to CI's own `--timeout=30000`
+	// — the same coincidence class this file exists to remove. An explicit bound
+	// overrides the flag, so any browser-launching test added here needs one.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 	}, 90_000);
 
 	// Bounded for the same reason as the hook above, and sized for the worst-case
-	// teardown: `releaseBrowser(…, { kill: true })` can spend a 5s close timeout,
-	// then a ~2.5s graceful tree kill, then ~2s of profile-removal retries — about
-	// 9.5s, over a bare `bun test`'s 5s default.
+	// teardown: `releaseBrowser(…, { kill: true })` can spend a 5s close timeout
+	// then a ~2.5s graceful tree kill — ~7.5s here, over a bare `bun test`'s 5s
+	// default. (A further ~2s of profile-removal retries applies on win32 only.)
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 	}, 30_000);
@@ -296,7 +303,10 @@ describe("pickElectronTarget", () => {
 				// Explicit budget, strictly below the `it()` bound: the implicit default
 				// is 30s (`clampTimeout`), which equalled the old test bound and left the
 				// tool and runner deadlines expiring together. Rationale in full:
-				// browser-prelude-facade.test.ts, the `browser.open` call.
+				// browser-prelude-facade.test.ts, the `browser.open` call — with one
+				// difference: this site passes `app.cdp_url`, so it ATTACHES to an
+				// already-running browser rather than launching one. No launch ceiling
+				// applies, and the 45s genuinely governs the whole open.
 				await invokeBrowser({
 					action: "open",
 					name: tabName,

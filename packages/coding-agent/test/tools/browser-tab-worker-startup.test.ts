@@ -159,15 +159,18 @@ describe("browser init deadline carry-over", () => {
 	// deadline. This file shares a CI bucket with the other two browser E2Es, so
 	// leaving it unbounded would keep reddening the same required gate.
 	//
-	// As in that hook, 90_000 clears the ~60s launch ceiling (puppeteer spends its
-	// default 30_000 twice in sequence — see RIG-3406) rather than sitting on it.
+	// As in that hook, 90_000 leaves ~3x slack over the ~30s launch ceiling
+	// (puppeteer's default on the WS-endpoint wait — the full mechanism, and why
+	// the second spend contributes ~0ms here, is documented on that hook; see also
+	// RIG-3406).
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 	}, 90_000);
 
-	// Bounded like its sibling: a killing `releaseBrowser` can spend ~9.5s across
-	// close timeout, graceful tree kill, and profile-removal retries.
+	// Bounded like its sibling: a killing `releaseBrowser` can spend ~7.5s across
+	// close timeout and graceful tree kill (plus ~2s of profile-removal retries on
+	// win32 only).
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 	}, 30_000);
