@@ -285,6 +285,34 @@ describe("generated model policies", () => {
 		});
 	});
 
+	it("cuts cacheRead to $0.25 for Fable/Mythos 5.1+ while 5.0 keeps $1", () => {
+		const build = (id: string) =>
+			buildGenerated(
+				createSpec({
+					id,
+					api: "anthropic-messages",
+					provider: "anthropic",
+					baseUrl: "https://api.anthropic.com",
+				}),
+			);
+
+		// 5.1 cut cacheRead 75%; every other field is unchanged across 5.x. The
+		// whole cost object is asserted because `cost-patch` is one cascade axis
+		// that replaces rather than merges — a cacheRead-only patch would drop
+		// the other three fields and still satisfy a cacheRead-only assertion.
+		for (const id of ["claude-fable-5-1", "claude-mythos-5-1"]) {
+			expect(build(id)?.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 });
+		}
+		// A later revision inherits the reduced rate rather than falling back.
+		expect(build("claude-fable-5-2")?.cost.cacheRead).toBe(0.25);
+		// The 5.0 generation is unaffected.
+		expect(build("claude-fable-5")?.cost.cacheRead).toBe(1);
+		// `limits-patch` is a separate axis, so the revision-scoped cost patch
+		// must not disturb the family-level limits pin.
+		expect(build("claude-fable-5-1")?.contextWindow).toBe(1_000_000);
+		expect(build("claude-fable-5-1")?.maxTokens).toBe(128_000);
+	});
+
 	it("preserves QwenCloud's provider-authored qwen3.8 effort ladders", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({
