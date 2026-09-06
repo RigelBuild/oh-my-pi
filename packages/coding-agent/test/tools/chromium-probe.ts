@@ -5,34 +5,54 @@ import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/bro
 import { type ChildProcess, ptree } from "@oh-my-pi/pi-utils";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 
-/**
- * Whether the Chromium puppeteer resolves can actually execute on this host.
- * CI runners without Chrome's system libraries (libnspr4 & co.) hold the
- * downloaded binary but cannot exec it. A wrapper can also print a version
- * without starting Chrome, so Linux requires a live headless CDP endpoint.
- */
-async function chromiumCanLaunch(): Promise<boolean> {
+const PROBE_TIMEOUT_MS = 10_000;
+
+/** Linux checks for a live headless browser; the outer bound includes resolve. */
+export async function chromiumCanLaunch(
+	resolveExecutable: () => Promise<string | undefined> = ensureChromiumExecutable,
+	timeoutMs = PROBE_TIMEOUT_MS,
+	checkAvailability: (
+		executable: string,
+		timeoutMs: number,
+		signal: AbortSignal,
+	) => Promise<boolean> = chromiumCdpAvailable,
+): Promise<boolean> {
+	const startedAt = performance.now();
+	const controller = new AbortController();
+	const { promise: deadline, resolve } = Promise.withResolvers<boolean>();
+	const timer = setTimeout(() => {
+		controller.abort();
+		console.error(
+			`chromium-probe: no answer within ${timeoutMs}ms; treating Chromium as unavailable and SKIPPING the browser suites`,
+		);
+		resolve(false);
+	}, timeoutMs);
 	try {
-		const executable = await ensureChromiumExecutable();
-		if (!executable) return false;
-		// Only Linux runs the exec probe. Elsewhere the resolved candidate is a
-		// GUI application path, and running it is the hazard
-		// `isChromiumExecutable()` already refuses for the same reason (#8445): a
-		// GUI `chrome.exe --version` prints nothing to a detached stdout and does
-		// not exit, so this spawnSync never returns and every importing suite
-		// hangs during module evaluation. Check the file instead, so a stale
-		// PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
-		// back unvalidated — still skips the suites rather than failing them at
-		// launch.
-		if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
-		return await chromiumCdpAvailable(executable);
+		return await Promise.race([
+			(async () => {
+				const executable = await resolveExecutable();
+				if (!executable) return false;
+				const remainingMs = timeoutMs - (performance.now() - startedAt);
+				if (remainingMs <= 100) return false;
+				// Avoid GUI binaries that may never exit without a display (#8445).
+				if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
+				return await checkAvailability(executable, remainingMs - 100, controller.signal);
+			})(),
+			deadline,
+		]);
 	} catch {
 		return false;
+	} finally {
+		clearTimeout(timer);
 	}
 }
 
-/** A disposable headless launch must actually answer CDP, not just --version. */
-export async function chromiumCdpAvailable(executable: string, timeoutMs = 5000): Promise<boolean> {
+/** A disposable headless launch must answer CDP. */
+export async function chromiumCdpAvailable(
+	executable: string,
+	timeoutMs = 5000,
+	signal?: AbortSignal,
+): Promise<boolean> {
 	const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-chromium-probe-"));
 	let child: ChildProcess | undefined;
 	try {
@@ -50,7 +70,7 @@ export async function chromiumCdpAvailable(executable: string, timeoutMs = 5000)
 			],
 			{ stdin: "ignore", detached: true, subreaper: true },
 		);
-		await waitForCdp(`http://127.0.0.1:${port}`, timeoutMs);
+		await waitForCdp(`http://127.0.0.1:${port}`, timeoutMs, signal);
 		return true;
 	} catch {
 		return false;
@@ -65,20 +85,7 @@ export async function chromiumCdpAvailable(executable: string, timeoutMs = 5000)
 
 let probe: Promise<boolean> | undefined;
 
-/**
- * Gate for tests that launch a real Chromium:
- *
- *     const CHROMIUM_AVAILABLE = await chromiumAvailable();
- *     describe.skipIf(!CHROMIUM_AVAILABLE)(…);
- *
- * The result is a promise rather than an awaited `export const`. A module whose
- * exports are initialized by top-level await hands the test runner a binding
- * that is still in its temporal dead zone when a second test file in the same
- * process imports it, and that file dies during registration with "Cannot
- * access 'CHROMIUM_AVAILABLE' before initialization". Awaiting in the importer
- * makes the wait part of that file's own evaluation, which the runner does
- * sequence. The probe runs once per process.
- */
+// Return a promise to avoid a top-level-await export TDZ in concurrent importers.
 export function chromiumAvailable(): Promise<boolean> {
 	probe ??= chromiumCanLaunch();
 	return probe;
@@ -86,19 +93,7 @@ export function chromiumAvailable(): Promise<boolean> {
 
 let visibleProbe: Promise<boolean> | undefined;
 
-/**
- * Gate for tests that launch a *headful* Chromium (`headless: false`).
- *
- * `chromiumAvailable()` checks a headless launch on Linux, which needs no
- * display and cannot gate a headful launch. On a
- * GH-hosted ubuntu runner there is no X server and no xvfb in the workflow,
- * so `puppeteer.launch({ headless: false })` throws "Missing X server or
- * $DISPLAY" and the suite fails rather than skipping. Require a display on
- * Linux; macOS and Windows launch headful without one.
- *
- * Same promise-not-awaited-const shape as `chromiumAvailable()`, for the same
- * temporal-dead-zone reason.
- */
+// Headful launches need a display on Linux.
 export function visibleBrowserAvailable(): Promise<boolean> {
 	visibleProbe ??= (async () => {
 		if (!(await chromiumAvailable())) return false;
