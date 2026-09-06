@@ -291,12 +291,11 @@ segments), so `__piNativesV18_1_10_rigel_1` does not match,
 addon has no unique release version sentinel" (`native-version.ts:20`),
 failing `ci:test:install-methods` (`package.json:124`, `ci.yml:545`) on the
 first rigel release commit and blocking the release. Fix in Task 2: the
-harness must round-trip the FULL version, suffix included. Do NOT widen
-`VERSION_SENTINEL_RE` by adding an optional `(?:_rigel_(\d+))?` group: the
-capture is discarded, because `native-version.ts:10` rebuilds the version from
-only the first three groups
-(``.map(match => `${match[1]}.${match[2]}.${match[3]}`)``), so
-`__piNativesV18_1_10_rigel_1` would yield the TRUNCATED `18.1.10`. That
+harness must round-trip the FULL version, suffix included. Widening
+`VERSION_SENTINEL_RE` is NECESSARY BUT NOT SUFFICIENT: `native-version.ts:10`
+rebuilds the version from only the first three groups
+(``.map(match => `${match[1]}.${match[2]}.${match[3]}`)``), so a widened regex
+alone silently drops the capture and yields the TRUNCATED `18.1.10`. That
 truncation fails a second time, further downstream and with a misleading
 diagnosis: `run-ci.sh:67` feeds the value to `align_native_manifest`, whose
 `:78-82` comparison sees `declared_version 18.1.10-rigel.1` !=
@@ -307,13 +306,37 @@ strict path. Worse, the `:706` `diskHasExpectedSentinel` check uses
 `.includes()` on the raw file bytes and `__piNativesV18_1_10` IS a substring of
 `__piNativesV18_1_10_rigel_1`, so it evaluates TRUE and routes into the
 `:714` branch that throws the wrong error ("omp was upgraded while this
-session was running; restart omp") instead of a version mismatch. PRESCRIBED
-fix: make the sentinel-to-version inverse preserve the suffix, either by
-deriving the expected sentinel from `packages/natives/package.json` the way the
-runtime loader does (`loader-state.js:840`), or by inverting the sentinel
-directly (`sentinel.slice("__piNativesV".length).replace(/_/g, ".")`
-constrained to a `-rigel.N` shape) so the returned value is
-`18.1.10-rigel.1`. Only this harness needs the change.
+session was running; restart omp") instead of a version mismatch.
+
+PRESCRIBED fix (both edits in the same commit): widen `VERSION_SENTINEL_RE`
+(`:3`) to `/^__piNativesV(\d+)_(\d+)_(\d+)(?:_rigel_(\d+))?$/` AND fix the
+`:10` rebuild to
+`` .map(m => `${m[1]}.${m[2]}.${m[3]}${m[4] ? `-rigel.${m[4]}` : ""}`) ``.
+Verified: the rigel sentinel then yields `18.1.10-rigel.1` and a plain
+three-segment sentinel still yields `18.1.10`, so the existing
+`native-version.test.ts` cases and the PR path both keep passing.
+
+Two mechanisms that look plausible and are WRONG, recorded so nobody retries
+them:
+
+- **Blind `_`-to-`.` inversion**
+  (`sentinel.slice("__piNativesV".length).replace(/_/g, ".")`) yields
+  `18.1.10.rigel.1`, not `18.1.10-rigel.1`. The encoding at `release.ts:345`
+  (`version.replace(/[^A-Za-z0-9]/g, "_")`) is LOSSY: it maps both `.` and `-`
+  to `_`, so a blind inverse cannot recover which separator was which.
+- **Deriving the expected sentinel from `packages/natives/package.json`** (the
+  way `loader-state.js:840` does) inverts the harness's direction of use and
+  breaks the PR path. `run-ci.sh:67` calls this helper to discover what the
+  addon ON DISK actually is, precisely so `align_native_manifest` (`:76-82`)
+  can reconcile a DIVERGENT manifest against it; deriving the answer from the
+  manifest returns `undefined` in exactly that divergent case. Concretely:
+  `ci.yml:282-285` deliberately fetches the UPSTREAM base addon
+  (`base="${version%%-*}"` → `@oh-my-pi/pi-natives-linux-x64@18.1.10`,
+  exporting `__piNativesV18_1_10`) while the checkout's manifest carries
+  `18.1.10-rigel.1`, so manifest-derivation would fail
+  `ci:test:install-methods` red on every post-first-release PR.
+
+Only this harness needs the change.
 
 **GitHub release notes: a second regex needs the suffix (Task 4 scope).** Two
 `-rigel.N`-blind regexes sit in `scripts/ci-release-notes.ts`, and the second
@@ -482,14 +505,18 @@ One commit atop Task 1 (overlay row 8, part 1):
   `<base>-rigel.1`.
 - Fix the install-test sentinel round-trip:
   `scripts/install-tests/native-version.ts` must return the FULL version
-  including the `-rigel.N` suffix. Do NOT just add an optional
-  `(?:_rigel_(\d+))?` group to `VERSION_SENTINEL_RE` (`:3`): `:10` rebuilds
-  from groups 1-3 only, so the capture is dropped and the value truncates to
-  `18.1.10`, which fails again downstream with a misleading diagnosis (full
-  chain in Approach §2). Instead derive the expected sentinel from
-  `packages/natives/package.json` as the runtime loader does
-  (`packages/natives/native/loader-state.js:840`), or invert the sentinel
-  directly so `__piNativesV18_1_10_rigel_1` maps to `18.1.10-rigel.1`. The
+  including the `-rigel.N` suffix, which takes TWO edits in the same commit:
+  widen `VERSION_SENTINEL_RE` (`:3`) to
+  `/^__piNativesV(\d+)_(\d+)_(\d+)(?:_rigel_(\d+))?$/` AND fix the `:10`
+  rebuild to
+  `` .map(m => `${m[1]}.${m[2]}.${m[3]}${m[4] ? `-rigel.${m[4]}` : ""}`) ``.
+  Widening the regex alone is NOT sufficient (`:10` rebuilds from groups 1-3,
+  dropping the capture, truncating to `18.1.10` and failing downstream with a
+  misleading diagnosis). Do NOT derive the version from
+  `packages/natives/package.json` and do NOT use a blind `_`-to-`.` inverse:
+  both are wrong for reasons recorded in Approach §2 (direction-of-use
+  inversion that red-gates every post-release PR, and a lossy encoding that
+  cannot recover the hyphen). The
   runtime loader is already tolerant (`loader-state.js:667,698`); only this
   harness blocks. Without the fix, `nativeVersionFromExports` returns
   undefined, the CLI throws at `native-version.ts:20`, and
@@ -646,12 +673,16 @@ main, verified `git rev-parse origin/main:scripts/release.test.ts`):
   `v17.2.8` are currently expected to be ACCEPTED and must be rewritten to
   expect null. The canary-bump cases at `:47-66` survive unchanged
   (`bumpVersion`/`bumpCanaryVersion` stay exported).
-- Sentinel round-trip (install-test harness): assert the EXACT value, not just
-  truthiness —
+- Sentinel round-trip (install-test harness), BOTH directions, exact values:
   `nativeVersionFromExports(["__piNativesV18_1_10_rigel_1"])` must equal
-  `"18.1.10-rigel.1"`, NOT `"18.1.10"`. A truncating implementation satisfies a
-  "returns the version" assertion vacuously and would ship green (see Approach
-  §2 for the downstream failure it causes).
+  `"18.1.10-rigel.1"` (not `"18.1.10"` — a truncating implementation satisfies
+  a bare "returns the version" assertion vacuously and would ship green), AND
+  `nativeVersionFromExports(["__piNativesV18_1_10"])` must equal `"18.1.10"`.
+  The plain-sentinel case is the one that defends the PR path: it fails any
+  implementation that resolves the version from `packages/natives/package.json`
+  instead of from the addon's exports, which would otherwise pass the rigel
+  case green while red-gating `ci:test:install-methods` on every
+  post-first-release PR (`ci.yml:282-285` fetches the upstream base addon).
 - `parseVersion`: `18.1.10-rigel.3` → `[18, 1, 10]`.
 - `bumpRigelVersion` (D5): `v18.1.10-rigel.1` → `18.1.10-rigel.2`;
   tagless + pkg `18.1.10` → `18.1.10-rigel.1`.
