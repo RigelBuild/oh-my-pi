@@ -490,10 +490,22 @@ describe("openai-responses parseRequest", () => {
 		expect(tool.strict).toBe(false);
 	});
 
-	it("still rejects a wrong-typed strict after the null widening", () => {
+	it.each([
+		["strict", { strict: "yes" }],
+		["description", { description: 7 }],
+		["parameters", { parameters: "not-an-object" }],
+	] as const)("still rejects a wrong-typed %s after the null widening", (field, override) => {
 		// The two tests above only assert what the widening ADMITS, so on their own
 		// they would stay green if someone loosened the tool schema wholesale. This
-		// pins the other edge: `null` is accepted, a non-boolean is still refused.
+		// pins the other edge: `null` is accepted, a wrong type is still refused.
+		//
+		// Match on the field name rather than the validator's exact wording. The
+		// tool schema is a union, and which arm it reports depends on whether the
+		// union has already been exercised in this module instance -- so an
+		// exact-message assertion passes only in committed file order and goes red
+		// under `-t`, `.only`, or any reordering. Both arms name the offending
+		// field; only the phrasing around it moves. The invariant under test is
+		// the rejection, not the phrasing.
 		expect(() =>
 			parseRequest({
 				model: "gpt-5.6-luna",
@@ -504,11 +516,11 @@ describe("openai-responses parseRequest", () => {
 						name: "read",
 						description: "read a file",
 						parameters: { type: "object" },
-						strict: "yes",
+						...override,
 					},
 				],
 			}),
-		).toThrow("tools[0].strict must be boolean or null (was a string)");
+		).toThrow(new RegExp(`tools\\[0\\].*\\b${field}\\b`));
 	});
 
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
