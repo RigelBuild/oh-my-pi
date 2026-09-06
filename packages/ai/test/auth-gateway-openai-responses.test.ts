@@ -494,23 +494,25 @@ describe("openai-responses parseRequest", () => {
 	// own they would stay green if someone loosened the tool schema wholesale.
 	// These pin the other edge: `null` is accepted, a wrong type is still refused.
 	//
-	// The schema is a union, and its message depends on how many times the union
-	// has already been parsed in this module instance: from the second parse on it
-	// names the field (`tools[0].strict must be ...`), before that it reports only
-	// the generic arm. So the assertion accepts either. What it must NOT accept is
-	// a bare field name anywhere in the text -- the generic message echoes the
-	// whole tool object, so `/tools\[0\].*\bstrict\b/` is satisfied by the fixture
-	// we sent rather than by the validator's conclusion, and would match \bname\b
+	// The schema is a union, and its message depends on how many requests this
+	// module instance has already parsed -- any request, including ones carrying
+	// no tools at all: from the third parse on it names the field
+	// (`tools[0].strict must be ...`), before that it reports only the generic
+	// arm. So the assertion accepts either. What it must NOT accept is a bare
+	// field name anywhere in the text -- the generic message echoes the whole
+	// tool object, so `/tools\[0\].*\bstrict\b/` is satisfied by the fixture we
+	// sent rather than by the validator's conclusion, and would match \bname\b
 	// or \btype\b just as happily. Both alternatives below are contiguous
 	// diagnostic prefixes.
 	//
 	// Coverage this does not have, stated rather than implied: the generic arm is
 	// field-agnostic, so while it is the matching arm a case asserting one field
-	// while breaking another passes. That is the first one or two cases to parse,
-	// whichever they are -- not a fixed field, and not this file's whole-file run,
-	// where every case is past the threshold and all six wrong pairings are
-	// caught. Closing the remaining gap needs a field-level error from the schema
-	// on the first parse, not a stronger pattern here.
+	// while breaking another passes. That is whichever two cases parse first --
+	// an ordinal, not a fixed field: permuting the array moves the gap to
+	// whoever lands there. It is not this file's whole-file run, where earlier
+	// tests have already warmed the module and all six wrong pairings are
+	// caught. Closing the remaining gap needs a field-level error from the
+	// schema on the first parse, not a stronger pattern here.
 	it.each([
 		["strict", { strict: "yes" }],
 		["description", { description: 7 }],
