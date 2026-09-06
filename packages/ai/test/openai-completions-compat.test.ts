@@ -2927,7 +2927,19 @@ describe("never serialize a zero-body request over demotable history (RIG-2806)"
 		const wire = (captured?.messages ?? []) as { role: string; content?: unknown }[];
 		const body = wire.filter(m => m.role !== "system" && m.role !== "developer");
 		expect(body.length).toBeGreaterThan(0);
-		const carriesContent = body.some(m => typeof m.content === "string" && m.content.trim().length > 0);
+		// Both shapes the comment above documents: a plain string, or the
+		// one-element text array `maybeAddAnthropicCacheControl` restructures it
+		// into when the model's compat row sets `cacheControlFormat`. Asserting
+		// only the string form would report a zero body on an enriched request.
+		const carriesContent = body.some(m =>
+			typeof m.content === "string"
+				? m.content.trim().length > 0
+				: Array.isArray(m.content) &&
+					m.content.some(p => {
+						const part = p as { type?: string; text?: string };
+						return part.type === "text" && (part.text?.trim().length ?? 0) > 0;
+					}),
+		);
 		expect(carriesContent).toBe(true);
 	});
 });
