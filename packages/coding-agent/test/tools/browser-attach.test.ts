@@ -94,19 +94,36 @@ async function spawnDisposableExecutable(args: string[] = []): Promise<Disposabl
 }
 
 describe("pickElectronTarget", () => {
-	// The hook LAUNCHES a real Chromium, so it needs its own bound: an unbounded
-	// `beforeAll` inherits bun's 5s hook default, well under a cold start on a
-	// loaded runner, and the failure surfaces as "a beforeEach/afterEach hook
-	// timed out" against no named deadline — the same coincident-deadline defect
-	// as the test bodies, in the one place no `it()` bound covers.
+	// This hook LAUNCHES a real Chromium, so it carries its own bound rather than
+	// inheriting one. An unbounded hook takes whatever `--timeout` the harness
+	// supplies: 5s under a bare `bun test`, but 30_000 under `scripts/ci-test-ts.ts`
+	// (which appends `--timeout=${testTimeoutMs()}`) — so in CI it sat at exactly
+	// the same 30s the browser tool's own budget used, the same coincidence the
+	// test bodies had, in the one place no `it()` bound covers. It surfaced as
+	// "a beforeEach/afterEach hook timed out" naming no deadline at all.
+	//
+	// The bound is explicit so the hook is never silently governed by a harness
+	// flag. It is 90_000 to clear the launch ceiling with slack: `acquireBrowser`
+	// reaches `puppeteer.launch`, which is passed no `timeout`, so puppeteer
+	// applies its default 30_000 TWICE in sequence — the WS-endpoint wait, then
+	// `waitForPageTarget` (`waitForInitialPage` also defaults on) — making the real
+	// launch ceiling ~60s, not 30s. Measured directly against
+	// `launchHeadlessBrowser`: 33.0s with no induced delay, 59.9s at a 29s startup
+	// delay. A 60s bound here would sit ON that ceiling, re-creating exactly the
+	// coincidence this file is fixing. Threading a launch budget through is a src
+	// change (RIG-3406).
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	}, 60_000);
+	}, 90_000);
 
+	// Bounded for the same reason as the hook above, and sized for the worst-case
+	// teardown: `releaseBrowser(…, { kill: true })` can spend a 5s close timeout,
+	// then a ~2.5s graceful tree kill, then ~2s of profile-removal retries — about
+	// 9.5s, over a bare `bun test`'s 5s default.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	});
+	}, 30_000);
 
 	test("uses discovered CDP page targets when browser.pages is empty", async () => {
 		const page = fakePage({ url: "https://www.google.com/", title: "Google" });
@@ -278,13 +295,13 @@ describe("pickElectronTarget", () => {
 			try {
 				// Explicit budget, strictly below the `it()` bound: the implicit default
 				// is 30s (`clampTimeout`), which equalled the old test bound and left the
-				// tool and runner deadlines expiring together. The sibling suites already
-				// pass an inner budget for exactly this reason.
+				// tool and runner deadlines expiring together. Rationale in full:
+				// browser-prelude-facade.test.ts, the `browser.open` call.
 				await invokeBrowser({
 					action: "open",
 					name: tabName,
 					url: requested,
-					timeout: 60,
+					timeout: 45,
 					app: { cdp_url: `http://${endpoint.host}` },
 				});
 				opened = true;

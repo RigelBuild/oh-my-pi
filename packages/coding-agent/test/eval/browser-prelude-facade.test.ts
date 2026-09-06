@@ -320,24 +320,24 @@ describe("browser facade Chromium helper E2E", () => {
 			runInContext(prelude.javascript, context);
 
 			try {
-				// Two separate requirements, both violated by the implicit default.
+				// Invariant: the inner `open` budget stays strictly below the `it()` bound,
+				// and is sized above what a loaded runner needs. Left implicit the budget
+				// is 30s (`clampTimeout`, tools/tool-timeouts.ts) — exactly the old test
+				// bound — so both deadlines expired together and a slow start raced two
+				// timers, which is why one commit went red and green in adjacent runs.
 				//
-				// 1. The `open` budget must not EQUAL the `it()` bound. Left implicit it
-				//    is 30s (`clampTimeout`, tools/tool-timeouts.ts) — exactly the old
-				//    test bound — so the tool and runner deadlines expired together and
-				//    a slow Chromium start raced two timers. Whichever won was the
-				//    failure you saw: bun reported "this test timed out", the tool
-				//    reported "Browser open timed out". Both were that coincidence, not
-				//    a code defect, which is how one commit went red and green in
-				//    adjacent CI runs.
-				// 2. The budget must exceed what a LOADED runner needs. Cold Chromium
-				//    startup here is ~7s unloaded; CI observed >30s. A budget set at the
-				//    observed failure point has no headroom by construction.
-				//
-				// So: an explicit inner budget with real headroom, and an `it()` bound
-				// strictly above it so the tool always reports first and names the cause.
+				// The 45s governs the WHOLE open: CDP connect, queued tab acquisition,
+				// worker init, and navigation, whose SUM was crossing 30s. It does NOT buy
+				// 45s of startup — the launch phase sits outside this budget entirely,
+				// capped by puppeteer's own bound, which it spends TWICE in sequence (the
+				// WS-endpoint wait, then `waitForPageTarget`) for a real ceiling near 60s;
+				// measured 33.0s idle and 59.9s at a 29s startup delay (RIG-3406). A
+				// launch slower than that fails with puppeteer's WS-endpoint TimeoutError
+				// rather than the tool's message. 45s deliberately avoids both 30s (the
+				// old coincidence) and ~60s (the launch ceiling), and stays strictly under
+				// the 90s `it()` bound. Incident history: RIG-3377.
 				await runInContext(
-					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 60 }); })()",
+					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 45 }); })()",
 					context,
 				);
 				await runInContext('__e2eTab.click("text/Go")', context);

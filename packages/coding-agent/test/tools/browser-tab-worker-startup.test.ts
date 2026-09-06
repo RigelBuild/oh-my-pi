@@ -152,14 +152,25 @@ describe("browser init budget exhaustion", () => {
 describe("browser init deadline carry-over", () => {
 	let sharedHeadless: BrowserHandle | undefined;
 
+	// Same real-Chromium launch, and the same reason for an explicit bound, as
+	// browser-attach.test.ts's hook: unbounded it inherits the harness `--timeout`
+	// (30_000 under scripts/ci-test-ts.ts), coinciding with the browser tool's own
+	// 30s budget, and fails as "a beforeEach/afterEach hook timed out" naming no
+	// deadline. This file shares a CI bucket with the other two browser E2Es, so
+	// leaving it unbounded would keep reddening the same required gate.
+	//
+	// As in that hook, 90_000 clears the ~60s launch ceiling (puppeteer spends its
+	// default 30_000 twice in sequence — see RIG-3406) rather than sitting on it.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	});
+	}, 90_000);
 
+	// Bounded like its sibling: a killing `releaseBrowser` can spend ~9.5s across
+	// close timeout, graceful tree kill, and profile-removal retries.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	});
+	}, 30_000);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"counts caller time already spent before acquisition against the worker-init budget",
