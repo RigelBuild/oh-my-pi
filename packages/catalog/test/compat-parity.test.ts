@@ -138,6 +138,19 @@ describe("compat parity", () => {
 					diffValues(`${label}.compat`, jsonClone(row.compat), jsonClone(policy.compat), diffs);
 				}
 				diffValues(`${label}.thinking`, jsonClone(row.thinking), jsonClone(thinking), diffs);
+				// A `cost-patch` rule is applied at bake time into models.json AND
+				// re-applied by buildModel at runtime, so the two must agree: a rule
+				// edit landed without a models.json rebake leaves verbatim-served
+				// rows (getBundledModel, cold-start no-override) on the stale price.
+				// Only the fields the rule actually pins are compared — a costPatch
+				// legitimately carries a subset.
+				const costPatch = policy.catalog?.costPatch;
+				if (costPatch !== undefined) {
+					const bakedCost = row.cost as unknown as Record<string, unknown> | undefined;
+					for (const [field, ruleValue] of Object.entries(costPatch as Record<string, unknown>)) {
+						diffValues(`${label}.cost.${field}`, bakedCost?.[field], ruleValue, diffs);
+					}
+				}
 			}
 		}
 		if (diffs.length > 0) {
