@@ -245,15 +245,18 @@ describe("visible OMP-owned browser tabs", () => {
 	// They are still in scope: the second is gated on `CHROMIUM_AVAILABLE`, so it
 	// runs in the same CI bucket as the flaking tests.
 	//
-	// The exposure is additive, and 90_000 does NOT cover the first test's true
-	// worst case. It calls `acquireTab` twice and its `finally` closes two tabs
-	// and kills the browser: ~30s launch ceiling + 2x(30_000 + GRACE_MS 750,
-	// tab-supervisor.ts) + 2x5_000 (DEFAULT_TAB_CLOSE_TIMEOUT_MS) + ~7.5s wedged
-	// teardown is ~109s. The second test has one `acquireTab`, so it computes to
-	// ~73s and does fit. 90_000 is a deliberate partial cover for the first: it
-	// clears every single-phase stall and the old 45_000 coincidence, while a run
-	// that maxes every phase at once is a hang worth failing on rather than
-	// waiting out. RIG-3377.
+	// The exposure is additive and 90_000 does not cover it. From the bounded
+	// phases alone the first test has a FLOOR of ~109s: it calls `acquireTab`
+	// twice and its `finally` closes two tabs and kills the browser, so ~30s warm
+	// launch ceiling + 2x`initBudgetMs` (`timeoutMs + GRACE_MS` = 30_750 total per
+	// init, tab-supervisor.ts) + 2x`DEFAULT_TAB_CLOSE_TIMEOUT_MS` (5_000) + ~7.5s
+	// wedged teardown. It has no ceiling above that floor, because the executable
+	// resolve ahead of each launch carries no deadline (RIG-3406). The second test
+	// inits once, so its floor is ~73s.
+	//
+	// 90_000 is therefore chosen on what it can honestly claim: it clears every
+	// single-phase stall and the old 45_000 coincidence. A run that maxes several
+	// phases at once is a hang worth failing on rather than waiting out. RIG-3377.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {

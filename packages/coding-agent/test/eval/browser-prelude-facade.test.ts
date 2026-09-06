@@ -326,19 +326,22 @@ describe("browser facade Chromium helper E2E", () => {
 				// bound — so both deadlines expired together and a slow start raced two
 				// timers, which is why one commit went red and green in adjacent runs.
 				//
-				// The 45s covers the WHOLE open, launch included: `openBrowser`
-				// (src/tools/browser.ts:224-236) builds one `AbortSignal.timeout` from
-				// this value and threads it through both `acquireBrowser` and
-				// `acquireTab`, so queued tab acquisition, worker init and navigation all
-				// share it with the launch. It does NOT buy 45s of startup. Two deadlines
-				// are live over DIFFERENT intervals: puppeteer's ~30s bounds only the
-				// WS-endpoint wait inside the launch, while this 45s bounds the whole
-				// open. Neither dominates by magnitude — whichever interval exhausts
-				// first fires. A cold-LAUNCH stall hits the ~30s ceiling, so the failure
-				// is puppeteer's WS-endpoint TimeoutError even under a budget above 30s;
-				// a POST-launch stall is bounded only by this 45s and surfaces the tool's
-				// own "Browser open timed out" message. Raising the budget cannot move
-				// the launch ceiling. Measurements for both intervals: RIG-3406.
+				// The 45s is the OUTER bound and covers the whole open, launch included:
+				// `openBrowser` (src/tools/browser.ts:224-225) builds one
+				// `AbortSignal.timeout` from this value and threads it through both
+				// `acquireBrowser` (:238) and `acquireTab` (:269). It does NOT buy 45s of
+				// startup. Puppeteer's ~30s WS-endpoint default is an INNER bound, and
+				// the two are nested rather than racing: the inner clock does not start
+				// until `launchHeadlessBrowser` reaches `puppeteer.launch`, after an
+				// `ensureChromiumExecutable()` resolve that is itself unbounded (it
+				// spawns `--version` per PATH candidate, and can download Chromium).
+				// So the offset between the two starts is unbounded, and it — not the
+				// magnitudes — decides which fires. Warm resolve, the normal case: a
+				// launch stall hits the ~30s inner bound and surfaces puppeteer's
+				// WS-endpoint TimeoutError. Slow resolve or a post-launch stall: the
+				// outer 45s expires first and surfaces the tool's "Browser open timed
+				// out". Raising the budget cannot move the inner ceiling. Both intervals,
+				// with measurements: RIG-3406.
 				//
 				// 45s is chosen to clear the old 30s coincidence while staying strictly
 				// under the 90s `it()` bound. Incident history: RIG-3377.

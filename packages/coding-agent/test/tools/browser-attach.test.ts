@@ -103,20 +103,14 @@ describe("pickElectronTarget", () => {
 	// "a beforeEach/afterEach hook timed out" naming no deadline at all.
 	//
 	// The bound is explicit so the hook is never silently governed by a harness
-	// flag, and 90_000 leaves ~3x slack over the launch ceiling. That ceiling is
-	// puppeteer's default 30_000 on the WS-endpoint wait: `acquireBrowser` reaches
-	// `puppeteer.launch`, which is passed no `timeout`. Measured against
-	// `launchHeadlessBrowser` on this path: ~1-3s idle, a 29s startup delay still
-	// succeeds at ~30.1s, and a 31s delay throws at ~30.2s with puppeteer's
-	// WS-endpoint TimeoutError.
+	// flag, and 90_000 leaves ~3x slack over the ~30s warm launch ceiling —
+	// puppeteer's default on the WS-endpoint wait, since `puppeteer.launch` is
+	// passed no `timeout`. The ceiling is only the WARM figure: the resolve ahead
+	// of the launch is unbounded, so a cold resolve adds to it. Nesting, the
+	// second (inert) spend, and the measurements: RIG-3406, and the mechanism is
+	// written out once on browser-prelude-facade.test.ts's `browser.open`.
 	//
-	// puppeteer spends that same 30_000 a second time in `waitForPageTarget`, and
-	// the phases ARE additive — but it contributes ~0ms here, because a normal
-	// launch already has an initial page target. It only becomes visible under
-	// `--no-startup-window`, which only the shared-daemon spec passes, never this
-	// path. Threading a launch budget through is a src change (RIG-3406).
-	//
-	// Note the ceiling (~30s) is numerically identical to CI's own `--timeout=30000`
+	// Note the ~30s ceiling is numerically identical to CI's own `--timeout=30000`
 	// — the same coincidence class this file exists to remove. An explicit bound
 	// overrides the flag, so any browser-launching test added here needs one.
 	beforeAll(async () => {
