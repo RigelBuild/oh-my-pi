@@ -144,6 +144,18 @@ describe("compat parity", () => {
 				// rows (getBundledModel, cold-start no-override) on the stale price.
 				// Only the fields the rule actually pins are compared — a costPatch
 				// legitimately carries a subset.
+				//
+				// Load-bearing: neither `gen:models` nor `gen:compat` runs anywhere in
+				// CI and no workflow checks generated-file freshness, so this is the
+				// only automated detector of a stale bundled cost. Don't simplify it
+				// into a whole-object compare (it would false-red on every legitimate
+				// subset patch) and don't drop it.
+				//
+				// Bound worth knowing: this sweep iterates the BAKED bundle, so a
+				// model carrying a rule but no bundled row is never visited (e.g. no
+				// `claude-mythos-5-1` row exists at any provider). Families in that
+				// position rest entirely on the rule-layer assertions in
+				// test/generated-policies.test.ts — this guard is not a substitute.
 				const costPatch = policy.catalog?.costPatch;
 				if (costPatch !== undefined) {
 					const bakedCost = row.cost as unknown as Record<string, unknown> | undefined;
