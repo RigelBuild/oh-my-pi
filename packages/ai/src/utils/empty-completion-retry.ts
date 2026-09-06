@@ -193,6 +193,10 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// `acceptEmptyResponse` / `retryEmptyCompletion` terms, so opt-out
 				// callers never reach this.
 				isRetryableEmpty &&
+				// Redundant at runtime (`isRetryableEmpty` carries this conjunct), but
+				// load-bearing for the compiler: narrowing does not propagate through
+				// that intermediate boolean, so dropping this re-check un-narrows the
+				// `...completedMessage` spread below. Do not "simplify" it away.
 				completedMessage !== undefined &&
 				// An aborted turn (e.g. the backoff-abort path above) delivers its
 				// terminal as-is; relabeling it a provider error would blame the
