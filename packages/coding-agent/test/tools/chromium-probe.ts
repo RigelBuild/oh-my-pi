@@ -46,10 +46,20 @@ export async function chromiumCanLaunch(
 	let settled = false;
 	try {
 		return await Promise.race([
-			probeExecutable(resolve, deadline).then(verdict => {
-				settled = true;
-				return verdict;
-			}),
+			probeExecutable(resolve, deadline).then(
+				verdict => {
+					settled = true;
+					return verdict;
+				},
+				// A failure answers the question too: a resolve that throws decides the
+				// verdict on the merits, so the deadline's later abort must stay quiet.
+				// Marking settled only on success would print the skip notice after a
+				// run that did answer.
+				error => {
+					settled = true;
+					throw error;
+				},
+			),
 			new Promise<boolean>(resolveRace => {
 				deadline.addEventListener(
 					"abort",
@@ -65,7 +75,6 @@ export async function chromiumCanLaunch(
 			}),
 		]);
 	} catch {
-		settled = true;
 		return false;
 	}
 }

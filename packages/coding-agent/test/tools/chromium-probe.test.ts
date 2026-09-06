@@ -24,6 +24,13 @@ import { chromiumCanLaunch } from "./chromium-probe";
 // removes. 2s is well clear of spawning a bash script (~5ms here) while far
 // under the blocking fixtures, so a regression that drops the deadline fails
 // them on the bound rather than racing it.
+//
+// Every test that CONSUMES a deadline also carries an explicit runner bound
+// (30_000), for the same reason the browser suites do: left implicit, a body
+// that spends seconds by construction is governed by whichever `--timeout` the
+// invocation happens to supply — 30s under CI, 5s under a bare `bun test` — and
+// a 4s body under a 5s default is a race, not a test. State the bound; never
+// inherit it.
 const BOUND_MS = 2_000;
 const BLOCK_S = 30;
 
@@ -58,14 +65,20 @@ test("stays silent when the probe succeeds", async () => {
 	};
 	try {
 		expect(await chromiumCanLaunch(async () => ok, BOUND_MS)).toBe(true);
-		// Outlive the deadline: the listener fires at BOUND_MS, after the verdict.
-		const idle = Bun.spawn(["sleep", String((BOUND_MS * 2) / 1000)]);
+		// Outlive the deadline so the listener actually fires: it aborts at
+		// BOUND_MS, after the verdict. Only needs to EXCEED that, not double it —
+		// a longer sleep just narrows the margin against the runner bound.
+		const idle = Bun.spawn(["sleep", String((BOUND_MS + 500) / 1000)]);
 		await idle.exited;
 	} finally {
 		console.error = original;
 	}
 	expect(errors.filter(line => line.includes("SKIPPING"))).toEqual([]);
-});
+	// Explicit, like every other deadline-consuming test here: this body spends
+	// BOUND_MS + 500ms by construction, and left implicit it would sit ~1s under
+	// a bare `bun test`'s 5s default — a runner bound racing an operation bound,
+	// which is the exact defect this PR removes.
+}, 30_000);
 
 test("reports a non-zero exit as unavailable", async () => {
 	const bad = await script("bad.sh", "exit 127");
@@ -76,39 +89,88 @@ test("reports an unresolvable executable as unavailable", async () => {
 	expect(await chromiumCanLaunch(async () => undefined, BOUND_MS)).toBe(false);
 });
 
-test.skipIf(process.platform !== "linux")("bounds a binary that never answers --version", async () => {
-	const hang = await script("hang.sh", `sleep ${BLOCK_S}`);
-	expect(await chromiumCanLaunch(async () => hang, BOUND_MS)).toBe(false);
-});
+test.skipIf(process.platform !== "linux")(
+	"bounds a binary that never answers --version",
+	async () => {
+		const hang = await script("hang.sh", `sleep ${BLOCK_S}`);
+		expect(await chromiumCanLaunch(async () => hang, BOUND_MS)).toBe(false);
+	},
+	30_000,
+);
 
-test.skipIf(process.platform !== "linux")("bounds a binary that ignores SIGTERM", async () => {
-	// The default kill signal would leave `exited` pending here, degrading the
-	// bound to no bound; the probe uses SIGKILL for exactly this shape.
-	const stubborn = await script("stubborn.sh", `trap "" TERM\nsleep ${BLOCK_S}`);
-	expect(await chromiumCanLaunch(async () => stubborn, BOUND_MS)).toBe(false);
-});
+test.skipIf(process.platform !== "linux")(
+	"bounds a binary that ignores SIGTERM",
+	async () => {
+		// The default kill signal would leave `exited` pending here, degrading the
+		// bound to no bound; the probe uses SIGKILL for exactly this shape.
+		const stubborn = await script("stubborn.sh", `trap "" TERM\nsleep ${BLOCK_S}`);
+		expect(await chromiumCanLaunch(async () => stubborn, BOUND_MS)).toBe(false);
+	},
+	30_000,
+);
 
-test.skipIf(process.platform !== "linux")("bounds a slow resolve, not just the version spawn", async () => {
-	// The CI-shaped hazard: resolution itself is slow (it probes candidates), and
-	// the executable it eventually returns is fine. A bound armed only around the
-	// spawn would let this run for the full resolve.
-	//
-	// The blocker is the test's own child, not the probe's, so the probe's
-	// `signal:`/`killSignal` cannot reap it. Left alive it keeps this process up
-	// for its full sleep — a green, fast-looking test that stalls the chunk by
-	// BLOCK_S. This bucket runs `parallel: 1`, so that is added wall clock in the
-	// very job this file exists to keep green. Kill it explicitly.
-	const ok = await script("ok-after-slow-resolve.sh", 'echo "Chromium 150.0.0.0"');
-	let blocker: Subprocess | undefined;
-	try {
-		const available = await chromiumCanLaunch(async () => {
-			const { promise, resolve } = Promise.withResolvers<string>();
-			blocker = Bun.spawn(["sleep", String(BLOCK_S)]);
-			void blocker.exited.then(() => resolve(ok));
-			return promise;
-		}, BOUND_MS);
-		expect(available).toBe(false);
-	} finally {
-		blocker?.kill();
-	}
-});
+test.skipIf(process.platform !== "linux")(
+	"bounds a slow resolve, not just the version spawn",
+	async () => {
+		// The CI-shaped hazard: resolution itself is slow (it probes candidates), and
+		// the executable it eventually returns is fine. A bound armed only around the
+		// spawn would let this run for the full resolve.
+		//
+		// The blocker is the test's own child, not the probe's, so the probe's
+		// `signal:`/`killSignal` cannot reap it. Left alive it keeps this process up
+		// for its full sleep — a green, fast-looking test that stalls the chunk by
+		// BLOCK_S. This bucket runs `parallel: 1`, so that is added wall clock in the
+		// very job this file exists to keep green. Kill it explicitly.
+		const ok = await script("ok-after-slow-resolve.sh", 'echo "Chromium 150.0.0.0"');
+		let blocker: Subprocess | undefined;
+		try {
+			const available = await chromiumCanLaunch(async () => {
+				const { promise, resolve } = Promise.withResolvers<string>();
+				blocker = Bun.spawn(["sleep", String(BLOCK_S)]);
+				void blocker.exited.then(() => resolve(ok));
+				return promise;
+			}, BOUND_MS);
+			expect(available).toBe(false);
+		} finally {
+			blocker?.kill();
+		}
+	},
+	30_000,
+);
+
+test.skipIf(process.platform !== "linux")(
+	"stays silent when the probe fails fast",
+	async () => {
+		// A resolve that throws EARLY answers the question — Chromium is unusable —
+		// so the verdict is `false` on the merits, not on a deadline. The notice must
+		// not appear, and in particular must not appear when the deadline later
+		// aborts: `AbortSignal.timeout` cannot be cancelled, so its listener still
+		// runs after the race is decided. That is the same mechanism the success case
+		// covers, on the failure branch, which is why the flag is set from BOTH
+		// continuations rather than the success one alone.
+		//
+		// A resolve that throws AFTER the deadline is deliberately not asserted here:
+		// there the notice is true — nothing answered within the bound — and the
+		// verdict comes from the deadline.
+		const errors: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => {
+			errors.push(args.map(String).join(" "));
+		};
+		let idle: Subprocess | undefined;
+		try {
+			const available = await chromiumCanLaunch(async () => {
+				throw new Error("resolve failed immediately");
+			}, BOUND_MS);
+			expect(available).toBe(false);
+			// Outlive the deadline so its listener fires after the verdict.
+			idle = Bun.spawn(["sleep", String((BOUND_MS + 500) / 1000)]);
+			await idle.exited;
+		} finally {
+			idle?.kill();
+			console.error = original;
+		}
+		expect(errors.filter(line => line.includes("SKIPPING"))).toEqual([]);
+	},
+	30_000,
+);

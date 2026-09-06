@@ -253,16 +253,12 @@ describe("visible OMP-owned browser tabs", () => {
 	// above the latest estimate also converges on asserting only "eventually
 	// finishes", which is the opposite of this file's purpose.
 	//
-	// The bound is a budget instead. Its outer constraint is the per-chunk
-	// watchdog in `scripts/ci-test-ts.ts` (`chunkTimeoutMs`, 600_000): overrun
-	// that and the whole chunk dies with no per-test attribution, which is worse
-	// than any named timeout. 180_000 matches the hooks so this bucket has ONE
-	// number rather than a ladder of individually-argued ones, and it is well
+	// The bound is a budget instead: 180_000 matches the hooks so this bucket has
+	// ONE number rather than a ladder of individually-argued ones, and it is well
 	// clear of every individual bounded phase, so a runner deadline never races
-	// an operation deadline — the defect this file exists to remove. If more than
-	// one bound in a chunk is consumed to exhaustion the sum can still reach the
-	// watchdog; that is a wedge, and the watchdog is the correct backstop for a
-	// wedge. RIG-3377.
+	// an operation deadline — the defect this file exists to remove. Why a budget
+	// and not a prediction, and how it relates to CI's per-chunk watchdog, is
+	// written out in full on browser-attach.test.ts's `beforeAll`. RIG-3377.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {

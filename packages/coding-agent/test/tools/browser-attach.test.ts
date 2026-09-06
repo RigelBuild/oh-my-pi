@@ -111,16 +111,22 @@ describe("pickElectronTarget", () => {
 	// but "eventually finishes"; the arithmetic is deliberately gone.
 	//
 	// So the bound answers a different question: how long may a hook hold the
-	// runner before failing is more useful than waiting? The ceiling on that is
-	// `scripts/ci-test-ts.ts`'s per-chunk watchdog (`chunkTimeoutMs`, 600_000).
-	// Exceed it and the chunk is killed with no per-test attribution, which is
-	// strictly worse than a named hook timeout — so every bound in this bucket
-	// must sum well under it. 180_000 is a deliberate budget, not a prediction:
-	// past it, the launch is wedged behind an unbounded segment and more waiting
-	// buys nothing. Giving the launch a caller-reachable bound is a src change
-	// (RIG-3406), which also carries the phase table and measurements; the
-	// mechanism is written out once on browser-prelude-facade.test.ts's
-	// `browser.open`.
+	// runner before failing is more useful than waiting? 180s. Past that the
+	// launch is wedged behind a segment with no deadline, and more waiting buys
+	// nothing.
+	//
+	// Separately, `scripts/ci-test-ts.ts`'s watchdog (`chunkTimeoutMs`, 600_000)
+	// SIGKILLs the whole chunk it spawns — up to `chunkSize` (10) files — so its
+	// failure names no test and is reported as a 137 alongside genuine OOM kills.
+	// These bounds do not and cannot make a chunk fit under it: this bucket runs
+	// 75 chunks of 10, every one of which already admits far more than 600s from
+	// the 30s harness default alone, before any browser bound is counted. What
+	// the budget buys is that a SINGLE wedged launch fails as a named timeout at
+	// 180s, well inside the watchdog, instead of anonymously at 600s.
+	//
+	// Giving the launch a caller-reachable bound is a src change (RIG-3406),
+	// which also carries the phase table and measurements; the launch mechanism
+	// is written out once on browser-prelude-facade.test.ts's `browser.open`.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
