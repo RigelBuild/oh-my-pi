@@ -167,7 +167,9 @@ describe("getProxyForProvider", () => {
 // All four cases are load-bearing. Each "memoizes" case plants the entry its
 // successor reads back, so deleting one blinds that direction; both resolve
 // twice across an env change to assert the memoization itself, which is what
-// makes them fail rather than go quiet if the cache is ever removed.
+// makes them fail rather than go quiet if the cache is ever removed. Deleting
+// both at once still goes quiet, though, and leaves the two observers passing
+// vacuously -- the block is a unit, so prune it whole or not at all.
 describe("resolver cache isolation", () => {
 	it("memoizes a resolved provider proxy within a test", () => {
 		Bun.env.PI_PROXY_CACHE_PROBE_HIT = PROXY;
