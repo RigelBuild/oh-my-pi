@@ -294,11 +294,13 @@ export type OpenAIResponsesOutputRefusalBlock = typeof outputRefusalSchema.infer
 export const toolSchema = type({
 	type: "'function'",
 	name: "string >= 1",
-	"description?": "string",
-	"parameters?": type({ "[string]": "unknown" }),
-	// Proxies converting Chat Completions to Responses may forward `strict: null`;
-	// the SDK wire type declares `strict: boolean | null`, so accept null here and
-	// let buildTools drop it.
+	// A proxy converting Chat Completions to Responses forwards the SDK wire
+	// shape, which declares `description?: string | null`, `parameters: … | null`
+	// and `strict: boolean | null`. Accept null on all three and let buildTools
+	// normalize: it already reads `description ?? ""`, `parameters ?? {}`, and
+	// skips a null `strict`.
+	"description?": "string | null",
+	"parameters?": type({ "[string]": "unknown" }).or("null"),
 	"strict?": "boolean | null",
 });
 

@@ -748,6 +748,35 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.context.tools?.[0]).toMatchObject({ name: "read" });
 		expect(parsed.context.tools?.[0]?.strict).toBeUndefined();
 	});
+
+	it("accepts description:null and parameters:null on a function tool and normalizes them", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			input: "hi",
+			tools: [
+				{
+					type: "function",
+					name: "ping",
+					description: null,
+					parameters: null,
+				},
+			],
+		});
+		expect(parsed.context.tools).toHaveLength(1);
+		expect(parsed.context.tools?.[0]?.name).toBe("ping");
+		expect(parsed.context.tools?.[0]?.description).toBe("");
+		expect(parsed.context.tools?.[0]?.parameters).toEqual({});
+	});
+
+	it("still rejects a function tool whose name is absent", () => {
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.4",
+				input: "hi",
+				tools: [{ type: "function", strict: null } as never],
+			}),
+		).toThrow(/name/);
+	});
 });
 
 describe("openai-responses encodeResponse", () => {
