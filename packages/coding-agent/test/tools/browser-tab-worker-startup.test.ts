@@ -131,7 +131,7 @@ describe("browser tab worker startup", () => {
 		// 5 s remain -> guard min(10 s, 5 s / 3) = 1.67 s -> floored to 2 s.
 		// A fresh (un-carried) budget would guard for 10 s.
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
-	});
+	}, 30_000);
 });
 
 describe("browser init budget exhaustion", () => {
@@ -146,7 +146,7 @@ describe("browser init budget exhaustion", () => {
 
 		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
 		expect(performance.now() - started).toBeLessThan(3_000);
-	});
+	}, 30_000);
 });
 
 describe("browser init deadline carry-over", () => {

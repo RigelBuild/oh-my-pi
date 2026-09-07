@@ -92,9 +92,11 @@ async function probeExecutable(resolve: () => Promise<string | undefined>, deadl
 	// back unvalidated — still skips the suites rather than failing them at
 	// launch.
 	if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
-	// SIGKILL and `signal:`, matching `isChromiumExecutable`'s convention: the
-	// resolved binary is often a wrapper script, and a child that ignores
-	// SIGTERM would leave `exited` pending — turning the bound back into none.
+	// SIGKILL and `signal:`, matching `isChromiumExecutable`'s convention
+	// (launch.ts:300-301): the resolved binary is often a wrapper script, and a
+	// child that ignores SIGTERM leaves `exited` pending. The bound still holds —
+	// the abort arm of the race above answers regardless — but the ignoring
+	// process survives the verdict and leaks, so SIGKILL is what reaps it.
 	const probe = Bun.spawn([executable, "--version"], {
 		stdout: "ignore",
 		stderr: "ignore",
