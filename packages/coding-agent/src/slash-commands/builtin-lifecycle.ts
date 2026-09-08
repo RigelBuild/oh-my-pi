@@ -107,7 +107,11 @@ async function relocateHeadlessSession(
 	}
 	const previousState = runtime.sessionManager.captureState();
 	try {
-		await runtime.session.moveSession(resolvedPath);
+		if (!(await runtime.session.moveSession(resolvedPath))) {
+			// A latched restart refused the move: the session file never moved, so
+			// re-scoping the process below would strand the workspace away from it.
+			return usage("Move failed: a session restart is in progress. Try again once it completes.", runtime);
+		}
 	} catch (err) {
 		return usage(`Move failed: ${errorMessage(err)}`, runtime);
 	}
