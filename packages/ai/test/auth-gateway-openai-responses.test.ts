@@ -439,6 +439,102 @@ describe("openai-responses parseRequest", () => {
 		expect(replay.some(item => item.type === "function_call_output")).toBe(false);
 	});
 
+	it("accepts strict:null on a function tool (LiteLLM-forwarded shape) and drops it", () => {
+		// LiteLLM converts chat->Responses and forwards `strict: null`, which the
+		// SDK wire type (FunctionTool.strict: boolean | null) permits. The inbound
+		// schema must accept it rather than fail closed with "must be a valid
+		// bridged Responses tool".
+		const parsed = parseRequest({
+			model: "gpt-5.6-luna",
+			input: "hi",
+			tools: [
+				{
+					type: "function",
+					name: "read",
+					description: "read a file",
+					parameters: { type: "object", properties: { path: { type: "string" } } },
+					strict: null,
+				},
+			],
+		});
+		expect(parsed.context.tools).toHaveLength(1);
+		expect(parsed.context.tools![0]).toMatchObject({ name: "read" });
+		// buildTools drops a null strict so it never leaks to the provider.
+		expect(parsed.context.tools![0]!.strict).toBeUndefined();
+	});
+
+	it("accepts null parameters/description on a function tool and coalesces them", () => {
+		// The SDK FunctionTool wire type declares `parameters: {...} | null` and
+		// `description?: string | null`, and a proxy may forward either as null.
+		// The inbound schema must accept them rather than fail closed; buildTools
+		// coalesces (?? {} / ?? "").  `strict: false` is exercised here too (the
+		// boolean path stays valid).
+		const parsed = parseRequest({
+			model: "gpt-5.6-luna",
+			input: "hi",
+			tools: [
+				{
+					type: "function",
+					name: "read",
+					description: null,
+					parameters: null,
+					strict: false,
+				},
+			],
+		});
+		expect(parsed.context.tools).toHaveLength(1);
+		const tool = parsed.context.tools![0]!;
+		expect(tool.name).toBe("read");
+		expect(tool.description).toBe("");
+		expect(tool.parameters).toEqual({});
+		expect(tool.strict).toBe(false);
+	});
+
+	// The two accept tests above only assert what the widening ADMITS, so on their
+	// own they would stay green if someone loosened the tool schema wholesale.
+	// These pin the other edge: `null` is accepted, a wrong type is still refused.
+	//
+	// The schema is a union, and its message depends on how many requests this
+	// module instance has already parsed -- any request, including ones carrying
+	// no tools at all: from the third parse on it names the field
+	// (`tools[0].strict must be ...`), before that it reports only the generic
+	// arm. So the assertion accepts either. What it must NOT accept is a bare
+	// field name anywhere in the text -- the generic message echoes the whole
+	// tool object, so `/tools\[0\].*\bstrict\b/` is satisfied by the fixture we
+	// sent rather than by the validator's conclusion, and would match \bname\b
+	// or \btype\b just as happily. Both alternatives below are contiguous
+	// diagnostic prefixes.
+	//
+	// Coverage this does not have, stated rather than implied: the generic arm is
+	// field-agnostic, so while it is the matching arm a case asserting one field
+	// while breaking another passes. That is whichever two cases parse first --
+	// an ordinal, not a fixed field: permuting the array moves the gap to
+	// whoever lands there. It is not this file's whole-file run, where earlier
+	// tests have already warmed the module and all six wrong pairings are
+	// caught. Closing the remaining gap needs a field-level error from the
+	// schema on the first parse, not a stronger pattern here.
+	it.each([
+		["strict", { strict: "yes" }],
+		["description", { description: 7 }],
+		["parameters", { parameters: "not-an-object" }],
+	] as const)("still rejects a wrong-typed %s after the null widening", (field, override) => {
+		expect(() =>
+			parseRequest({
+				model: "gpt-5.6-luna",
+				input: "hi",
+				tools: [
+					{
+						type: "function",
+						name: "read",
+						description: "read a file",
+						parameters: { type: "object" },
+						...override,
+					},
+				],
+			}),
+		).toThrow(new RegExp(`tools\\[0\\](\\.${field} must be| must be a valid bridged Responses tool)`));
+	});
+
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
 		expect(() =>
 			parseRequest({
