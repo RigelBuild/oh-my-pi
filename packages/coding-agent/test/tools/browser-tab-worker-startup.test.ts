@@ -131,7 +131,7 @@ describe("browser tab worker startup", () => {
 		// 5 s remain -> guard min(10 s, 5 s / 3) = 1.67 s -> floored to 2 s.
 		// A fresh (un-carried) budget would guard for 10 s.
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
-	});
+	}, 30_000);
 });
 
 describe("browser init budget exhaustion", () => {
@@ -146,20 +146,39 @@ describe("browser init budget exhaustion", () => {
 
 		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
 		expect(performance.now() - started).toBeLessThan(3_000);
-	});
+	}, 30_000);
 });
 
 describe("browser init deadline carry-over", () => {
 	let sharedHeadless: BrowserHandle | undefined;
 
+	// Same real-Chromium launch, and the same reason for an explicit bound, as
+	// browser-attach.test.ts's hook: unbounded it inherits the harness `--timeout`
+	// (30_000 under scripts/ci-test-ts.ts), coinciding with the browser tool's own
+	// 30s budget, and fails as "a beforeEach/afterEach hook timed out" naming no
+	// deadline. This file shares a CI bucket with the other two browser E2Es, so
+	// leaving it unbounded would keep reddening the same required gate.
+	//
+	// As in that hook, 180_000 — the bucket's single bound, sized as a budget
+	// against the 600_000 per-chunk watchdog rather than as a prediction of the
+	// launch's cost, for the reasons written out on the `it.skipIf` below. The
+	// deferral holds because this hook passes `acquireBrowser` the same args as
+	// that one (`{ kind: "headless", headless: true }`, `cwd` only), so the same
+	// phases apply; diverge either call and document it here. RIG-3406.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	});
+	}, 180_000);
 
+	// Bounded like its sibling: on the WEDGED-Chromium path a killing
+	// `releaseBrowser` can spend ~7.5s — a 5s close timeout, then a ~2.5s graceful
+	// tree kill only in that timeout's catch — followed by an unbounded recursive
+	// profile removal that runs on every platform (its ~2s retry loop is win32-only
+	// and does not run elsewhere). A healthy close pays neither in full. In full on
+	// that sibling's `afterAll`.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	});
+	}, 30_000);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"counts caller time already spent before acquisition against the worker-init budget",
@@ -220,6 +239,26 @@ describe("browser init deadline carry-over", () => {
 	);
 });
 describe("visible OMP-owned browser tabs", () => {
+	// These two launch Chromium DIRECTLY via `acquireBrowser`, bypassing the
+	// `browser.open` tool wrapper, so there is no tool budget to separate from the
+	// `it()` bound — the fix shape used elsewhere in this file does not apply.
+	// They are still in scope: the second is gated on `CHROMIUM_AVAILABLE`, so it
+	// runs in the same CI bucket as the flaking tests.
+	//
+	// Neither bound is a prediction of how long the work takes. Earlier revisions
+	// of this comment computed a "floor" from the bounded phases (~199s and
+	// ~163s) and then picked a bound above it; every such figure was falsified by
+	// the next measurement, because the launch's unbounded segments mean the sum
+	// has no upper limit to compute (RIG-3406 carries the phase table). Bidding
+	// above the latest estimate also converges on asserting only "eventually
+	// finishes", which is the opposite of this file's purpose.
+	//
+	// The bound is a budget instead: 180_000 matches the hooks so this bucket has
+	// ONE number rather than a ladder of individually-argued ones, and it is well
+	// clear of every individual bounded phase, so a runner deadline never races
+	// an operation deadline — the defect this file exists to remove. Why a budget
+	// and not a prediction, and how it relates to CI's per-chunk watchdog, is
+	// written out in full on browser-attach.test.ts's `beforeAll`. RIG-3377.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
@@ -267,7 +306,7 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		45_000,
+		180_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps deterministic viewport emulation for hidden launches",
@@ -293,6 +332,6 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		45_000,
+		180_000,
 	);
 });

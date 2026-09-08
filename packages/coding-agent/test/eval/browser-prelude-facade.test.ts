@@ -88,9 +88,13 @@ function recorderDefinition(session: ToolSession, calls: unknown[]): EvalPrelude
 	};
 }
 
+// Bounded for the same reason as this file's other deadlines, even though it
+// launches no browser: it awaits real VM and kernel-session disposal, and
+// unbounded it would inherit whatever `--timeout` the invocation supplies (30s
+// under CI, 5s under a bare `bun test`) and fail without naming a deadline.
 afterAll(async () => {
 	await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
-});
+}, 30_000);
 
 describe("browser JavaScript facade", () => {
 	it("builds handles, chains, markers, and direct values against the shipped VM prelude", async () => {
@@ -320,8 +324,35 @@ describe("browser facade Chromium helper E2E", () => {
 			runInContext(prelude.javascript, context);
 
 			try {
+				// Invariant: the inner `open` budget stays strictly below the `it()` bound,
+				// and is sized above what a loaded runner needs. Left implicit the budget
+				// is 30s (`clampTimeout`, tools/tool-timeouts.ts) — exactly the old test
+				// bound — so both deadlines expired together and a slow start raced two
+				// timers, which is why one commit went red and green in adjacent runs.
+				//
+				// The 45s is the OUTER bound and covers the whole open, launch included:
+				// `openBrowser` (src/tools/browser.ts:224-225) builds one
+				// `AbortSignal.timeout` from this value and threads it through both
+				// `acquireBrowser` (:227-228) and `acquireTab` (:253-254). It does NOT
+				// buy 45s of startup, and it is not a ceiling on the launch: the launch
+				// has NO ceiling any bound here can cover. Several of its phases run on
+				// clocks that are not the caller's, at least two segments have no
+				// deadline at all, and the per-CDP-command phases are additive. Measured
+				// rejections on this path range from ~60s to ~238s depending only on
+				// WHICH segment stalls. Phase table, constants and measurements live in
+				// RIG-3406, which also carries the src-side fix; they are deliberately
+				// not restated here, because three files each holding a copy is how a
+				// corrected figure kept surviving in one of them.
+				//
+				// So which deadline fires is decided by WHERE time is spent, never by
+				// comparing numbers: a phase-1 stall surfaces puppeteer's WS-endpoint
+				// TimeoutError, a handshake stall a ProtocolError, a slow resolve or a
+				// post-launch stall the tool's own "Browser open timed out".
+				//
+				// 45s is chosen to clear the old 30s coincidence while staying strictly
+				// under the `it()` bound. Incident history: RIG-3377.
 				await runInContext(
-					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__ }); })()",
+					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 45 }); })()",
 					context,
 				);
 				await runInContext('__e2eTab.click("text/Go")', context);
@@ -355,6 +386,6 @@ describe("browser facade Chromium helper E2E", () => {
 					.catch(() => undefined);
 			}
 		},
-		30_000,
+		90_000,
 	);
 });
