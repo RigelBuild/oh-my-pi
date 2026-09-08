@@ -4,6 +4,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	__resetGlobalProxyFetch,
+	__resetProxyCache,
 	connectProxiedSocket,
 	getProxyForProvider,
 	getProxyForUrl,
@@ -98,11 +99,19 @@ function proxyEnvKeys(): Set<string> {
 }
 
 // Snapshot + clear every proxy-related env var so each test starts clean and
-// leaves nothing behind for later files. Provider-specific tests use unique
-// provider ids so the module-level resolver cache can never cross-contaminate.
+// leaves nothing behind for later files.
+//
+// The cache must be cleared too, not just the env. getProxyForProvider
+// memoizes a miss, so a provider resolved before its var is set stays
+// undefined for the rest of the module however the env changes afterwards --
+// which makes a test's outcome depend on whether anything resolved that same
+// id earlier. Unique provider ids are not enough on their own: the resolver
+// cache isolation tests below own a dedicated id per direction and resolve it
+// in consecutive cases, the only shape that can observe a stale entry.
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
+	__resetProxyCache();
 	saved = {};
 	for (const key of proxyEnvKeys()) {
 		saved[key] = Bun.env[key];
@@ -142,6 +151,46 @@ describe("getProxyForProvider", () => {
 
 	it("returns undefined when neither var is set", () => {
 		expect(getProxyForProvider("none-prov")).toBeUndefined();
+	});
+});
+
+// Owns both probe ids outright: every case that resolves them is in this block,
+// so the pair that observes a leak is the pair that plants it. An id shared with
+// a test elsewhere in the file would work today and shift which case fails the
+// moment that test is re-idded or deleted.
+//
+// Each direction gets its own id because the cache stores a resolved value and
+// an unresolved one alike, and one id cannot witness both: whichever entry is
+// planted first is the one every later case reads back, so the second direction
+// would pass on the leak it is meant to catch.
+//
+// All four cases are load-bearing. Each "memoizes" case plants the entry its
+// successor reads back, so deleting one blinds that direction; both resolve
+// twice across an env change to assert the memoization itself, which is what
+// makes them fail rather than go quiet if the cache is ever removed. Deleting
+// both at once still goes quiet, though, and leaves the two observers passing
+// vacuously -- the block is a unit, so prune it whole or not at all.
+describe("resolver cache isolation", () => {
+	it("memoizes a resolved provider proxy within a test", () => {
+		Bun.env.PI_PROXY_CACHE_PROBE_HIT = PROXY;
+		expect(getProxyForProvider("cache-probe-hit")).toBe(PROXY);
+		delete Bun.env.PI_PROXY_CACHE_PROBE_HIT;
+		expect(getProxyForProvider("cache-probe-hit")).toBe(PROXY);
+	});
+
+	it("does not serve the hit memoized by the previous test", () => {
+		expect(getProxyForProvider("cache-probe-hit")).toBeUndefined();
+	});
+
+	it("memoizes an unresolved provider within a test", () => {
+		expect(getProxyForProvider("cache-probe-miss")).toBeUndefined();
+		Bun.env.PI_PROXY_CACHE_PROBE_MISS = PROXY;
+		expect(getProxyForProvider("cache-probe-miss")).toBeUndefined();
+	});
+
+	it("does not serve the miss memoized by the previous test", () => {
+		Bun.env.PI_PROXY_CACHE_PROBE_MISS = PROXY;
+		expect(getProxyForProvider("cache-probe-miss")).toBe(PROXY);
 	});
 });
 
