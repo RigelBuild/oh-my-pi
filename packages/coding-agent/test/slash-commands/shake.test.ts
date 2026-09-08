@@ -69,6 +69,18 @@ describe("/shake dispatch (ACP)", () => {
 		expect(ACP_BUILTIN_SLASH_COMMANDS.some(c => c.name === "shake")).toBe(true);
 		expect(ACP_BUILTIN_SLASH_COMMANDS.some(c => c.name === "drop-images")).toBe(false);
 	});
+
+	it("reports a rejected shake on the command instead of rejecting unhandled", async () => {
+		const h = acpRuntime();
+		// Neither dispatcher wraps `handle`, so an unguarded await here escapes as
+		// an unhandled rejection and the user sees nothing on the command they ran.
+		(h.runtime.session.shake as unknown as ReturnType<typeof vi.fn>) = vi.fn(async () => {
+			throw new Error("session restart is in progress");
+		});
+		const result = await executeAcpBuiltinSlashCommand("/shake elide", h.runtime);
+		expect(result).toEqual({ consumed: true });
+		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("session restart is in progress");
+	});
 });
 
 describe("/shake dispatch (TUI)", () => {

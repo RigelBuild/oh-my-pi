@@ -19,7 +19,7 @@ import {
 	formatSessionWorktreeSummary,
 	type SessionWorktree,
 } from "../session/session-worktree";
-import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { resolveToCwd } from "../tools/path-utils";
@@ -323,7 +323,15 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const mode = parseShakeMode(command.args);
 			if (typeof mode !== "string") return usage(mode.error, runtime);
-			const result = await runtime.session.shake(mode);
+			// `shake()` can reject (an unwritable session file, a sealed manager), and
+			// neither dispatcher wraps `handle`, so an unguarded await surfaces as an
+			// unhandled rejection instead of a message on the command that caused it.
+			let result: ShakeResult;
+			try {
+				result = await runtime.session.shake(mode);
+			} catch (err) {
+				return usage(`Shake failed: ${errorMessage(err)}`, runtime);
+			}
 			await runtime.output(formatShakeSummary(result));
 			return commandConsumed();
 		},
