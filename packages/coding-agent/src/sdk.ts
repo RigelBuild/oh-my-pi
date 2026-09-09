@@ -4191,7 +4191,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// demand after the recycle.
 						const lifecycle = AgentLifecycleManager.global();
 						if (options.recycle) {
-							releaseParkingBarrier = await lifecycle.parkAll();
+							// Scoped to THIS top-level session: the manager is
+							// process-global, so an unscoped call would park and
+							// invalidate the adoptions of any other coexisting
+							// top-level session, whose parent and captured
+							// dependencies this teardown never touches.
+							releaseParkingBarrier = await lifecycle.parkAll(undefined, resolvedAgentId);
 						} else {
 							await lifecycle.dispose();
 						}

@@ -2809,6 +2809,12 @@ export async function finalizeSubagentLifecycle(args: {
 		{
 			idleTtlMs: args.agentIdleTtlMs,
 			revive: args.reviveSession ?? undefined,
+			// The ref's own recorded spawner — stamped by `createAgentSession` from
+			// `parentAgentId`, so it is the same identity the spawn tree is already
+			// keyed on rather than a second one invented here. The lifecycle
+			// resolves it up to the top-level session that owns the reviver's
+			// dependencies, which is the granularity a recycle acts on.
+			spawnedBy: ref.parentId,
 		},
 		ref,
 	);

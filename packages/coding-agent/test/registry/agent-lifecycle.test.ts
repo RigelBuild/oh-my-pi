@@ -1937,4 +1937,248 @@ describe("AgentLifecycleManager", () => {
 		expect(await lifecycle.ensureLive("No-Reviver")).toBe(built.session);
 		expect(factoryCalls).toBe(2);
 	});
+
+	/** A top-level session, as the SDK pre-registers one before attaching it. */
+	function registerParent(id: string) {
+		return registry.register({
+			id,
+			displayName: id,
+			kind: "main",
+			session: makeSessionStub().session,
+			sessionFile: `/tmp/${id}.jsonl`,
+			status: "running",
+		});
+	}
+
+	/** An idle keep-alive child stamped with its spawner, as createAgentSession does. */
+	function registerChildOf(parentId: string | undefined, id: string, session: AgentSession) {
+		return registry.register({
+			id,
+			displayName: "task",
+			kind: "sub",
+			parentId,
+			session,
+			sessionFile: `/tmp/${id}.jsonl`,
+			status: "idle",
+		});
+	}
+
+	// This manager is process-global; a recycle is NOT. Two top-level SDK
+	// sessions coexist with distinct agent ids, and restarting either one calls
+	// parkAll() on the single global lifecycle. An unscoped call parks every
+	// adoption and marks every retained reviver stale — including the children of
+	// the OTHER, still-live parent, whose reviver closes over dependencies this
+	// teardown never touches. And because the normal SDK path installs no
+	// persisted-reviver factory, a stale mark there is not a redirect but a
+	// permanent refusal: every later ensureLive() rejects a child that was fine.
+	//
+	// Both halves are asserted, because either alone is satisfiable by breaking
+	// the other: scoping that marks nothing would spare parent B by also sparing
+	// parent A's own children, which is the staleness bug this whole path exists
+	// to prevent.
+	//
+	// RED (pre-fix): parent B's child is parked by A's recycle and its later
+	// revival rejects with /has been recycled/.
+	it("scopes parking and staleness to the recycling parent, sparing another live parent's child", async () => {
+		registerParent("Owner-A");
+		registerParent("Owner-B");
+		const aStub = makeSessionStub();
+		const bStub = makeSessionStub();
+		const aRevived = makeSessionStub();
+		const bRevived = makeSessionStub();
+		const aRef = registerChildOf("Owner-A", "Scoped-A-Child", aStub.session);
+		const bRef = registerChildOf("Owner-B", "Scoped-B-Child", bStub.session);
+		let bReviverRuns = 0;
+		lifecycle.adopt(
+			"Scoped-A-Child",
+			{ idleTtlMs: 0, revive: async () => aRevived.session, spawnedBy: aRef.parentId },
+			aRef,
+		);
+		lifecycle.adopt(
+			"Scoped-B-Child",
+			{
+				idleTtlMs: 0,
+				revive: async () => {
+					bReviverRuns++;
+					return bRevived.session;
+				},
+				spawnedBy: bRef.parentId,
+			},
+			bRef,
+		);
+
+		// Owner A recycles. No factory is installed — the ordinary SDK state, and
+		// the one in which a stale mark becomes a permanent refusal.
+		(await lifecycle.parkAll(undefined, "Owner-A"))();
+
+		// A's own child took the recycle: parked, and refused rather than revived
+		// through the closure over the parent that just went away.
+		expect(registry.get("Scoped-A-Child")?.status).toBe("parked");
+		expect(aStub.disposeCalls()).toBe(1);
+		await expect(lifecycle.ensureLive("Scoped-A-Child")).rejects.toThrow(/has been recycled/);
+
+		// B's child was never in the recycle: still live, its session untouched.
+		expect(registry.get("Scoped-B-Child")?.status).toBe("idle");
+		expect(registry.get("Scoped-B-Child")?.session).toBe(bStub.session);
+		expect(bStub.disposeCalls()).toBe(0);
+
+		// And still revivable through its OWN reviver, which is the half a global
+		// staleness pass destroys: B's parent and its captured dependencies are
+		// both still live, so nothing has to be rebuilt through a factory.
+		await lifecycle.park("Scoped-B-Child");
+		expect(await lifecycle.ensureLive("Scoped-B-Child")).toBe(bRevived.session);
+		expect(bReviverRuns).toBe(1);
+	});
+
+	// The other direction of the same scoping, and the reason it is not simply
+	// "spare whatever this recycle does not name". An adoption this manager
+	// cannot attribute to a top-level session — no spawner supplied, or the chain
+	// to a `main` ref broken by an intermediate release — may well belong to the
+	// parent that is tearing down. Exempting it would leave a child revivable
+	// through a closure over disposed resources, which fails at its first tool
+	// call with nothing to retry; claiming it costs at most a rebuild through the
+	// replacement's factory. So every recycle claims it.
+	it("claims an adoption with no resolvable owner for every recycle", async () => {
+		registerParent("Owner-Other");
+		const stub = makeSessionStub();
+		// A child that records no spawner at all — a broken-chain adoption, which
+		// no recycle can attribute to a top-level session.
+		const ref = registerChildOf(undefined, "Unattributed-Child", stub.session);
+		lifecycle.adopt("Unattributed-Child", { idleTtlMs: 0, revive: async () => makeSessionStub().session }, ref);
+
+		// A recycle driven by a parent this adoption was never attributed to.
+		(await lifecycle.parkAll(undefined, "Owner-Other"))();
+
+		expect(registry.get("Unattributed-Child")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+		await expect(lifecycle.ensureLive("Unattributed-Child")).rejects.toThrow(/has been recycled/);
+	});
+
+	// The failed-handoff refusal is the same defect class as the staleness pass:
+	// it is retained state on a process-global manager, so a single latch refused
+	// every parked child in the process once ANY parent's reattachment failed —
+	// including a child whose own parent is still live and whose reviver still
+	// closes over dependencies nothing disposed. It has to be keyed by the
+	// recycling owner too.
+	//
+	// RED (pre-fix): parent B's child rejects with /replacement failed to
+	// attach/ because of a failure in parent A.
+	it("scopes a failed handoff to the recycling parent, not every parked child", async () => {
+		registerParent("Failed-A");
+		registerParent("Failed-B");
+		const aRef = registerChildOf("Failed-A", "Failed-A-Child", makeSessionStub().session);
+		const bRef = registerChildOf("Failed-B", "Failed-B-Child", makeSessionStub().session);
+		const bRevived = makeSessionStub();
+		let aReviverRuns = 0;
+		lifecycle.adopt(
+			"Failed-A-Child",
+			{
+				idleTtlMs: 0,
+				revive: async () => {
+					aReviverRuns++;
+					return makeSessionStub().session;
+				},
+				spawnedBy: aRef.parentId,
+			},
+			aRef,
+		);
+		lifecycle.adopt(
+			"Failed-B-Child",
+			{ idleTtlMs: 0, revive: async () => bRevived.session, spawnedBy: bRef.parentId },
+			bRef,
+		);
+
+		// A's reattachment produced no replacement parent.
+		(await lifecycle.parkAll(undefined, "Failed-A"))("failed");
+
+		// A's child is refused, and never through the disposed parent's closure.
+		await expect(lifecycle.ensureLive("Failed-A-Child")).rejects.toThrow(/replacement failed to attach/);
+		expect(aReviverRuns).toBe(0);
+
+		// B's parent never recycled at all, so its child revives normally.
+		await lifecycle.park("Failed-B-Child");
+		expect(await lifecycle.ensureLive("Failed-B-Child")).toBe(bRevived.session);
+	});
+
+	// A rebind through the factory replaces the STALE CLOSURE, not the record's
+	// identity. Dropping its owner makes the child unattributed, and an
+	// unattributed record is claimed by every recycle — so the first successful
+	// post-recycle revival hands the child to the next unrelated session's
+	// recycle, which parks it and invalidates the reviver just installed. The
+	// factory is process-global and names no owner, but the ref's parent chain
+	// still does.
+	//
+	// RED (pre-fix): B's recycle parks A's freshly revived child, and its next
+	// revival rejects with /has been recycled/.
+	it("keeps a rebound child bound to its own owner across another parent's recycle", async () => {
+		registerParent("Rebind-A");
+		registerParent("Rebind-B");
+		const aRef = registerChildOf("Rebind-A", "Rebind-A-Child", makeSessionStub().session);
+		registerChildOf("Rebind-B", "Rebind-B-Child", makeSessionStub().session);
+		const rebuilt = makeSessionStub();
+		lifecycle.adopt(
+			"Rebind-A-Child",
+			{ idleTtlMs: 0, revive: async () => makeSessionStub().session, spawnedBy: aRef.parentId },
+			aRef,
+		);
+
+		// A recycles and its replacement installs the factory, so A's child is
+		// rebuilt through it rather than the closure the recycle invalidated.
+		(await lifecycle.parkAll(undefined, "Rebind-A"))();
+		lifecycle.setPersistedSubagentReviverFactory(async () => async () => rebuilt.session, 0);
+		expect(await lifecycle.ensureLive("Rebind-A-Child")).toBe(rebuilt.session);
+
+		// Now an UNRELATED parent recycles. It destroyed nothing A's child
+		// borrows, so the rebound child must be left alone.
+		(await lifecycle.parkAll(undefined, "Rebind-B"))();
+
+		expect(registry.get("Rebind-A-Child")?.status).not.toBe("parked");
+		await lifecycle.park("Rebind-A-Child");
+		expect(await lifecycle.ensureLive("Rebind-A-Child")).toBe(rebuilt.session);
+	});
+
+	// The failed-handoff scoping has the same hole on its cold path: a persisted
+	// subagent that has never been revived has no `#adopted` record, but its
+	// `parentId` still resolves to the top-level session it belongs to. Reading
+	// "no record" as "no owner" makes one session's failed handoff refuse every
+	// cold ref in the process, which is the over-refusal the scoping removes.
+	//
+	// RED (pre-fix): B's cold child rejects with /replacement failed to attach/
+	// because of a failure in A.
+	it("scopes a failed handoff away from another owner's cold persisted child", async () => {
+		registerParent("Cold-A");
+		registerParent("Cold-B");
+		const aRef = registerChildOf("Cold-A", "Cold-A-Child", makeSessionStub().session);
+		// Genuinely COLD: restored from disk with no live session and no adoption
+		// record, which is the shape that made `#adopted.get()` miss and read as
+		// "no owner". Its `parentId` still names B.
+		registry.register({
+			id: "Cold-B-Child",
+			displayName: "task",
+			kind: "sub",
+			parentId: "Cold-B",
+			session: null,
+			sessionFile: "/tmp/Cold-B-Child.jsonl",
+			status: "parked",
+		});
+		const bRebuilt = makeSessionStub();
+		lifecycle.adopt(
+			"Cold-A-Child",
+			{ idleTtlMs: 0, revive: async () => makeSessionStub().session, spawnedBy: aRef.parentId },
+			aRef,
+		);
+
+		// Installed BEFORE the failure: a later install clears `#failedHandoffs`
+		// wholesale, which would retire the very failure this scoping is measured
+		// against. B's cold child is revived through it.
+		lifecycle.setPersistedSubagentReviverFactory(async () => async () => bRebuilt.session, 0);
+
+		// A's reattachment produces no replacement parent.
+		(await lifecycle.parkAll(undefined, "Cold-A"))("failed");
+		await expect(lifecycle.ensureLive("Cold-A-Child")).rejects.toThrow(/replacement failed to attach/);
+
+		// B's child never took part in that recycle and holds no adoption record:
+		// it is revived cold, on B's still-live resources.
+		expect(await lifecycle.ensureLive("Cold-B-Child")).toBe(bRebuilt.session);
+	});
 });

@@ -63,6 +63,17 @@ export interface AdoptOptions {
 	idleTtlMs: number;
 	/** Recreates a live AgentSession from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
 	revive?: AgentReviver;
+	/**
+	 * Id of the agent that spawned this one — the caller's own identity, not a
+	 * derived one. Resolved to the top-level session that OWNS the adoption (see
+	 * {@link AdoptedAgent.ownerId}), which is the granularity a recycle acts on:
+	 * a nested subagent's spawner is itself a subagent, and its reviver's
+	 * dependencies still trace to the root session's MCP/artifact managers.
+	 *
+	 * Absent (or unresolvable) leaves the adoption UNATTRIBUTED, which every
+	 * recycle then treats as its own — see {@link AdoptedAgent.ownerId}.
+	 */
+	spawnedBy?: string;
 }
 
 interface AdoptedAgent {
@@ -70,6 +81,25 @@ interface AdoptedAgent {
 	idleTtlMs: number;
 	revive?: AgentReviver;
 	timer?: NodeJS.Timeout;
+	/**
+	 * The top-level session whose spawn built {@link revive} and whose shared
+	 * dependencies it closes over — resolved once, at adopt time, by walking
+	 * {@link AdoptOptions.spawnedBy} up to the `main` ref that roots the spawn
+	 * tree. This manager is process-global while a recycle is not: two top-level
+	 * SDK sessions coexist with distinct ids, and only one of them is tearing
+	 * down, so {@link AgentLifecycleManager.parkAll} parks and invalidates the
+	 * adoptions carrying THIS id rather than every adoption it holds.
+	 *
+	 * `undefined` means the adoption could not be attributed — no spawner was
+	 * supplied, or the chain to a `main` ref is broken (an intermediate one-shot
+	 * parent was already unregistered). Such a record is treated as belonging to
+	 * EVERY recycle: parked and invalidated by each one, and refused after any
+	 * failed handoff. An adoption whose owner cannot be named is not thereby
+	 * safe — its reviver may well close over the session that is going away, and
+	 * a refusal leaves the transcript readable while a wrong revival hands back
+	 * a child on disposed resources.
+	 */
+	ownerId?: string;
 	/**
 	 * True once {@link AgentLifecycleManager.parkAll} carried this adoption
 	 * across a parent recycle. {@link revive} was captured by the parent's
@@ -128,7 +158,7 @@ interface RevivingAgent {
  * readable only by a waiter that already holds a reference to that exact
  * object — and a waiter racing several barriers does not hold one for every
  * recycle it overlaps. A failure is latched on the manager instead
- * ({@link AgentLifecycleManager.#handoffFailed}), where it outlives both the
+ * ({@link AgentLifecycleManager.#failedHandoffs}), where it outlives both the
  * entry that produced it and every call that raced it.
  */
 interface ParkingBarrier {
@@ -158,6 +188,7 @@ export class AgentLifecycleManager {
 			current.#revivals.clear();
 			current.#parks.clear();
 			current.#persistedReviverFactory = undefined;
+			current.#failedHandoffs.clear();
 		}
 		AgentLifecycleManager.#global = undefined;
 	}
@@ -201,9 +232,16 @@ export class AgentLifecycleManager {
 	readonly #parkingBarriers = new Set<ParkingBarrier>();
 
 	/**
-	 * Latched while the most recent recycle released with `"failed"` — a handoff
-	 * that disposed its children's shared dependencies and produced no
-	 * replacement parent to own the successors.
+	 * Owners whose most recent recycle released with `"failed"` — a handoff that
+	 * disposed its children's shared dependencies and produced no replacement
+	 * parent to own the successors. Keyed by the recycling owner
+	 * ({@link AdoptedAgent.ownerId}), with `undefined` standing for a recycle
+	 * this manager could not attribute to one.
+	 *
+	 * Keyed rather than a single flag because the manager is process-global while
+	 * a recycle is not: two top-level sessions coexist, and a failed handoff in
+	 * one says nothing about the other's children, whose parent and captured
+	 * dependencies are both still live. A single boolean refused them too.
 	 *
 	 * Latched on the MANAGER, not on the {@link ParkingBarrier}, because a
 	 * release drops its entry from `#parkingBarriers` before resolving. An
@@ -221,7 +259,7 @@ export class AgentLifecycleManager {
 	 * them. A delta only refuses the calls that happened to be in flight across
 	 * the barrier — a call STARTING after the failure settled samples a baseline
 	 * that already includes it, sees no movement, and proceeds through the stale
-	 * retained reviver. The flag has no baseline to slip past.
+	 * retained reviver. The entries have no baseline to slip past.
 	 *
 	 * Cleared by {@link setPersistedSubagentReviverFactory} and by nothing else;
 	 * see there for why that event, and only that event, proves the revival
@@ -229,7 +267,7 @@ export class AgentLifecycleManager {
 	 * clear it: parking children with no new factory installed rebuilds nothing
 	 * the failure disposed.
 	 */
-	#handoffFailed = false;
+	readonly #failedHandoffs = new Set<string | undefined>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -242,7 +280,7 @@ export class AgentLifecycleManager {
 	 * but no adoption. Set by the top-level session, which owns the ambient deps
 	 * (auth, models, MCP, artifacts) the factory needs at revive time.
 	 *
-	 * This is also the one event that clears {@link #handoffFailed}. After a
+	 * This is also the one event that clears {@link #failedHandoffs}. After a
 	 * recycle whose reattachment produced no replacement parent, BOTH routes back
 	 * to a live session belong to the parent that went away: the retained reviver
 	 * closes over it, and the factory that would supersede that reviver is its
@@ -260,7 +298,54 @@ export class AgentLifecycleManager {
 	setPersistedSubagentReviverFactory(factory: PersistedSubagentReviverFactory, idleTtlMs: number): void {
 		this.#persistedReviverFactory = factory;
 		this.#persistedReviveTtlMs = idleTtlMs;
-		this.#handoffFailed = false;
+		// Cleared wholesale, not per owner, because the factory itself is
+		// process-global: whichever session installed it is the one EVERY later
+		// revival — any owner's — is rebuilt through, and it re-derives the
+		// dependencies from that live session. So a single install re-binds the
+		// revival dependencies for every refused owner at once.
+		this.#failedHandoffs.clear();
+	}
+
+	/**
+	 * True when a recycle that could have owned this adoption failed. An owner
+	 * we cannot name is refused by ANY failure, and a failure we could not
+	 * attribute refuses every owner: in both directions the unattributed side
+	 * may be the one whose dependencies are gone, and a wrong revival hands back
+	 * a child on a disconnected MCP and dead kernels where a refusal only leaves
+	 * the transcript readable and the ref parked.
+	 */
+	#handoffFailedFor(ownerId: string | undefined): boolean {
+		if (this.#failedHandoffs.size === 0) return false;
+		if (ownerId === undefined) return true;
+		return this.#failedHandoffs.has(ownerId) || this.#failedHandoffs.has(undefined);
+	}
+
+	/**
+	 * Resolve the top-level session that owns a spawn, by walking `parentId` up
+	 * from the spawner to the `main` ref that roots the tree. A nested
+	 * subagent's spawner is itself a subagent, but its reviver's dependencies
+	 * still trace to the root session's MCP and artifact managers, so the root
+	 * is the granularity a recycle acts on.
+	 *
+	 * Returns `undefined` when the walk cannot REACH a `main` ref — no spawner
+	 * given, or an intermediate parent already unregistered. Naming the last id
+	 * still visible instead would attribute the adoption to a subagent id no
+	 * recycle ever passes, so it would be silently exempt from every staleness
+	 * pass — the one failure direction that hands back a child on disposed
+	 * resources. An unattributable adoption is left unattributed, which every
+	 * recycle treats as its own.
+	 */
+	#resolveOwnerId(spawnedBy: string | undefined): string | undefined {
+		let current = spawnedBy;
+		const seen = new Set<string>();
+		while (current !== undefined && !seen.has(current)) {
+			seen.add(current);
+			const ref = this.#registry.get(current);
+			if (!ref) return undefined;
+			if (ref.kind === "main") return current;
+			current = ref.parentId;
+		}
+		return undefined;
 	}
 
 	/**
@@ -268,6 +353,12 @@ export class AgentLifecycleManager {
 	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
 	 * When `expected` is given, the adoption is refused if the id no longer
 	 * resolves to that ref (or that ref's session).
+	 *
+	 * {@link AdoptOptions.spawnedBy} is resolved to a top-level owner ONCE, here,
+	 * rather than walked at every recycle: the chain it walks is registry state
+	 * that a later intermediate release can break, and an adoption that was
+	 * attributable at adopt time must not become unattributable — hence
+	 * refusable — because a one-shot parent above it went away.
 	 */
 	adopt(id: string, opts: AdoptOptions, expected?: AgentRefExpectation): void {
 		if (id === MAIN_AGENT_ID) return;
@@ -278,7 +369,12 @@ export class AgentLifecycleManager {
 		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
-		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
+		const adopted: AdoptedAgent = {
+			ref,
+			idleTtlMs: opts.idleTtlMs,
+			revive: opts.revive,
+			ownerId: this.#resolveOwnerId(opts.spawnedBy),
+		};
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
 	}
@@ -529,6 +625,16 @@ export class AgentLifecycleManager {
 		// live borrows nothing from the parent that failed to come back, and
 		// refusing it would throw away work the recycle never touched.
 		//
+		// Scoped to the adoption's OWNER, because the manager is process-global
+		// while a recycle is not: another top-level session's handoff failing
+		// destroyed nothing this child borrows, and refusing it would park a
+		// healthy agent for the rest of the process. Only an adoption whose owner
+		// cannot be resolved AT ALL — an unattributable spawn, or a ref whose
+		// parent chain no longer reaches a `main` — is refused by ANY failure: it
+		// may well be the failed parent's, and a refusal leaves the transcript
+		// readable while a wrong revival hands back a child on a disconnected MCP
+		// and dead kernels.
+		//
 		// Read as RETAINED state, never as a delta against an entry-time sample.
 		// Two readings a sample gets wrong, in opposite directions: a call that
 		// starts after the failure settled already carries it in its own baseline
@@ -536,9 +642,17 @@ export class AgentLifecycleManager {
 		// awaited misses every recycle that starts and finishes inside one of the
 		// OTHER awaits above (a park settling, a sibling barrier resolving first),
 		// because the release drops its entry before resolving and leaves nothing
-		// to read. The flag survives both — set before the entry is dropped, and
-		// held until a replacement rebinds the revival dependencies.
-		if (this.#handoffFailed) {
+		// to read. The entry survives both — recorded before the barrier is
+		// dropped, and held until a replacement rebinds the revival dependencies.
+		// A ref with no adoption record is not automatically unattributable: a
+		// cold persisted subagent has no `#adopted` entry yet, but its `parentId`
+		// still resolves to the top-level session it belongs to. Passing
+		// `undefined` for it would make one session's failed handoff refuse every
+		// cold ref in the process — including other sessions' — which is exactly
+		// the over-refusal the per-owner scoping exists to remove.
+		const owned = this.#adopted.get(id);
+		const ownerId = owned?.ref === ref ? owned.ownerId : this.#resolveOwnerId(ref.parentId);
+		if (this.#handoffFailedFor(ownerId)) {
 			throw new Error(
 				`Agent "${id}" cannot be revived: its parent session was recycled but the replacement failed to attach, so the shared resources it would be rebuilt on are gone. Its transcript remains readable at history://${id}.`,
 			);
@@ -578,7 +692,7 @@ export class AgentLifecycleManager {
 	 * turn and the park detaches instead of being cancelled.
 	 *
 	 * Reports nothing. Whether a waited-out handoff ended WITHOUT a replacement
-	 * parent is read off {@link #handoffFailed} instead, because the outcome has
+	 * parent is read off {@link #failedHandoffs} instead, because the outcome has
 	 * to survive both a barrier entry that its own release deletes and every
 	 * caller that never held that entry.
 	 */
@@ -642,11 +756,32 @@ export class AgentLifecycleManager {
 			// `revive: undefined`) is NOT that case — it takes the cold-adopt path
 			// below so it picks up the persisted-revive TTL and the poisoned-reviver
 			// cleanup that a first-time factory revival needs.
+			//
+			// The record's owner is RE-DERIVED from the ref's own parent chain, not
+			// dropped. The factory is process-global — one install in `main.ts`
+			// serves every session — so "whoever installed the factory" names no
+			// particular owner and cannot be read off it. But the child's parent
+			// chain still resolves to the top-level session it belongs to, and that
+			// is the recycle granularity.
+			//
+			// Leaving it unattributed is not the safe default it looks like: an
+			// unattributed record is claimed by EVERY recycle, so the first
+			// successful revival would hand this child to the next unrelated
+			// session's recycle, which parks it and invalidates the working reviver
+			// just installed. A chain that no longer reaches a `main` ref still
+			// yields `undefined`, which keeps the original conservative behaviour
+			// for a genuinely unattributable record.
 			if (revive && adoption?.reviverStale) {
 				adoption.revive = revive;
 				adoption.reviverStale = false;
+				adoption.ownerId = this.#resolveOwnerId(ref.parentId);
 			} else if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
+				adoption = {
+					ref,
+					idleTtlMs: this.#persistedReviveTtlMs,
+					revive,
+					ownerId: this.#resolveOwnerId(ref.parentId),
+				};
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
 			}
@@ -784,6 +919,18 @@ export class AgentLifecycleManager {
 	 * holds its own entry and revival stays blocked until the last of them
 	 * releases, whichever order they finish in.
 	 *
+	 * SCOPED to the recycling parent. This manager is process-global, but a
+	 * recycle is not: two top-level SDK sessions coexist with distinct agent
+	 * ids, and only one of them is tearing down. Parking or invalidating the
+	 * other's children would park agents whose parent and captured dependencies
+	 * are both still live — and, with no persisted-reviver factory installed
+	 * (the ordinary SDK state), leave every later {@link ensureLive} refusing
+	 * them. So `recyclingOwnerId` names the top-level session driving this
+	 * handoff, and only adoptions attributed to it — plus those attributed to
+	 * nobody, which any recycle may own — are parked and marked. Omitted, the
+	 * call is an unattributable recycle and claims every adoption, which is the
+	 * pre-scoping behaviour and the conservative one.
+	 *
 	 * Parking every child is only the FIRST half of the recycle, so the barrier
 	 * outlives this call: the caller tears the shared kernels/MCP/LSP down
 	 * *after* awaiting it, and a waiter released at that point would revive a
@@ -802,7 +949,10 @@ export class AgentLifecycleManager {
 	 * own way out (the parking phase's own `catch`) is also a failure by the same
 	 * reasoning — it never reached a handoff at all.
 	 */
-	async parkAll(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<ParkingBarrierRelease> {
+	async parkAll(
+		deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS,
+		recyclingOwnerId?: string,
+	): Promise<ParkingBarrierRelease> {
 		const resolvers = Promise.withResolvers<void>();
 		const barrier: ParkingBarrier = { promise: resolvers.promise };
 		// Added before the first await so an ensureLive() in the same tick — the
@@ -815,10 +965,12 @@ export class AgentLifecycleManager {
 			// Latched on the MANAGER before the entry is dropped, so the failure
 			// outlives this barrier: a waiter that never held a reference to it —
 			// one blocked in a park settle, or on a sibling barrier that resolved
-			// first — still reads the flag and refuses, and so does a call that
-			// arrives only after this release has settled. Recorded before the
-			// resolution below so the two can never be observed out of order.
-			if (outcome === "failed") this.#handoffFailed = true;
+			// first — still reads it and refuses, and so does a call that arrives
+			// only after this release has settled. Recorded before the resolution
+			// below so the two can never be observed out of order. Keyed by the
+			// recycling owner: another top-level session's children borrow nothing
+			// this handoff destroyed.
+			if (outcome === "failed") this.#failedHandoffs.add(recyclingOwnerId);
 			// Drop OUR entry before resolving, so a waiter waking on the resolution
 			// re-reads the set without it rather than looping on a barrier nobody
 			// holds. Every other live handoff keeps its own entry, so revival stays
@@ -876,7 +1028,8 @@ export class AgentLifecycleManager {
 			// in flight past the deadline was fenced above, so it fails rather than
 			// attaching behind this snapshot — blocking here instead is the wedge
 			// the deadline exists to prevent.
-			const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
+			const parkable = (id: string): boolean => this.#recycleOwns(this.#adopted.get(id), recyclingOwnerId);
+			const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])].filter(parkable);
 			await Promise.all(
 				ids.map(async id => {
 					const park = this.park(id);
@@ -910,7 +1063,7 @@ export class AgentLifecycleManager {
 			// miss exactly that record. Nothing can adopt after this point — the
 			// barrier blocks revival until the caller releases, and an abandoned
 			// revival is fenced and refuses to attach.
-			this.#markRevivedDependenciesStale();
+			this.#markRevivedDependenciesStale(recyclingOwnerId);
 		} catch (error) {
 			release();
 			throw error;
@@ -919,19 +1072,40 @@ export class AgentLifecycleManager {
 	}
 
 	/**
-	 * Mark every adoption's retained reviver as belonging to a parent that is
-	 * being replaced. Covers EVERY adoption this manager holds, not just the ids
-	 * {@link parkAll} snapshotted: an adoption whose ref is already `parked`
+	 * True when the recycle driven by `recyclingOwnerId` owns this adoption, and
+	 * may therefore park it and invalidate its retained reviver.
+	 *
+	 * Both `undefined` sides answer YES, and deliberately: an adoption nobody
+	 * could attribute may well be the recycling parent's, and a recycle nobody
+	 * could attribute may well own any adoption. In both directions the
+	 * alternative is treating an unattributed record as SAFE — leaving a child
+	 * revivable through a closure over the disposed parent, which fails at its
+	 * first tool call with nothing to retry. Being parked and marked instead
+	 * costs at most a revival through the replacement's factory.
+	 */
+	#recycleOwns(adopted: AdoptedAgent | undefined, recyclingOwnerId: string | undefined): boolean {
+		if (!adopted) return true;
+		return adopted.ownerId === undefined || recyclingOwnerId === undefined || adopted.ownerId === recyclingOwnerId;
+	}
+
+	/**
+	 * Mark the recycling owner's adoptions as holding a reviver that belongs to
+	 * a parent being replaced. Covers every adoption of THAT owner, not just the
+	 * ids {@link parkAll} snapshotted: an adoption whose ref is already `parked`
 	 * (its TTL expired earlier) still carries the same recycling parent's
 	 * closure, and a live-session record parked by this call carries it too. A
 	 * cleared flag is never re-set here — {@link #resolveAndRevive} clears it
 	 * only after a factory reviver replaced the closure, and that replacement
 	 * belongs to the parent that installed the factory, which a later recycle
 	 * marks in its own turn.
+	 *
+	 * Another live owner's adoptions are left alone: their reviver still closes
+	 * over a session this teardown does not touch, so marking them would refuse
+	 * a revival that had nothing wrong with it.
 	 */
-	#markRevivedDependenciesStale(): void {
+	#markRevivedDependenciesStale(recyclingOwnerId: string | undefined): void {
 		for (const adopted of this.#adopted.values()) {
-			if (adopted.revive) adopted.reviverStale = true;
+			if (adopted.revive && this.#recycleOwns(adopted, recyclingOwnerId)) adopted.reviverStale = true;
 		}
 	}
 
