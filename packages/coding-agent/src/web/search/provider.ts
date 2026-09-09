@@ -10,11 +10,19 @@
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { SearchAvailabilityContext, SearchProvider } from "./providers/base";
-import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
+import {
+	createSearchProviderPolicy,
+	isSearchProviderId,
+	SEARCH_PROVIDER_LABELS,
+	SEARCH_PROVIDER_ORDER,
+	SearchProviderError,
+	type SearchProviderId,
+	type SearchProviderPolicy,
+} from "./types";
 
 export type { SearchAvailabilityContext, SearchParams } from "./providers/base";
 export { SearchProvider } from "./providers/base";
-export { SEARCH_PROVIDER_ORDER } from "./types";
+export { createSearchProviderPolicy, SEARCH_PROVIDER_ORDER, type SearchProviderPolicy } from "./types";
 
 interface ProviderMeta {
 	id: SearchProviderId;
@@ -189,10 +197,52 @@ export async function getSearchProvider(id: SearchProviderId): Promise<SearchPro
 	return provider;
 }
 
-/** Provider fallback order set via settings (default: built-in order). */
-let orderedProvIds: readonly SearchProviderId[] = SEARCH_PROVIDER_ORDER;
-/** Providers the user explicitly listed in `providers.webSearchOrder`. */
-let explicitProvIds = new Set<SearchProviderId>();
+/**
+ * Process-wide fallback policy, installed from settings at startup and by the
+ * interactive selector.
+ *
+ * This is the DEFAULT for callers that have no session of their own (the
+ * one-shot `omp q` CLI, direct provider-chain users, tests). A caller that owns
+ * a session should pass its own policy instead: settings are per-project, and
+ * with several top-level sessions in one process the last writer here would
+ * otherwise decide every session's provider order and exclusions.
+ */
+let globalPolicy: SearchProviderPolicy = createSearchProviderPolicy([], []);
+
+/**
+ * Minimal read view of a `Settings` instance: exactly the two paths a
+ * web-search policy is built from. Structural so a session can pass its own
+ * `Settings` without this module importing the settings singleton.
+ */
+export interface SearchPolicySettings {
+	get(path: "providers.webSearchOrder"): unknown;
+	get(path: "providers.webSearchExclude"): unknown;
+}
+
+/**
+ * This session's OWN order/exclusions, read from its `Settings` rather than
+ * from the process-wide state above.
+ *
+ * Several top-level SDK/ACP sessions share one process, so the global holds
+ * whichever session applied last — including after a peer's `/refresh
+ * settings`. A session that carries its own settings resolves against this and
+ * is unaffected by that peer.
+ *
+ * `undefined` in, `undefined` out: a caller with no settings of its own
+ * (one-shot CLI paths, embedding harnesses) keeps resolving against the global,
+ * which is today's behaviour.
+ */
+export function resolveSearchProviderPolicy(
+	settings: SearchPolicySettings | undefined,
+): SearchProviderPolicy | undefined {
+	if (settings === undefined) return undefined;
+	const order = settings.get("providers.webSearchOrder");
+	const excluded = settings.get("providers.webSearchExclude");
+	return createSearchProviderPolicy(
+		Array.isArray(order) ? order.filter(isSearchProviderId) : [],
+		Array.isArray(excluded) ? excluded.filter(isSearchProviderId) : [],
+	);
+}
 
 /**
  * Prioritize configured providers while retaining every unlisted provider in
@@ -202,25 +252,20 @@ let explicitProvIds = new Set<SearchProviderId>();
  * anonymous search exactly like the retired single-preference setting did.
  */
 export function setSearchProviderOrder(providers: readonly SearchProviderId[]): void {
-	const prioritized = new Set(providers.filter(id => SEARCH_PROVIDER_ORDER.includes(id)));
-	explicitProvIds = prioritized;
-	orderedProvIds =
-		prioritized.size === 0
-			? SEARCH_PROVIDER_ORDER
-			: [...prioritized, ...SEARCH_PROVIDER_ORDER.filter(id => !prioritized.has(id))];
+	globalPolicy = createSearchProviderPolicy(providers, [...globalPolicy.excludedIds]);
 }
-
-/** Providers excluded from web search resolution via settings. */
-let excludedProvIds = new Set<SearchProviderId>();
 
 /** Set providers that web search should never use, including fallbacks. */
 export function setExcludedSearchProviders(providers: readonly SearchProviderId[]): void {
-	excludedProvIds = new Set(providers);
+	globalPolicy = { ...globalPolicy, excludedIds: new Set(providers) };
 }
 
-/** `true` when settings exclude `id` from web search (auto chain and the Public Web fan-out). */
-export function isSearchProviderExcluded(id: SearchProviderId): boolean {
-	return excludedProvIds.has(id);
+/**
+ * `true` when `policy` excludes `id` from web search (auto chain and the Public
+ * Web fan-out). Defaults to the process-wide policy when the caller has none.
+ */
+export function isSearchProviderExcluded(id: SearchProviderId, policy: SearchProviderPolicy = globalPolicy): boolean {
+	return policy.excludedIds.has(id);
 }
 
 export interface SearchProviderCandidate {
@@ -232,17 +277,24 @@ export interface SearchProviderCandidate {
  * Return provider candidates in fallback order without loading their modules.
  * `forcedProvider` (a per-request `provider` argument) is terminal-first and
  * bypasses exclusion; configured-order entries carry `explicit: true`.
+ *
+ * `policy` is the calling session's resolved order/exclusions; omitting it
+ * resolves against the process-wide policy, which is what a session-less
+ * caller wants.
  */
-export function resolveProviderCandidates(forcedProvider?: SearchProviderId): SearchProviderCandidate[] {
+export function resolveProviderCandidates(
+	forcedProvider?: SearchProviderId,
+	policy: SearchProviderPolicy = globalPolicy,
+): SearchProviderCandidate[] {
 	const candidates: SearchProviderCandidate[] = [];
 
-	if (forcedProvider !== undefined && !isSearchProviderExcluded(forcedProvider)) {
+	if (forcedProvider !== undefined && !policy.excludedIds.has(forcedProvider)) {
 		candidates.push({ id: forcedProvider, explicit: true });
 	}
 
-	for (const id of orderedProvIds) {
-		if (id === forcedProvider || isSearchProviderExcluded(id)) continue;
-		candidates.push({ id, explicit: explicitProvIds.has(id) });
+	for (const id of policy.orderedIds) {
+		if (id === forcedProvider || policy.excludedIds.has(id)) continue;
+		candidates.push({ id, explicit: policy.explicitIds.has(id) });
 	}
 
 	return candidates;
@@ -253,15 +305,21 @@ export function resolveProviderCandidates(forcedProvider?: SearchProviderId): Se
  *
  * This compatibility helper loads every candidate. Search execution should use
  * {@link resolveProviderCandidates} so fallback modules load only when reached.
+ *
+ * `policy` is the calling session's order/exclusions; omitting it resolves
+ * against the process-wide policy. It stays separate from `context`, which is
+ * handed to the providers themselves — a provider decides its own availability
+ * and must not see the chain's ordering policy.
  */
 export async function resolveProviderChain(
 	authStorage: AuthStorage,
 	forcedProvider?: SearchProviderId,
 	context?: SearchAvailabilityContext,
+	policy?: SearchProviderPolicy,
 ): Promise<SearchProvider[]> {
 	const providers: SearchProvider[] = [];
 
-	for (const candidate of resolveProviderCandidates(forcedProvider)) {
+	for (const candidate of resolveProviderCandidates(forcedProvider, policy ?? globalPolicy)) {
 		const provider = await getSearchProvider(candidate.id);
 		const available = candidate.explicit
 			? await provider.isExplicitlyAvailable(authStorage, context)

@@ -73,7 +73,7 @@ function createHost(
 		textOutputCommitted: () => options.textOutputCommitted !== false,
 		thinkingLevel: () => undefined,
 		configuredThinkingLevel: () => undefined,
-		setThinkingLevel: () => {},
+		setThinkingLevelPreservingProvenance: () => {},
 		thinkingLevelCeiling: () => undefined,
 		isDisposed: () => false,
 		isStreaming: () => false,
@@ -183,7 +183,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			appendModelChange: (selector: string) => modelChanges.push(selector),
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
-		host.setThinkingLevel = level => thinkingChanges.push(level);
+		host.setThinkingLevelPreservingProvenance = level => thinkingChanges.push(level);
 		host.setModelWithProviderSessionReset = async nextModel => {
 			activeModel = nextModel;
 			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {

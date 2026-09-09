@@ -26,6 +26,7 @@ import {
 	getSearchProvider,
 	getSearchProviderLabel,
 	resolveProviderCandidates,
+	resolveSearchProviderPolicy,
 	type SearchProvider,
 	type SearchProviderCandidate,
 } from "./provider";
@@ -36,6 +37,7 @@ import {
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SearchProviderError,
 	type SearchProviderId,
+	type SearchProviderPolicy,
 	type SearchResponse,
 } from "./types";
 
@@ -134,6 +136,13 @@ interface ExecuteSearchOptions {
 	sessionId?: string;
 	/** Calling session's own MCP-discovered Exa key; see {@link SearchParams.sessionExaApiKey}. */
 	sessionExaApiKey?: string;
+	/**
+	 * Calling session's own web-search order/exclusions, resolved from ITS
+	 * settings. Omitted, resolution falls back to the process-wide policy — the
+	 * right answer for a caller with no session, and wrong for one whose peer
+	 * session just reloaded different settings over it.
+	 */
+	providerPolicy?: SearchProviderPolicy;
 	signal?: AbortSignal;
 }
 
@@ -143,7 +152,7 @@ async function executeSearch(
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
-	const { authStorage, modelRegistry, sessionId, sessionExaApiKey, signal } = options;
+	const { authStorage, modelRegistry, sessionId, sessionExaApiKey, providerPolicy, signal } = options;
 	const explicitProvider = params.provider;
 	let candidates: SearchProviderCandidate[];
 	if (explicitProvider && explicitProvider !== "auto") {
@@ -151,7 +160,7 @@ async function executeSearch(
 	} else {
 		// `--provider auto` and the default both walk the configured chain;
 		// exclusions still apply.
-		candidates = resolveProviderCandidates();
+		candidates = resolveProviderCandidates(undefined, providerPolicy);
 	}
 
 	const parsedQuery = parseSearchQuery(params.query);
@@ -227,6 +236,10 @@ async function executeSearch(
 				sessionExaApiKey,
 				antigravityEndpointMode,
 				geminiModel,
+				// Only the `public` aggregate reads this: it fans out over other
+				// providers itself, so it needs the CALLING session's exclusions
+				// rather than the process-wide set.
+				providerPolicy,
 			});
 
 			// Lenient constraint pass over whatever the provider returned: enforce
@@ -359,6 +372,12 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 			// process-global `EXA_API_KEY` — the FIRST session's key — and
 			// authenticates as that account.
 			sessionExaApiKey: getSessionExaApiKey(this.#session.mcpManager),
+			// Likewise this session's own provider order/exclusions, read from
+			// ITS settings: `providers.webSearchOrder`/`webSearchExclude` are
+			// per-project, and the module-level policy holds whichever session
+			// applied last — so a peer's `/refresh settings` would otherwise
+			// redirect this session's searches to a provider it never selected.
+			providerPolicy: resolveSearchProviderPolicy(this.#session.settings),
 			signal,
 		});
 	}
@@ -385,6 +404,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRende
 			authStorage,
 			modelRegistry: ctx.modelRegistry,
 			sessionId,
+			providerPolicy: resolveSearchProviderPolicy(ctx.settings),
 			signal,
 		});
 	},
@@ -402,6 +422,11 @@ export function getSearchTools(): CustomTool<any, any>[] {
 	return [webSearchCustomTool];
 }
 
-export { getSearchProvider, setExcludedSearchProviders, setSearchProviderOrder } from "./provider";
-export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
-export { isSearchProviderId, isSearchProviderPreference } from "./types";
+export {
+	getSearchProvider,
+	resolveSearchProviderPolicy,
+	setExcludedSearchProviders,
+	setSearchProviderOrder,
+} from "./provider";
+export type { SearchProviderId as SearchProvider, SearchProviderPolicy, SearchResponse } from "./types";
+export { createSearchProviderPolicy, isSearchProviderId, isSearchProviderPreference } from "./types";

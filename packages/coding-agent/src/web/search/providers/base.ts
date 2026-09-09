@@ -1,7 +1,7 @@
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../../config/model-registry";
 import type { StructuredQuery } from "../query";
-import type { SearchProviderId, SearchResponse } from "../types";
+import type { SearchProviderId, SearchProviderPolicy, SearchResponse } from "../types";
 
 /**
  * Shared web search parameters passed to providers.
@@ -81,6 +81,13 @@ export interface SearchParams {
 	sessionExaApiKey?: string;
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	geminiModel?: string;
+	/**
+	 * The resolving caller's provider order/exclusions. Only aggregate
+	 * providers that fan out over other providers (`public`) need it, so they
+	 * honour the CALLING session's exclusions rather than whichever session
+	 * last wrote the process-wide policy. Omitted, they fall back to it.
+	 */
+	providerPolicy?: SearchProviderPolicy;
 }
 
 /**

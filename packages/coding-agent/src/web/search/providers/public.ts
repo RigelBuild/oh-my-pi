@@ -121,7 +121,7 @@ export async function searchPublicWeb(
 	const softMs = deadlines.softMs ?? SOFT_DEADLINE_MS;
 	const hardMs = deadlines.hardMs ?? HARD_DEADLINE_MS;
 	const numResults = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
-	const engineIds = PUBLIC_ENGINE_IDS.filter(id => !isSearchProviderExcluded(id));
+	const engineIds = PUBLIC_ENGINE_IDS.filter(id => !isSearchProviderExcluded(id, params.providerPolicy));
 	if (engineIds.length === 0) {
 		throw new SearchProviderError("public", "Every credential-free engine is excluded by settings.", 400);
 	}

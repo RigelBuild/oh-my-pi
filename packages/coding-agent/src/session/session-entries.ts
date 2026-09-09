@@ -104,9 +104,24 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	 * `#applyReloadedModel` — rather than a user/RPC/ACP selection. Mirrors
 	 * {@link ModelChangeEntry.settingsTracking}: it marks a selection that still
 	 * FOLLOWS the configured default, so a later `/refresh settings` may replace
-	 * it. Absent means an explicit session-level choice a reload must not clobber.
+	 * it.
+	 *
+	 * Absence does NOT mean "explicit": see {@link explicitPin}.
 	 */
 	settingsTracking?: true;
+	/**
+	 * True when this transition was an explicit session-level choice a settings
+	 * reload must not clobber — a user/RPC/ACP/selector pick, an explicit
+	 * startup `--thinking`, or an internal re-apply that INHERITED such a pin.
+	 *
+	 * The positive marker exists because provenance used to be encoded as the
+	 * ABSENCE of {@link settingsTracking}, and absence cannot distinguish a
+	 * choice from a receipt written before either flag existed: builds predating
+	 * them wrote every startup default and every per-turn `auto` resolution
+	 * unflagged. With both markers written positively, an entry carrying neither
+	 * is unambiguously a legacy receipt — see {@link thinkingFollowsSettings}.
+	 */
+	explicitPin?: true;
 	/**
 	 * True when this entry is a per-turn `auto` classification receipt, not a
 	 * selection. Like the ephemeral retry-fallback `model_change` role, it masks
@@ -338,15 +353,59 @@ export type SessionEntry =
  * Whether the session's thinking level still FOLLOWS the configured default,
  * rather than being an explicit session-level choice a settings reload must not
  * clobber. The latest non-`autoResolved` {@link ThinkingLevelChangeEntry}
- * decides: its `settingsTracking` flag marks a settings-derived application
- * (settings-derived startup, or a prior tracking re-apply) and keeps the session
- * followable; an unflagged entry is a user/RPC/ACP selection and pins it.
+ * decides, by the marker it carries:
+ *
+ *   - {@link ThinkingLevelChangeEntry.explicitPin} — a user/RPC/ACP/selector
+ *     pick, an explicit startup `--thinking`, or an internal re-apply that
+ *     inherited one. PINNED.
+ *   - {@link ThinkingLevelChangeEntry.settingsTracking} — a settings-derived
+ *     application (settings-derived startup, a tracking re-apply, or the
+ *     retry-fallback recovery path inheriting one). FOLLOWS.
+ *   - NEITHER — a LEGACY receipt, written by a build predating both markers.
+ *     Read as FOLLOWS; see below.
  *
  * Per-turn `auto` classification receipts are skipped — like the ephemeral
  * retry-fallback `model_change`, they mask the underlying selection without
  * being one, so stopping at a receipt would let a refresh clobber an explicit
  * `auto` pin. A branch with no thinking entry at all (nothing was ever
  * selected) still follows settings.
+ *
+ * ## Why an unmarked entry reads as settings-following
+ *
+ * Provenance used to be the ABSENCE of `settingsTracking`, which made every
+ * pre-existing transcript read as pinned: builds before these markers wrote
+ * the startup level unflagged whether or not the user had chosen it, and wrote
+ * every per-turn `auto` resolution unflagged too. So a resumed older session
+ * could never follow a `defaultThinkingLevel` edit again. Both provenances are
+ * now written POSITIVELY, which is what makes an unmarked entry identifiable
+ * as legacy at all — but not what it MEANT, since a legacy startup default and
+ * a legacy explicit pick are byte-identical on disk. The field that would
+ * separate them is exactly the field those writers did not set.
+ *
+ * Choosing FOLLOWS is a deliberate bet on the majority and on recoverability,
+ * in that order:
+ *
+ *   - Every session had a startup receipt; only some had a user pick. The
+ *     legacy writer emitted one unconditionally at session creation (sdk.ts),
+ *     and any run that never touched the thinking selector has that receipt and
+ *     nothing else, so the common case is settings-derived by construction.
+ *   - The two errors are not symmetric in cost. Guessing FOLLOWS on a real
+ *     legacy pin loses it only when the user runs `/refresh settings` after
+ *     editing `defaultThinkingLevel` — a deliberate act asking for the
+ *     configured level — and one re-selection restores it AND records a
+ *     first-class `explicitPin` that no later refresh can touch. Guessing
+ *     PINNED freezes the level for the resumed session's entire life with no
+ *     visible cause: the setting is edited, the refresh reports success, and
+ *     nothing moves.
+ *
+ * The positional trick {@link AgentSession.#hasSessionModelOverride} uses for
+ * `model_change` — pinned iff written after a message, since startup's receipt
+ * precedes the first one — is deliberately NOT reused here. It does not
+ * transfer: the legacy per-turn `auto` classifier wrote its receipts mid-turn,
+ * so on any auto-thinking session a mid-session unflagged entry is the norm
+ * rather than the signature of a choice, and the position test would read
+ * those as pins. Applying it would misclassify every legacy `auto` session in
+ * the direction this function most needs to avoid.
  *
  * Shared because the answer is load-bearing in both directions: the settings
  * refresh reads it to decide whether it may re-derive the level, and an
@@ -358,7 +417,7 @@ export function thinkingFollowsSettings(entries: readonly SessionEntry[]): boole
 		const entry = entries[i];
 		if (entry?.type !== "thinking_level_change") continue;
 		if (entry.autoResolved === true) continue;
-		return entry.settingsTracking === true;
+		return entry.explicitPin !== true;
 	}
 	return true;
 }

@@ -3699,10 +3699,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (autoThinking) {
 					// `configured: auto` so the pin records the SELECTOR, not the
 					// provisional effort — same reason as the new-session branch.
-					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
+					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING, {
+						explicitPin: true,
+					});
 				} else {
 					sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, {
-						settingsTracking: false,
+						explicitPin: true,
 					});
 				}
 			}
@@ -3722,9 +3724,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			}
 			if (!autoThinking) {
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, {
-					settingsTracking: !explicitStartupThinking,
-				});
+				// Positive on BOTH sides: an unmarked receipt is how a legacy
+				// transcript is recognized, so a fresh session must never write one.
+				sessionManager.appendThinkingLevelChange(
+					effectiveThinkingLevel,
+					undefined,
+					explicitStartupThinking ? { explicitPin: true } : { settingsTracking: true },
+				);
 			} else if (explicitStartupThinking) {
 				// An EXPLICITLY selected `auto` is a session pin too, and it needs a
 				// receipt to say so. A settings-derived `auto` writes nothing (the
@@ -3739,7 +3745,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// configured/model fallback. `configured: auto` (not the provisional
 				// effort) so resume restores the selector, not the effort it
 				// happened to show.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING, { explicitPin: true });
 			}
 			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
@@ -4410,7 +4416,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// updates `agent.kimiApiFormat`, while the construction-time
 					// constant would pin every later capture to the old wire format.
 					kimiApiFormat: agent.kimiApiFormat,
-					preferWebsockets: preferOpenAICodexWebsockets,
+					// Live for the same reason as the format above: `/refresh settings`
+					// moves `agent.preferWebsockets` when `providers.openaiWebsockets`
+					// changes, so the construction-time constant would keep every later
+					// capture on the previous transport.
+					preferWebsockets: agent.preferWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,

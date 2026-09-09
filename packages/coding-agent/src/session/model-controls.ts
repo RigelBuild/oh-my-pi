@@ -592,7 +592,12 @@ export class ModelControls {
 	 * settings-derived application rather than an explicit session choice, so a
 	 * later `/refresh settings` may replace it (see
 	 * `AgentSession.#thinkingFollowsSettings`). Callers that represent a real
-	 * user/RPC/ACP selection must leave it unset.
+	 * user/RPC/ACP selection must leave it unset — the receipt then records the
+	 * complementary `explicitPin` marker, which is written POSITIVELY so an
+	 * unmarked LEGACY receipt stays distinguishable from a pin
+	 * ({@link thinkingFollowsSettings}). An automatic caller that must neither
+	 * pin nor untrack uses
+	 * {@link setThinkingLevelPreservingProvenance} instead of guessing.
 	 *
 	 * `options.explicit` marks this call as a DIRECT thinking selection (the
 	 * public session surface: ACP/RPC, the selector, the cycle key) rather than
@@ -627,7 +632,7 @@ export class ModelControls {
 			const isChanging = !wasAuto || previousLevel !== provisional;
 			if (isChanging || this.#needsExplicitPinReceipt(options)) {
 				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, {
-					settingsTracking: options?.settingsTracking,
+					...ModelControls.#receiptProvenance(options),
 				});
 			}
 			if (isChanging) {
@@ -653,7 +658,7 @@ export class ModelControls {
 
 		if (isChanging || this.#needsExplicitPinReceipt(options)) {
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, {
-				settingsTracking: options?.settingsTracking,
+				...ModelControls.#receiptProvenance(options),
 			});
 		}
 		if (isChanging) {
@@ -663,6 +668,48 @@ export class ModelControls {
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
+	}
+
+	/**
+	 * The provenance markers a receipt for this call must carry. Both are
+	 * written POSITIVELY and exactly one applies: a settings-derived application
+	 * is `settingsTracking`, anything else is a real session choice and is
+	 * `explicitPin`. Neither marker is what identifies a LEGACY receipt from a
+	 * build predating them, so a present-day writer must never emit a bare
+	 * entry — see {@link thinkingFollowsSettings}.
+	 */
+	static #receiptProvenance(options?: { settingsTracking?: boolean }): {
+		settingsTracking?: boolean;
+		explicitPin?: boolean;
+	} {
+		return options?.settingsTracking ? { settingsTracking: true } : { explicitPin: true };
+	}
+
+	/**
+	 * Apply a thinking level from an INTERNAL, automatic transition that is
+	 * neither a user selection nor a settings-derived application — the
+	 * retry-fallback recovery path, which moves the level because the model it
+	 * failed over to demands a different one, and moves it back on restore.
+	 *
+	 * Such a call must leave the session's provenance exactly as it found it.
+	 * Routing it through the public `AgentSession.setThinkingLevel()` classified
+	 * it as an explicit user selection, so entering or leaving a fallback
+	 * appended a pin receipt the user never asked for — including for a
+	 * "change" to the level already active, which `#needsExplicitPinReceipt`
+	 * writes precisely because a real selection must be recorded even when
+	 * nothing moves. A settings-tracking session that hit one rate-limit
+	 * failover then ignored every later `defaultThinkingLevel` edit plus
+	 * `/refresh settings`.
+	 *
+	 * Shares `#reapplyThinkingLevel`'s inheritance rule (read the pre-transition
+	 * answer off the branch) rather than re-deriving it, and for the same
+	 * reason: the fallback's own `model_change` carries no thinking receipt, so
+	 * the branch still holds the pre-transition provenance at this point.
+	 */
+	setThinkingLevelPreservingProvenance(level: ConfiguredThinkingLevel | undefined): void {
+		this.setThinkingLevel(level, false, {
+			settingsTracking: thinkingFollowsSettings(this.#host.sessionManager.getBranch()),
+		});
 	}
 
 	/**

@@ -125,6 +125,51 @@ export function isSearchProviderPreference(value: string): value is SearchProvid
 	return SEARCH_PROVIDER_PREFERENCES.includes(value as SearchProviderId | "auto");
 }
 
+/**
+ * A resolved web-search provider policy: the fallback order, which entries the
+ * user hand-listed (those route through `isExplicitlyAvailable`), and which
+ * providers are excluded outright.
+ *
+ * Materialized as a VALUE so a policy can travel with a request instead of
+ * living only in module state. `providers.webSearchOrder` /
+ * `providers.webSearchExclude` are per-project settings, and several top-level
+ * SDK/ACP sessions share one process: a session-scoped policy lets each one
+ * resolve under its OWN settings rather than whichever session wrote the
+ * module-level default most recently.
+ */
+export interface SearchProviderPolicy {
+	/** Fallback order: configured entries first, then every unlisted provider. */
+	readonly orderedIds: readonly SearchProviderId[];
+	/** Providers the user hand-listed — treated as explicit selections. */
+	readonly explicitIds: ReadonlySet<SearchProviderId>;
+	/** Providers web search must never use, including as a fallback. */
+	readonly excludedIds: ReadonlySet<SearchProviderId>;
+}
+
+/**
+ * Build a policy from a configured order and exclusion list.
+ *
+ * Prioritizes configured providers while retaining every unlisted provider in
+ * its built-in relative order. Invalid IDs are ignored defensively. Listed
+ * providers are recorded as explicit selections: they resolve through
+ * `isExplicitlyAvailable`, so e.g. a hand-listed Perplexity may fall back to
+ * anonymous search exactly like the retired single-preference setting did.
+ */
+export function createSearchProviderPolicy(
+	order: readonly SearchProviderId[],
+	excluded: readonly SearchProviderId[],
+): SearchProviderPolicy {
+	const prioritized = new Set(order.filter(id => SEARCH_PROVIDER_ORDER.includes(id)));
+	return {
+		orderedIds:
+			prioritized.size === 0
+				? SEARCH_PROVIDER_ORDER
+				: [...prioritized, ...SEARCH_PROVIDER_ORDER.filter(id => !prioritized.has(id))],
+		explicitIds: prioritized,
+		excludedIds: new Set(excluded),
+	};
+}
+
 /** Source returned by search (all providers) */
 export interface SearchSource {
 	title: string;

@@ -2358,13 +2358,21 @@ export class SessionManager {
 
 	/**
 	 * Append a thinking level change as child of current leaf, then advance leaf. Returns entry id.
+	 *
+	 * The two provenance markers are both written POSITIVELY, and a caller that
+	 * knows the provenance must pass one: an entry carrying NEITHER is how a
+	 * legacy receipt (written before the markers existed) is recognized, so
+	 * omitting both on a new entry silently backdates it. See
+	 * {@link thinkingFollowsSettings}.
+	 *
 	 * @param options.settingsTracking Marks a settings-derived application (not an explicit session choice), leaving it replaceable by a later `/refresh settings`.
+	 * @param options.explicitPin Marks an explicit session-level choice (a user/RPC/ACP/selector pick, an explicit startup `--thinking`, or an internal re-apply inheriting one) that a `/refresh settings` must not clobber.
 	 * @param options.autoResolved Marks a per-turn `auto` classification receipt rather than a selection, so tracking classification walks past it.
 	 */
 	appendThinkingLevelChange(
 		thinkingLevel?: string,
 		configured?: string,
-		options?: { settingsTracking?: boolean; autoResolved?: boolean },
+		options?: { settingsTracking?: boolean; explicitPin?: boolean; autoResolved?: boolean },
 	): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
@@ -2372,6 +2380,7 @@ export class SessionManager {
 			thinkingLevel: thinkingLevel ?? null,
 			configured: configured ?? null,
 			...(options?.settingsTracking ? { settingsTracking: true } : {}),
+			...(options?.explicitPin ? { explicitPin: true } : {}),
 			...(options?.autoResolved ? { autoResolved: true } : {}),
 		};
 		this.#recordEntry(entry);

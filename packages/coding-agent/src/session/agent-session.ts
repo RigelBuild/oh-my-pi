@@ -1661,7 +1661,7 @@ export class AgentSession {
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
-			setThinkingLevel: level => this.setThinkingLevel(level),
+			setThinkingLevelPreservingProvenance: level => this.#models.setThinkingLevelPreservingProvenance(level),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
@@ -6734,7 +6734,18 @@ export class AgentSession {
 		// holding are different questions, and only the latter belongs here.
 		const publishedTtsrRules = ttsrManager.getRules().filter(rule => ttsrRuleNames.has(rule.name));
 		const activeRules = [...rulebookRules, ...alwaysApplyRules, ...publishedTtsrRules];
-		setActiveRules(activeRules);
+		// Only a TOP-LEVEL session may replace the process-global rule snapshot,
+		// the same condition the roster path hands `reloadSkillsAndRules` as
+		// `publishGlobals`. This re-bucket runs under `#agentRuleName`, so a
+		// structured subagent whose own `refresh("settings")` flips TTSR gating
+		// published its CHILD-scoped set over the parent's, leaving every
+		// contextless consumer (a `RuleProtocolHandler` with no session-local
+		// array) serving it until the main session refreshed again.
+		//
+		// The gate covers the global swap ONLY: the child's own roster, TTSR
+		// registry reconciliation and session-local snapshot below must still
+		// apply, or its `disabledRules` edit would do nothing at all.
+		if (this.#agentKind === "main") setActiveRules(activeRules);
 		const nextRosterRules = [...rulebookRules, ...alwaysApplyRules];
 		const rulesChanged = !rulesEqual(this.#rosterRules, nextRosterRules);
 		this.#rosterRules = nextRosterRules;
@@ -9476,6 +9487,14 @@ export class AgentSession {
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		// The carried-over thinking receipt below is written onto the NEW branch,
+		// after `newSession()` has replaced the old one, so its provenance has to
+		// be read while the outgoing branch is still current. `/new` keeps the
+		// live thinking selection, so it must keep that selection's provenance
+		// too: a pin stays pinned, and a settings-derived level stays followable.
+		// Both markers are written positively, so an unmarked carry-over would
+		// instead read as a legacy receipt (see `thinkingFollowsSettings`).
+		const thinkingWasFollowingSettings = this.#thinkingFollowsSettings();
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -9551,7 +9570,11 @@ export class AgentSession {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
-			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
+			this.sessionManager.appendThinkingLevelChange(
+				this.thinkingLevel,
+				this.configuredThinkingLevel(),
+				thinkingWasFollowingSettings ? { settingsTracking: true } : { explicitPin: true },
+			);
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 
 			this.#todo.resetCycle();
@@ -9749,6 +9772,13 @@ export class AgentSession {
 	 * selector, extensions — so every call here is a real user choice and is
 	 * recorded as a pin a later `/refresh settings` must not clobber, even when
 	 * the selected level matches the one already active.
+	 *
+	 * That classification is why an INTERNAL, automatic transition must not come
+	 * through here. Retry-fallback recovery uses
+	 * `ModelControls.setThinkingLevelPreservingProvenance()` (reached via
+	 * `TurnRecoveryHost`), and a model-derived re-apply uses
+	 * `ModelControls.#reapplyThinkingLevel`; both inherit the session's existing
+	 * provenance instead of asserting a user choice.
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist, { explicit: true });

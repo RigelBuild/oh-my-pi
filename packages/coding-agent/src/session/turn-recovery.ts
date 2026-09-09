@@ -187,7 +187,18 @@ export interface TurnRecoveryHost {
 	textOutputCommitted(): boolean;
 	thinkingLevel(): ThinkingLevel | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
+	/**
+	 * Apply a thinking level for a fallback transition, PRESERVING the session's
+	 * existing thinking provenance. Recovery is automatic: it moves the level
+	 * because the model it failed over to demands a different one, which is
+	 * neither a user selection nor a settings-derived application. The public
+	 * `AgentSession.setThinkingLevel()` classifies every call as a user/RPC
+	 * selection, so routing recovery through it appended a pin receipt — even
+	 * for an adjustment matching the current level — and a settings-tracking
+	 * session that hit one failover stopped following `defaultThinkingLevel`
+	 * edits for the rest of its life.
+	 */
+	setThinkingLevelPreservingProvenance(level: ConfiguredThinkingLevel | undefined): void;
 	/** Hard per-session effort ceiling; fallback recovery must never raise thinking above it. */
 	thinkingLevelCeiling(): Effort | undefined;
 	isDisposed(): boolean;
@@ -1836,7 +1847,7 @@ export class TurnRecovery {
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
-		this.#host.setThinkingLevel(nextThinkingLevel);
+		this.#host.setThinkingLevelPreservingProvenance(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
 			this.#activeRetryFallback = {
 				role,
@@ -2070,15 +2081,15 @@ export class TurnRecovery {
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
-		// Clear before the swap: `setModelWithProviderSessionReset` and
-		// `setThinkingLevel` both notify subscribers, and an observer reading
+		// Clear before the swap: `setModelWithProviderSessionReset` and the
+		// thinking application both notify subscribers, and an observer reading
 		// attribution in that window would see the restored primary still tagged
 		// as fallback-served.
 		this.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
-		this.#host.setThinkingLevel(thinkingToApply);
+		this.#host.setThinkingLevelPreservingProvenance(thinkingToApply);
 		return true;
 	}
 

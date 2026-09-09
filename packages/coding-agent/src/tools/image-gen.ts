@@ -33,7 +33,7 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
-import { settings } from "../config/settings";
+import { type Settings, settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { resolveXAIHttpCredentials } from "../lib/xai-http";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
@@ -551,7 +551,15 @@ async function buildImageEndpointResult(
 	};
 }
 
-/** Configured provider priority set via `providers.imageOrder` (default: none). */
+/**
+ * Process-wide image-provider priority from `providers.imageOrder`, installed
+ * at startup and by the interactive selector (default: none).
+ *
+ * The DEFAULT for callers with no settings of their own. A session that
+ * carries its own `Settings` resolves from those instead: `providers.imageOrder`
+ * is per-project and several top-level sessions share one process, so this
+ * holds whichever session applied last.
+ */
 let configuredImageProviderOrder: readonly ImageProvider[] = [];
 
 export function isImageProviderPreference(value: unknown): value is ImageProviderPreference {
@@ -562,6 +570,17 @@ export function isImageProviderPreference(value: unknown): value is ImageProvide
 export function setImageProviderOrder(providers: readonly string[]): void {
 	configuredImageProviderOrder = providers.filter(isImageProviderId);
 }
+
+/**
+ * The calling session's own image-provider priority, or the process-wide list
+ * when the caller has no settings of its own.
+ */
+function sessionImageProviderOrder(settings: Settings | undefined): readonly ImageProvider[] {
+	if (settings === undefined) return configuredImageProviderOrder;
+	const configured = settings.get("providers.imageOrder");
+	return Array.isArray(configured) ? configured.filter(isImageProviderId) : [];
+}
+
 function assertImageAspectRatioSupported(provider: ImageProvider, aspectRatio: ImageGenParams["aspect_ratio"]): void {
 	if (!aspectRatio || provider === "xai" || COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio)) {
 		return;
@@ -742,7 +761,11 @@ function activeImageProvider(model: Model | undefined): Exclude<ImageProviderPre
 	}
 }
 
-function imageProviderOrder(activeModel: Model | undefined, requested?: ImageProviderPreference): ImageProvider[] {
+function imageProviderOrder(
+	activeModel: Model | undefined,
+	requested: ImageProviderPreference | undefined,
+	settings: Settings | undefined,
+): ImageProvider[] {
 	const providers: ImageProvider[] = [];
 	const added = new Set<ImageProvider>();
 	const add = (provider: ImageProvider | null): void => {
@@ -754,7 +777,7 @@ function imageProviderOrder(activeModel: Model | undefined, requested?: ImagePro
 	// Per-request provider wins, then the configured priority list, then the
 	// active session's provider, then the built-in auto order.
 	if (requested !== undefined && requested !== "auto") add(requested);
-	for (const provider of configuredImageProviderOrder) add(provider);
+	for (const provider of sessionImageProviderOrder(settings)) add(provider);
 	add(activeImageProvider(activeModel));
 	for (const provider of AUTO_IMAGE_PROVIDER_ORDER) add(provider);
 	return providers;
@@ -1231,7 +1254,10 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 	async execute(_toolCallId, params, _onUpdate, ctx, signal) {
 		return untilAborted(signal, async () => {
 			const sessionId = ctx.sessionManager.getSessionId();
-			const providerOrder = imageProviderOrder(ctx.model, params.provider);
+			// This session's own `providers.imageOrder`. Module state holds
+			// whichever top-level session applied last, so a peer's `/refresh
+			// settings` would otherwise reprice this session's generation.
+			const providerOrder = imageProviderOrder(ctx.model, params.provider, ctx.settings);
 			const cwd = ctx.sessionManager.getCwd();
 			const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
 			const fetchImpl = ctx.fetch ?? fetch;

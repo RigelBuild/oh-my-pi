@@ -17,6 +17,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getActiveRules, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { RuleProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/rule-protocol";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -696,6 +697,91 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 
 			// A main session owns the globals, so its refresh must swap them.
 			expect(getActiveRules().map(rule => rule.name)).toContain(topLevel);
+		} finally {
+			await parent.dispose();
+		}
+	});
+
+	// Same gate, reached by the OTHER path. A `settings`-scope refresh never
+	// enters the roster block that threads `publishGlobals`, so it re-buckets
+	// the session's own source roster in-place and publishes that — under the
+	// CHILD's agent name. A structured subagent flipping TTSR gating therefore
+	// replaced the parent's process-global snapshot with its own scoped view
+	// until the main session refreshed again.
+	it("does not let a child's settings-only TTSR gating change replace the process-global rule snapshot", async () => {
+		const customRegistry = new AgentRegistry();
+		const marker = Bun.nanoseconds().toString(36);
+		const gatedName = `child-settings-gated-${marker}`;
+
+		const parent = await makeSession({
+			agentRegistry: customRegistry,
+			agentId: "Parent",
+			reloadableRules: true,
+			seed: cwd => writeRule(cwd, gatedName, "gated body", "alwaysApply: true\n"),
+		});
+		// The real spawn shape: the parent's roster forwarded and marked
+		// inherited, so the child's own source roster carries the rule and its
+		// settings-only re-bucket has something to drop.
+		const child = await makeSession({
+			agentRegistry: customRegistry,
+			agentId: "Child",
+			parentAgentId: "Parent",
+			taskDepth: 1,
+			cwd: parent.cwd,
+			inheritedRules: getActiveRules(),
+		});
+
+		try {
+			// The PARENT owns the globals: establish the state a contextless
+			// consumer reads.
+			await parent.session.refresh("rules");
+			expect(getActiveRules().map(rule => rule.name)).toContain(gatedName);
+
+			// A CONFIG OVERLAY, not an in-memory settings mutation: the child's
+			// `settings` refresh gates every reconcile on a real on-disk change,
+			// and the rules capability is cached for the process lifetime anyway.
+			await fs.writeFile(path.join(child.cwd, "config.yml"), `ttsr:\n  disabledRules:\n    - ${gatedName}\n`);
+			await child.session.refresh("settings");
+
+			// Pre-fix: the child's re-bucket published unconditionally, so the
+			// process global lost the rule and `rule://` served the child's gated
+			// view to every contextless consumer in the parent process.
+			expect(getActiveRules().map(rule => rule.name)).toContain(gatedName);
+			await expect(
+				new RuleProtocolHandler().resolve({ rawHost: gatedName, hostname: gatedName } as never),
+			).resolves.toBeDefined();
+
+			// And the child's OWN roster really did apply its gating — the guard
+			// suppresses the global swap only. Without this the assertion above
+			// would also pass if the child's settings refresh had become a no-op.
+			expect(childRuleNames(child.session)).not.toContain(gatedName);
+		} finally {
+			await child.dispose();
+			await parent.dispose();
+		}
+	});
+
+	// The top-level half of the settings-scope gate, kept separate so an
+	// over-broad fix (never publishing from this path) is distinguishable from
+	// the missing guard above.
+	it("still publishes the process-global rule snapshot for a top-level settings-only gating change", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const gatedName = `main-settings-gated-${marker}`;
+
+		const parent = await makeSession({
+			agentId: "Solo",
+			reloadableRules: true,
+			seed: cwd => writeRule(cwd, gatedName, "gated body", "alwaysApply: true\n"),
+		});
+
+		try {
+			expect(getActiveRules().map(rule => rule.name)).toContain(gatedName);
+
+			await fs.writeFile(path.join(parent.cwd, "config.yml"), `ttsr:\n  disabledRules:\n    - ${gatedName}\n`);
+			await parent.session.refresh("settings");
+
+			// A main session owns the globals, so its gating flip must reach them.
+			expect(getActiveRules().map(rule => rule.name)).not.toContain(gatedName);
 		} finally {
 			await parent.dispose();
 		}
