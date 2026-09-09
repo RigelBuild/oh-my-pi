@@ -553,6 +553,21 @@ export type RequestRestartResult = { ok: true } | { ok: false; reason: "unavaila
  */
 interface LocalCommandWindow {
 	released: boolean;
+	/**
+	 * Set while the handler is provably parked on a restart it requested: the
+	 * returned promise has been awaited, so the handler cannot run again until
+	 * the restart resolves and its window is the only thing left holding the
+	 * counter up.
+	 *
+	 * Store presence alone does not prove this. The store propagates to every
+	 * descendant of the handler's async context and outlives the handler itself,
+	 * so a fire-and-forget `requestRestart()` — or a call from a detached timer
+	 * the handler started — carries the same window while the handler is still
+	 * running and still using its session runtime. Releasing on store presence
+	 * therefore dropped the counter for a handler that was not waiting, and the
+	 * quiesce loop could dispose underneath it.
+	 */
+	awaitedByHandler: boolean;
 }
 
 export class AgentSession {
@@ -640,6 +655,16 @@ export class AgentSession {
 	 * it owns; see {@link #releaseOwnLocalCommandWindow}.
 	 */
 	readonly #localCommandScope = new AsyncLocalStorage<LocalCommandWindow>();
+	/**
+	 * Every command window currently open on this session.
+	 *
+	 * The ALS store answers "am I inside a window" for the CURRENT async chain;
+	 * a restart running on its own chain needs the opposite question — "is any
+	 * handler still working" — which no store lookup can answer. Entries are
+	 * added when the window opens and removed when the handler unwinds, so the
+	 * set holds only live handlers.
+	 */
+	readonly #liveLocalCommandWindows = new Set<LocalCommandWindow>();
 
 	#powerAssertion: PowerAssertion | undefined;
 
@@ -5927,8 +5952,7 @@ export class AgentSession {
 			// back either promise. Idempotent and scoped to THIS async chain, so a
 			// requester outside a command window releases nothing and every other
 			// in-flight prompt still blocks the recycle.
-			this.#releaseOwnLocalCommandWindow();
-			return this.#restartCall;
+			return this.#restartCallAwaitedFromCommandWindow(this.#restartCall);
 		}
 		// Pre-latch refusals: return WITHOUT latching or caching so the session
 		// stays fully live.
@@ -5951,9 +5975,8 @@ export class AgentSession {
 		// caller's own window from the wait it owns. Only that window: any OTHER
 		// in-flight prompt still blocks the recycle, and prompt()'s `released` flag
 		// keeps the counter balanced when the handler finally unwinds.
-		this.#releaseOwnLocalCommandWindow();
 		this.#restartCall = this.#doRequestRestart(this.#onRestartRequested, sessionFile);
-		return this.#restartCall;
+		return this.#restartCallAwaitedFromCommandWindow(this.#restartCall);
 	}
 
 	/**
@@ -5972,6 +5995,35 @@ export class AgentSession {
 		if (!window || window.released) return;
 		window.released = true;
 		this.#endInFlight();
+	}
+
+	/**
+	 * Hand back `call` as a promise whose FIRST await releases the requester's
+	 * own command window, if this call is running inside one.
+	 *
+	 * The release has to be deferred to the await because that is the only
+	 * moment the handler proves it is parked. `#localCommandScope.getStore()` is
+	 * true for a fire-and-forget call and for a detached descendant of the
+	 * handler, neither of which is waiting — releasing for those drops the
+	 * counter while the handler still holds its runtime, and `#doRequestRestart`
+	 * can then read zero and dispose underneath it. Awaiting is the contract, and
+	 * an await is observable: it calls `then`.
+	 *
+	 * A handler that never awaits keeps its window, so the quiesce loop sees it
+	 * and refuses `busy` naming the command — the caller stops it and retries.
+	 */
+	#restartCallAwaitedFromCommandWindow(call: Promise<RequestRestartResult>): Promise<RequestRestartResult> {
+		const window = this.#localCommandScope.getStore();
+		if (!window || window.released) return call;
+		return {
+			then: (onFulfilled, onRejected) => {
+				// Marked before the release so a second await is a no-op, and so the
+				// quiesce loop can tell a parked handler from a working one.
+				window.awaitedByHandler = true;
+				this.#releaseOwnLocalCommandWindow();
+				return call.then(onFulfilled, onRejected);
+			},
+		} as Promise<RequestRestartResult>;
 	}
 
 	async #doRequestRestart(
@@ -7181,7 +7233,8 @@ export class AgentSession {
 			// otherwise decrement a window the cleanup had already paid for —
 			// dropping the counter below the number of live prompts and letting the
 			// recycle dispose underneath an unrelated one.
-			const window: LocalCommandWindow = { released: false };
+			const window: LocalCommandWindow = { released: false, awaitedByHandler: false };
+			this.#liveLocalCommandWindows.add(window);
 			this.#beginInFlight();
 			try {
 				await this.#localCommandScope.run(window, async () => {
@@ -7208,6 +7261,10 @@ export class AgentSession {
 					}
 				});
 			} finally {
+				// Drop it from the live set first: the handler has unwound, so it no
+				// longer blocks a restart even though a detached descendant may still
+				// carry the store.
+				this.#liveLocalCommandWindows.delete(window);
 				// Retire the window before the decrement, not after: a descendant
 				// that outlives the handler must find it already spent.
 				if (!window.released) {

@@ -1084,6 +1084,75 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		expect(session.isDisposed).toBe(true);
 	});
 
+	// The window's release is what lets a self-requesting handler avoid waiting
+	// for itself, and store presence was taken as proof that the handler was
+	// doing that waiting. It is not: the ALS store propagates to every
+	// descendant of the handler's context and outlives the handler, so a
+	// FIRE-AND-FORGET `requestRestart()` — the handler kicks one off and carries
+	// on with other work — released the window while the handler was still
+	// running and still using its extension/session runtime. `#doRequestRestart`
+	// could then read a zero in-flight count and dispose underneath it.
+	//
+	// Awaiting the returned promise is the contract, and an await is observable,
+	// so the release now happens on the first `then` rather than at call time. A
+	// handler that does not await keeps its window and the recycle waits it out,
+	// exactly as it does for an unrelated handler.
+	//
+	// RED (pre-fix): dispose began while the handler was still parked past its
+	// un-awaited restart request.
+	it("does not dispose under a local command that requested a restart without awaiting it", async () => {
+		const handlerEntered = Promise.withResolvers<void>();
+		const releaseHandler = Promise.withResolvers<void>();
+		let handlerFinished = false;
+		const extensionRunner = {
+			hasHandlers: () => false,
+			emit: async () => undefined,
+			emitBeforeAgentStart: async () => undefined,
+			getCommand: (name: string) =>
+				name === "fire"
+					? {
+							name: "fire",
+							description: "requests a restart without awaiting it",
+							handler: async () => {
+								// Requested, deliberately NOT awaited: the handler keeps
+								// working afterwards, so it still needs its runtime.
+								void session.requestRestart();
+								handlerEntered.resolve();
+								await releaseHandler.promise;
+								handlerFinished = true;
+							},
+						}
+					: undefined,
+			createCommandContext: () => ({}),
+			runScoped: <T>(run: () => T): T => run(),
+			emitError: () => {},
+		} as unknown as ExtensionRunner;
+		await buildLiveSession(undefined, extensionRunner);
+
+		let disposeStarted = false;
+		const realDispose = session.dispose.bind(session);
+		vi.spyOn(session, "dispose").mockImplementation(options => {
+			disposeStarted = true;
+			return realDispose(options);
+		});
+
+		const prompt = session.prompt("/fire");
+		await handlerEntered.promise;
+
+		// Every opportunity for the barrier to (wrongly) conclude the session is
+		// quiet on the strength of a window the handler never stopped needing.
+		await drainEventLoop();
+		expect(disposeStarted).toBe(false);
+		expect(handlerFinished).toBe(false);
+		expect(session.isDisposed).toBe(false);
+
+		// The handler finishes against a live session, and only then may the
+		// recycle proceed.
+		releaseHandler.resolve();
+		expect(await prompt).toBe(false);
+		expect(handlerFinished).toBe(true);
+	});
+
 	// The same circular wait as the self-restart case above, reached through the
 	// COALESCE branch instead of the committing one.
 	//
