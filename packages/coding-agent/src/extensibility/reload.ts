@@ -23,6 +23,7 @@ import type { SkillsSettings } from "../config/settings";
 import { loadCapability } from "../discovery";
 import type { TtsrManager } from "../export/ttsr";
 import { loadSkills, type Skill, setActiveSkills } from "./skills";
+import type { SettingGatedToolRefusal } from "../session/session-tools";
 
 /**
  * Config surface(s) an in-session refresh re-reads from disk. Single-sourced:
@@ -50,6 +51,14 @@ export interface RefreshResult {
 	mcp?: true;
 	/** MCP servers that failed to reconnect on this refresh, message keyed by server name. Empty/undefined when every server connected. */
 	mcpErrors?: Map<string, string>;
+	/**
+	 * Setting-gated tool groups this refresh REFUSED to reconcile because their
+	 * tools hold live work, each naming the specific blocker. The settings were
+	 * still reloaded and every other group reconciled — only these were left as
+	 * they were, so the caller can stop the named work and refresh again.
+	 * Undefined when nothing refused.
+	 */
+	toolGateRefusals?: readonly SettingGatedToolRefusal[];
 }
 
 /** Inputs for a roster reload, sourced from the live session/settings. */

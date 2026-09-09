@@ -10,3 +10,5 @@ Use it when skills, rules, settings, the default model, or MCP servers changed o
 - `all` — every surface above.
 
 Pure re-read: it never writes or reformats any config file. A no-op refresh (nothing changed) is cheap and leaves the system prompt byte-identical.
+
+A settings refresh that enables or disables a tool swaps it on the live session. It never migrates running work, so if the tool being swapped owns any — a bash command or background bash job, an active debug session, an open checkpoint — that one tool is left as it was and the call reports an error naming the blocker. Every other tool still reconciles. Stop the named work, then refresh again.

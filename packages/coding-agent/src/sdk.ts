@@ -210,6 +210,7 @@ import {
 import {
 	BashTool,
 	BUILTIN_TOOLS,
+	buildSettingGatedBuiltinTools,
 	createTools,
 	createVibeTools,
 	type DeferredDiagnosticsEntry,
@@ -3985,6 +3986,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const imageGenTools = await getImageGenTools(modelRegistry, agent.state.model ?? model);
 				return imageGenTools as unknown as CustomTool[];
 			},
+			// The BUILT-IN counterpart. Delegates to `tools/index.ts`, which owns
+			// the availability predicate `createTools` itself uses, so a re-enabled
+			// built-in is gated by exactly the rule that installed it — including
+			// the explicit `options.toolNames` whitelist, which is what keeps a
+			// tool this session was never granted from appearing on a refresh.
+			// Returns native `AgentTool`s; the session only runtime-wraps them.
+			createSettingGatedBuiltinTools: setting =>
+				buildSettingGatedBuiltinTools(toolSession, setting, options.toolNames) as Promise<AgentTool[]>,
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();

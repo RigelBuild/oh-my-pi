@@ -512,60 +512,82 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 export type ToolName = BuiltinToolName;
 
 /**
- * Create tools from BUILTIN_TOOLS registry.
+ * Built-in tool sets whose very EXISTENCE is decided by one boolean setting
+ * read once, here, at session construction. Nothing downstream re-reads the
+ * setting, so `refresh('settings')` has to reconcile each of these explicitly —
+ * this table is the single source both {@link isBuiltinToolAllowed} (startup)
+ * and the session's setting-gated reconcile read, so a new gate cannot be added
+ * to one path and forgotten on the other.
+ *
+ * A gate that is NOT a plain `*.enabled` flag is deliberately absent: `eval`
+ * hangs off `eval.py`/`eval.js` plus an async interpreter preflight, `think`
+ * off `externalThinking` plus model support (reconciled by
+ * `reconcileThinkTool`), `hub` off IRC/spawn capacity, and the memory tools off
+ * `memory.backend` (reconciled by `applyMemoryBackend`).
  */
-export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+export const SETTING_GATED_BUILTIN_TOOL_GROUPS = [
+	{ setting: "bash.enabled", toolNames: ["bash"] },
+	{ setting: "lsp.enabled", toolNames: ["lsp"] },
+	{ setting: "debug.enabled", toolNames: ["debug"] },
+	{ setting: "todo.enabled", toolNames: ["todo"] },
+	{ setting: "glob.enabled", toolNames: ["glob"] },
+	{ setting: "grep.enabled", toolNames: ["grep"] },
+	{ setting: "github.enabled", toolNames: ["github"] },
+	{ setting: "astGrep.enabled", toolNames: ["ast_grep"] },
+	{ setting: "astEdit.enabled", toolNames: ["ast_edit"] },
+	{ setting: "web_search.enabled", toolNames: ["web_search"] },
+	{ setting: "security.enabled", toolNames: ["security_scan"] },
+	{ setting: "ask.enabled", toolNames: ["ask"] },
+	// A pair, and reconciled as one: `createTools` auto-includes the sister tool
+	// precisely so an agent can never checkpoint without being able to rewind.
+	{ setting: "checkpoint.enabled", toolNames: ["checkpoint", "rewind"] },
+	// Top-level only at startup, and `manage_skill`/`learn` carry further
+	// backend gates their factories re-check, so construction stays faithful.
+	{ setting: "autolearn.enabled", toolNames: ["manage_skill", "learn"] },
+] as const satisfies ReadonlyArray<{ setting: string; toolNames: readonly BuiltinToolName[] }>;
+
+/** The boolean setting keys in {@link SETTING_GATED_BUILTIN_TOOL_GROUPS}. */
+export type SettingGatedBuiltinSetting = (typeof SETTING_GATED_BUILTIN_TOOL_GROUPS)[number]["setting"];
+
+/**
+ * The session-shaped inputs every built-in's availability gate reads, resolved
+ * once. `requestedTools` is the EXPANDED explicit list — the auto-includes
+ * below are part of what a session was granted, so a reconcile that skipped
+ * them would refuse to restore a tool startup would have installed.
+ */
+export interface BuiltinToolGate {
+	readonly restrictToolNames: boolean;
+	readonly includeYield: boolean;
+	readonly enableLsp: boolean;
+	readonly goalEnabled: boolean;
+	readonly goalModeActive: boolean;
+	readonly externalThinkingActive: boolean;
+	/** `undefined` = the full default set; otherwise the exact granted names. */
+	readonly requestedTools: string[] | undefined;
+}
+
+/**
+ * Resolve the gate inputs, applying the same explicit-list expansion
+ * `createTools` applies. Pure apart from reading `session`/`settings`, so the
+ * post-startup reconcile can ask "would a fresh build have installed this?"
+ * without rebuilding the registry.
+ */
+export function resolveBuiltinToolGate(session: ToolSession, toolNames?: string[]): BuiltinToolGate {
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
-	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = restrictToolNames
 		? normalizeToolNames(toolNames ?? [])
 		: toolNames
 			? normalizeToolNames(toolNames)
 			: undefined;
-	// createTools may be called more than once for the same ToolSession. A later
-	// explicit (or full-set) write request is a real grant and must upgrade any
-	// device-only transport left by an earlier read-only call.
-	if (requestedTools === undefined || requestedTools.includes("write")) {
-		session.deviceOnlyWrite = undefined;
-		session.pendingFullWriteDescription = undefined;
-	}
 	const goalEnabled = session.settings.get("goal.enabled");
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	const externalThinkingActive =
 		session.settings.get("externalThinking") && supportsExternalThinking(session.getActiveModel?.());
+
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
 		requestedTools.push("goal");
 	}
-	const backends = resolveEvalBackends(session);
-	const allowPython = backends.python;
-	const allowJs = backends.js;
-	const skipEvalPreflight = session.skipPythonPreflight === true;
-	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
-	// we only probe Python when JS is disabled — otherwise allowEval is
-	// already true and per-backend availability is checked at first invocation.
-	let pythonAvailable = true;
-	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
-	if (!skipEvalPreflight && !allowJs && evalRequested) {
-		if (allowPython) {
-			const availability = await logger.time(
-				"createTools:pythonCheck",
-				checkPythonKernelAvailability,
-				session.cwd,
-				session.settings.get("python.interpreter")?.trim() || undefined,
-			);
-			pythonAvailable = availability.ok;
-			if (!availability.ok) {
-				logger.warn("Python kernel unavailable and JS backend disabled", { reason: availability.reason });
-			}
-		}
-	}
-
-	const effectivePythonAllowed = allowPython && pythonAvailable;
-	// Eval is exposed whenever any backend is reachable. A backend may be
-	// unreachable, in which case eval dispatches exclusively to the others.
-	const allowEval = effectivePythonAllowed || allowJs;
-
 	// Checkpoint and rewind are a pair: listing one without the other strands
 	// the agent (it can checkpoint but not rewind, or vice versa). Auto-include
 	// the sister tool so a one-sided frontmatter `tools:` entry still works.
@@ -633,67 +655,169 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			}
 		}
 	}
-	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
-	const isToolAllowed = (name: string) => {
-		// Never in the default set. Explicitly activatable while goal.enabled and
-		// no goal record exists yet — /guided-goal enables it so the agent can
-		// finish the interview with `goal create`, which turns goal mode on. Once
-		// a goal record exists, only an enabled goal keeps the tool: a completed
-		// (exiting) or paused goal must stop advertising it on the next rebuild.
-		if (name === "goal") {
-			if (!goalEnabled || restrictToolNames) return false;
-			const goalState = session.getGoalModeState?.();
-			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
-		}
-		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
-		if (name === "bash") return session.settings.get("bash.enabled");
-		if (name === "eval") return allowEval;
-		if (name === "debug") return session.settings.get("debug.enabled");
-		if (name === "todo")
-			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
-		if (name === "glob") return session.settings.get("glob.enabled");
-		if (name === "grep") return session.settings.get("grep.enabled");
-		if (name === "github") return session.settings.get("github.enabled");
-		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
-		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-		if (name === "web_search") return session.settings.get("web_search.enabled");
-		if (name === "security_scan") return session.settings.get("security.enabled");
-		if (name === "think") return externalThinkingActive;
-		if (name === "ask") return session.settings.get("ask.enabled");
-		if (name === "checkpoint" || name === "rewind")
-			return (
-				session.settings.get("checkpoint.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "hub") {
-			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
-			);
-		}
-		if (name === "retain" || name === "recall" || name === "reflect") {
-			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
-		}
-		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
-		if (name === "manage_skill")
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "learn") {
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
-			);
-		}
-		if (name === "task") {
-			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
-		}
-		return true;
-	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
 		requestedTools.push("yield");
 	}
+
+	return {
+		restrictToolNames,
+		includeYield,
+		enableLsp: session.enableLsp ?? true,
+		goalEnabled,
+		goalModeActive,
+		externalThinkingActive,
+		requestedTools,
+	};
+}
+
+/**
+ * Whether this session may hold the named built-in at all, independent of
+ * whether it appears on an explicit `requestedTools` list.
+ *
+ * `allowEval` is a parameter rather than a gate field because it needs an async
+ * interpreter preflight only `createTools` performs; the reconcile never asks
+ * about `eval` (it has no `*.enabled` gate), so its default is safe.
+ */
+export function isBuiltinToolAllowed(
+	session: ToolSession,
+	name: string,
+	gate: BuiltinToolGate,
+	allowEval = false,
+): boolean {
+	// Never in the default set. Explicitly activatable while goal.enabled and
+	// no goal record exists yet — /guided-goal enables it so the agent can
+	// finish the interview with `goal create`, which turns goal mode on. Once
+	// a goal record exists, only an enabled goal keeps the tool: a completed
+	// (exiting) or paused goal must stop advertising it on the next rebuild.
+	if (name === "goal") {
+		if (!gate.goalEnabled || gate.restrictToolNames) return false;
+		const goalState = session.getGoalModeState?.();
+		return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
+	}
+	if (name === "lsp") return gate.enableLsp && session.settings.get("lsp.enabled");
+	if (name === "bash") return session.settings.get("bash.enabled");
+	if (name === "eval") return allowEval;
+	if (name === "debug") return session.settings.get("debug.enabled");
+	if (name === "todo")
+		return (!gate.includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
+	if (name === "glob") return session.settings.get("glob.enabled");
+	if (name === "grep") return session.settings.get("grep.enabled");
+	if (name === "github") return session.settings.get("github.enabled");
+	if (name === "ast_grep") return session.settings.get("astGrep.enabled");
+	if (name === "ast_edit") return session.settings.get("astEdit.enabled");
+	if (name === "web_search") return session.settings.get("web_search.enabled");
+	if (name === "security_scan") return session.settings.get("security.enabled");
+	if (name === "think") return gate.externalThinkingActive;
+	if (name === "ask") return session.settings.get("ask.enabled");
+	if (name === "checkpoint" || name === "rewind")
+		return (
+			session.settings.get("checkpoint.enabled") &&
+			((session.taskDepth ?? 0) === 0 || gate.requestedTools !== undefined)
+		);
+	if (name === "hub") {
+		return (
+			!gate.restrictToolNames &&
+			session.enableIrc !== false &&
+			isIrcEnabled(session.settings, session.taskDepth ?? 0)
+		);
+	}
+	if (name === "retain" || name === "recall" || name === "reflect") {
+		return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
+	}
+	if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
+	if (name === "manage_skill")
+		return (
+			session.settings.get("autolearn.enabled") &&
+			((session.taskDepth ?? 0) === 0 || gate.requestedTools !== undefined)
+		);
+	if (name === "learn") {
+		return (
+			session.settings.get("autolearn.enabled") &&
+			((session.taskDepth ?? 0) === 0 || gate.requestedTools !== undefined) &&
+			["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+		);
+	}
+	if (name === "task") {
+		return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
+	}
+	return true;
+}
+
+/**
+ * Construct one {@link SETTING_GATED_BUILTIN_TOOL_GROUPS} entry's tools for a
+ * post-startup enable, reproducing EXACTLY the gates the initial install
+ * applied: a name the session was never granted (absent from an explicit
+ * `toolNames` whitelist, or any name at all under `restrictToolNames` with no
+ * list) yields nothing, so a setting flip cannot widen a session's capability
+ * beyond what it launched with.
+ *
+ * Returns raw tools; the caller wraps them against its own live tool context.
+ */
+export async function buildSettingGatedBuiltinTools(
+	session: ToolSession,
+	setting: SettingGatedBuiltinSetting,
+	toolNames?: string[],
+): Promise<Tool[]> {
+	const group = SETTING_GATED_BUILTIN_TOOL_GROUPS.find(candidate => candidate.setting === setting);
+	if (!group) return [];
+	const gate = resolveBuiltinToolGate(session, toolNames);
+	const built: Tool[] = [];
+	for (const name of group.toolNames) {
+		if (gate.requestedTools !== undefined && !gate.requestedTools.includes(name)) continue;
+		if (!isBuiltinToolAllowed(session, name, gate)) continue;
+		const tool = await logger.time(`createTools:${name}:regate`, BUILTIN_TOOLS[name], session);
+		if (tool) built.push(tool);
+	}
+	return built;
+}
+
+/**
+ * Create tools from BUILTIN_TOOLS registry.
+ */
+export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+	// The gate resolution (including every explicit-list auto-include) is shared
+	// with the post-startup setting-gated reconcile, so a session that re-enables
+	// a tool mid-flight is re-gated against the SAME predicate that installed it.
+	const gate = resolveBuiltinToolGate(session, toolNames);
+	const { restrictToolNames, includeYield, requestedTools, externalThinkingActive, goalModeActive } = gate;
+	// createTools may be called more than once for the same ToolSession. A later
+	// explicit (or full-set) write request is a real grant and must upgrade any
+	// device-only transport left by an earlier read-only call.
+	if (requestedTools === undefined || requestedTools.includes("write")) {
+		session.deviceOnlyWrite = undefined;
+		session.pendingFullWriteDescription = undefined;
+	}
+	const backends = resolveEvalBackends(session);
+	const allowPython = backends.python;
+	const allowJs = backends.js;
+	const skipEvalPreflight = session.skipPythonPreflight === true;
+	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
+	// we only probe Python when JS is disabled — otherwise allowEval is
+	// already true and per-backend availability is checked at first invocation.
+	let pythonAvailable = true;
+	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
+	if (!skipEvalPreflight && !allowJs && evalRequested) {
+		if (allowPython) {
+			const availability = await logger.time(
+				"createTools:pythonCheck",
+				checkPythonKernelAvailability,
+				session.cwd,
+				session.settings.get("python.interpreter")?.trim() || undefined,
+			);
+			pythonAvailable = availability.ok;
+			if (!availability.ok) {
+				logger.warn("Python kernel unavailable and JS backend disabled", { reason: availability.reason });
+			}
+		}
+	}
+
+	const effectivePythonAllowed = allowPython && pythonAvailable;
+	// Eval is exposed whenever any backend is reachable. A backend may be
+	// unreachable, in which case eval dispatches exclusively to the others.
+	const allowEval = effectivePythonAllowed || allowJs;
+
+	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
+	const isToolAllowed = (name: string) => isBuiltinToolAllowed(session, name, gate, allowEval);
 
 	const filteredRequestedTools = requestedTools?.filter(name => name in allTools && isToolAllowed(name));
 	const baseEntries =

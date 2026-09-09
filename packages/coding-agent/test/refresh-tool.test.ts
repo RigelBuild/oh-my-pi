@@ -154,6 +154,43 @@ describe("RefreshTool.execute", () => {
 		expect(out.content).toEqual([{ type: "text", text: "Refresh is unavailable in this session." }]);
 		expect(out.details).toEqual({ scope: "all", result: {} });
 	});
+
+	it("errors when a tool gate refused, naming the blocker while keeping the full result", async () => {
+		// The caller asked for a tool to change and it did not, so a success
+		// result would leave it acting on a tool set that never moved. The
+		// blocker has to reach the text: "stop the other things" needs to say
+		// WHICH. Asserted as substrings, not exact prose — a copy edit here must
+		// not be a test failure.
+		const result: RefreshResult = {
+			settingsChanged: true,
+			toolGateRefusals: [
+				{ setting: "bash.enabled", toolNames: ["bash"], blocker: "a bash command is currently running" },
+			],
+		};
+		const tool = new RefreshTool(toolSession(vi.fn(async (_scope: RefreshScope) => result)));
+
+		const out = await tool.execute("call-4", { scope: "settings" });
+
+		expect(out.isError).toBe(true);
+		const text = out.content?.[0]?.type === "text" ? out.content[0].text : "";
+		expect(text).toContain("bash");
+		expect(text).toContain("a bash command is currently running");
+		// The rest of the refresh still happened, and the details carry it.
+		expect(out.details?.result.settingsChanged).toBe(true);
+		expect(out.details?.result.toolGateRefusals).toHaveLength(1);
+	});
+
+	it("stays a success when the refusal list is present but empty", async () => {
+		// Guards the error flag against keying off presence rather than length:
+		// an empty list is a clean pass.
+		const tool = new RefreshTool(
+			toolSession(vi.fn(async (_scope: RefreshScope) => ({ settingsChanged: true, toolGateRefusals: [] }))),
+		);
+
+		const out = await tool.execute("call-5", { scope: "settings" });
+
+		expect(out.isError).toBeUndefined();
+	});
 });
 
 // Security: refresh("mcp"/"all") reconnects MCP, spawning a project `.mcp.json`

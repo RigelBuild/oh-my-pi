@@ -21,6 +21,7 @@ import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { SETTING_GATED_BUILTIN_TOOL_GROUPS, type SettingGatedBuiltinSetting } from "../tools";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
@@ -64,18 +65,82 @@ export interface SettingGatedToolGroup {
 	 * reconcile. The factory's actual output is unioned in on top.
 	 */
 	readonly toolNames: readonly string[];
+	/**
+	 * Human label for the live work this group's tools own, when they own any.
+	 * Present means the group CAN refuse a swap; absent means it holds no
+	 * runtime state and always reconciles (see
+	 * {@link SettingGatedToolLivenessProbe}).
+	 */
+	readonly liveStateLabel?: string;
 }
 
-/** The boolean settings that gate a whole tool set's existence. */
-export type SettingGatedToolSetting = "generate_image.enabled" | "speechgen.enabled";
+/**
+ * Why one group refused to reconcile. `blocker` names the specific live work,
+ * because "busy" alone cannot tell the caller WHAT to stop.
+ */
+export interface SettingGatedToolRefusal {
+	readonly setting: SettingGatedToolSetting;
+	readonly toolNames: readonly string[];
+	readonly blocker: string;
+}
+
+/** Outcome of a whole reconcile pass: what moved, and what refused to. */
+export interface SettingGatedToolReconcileResult {
+	/** Whether the active tool set actually moved, so a caller can skip a prompt rebuild. */
+	readonly changed: boolean;
+	/** Groups left untouched because their tools hold live work. Empty on a clean pass. */
+	readonly refusals: readonly SettingGatedToolRefusal[];
+}
 
 /**
- * Tool sets sdk.ts installs at construction from a boolean setting and never
- * revisits, so `refresh('settings')` has to reconcile them explicitly.
+ * Reports the live work a group's tools own, or `undefined` when they own none.
+ *
+ * Supplied by the session (which owns the runners and job manager); the
+ * reconcile itself stays a pure registry operation. Consulted ONLY for a group
+ * whose {@link SettingGatedToolGroup.liveStateLabel} is set, so a probe never
+ * has to answer for a stateless group.
+ */
+export type SettingGatedToolLivenessProbe = (setting: SettingGatedToolSetting) => string | undefined;
+
+/** The boolean settings that gate a whole tool set's existence. */
+export type SettingGatedToolSetting = "generate_image.enabled" | "speechgen.enabled" | SettingGatedBuiltinSetting;
+
+/**
+ * The groups whose tools own live work, and the noun each refusal names. A
+ * setting absent here holds none, and its reconcile can never refuse.
+ */
+const SETTING_GATED_LIVE_STATE_LABELS: Partial<Record<SettingGatedBuiltinSetting, string>> = {
+	"bash.enabled": "shell execution",
+	"debug.enabled": "debug adapter sessions",
+	"checkpoint.enabled": "an open checkpoint",
+};
+
+/**
+ * Tool sets installed at construction from a boolean setting and never
+ * revisited, so `refresh('settings')` has to reconcile them explicitly.
+ *
+ * The two custom-tool groups sdk.ts pushes into `customTools`, plus EVERY
+ * built-in `createTools` gates on a `*.enabled` setting — the built-in half is
+ * derived from {@link SETTING_GATED_BUILTIN_TOOL_GROUPS} rather than restated,
+ * so a new gate added in `tools/index.ts` is reconciled here automatically
+ * instead of silently staying stale.
+ *
+ * `liveStateLabel` marks the groups that can REFUSE a swap. Only three of them
+ * own anything at runtime, and each names work a caller can actually go stop:
+ * `bash` runs foreground commands and owns background jobs; `debug` holds DAP
+ * adapter subprocesses with their breakpoints; `checkpoint`/`rewind` hold an
+ * open checkpoint whose rewind target would be unreachable without the tool.
+ * Every other group is a pure request/response façade over process-global or
+ * per-call state — swapping one mid-session strands nothing.
  */
 export const SETTING_GATED_TOOL_GROUPS: readonly SettingGatedToolGroup[] = [
 	{ setting: "generate_image.enabled", toolNames: ["generate_image"] },
 	{ setting: "speechgen.enabled", toolNames: ["tts"] },
+	...SETTING_GATED_BUILTIN_TOOL_GROUPS.map(group => ({
+		setting: group.setting,
+		toolNames: group.toolNames,
+		liveStateLabel: SETTING_GATED_LIVE_STATE_LABELS[group.setting],
+	})),
 ];
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -129,6 +194,22 @@ interface SessionToolsOptions {
 	 * allowed to have returns empty here rather than appearing on a refresh.
 	 */
 	createSettingGatedTools?: (setting: SettingGatedToolSetting) => Promise<CustomTool[]>;
+	/**
+	 * Builds one setting-gated BUILT-IN group's tools when its setting is
+	 * enabled after construction. Separate from the custom-tool factory above
+	 * because built-ins are native `AgentTool`s from `BUILTIN_TOOLS` rather than
+	 * `CustomTool`s needing adaptation — but held to the same rule: it reapplies
+	 * the startup gates, so a built-in the session was never granted returns
+	 * empty here rather than appearing on a refresh.
+	 */
+	createSettingGatedBuiltinTools?: (setting: SettingGatedBuiltinSetting) => Promise<AgentTool[]>;
+	/**
+	 * Reports the live work a setting-gated group's tools currently own, so a
+	 * swap that would orphan it is refused instead. Supplied by the session,
+	 * which owns the runners and the job manager; `undefined` means the group is
+	 * free to reconcile.
+	 */
+	settingGatedToolLiveness?: SettingGatedToolLivenessProbe;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -301,6 +382,8 @@ export class SessionTools {
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#createSettingGatedTools: SessionToolsOptions["createSettingGatedTools"];
+	#createSettingGatedBuiltinTools: SessionToolsOptions["createSettingGatedBuiltinTools"];
+	#settingGatedToolLiveness: SessionToolsOptions["settingGatedToolLiveness"];
 	/**
 	 * Tool names this session has installed per setting-gated group, so a later
 	 * disable can drop exactly what an earlier enable added — including a tool
@@ -339,6 +422,8 @@ export class SessionTools {
 		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#createSettingGatedTools = options.createSettingGatedTools;
+		this.#createSettingGatedBuiltinTools = options.createSettingGatedBuiltinTools;
+		this.#settingGatedToolLiveness = options.settingGatedToolLiveness;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
@@ -1580,32 +1665,46 @@ export class SessionTools {
 	}
 
 	/**
-	 * Reconcile the tool sets whose EXISTENCE is gated on a boolean setting
-	 * (`generate_image.enabled`, `speechgen.enabled`) against the live settings.
+	 * Reconcile every tool set whose EXISTENCE is gated on a boolean setting
+	 * against the live settings — the two custom-tool groups (`generate_image`,
+	 * `tts`) and every `*.enabled`-gated BUILT-IN (`bash`, `grep`, `github`,
+	 * `debug`, `lsp`, `ask`, `checkpoint`/`rewind`, …).
 	 *
-	 * sdk.ts pushes both into `customTools` at construction and nothing later
-	 * registers or removes them, so a reload alone left an enable with the tools
-	 * still absent and a disable with them still callable — the same class of
+	 * All of them are installed once at construction with no later registration
+	 * or removal path, so a reload alone left an enable with the tools still
+	 * absent and a disable with them still callable — the same class of
 	 * staleness as the `think` scratchpad above, which is why this mirrors it:
-	 * disabling drops the name from the active set while preserving its registry
-	 * entry, and enabling builds the tools once (via the host factory, which
-	 * owns the startup gates a session-level `--no-tools`/whitelist imposes) and
-	 * re-activates them.
+	 * disabling drops the names from the active set while preserving their
+	 * registry entries, and enabling builds what the registry lacks (through a
+	 * host factory that reapplies the startup gates a `--no-tools`/whitelist
+	 * imposes) and re-activates them.
 	 *
-	 * Returns whether the active tool set actually moved, so a caller can skip a
-	 * prompt rebuild when nothing changed.
+	 * **A group holding live work is refused, never migrated.** Swapping a tool
+	 * out from under running work would orphan it with no owner to report or
+	 * cancel it, so the group is left exactly as it was and its blocker is
+	 * returned for the caller to name. Refusal is scoped to the ONE group that
+	 * holds the state: a running bash job must not stop `grep` from reconciling,
+	 * which is why this is per-group rather than the whole-operation refusal a
+	 * session restart uses.
 	 */
-	reconcileSettingGatedTools(): Promise<boolean> {
+	reconcileSettingGatedTools(): Promise<SettingGatedToolReconcileResult> {
 		return this.runToolRegistryMutation(async () => {
 			let changed = false;
+			const refusals: SettingGatedToolRefusal[] = [];
 			for (const group of SETTING_GATED_TOOL_GROUPS) {
-				if (await this.#applySettingGatedToolGroup(group)) changed = true;
+				const outcome = await this.#applySettingGatedToolGroup(group);
+				if (outcome === true) changed = true;
+				else if (outcome !== false) refusals.push(outcome);
 			}
-			return changed;
+			return { changed, refusals };
 		});
 	}
 
-	async #applySettingGatedToolGroup(group: SettingGatedToolGroup): Promise<boolean> {
+	/**
+	 * @returns `true` when the group moved, `false` when it was already correct,
+	 * or the refusal describing the live work that blocked the swap.
+	 */
+	async #applySettingGatedToolGroup(group: SettingGatedToolGroup): Promise<boolean | SettingGatedToolRefusal> {
 		const enabled = this.#host.settings.get(group.setting) === true;
 		const active = this.getEnabledToolNames();
 		// Names this session has ever had installed for the group, so a disable
@@ -1614,38 +1713,74 @@ export class SessionTools {
 		const installed = this.#settingGatedToolNames.get(group.setting);
 		const owned = new Set<string>(group.toolNames);
 		if (installed) for (const name of installed) owned.add(name);
+
+		// Would this group actually move? Answered BEFORE the liveness probe so a
+		// group that is already correct never refuses: a refresh that changes
+		// nothing for `bash` must stay silent even while a bash job runs, or
+		// every unrelated refresh during a long background job would report a
+		// blocker the caller can do nothing useful about.
+		const disableWouldMove = !enabled && active.some(name => owned.has(name));
+		const enableWouldMove =
+			enabled &&
+			(group.toolNames.some(name => !this.#toolRegistry.has(name)) ||
+				[...owned].some(name => this.#toolRegistry.has(name) && !active.includes(name)));
+		if (!disableWouldMove && !enableWouldMove) return false;
+
+		// Only a group that owns runtime work is probed at all; the rest have
+		// nothing a swap could orphan.
+		if (group.liveStateLabel !== undefined) {
+			const blocker = this.#settingGatedToolLiveness?.(group.setting);
+			if (blocker !== undefined) {
+				return { setting: group.setting, toolNames: group.toolNames, blocker };
+			}
+		}
+
 		if (!enabled) {
-			const next = active.filter(name => !owned.has(name));
-			if (next.length === active.length) return false;
-			await this.#applyActiveToolsByName(next);
+			await this.#applyActiveToolsByName(active.filter(name => !owned.has(name)));
 			return true;
 		}
-		const create = this.#createSettingGatedTools;
-		if (!create) return false;
 		// Only build what the registry is actually missing: a group disabled and
 		// re-enabled keeps its registry entries, and rebuilding would discard a
 		// later extension re-registration of the same name.
 		if (group.toolNames.some(name => !this.#toolRegistry.has(name))) {
-			const built = await create(group.setting);
-			const names = this.#settingGatedToolNames.get(group.setting) ?? new Set<string>();
-			for (const customTool of built) {
-				names.add(customTool.name);
-				owned.add(customTool.name);
-				if (this.#toolRegistry.has(customTool.name)) continue;
-				// Adapted here rather than by the host, against THIS session's live
-				// tool context — the same binding an MCP tool refresh performs, and
-				// the reason a subagent's copy of these tools reaches its own cwd,
-				// exec, and pending-action queue rather than the parent's.
-				const adapted = CustomToolAdapter.wrap(customTool, this.#customToolContext) as AgentTool;
-				const wrapped = this.#wrapRuntimeTool(adapted);
+			for (const tool of await this.#buildSettingGatedTools(group.setting)) {
+				const names = this.#settingGatedToolNames.get(group.setting) ?? new Set<string>();
+				names.add(tool.name);
+				this.#settingGatedToolNames.set(group.setting, names);
+				owned.add(tool.name);
+				if (this.#toolRegistry.has(tool.name)) continue;
+				const wrapped = this.#wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
+				// Built-ins join the built-in name set so presentation and Code Mode
+				// partitioning treat a re-enabled tool exactly like a startup one.
+				if (this.#isSettingGatedBuiltin(group.setting)) this.#builtInToolNames.add(wrapped.name);
 			}
-			this.#settingGatedToolNames.set(group.setting, names);
 		}
 		const missing = [...owned].filter(name => this.#toolRegistry.has(name) && !active.includes(name));
 		if (missing.length === 0) return false;
 		await this.#applyActiveToolsByName([...active, ...missing]);
 		return true;
+	}
+
+	#isSettingGatedBuiltin(setting: SettingGatedToolSetting): setting is SettingGatedBuiltinSetting {
+		return SETTING_GATED_BUILTIN_TOOL_GROUPS.some(group => group.setting === setting);
+	}
+
+	/**
+	 * Build one group's tools for an enable, routing to the factory that matches
+	 * how the tool is constructed. Built-ins come back as native `AgentTool`s
+	 * needing only the runtime wrap; the two custom-tool groups come back as
+	 * `CustomTool`s and are adapted HERE rather than by the host, against THIS
+	 * session's live tool context — the same binding an MCP tool refresh
+	 * performs, and the reason a subagent's copy of those tools reaches its own
+	 * cwd, exec, and pending-action queue rather than the parent's.
+	 */
+	async #buildSettingGatedTools(setting: SettingGatedToolSetting): Promise<AgentTool[]> {
+		if (this.#isSettingGatedBuiltin(setting)) {
+			return (await this.#createSettingGatedBuiltinTools?.(setting)) ?? [];
+		}
+		const built = (await this.#createSettingGatedTools?.(setting)) ?? [];
+		return built.map(customTool => CustomToolAdapter.wrap(customTool, this.#customToolContext) as AgentTool);
 	}
 
 	/** Rebuilds the stable base prompt for the current tools and model. */

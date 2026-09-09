@@ -62,6 +62,17 @@ export function summarizeRefresh(scope: RefreshScope, result: RefreshResult): st
 			parts.push("MCP reconnected");
 		}
 	}
+	if (result.toolGateRefusals && result.toolGateRefusals.length > 0) {
+		// Named, not counted: "tell them to stop the other things" needs the
+		// blocker itself. Truncated as one field for the same reason the MCP
+		// failures above are — a job label or session id reaches this from
+		// outside and must not overflow or corrupt the line.
+		const detail = truncateToWidth(
+			result.toolGateRefusals.map(refusal => `${refusal.toolNames.join("/")}: ${refusal.blocker}`).join("; "),
+			TRUNCATE_LENGTHS.LINE,
+		);
+		parts.push(`${result.toolGateRefusals.length} tool(s) NOT reconciled (${detail})`);
+	}
 	const body = parts.length > 0 ? parts.join(", ") : "nothing to reload";
 	return `Refreshed (${scope}): ${body}.`;
 }
@@ -103,8 +114,16 @@ export class RefreshTool implements AgentTool<typeof refreshSchema, RefreshToolD
 			};
 		}
 		const result = await this.session.refresh(scope);
+		// A refused tool group is an ERROR, not a footnote: the caller asked for a
+		// tool to be enabled or disabled and it was not, so a success result would
+		// leave it acting on a tool set that did not actually change. The summary
+		// already names each blocker, which is what makes the error actionable —
+		// stop the named work and refresh again. Everything else on this refresh
+		// still applied, so the details carry the full result either way.
+		const refused = (result.toolGateRefusals?.length ?? 0) > 0;
 		return {
 			content: [{ type: "text", text: summarizeRefresh(scope, result) }],
+			...(refused ? { isError: true as const } : {}),
 			details: { scope, result },
 		};
 	}

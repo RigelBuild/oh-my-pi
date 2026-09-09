@@ -122,6 +122,7 @@ import {
 } from "../config/settings";
 import type { SettingPath } from "../config/settings-schema";
 import { resolveDialect } from "../config/tool-dialect";
+import { dapSessionManager } from "../dap";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
@@ -385,7 +386,12 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
-import { SessionTools, type SessionToolsHost } from "./session-tools";
+import {
+	SessionTools,
+	SETTING_GATED_TOOL_GROUPS,
+	type SettingGatedToolSetting,
+	type SessionToolsHost,
+} from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -1908,6 +1914,8 @@ export class AgentSession {
 			setPendingFullWriteDescription: config.setPendingFullWriteDescription,
 			ensureGoalRegistered: config.ensureGoalRegistered,
 			createSettingGatedTools: config.createSettingGatedTools,
+			createSettingGatedBuiltinTools: config.createSettingGatedBuiltinTools,
+			settingGatedToolLiveness: setting => this.#settingGatedToolBlocker(setting),
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
@@ -2551,6 +2559,62 @@ export class AgentSession {
 	 *  flag was never set OR was already consumed by `#handleAgentEvent`. */
 	clearPlanInternalAbortPending(): void {
 		this.#planInternalAbortPending = false;
+	}
+
+	/**
+	 * The live work a setting-gated tool group currently owns, or `undefined`
+	 * when the group is free to be swapped.
+	 *
+	 * A `refresh('settings')` that turns a tool off does not migrate its state —
+	 * it removes the tool. For a group whose tools own nothing that is
+	 * invisible, but for these three the tool IS the only thing that can report
+	 * or finish the work, so removing it would orphan it silently. Rather than
+	 * reason about a hand-off, refuse: the message names the blocker so the
+	 * caller can stop it and refresh again. Deliberately NOT a general "session
+	 * is busy" check — an unrelated in-flight turn, compaction, or handoff
+	 * blocks nothing here, because a group whose tools are idle can be swapped
+	 * safely no matter what else the session is doing.
+	 *
+	 * Groups absent from the switch hold no runtime state at all:
+	 * `grep`/`glob`/`ast_grep`/`ast_edit`/`web_search`/`security_scan`/`github`/
+	 * `lsp`/`todo`/`ask`/`manage_skill`/`learn` are request-scoped, and the
+	 * state they do touch (LSP servers, an `ast_edit` staged proposal, the todo
+	 * list) is owned by the session or a process-global registry that outlives
+	 * any one tool instance — so a swap loses nothing.
+	 */
+	#settingGatedToolBlocker(setting: SettingGatedToolSetting): string | undefined {
+		switch (setting) {
+			case "bash.enabled": {
+				// A foreground command holds an abort controller the tool owns; a
+				// background job additionally has a delivery sink that reports back
+				// THROUGH the tool. Both are named separately so the caller knows
+				// whether to wait or to cancel a job by id.
+				if (this.isBashRunning) return "a bash command is currently running";
+				const running = this.#asyncJobManager
+					?.getRunningJobs(this.#agentId ? { ownerId: this.#agentId } : undefined)
+					.filter(job => job.type === "bash");
+				if (running && running.length > 0) {
+					const ids = running.map(job => job.id).join(", ");
+					return `${running.length} background bash job(s) still running (${ids})`;
+				}
+				return undefined;
+			}
+			case "debug.enabled": {
+				// Each DAP session is a live adapter subprocess holding breakpoints
+				// and a stopped thread; only `debug` can continue or terminate it.
+				const sessions = dapSessionManager.listSessions().filter(session => session.status !== "terminated");
+				if (sessions.length === 0) return undefined;
+				const ids = sessions.map(session => session.id).join(", ");
+				return `${sessions.length} debug session(s) still active (${ids})`;
+			}
+			case "checkpoint.enabled":
+				// An open checkpoint's transcript position is only reachable via
+				// `rewind`; dropping the pair would strand the session past a
+				// checkpoint it can no longer return to.
+				return this.#checkpointState ? "a checkpoint is open and not yet rewound" : undefined;
+			default:
+				return undefined;
+		}
 	}
 
 	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
@@ -5806,16 +5870,19 @@ export class AgentSession {
 				advisorEnabled: this.settings.get("advisor.enabled"),
 				externalThinking: this.settings.get("externalThinking"),
 				browserEnabled: this.settings.get("browser.enabled"),
-				// Gate whether the `generate_image`/`tts` tool sets exist at all;
-				// installed once at construction with no later add/remove path.
-				imageGenEnabled: this.settings.get("generate_image.enabled"),
-				speechGenEnabled: this.settings.get("speechgen.enabled"),
 				computerEnabled: this.settings.get("computer.enabled"),
 				// Gates whether an obfuscator exists at all. The instance itself is
 				// built from `secrets.yml`, which this refresh also re-reads, so the
 				// rebuild below is keyed on the flag OR the file's content moving.
 				secretsEnabled: this.settings.get("secrets.enabled"),
 			};
+			// Every setting that gates a tool set's EXISTENCE, captured as one map so
+			// the reconcile below fires when ANY of them moved. Derived from the
+			// group table rather than listed by hand: a gate added there must not
+			// be able to go unreconciled here.
+			const previousSettingGatedTools = new Map<SettingGatedToolSetting, boolean>(
+				SETTING_GATED_TOOL_GROUPS.map(group => [group.setting, this.settings.get(group.setting) === true]),
+			);
 			// The search/image implementations read MODULE-level state that
 			// `applyProviderGlobalsFromSettings` installs at startup, never
 			// `settings.get(...)` at call time, so a reload alone leaves searches
@@ -5954,19 +6021,26 @@ export class AgentSession {
 				if (this.settings.get("externalThinking") !== previousSubsystems.externalThinking) {
 					await this.#tools.reconcileThinkTool();
 				}
-				// `generate_image.enabled`/`speechgen.enabled` gate whether those
-				// tool sets EXIST. sdk.ts pushes them into `customTools` once at
-				// construction with no later registration or removal path, so an
-				// enable left the tools unavailable and a disable left them active
-				// and callable — the same shape as `think` above. Gated on the
-				// values having moved for the same reason as every other branch
-				// here: the active tool set also moves through `/tools` and the
-				// Code Mode partition, and a blind re-apply would clobber that.
+				// Every setting that gates a tool set's EXISTENCE — the two
+				// custom-tool groups sdk.ts pushes into `customTools`, and every
+				// `*.enabled`-gated built-in `createTools` decides once. All are
+				// installed at construction with no later registration or removal
+				// path, so an enable left the tools unavailable and a disable left
+				// them active and callable — the same shape as `think` above.
+				// Gated on a value having moved for the same reason as every other
+				// branch here: the active tool set also moves through `/tools` and
+				// the Code Mode partition, and a blind re-apply would clobber that.
 				if (
-					this.settings.get("generate_image.enabled") !== previousSubsystems.imageGenEnabled ||
-					this.settings.get("speechgen.enabled") !== previousSubsystems.speechGenEnabled
+					SETTING_GATED_TOOL_GROUPS.some(
+						group => (this.settings.get(group.setting) === true) !== previousSettingGatedTools.get(group.setting),
+					)
 				) {
-					await this.#tools.reconcileSettingGatedTools();
+					const reconciled = await this.#tools.reconcileSettingGatedTools();
+					// A group whose tools hold live work was left alone rather than
+					// swapped out from under it. Report it: the settings HAVE been
+					// reloaded, so silence would leave the caller believing a tool it
+					// just disabled is gone while it is still active and callable.
+					if (reconciled.refusals.length > 0) result.toolGateRefusals = reconciled.refusals;
 				}
 				// `memory.backend` is prompt-affecting, so a change already rebuilds
 				// the prompt with the NEW backend's instructions — but the transition

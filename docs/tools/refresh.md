@@ -30,6 +30,7 @@ Single-shot `AgentToolResult<RefreshToolDetails>`.
   - `settingsChanged?: boolean` — merged settings view changed on a settings reload.
   - `modelSwapped?: boolean` — active default model swapped on a settings reload.
   - `mcp?: true` — MCP servers rediscovered and tools rebound (`true` when the reconnect ran; omitted when no MCP manager exists).
+  - `toolGateRefusals?: readonly SettingGatedToolRefusal[]` — setting-gated tool groups this refresh refused to reconcile because their tools hold live work, each carrying `{ setting, toolNames, blocker }`. Omitted when nothing refused. A non-empty value makes the result an error (see Errors).
 
 If the session exposes no `refresh` hook, `execute` returns `Refresh is unavailable in this session.` as an error result.
 
@@ -75,6 +76,7 @@ If the session exposes no `refresh` hook, `execute` returns `Refresh is unavaila
 - Session without a `refresh` hook: `execute` returns `Refresh is unavailable in this session.` with `isError: true`.
 - `/refresh <bad-scope>`: the command surfaces `Unknown refresh scope "<arg>". Use: skills, rules, settings, mcp, all.`
 - `/refresh` failures are caught by the command handler and surfaced as `Refresh failed: <message>`.
+- Refused tool gate: when a settings refresh would swap a tool group that owns live work, the group is left untouched and the result is an error whose text names each blocker, e.g. `Refreshed (settings): settings updated, 1 tool(s) NOT reconciled (bash: a bash command is currently running).` The settings themselves still reloaded and every other group reconciled, so the caller stops the named work and refreshes again. Only three groups can ever refuse — `bash.enabled` (a foreground command or a running background bash job), `debug.enabled` (a live DAP adapter session), and `checkpoint.enabled` (an open, not-yet-rewound checkpoint); every other gated group is request-scoped and always reconciles. A group whose setting did not move never refuses, so liveness alone cannot block an unrelated refresh.
 
 ## Notes
 - Reusing the live TTSR manager across reloads preserves in-flight injected/trigger state; a brand-new or rulebook/always-apply rule is picked up, but an *edited condition* on an already-registered TTSR rule is not re-read (that sub-case still needs a restart).

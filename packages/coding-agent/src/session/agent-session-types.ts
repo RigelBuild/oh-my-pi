@@ -45,6 +45,7 @@ import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionManager } from "./session-manager";
 import type { SettingGatedToolSetting } from "./session-tools";
+import type { SettingGatedBuiltinSetting } from "../tools";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -279,6 +280,12 @@ export interface AgentSessionConfig {
 	 * `refresh('settings')` can install a set the startup path skipped.
 	 */
 	createSettingGatedTools?: (setting: SettingGatedToolSetting) => Promise<CustomTool[]>;
+	/**
+	 * Builds the tools for one setting-gated BUILT-IN group (`bash.enabled`,
+	 * `grep.enabled`, …) turned on after construction, reapplying the same
+	 * startup gates so a built-in the session was never granted stays absent.
+	 */
+	createSettingGatedBuiltinTools?: (setting: SettingGatedBuiltinSetting) => Promise<AgentTool[]>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
