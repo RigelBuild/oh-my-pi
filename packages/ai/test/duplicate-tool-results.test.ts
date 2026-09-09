@@ -1852,3 +1852,93 @@ describe("Codex-style Abort Handling", () => {
 		expect(toolResults[0].isError).toBe(false);
 	});
 });
+
+describe("Responses composite ids replayed into a non-Anthropic target", () => {
+	// A Responses-origin composite call (`callId|itemId`) replayed into a
+	// NON-Anthropic target, with a sanitizing normalizeToolCallId injected
+	// directly. The sibling cross-provider cases above all target Anthropic,
+	// which takes the normalizeAnthropicTargetToolCallId branch; this one drives
+	// the model-agnostic `!isSameModel && normalizeToolCallId` branch instead.
+	//
+	// The injected normalizer rewrites every char outside [a-zA-Z0-9_-], so
+	// `call_X|fc_A` becomes `call_X_fc_A` — deliberately NOT what a real
+	// openai-completions replay would emit (that one splits on `|` and keeps the
+	// call half, yielding `call_X`). Keeping the whole id is the stronger
+	// assertion: the emitted `call_X_fc_A` differs from the bare call component,
+	// so pairing a result whose item half differs proves the full normalized id
+	// was carried onto it, not merely its prefix. The model here is just a
+	// non-Anthropic vehicle for that branch.
+	//
+	// If the result does not follow the call onto the emitted id, the call reads
+	// as unanswered and a synthetic "No result provided" stub is back-filled
+	// beside the real result.
+	const openaiTarget: Model<"openai-completions"> = buildModel({
+		api: "openai-completions",
+		provider: "openai",
+		id: "gpt-4o-mini",
+		name: "GPT-4o Mini",
+		baseUrl: "https://api.openai.com/v1",
+		input: ["text"],
+		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+		maxTokens: 8192,
+		contextWindow: 128000,
+		reasoning: false,
+	});
+
+	const responsesAssistant = (ids: string[], timestamp: number): AssistantMessage => ({
+		role: "assistant",
+		content: ids.map(id => ({ type: "toolCall", id, name: "tool_search", arguments: {} })),
+		api: "openai-responses",
+		provider: "openai",
+		model: "gpt-5-codex",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp,
+	});
+
+	const result = (id: string, text: string, timestamp: number): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: id,
+		toolName: "tool_search",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp,
+	});
+
+	const hasSyntheticStub = (messages: Message[]): boolean =>
+		messages.some(
+			m =>
+				m.role === "toolResult" &&
+				(m as ToolResultMessage).content.some(part => part.type === "text" && part.text === "No result provided"),
+		);
+
+	it("pairs a composite result through a sanitizing normalizer when the item half differs", () => {
+		const sanitize = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+		const messages: Message[] = [
+			{ role: "user", content: "do", timestamp: 1 },
+			responsesAssistant(["call_X|fc_A"], 2),
+			result("call_X|fc_B", "the real result", 3),
+		];
+
+		const transformed = transformMessages(messages, openaiTarget, id => sanitize(id));
+
+		expect(hasSyntheticStub(transformed)).toBe(false);
+		const callIds = transformed
+			.filter((m): m is AssistantMessage => m.role === "assistant")
+			.flatMap(m => m.content)
+			.filter((b): b is ToolCall => b.type === "toolCall")
+			.map(b => b.id);
+		expect(callIds).toEqual(["call_X_fc_A"]);
+		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.toolCallId).toBe("call_X_fc_A");
+		expect(results[0]!.content).toEqual([{ type: "text", text: "the real result" }]);
+	});
+});
