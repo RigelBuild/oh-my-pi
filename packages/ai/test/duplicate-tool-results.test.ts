@@ -1852,3 +1852,124 @@ describe("Codex-style Abort Handling", () => {
 		expect(toolResults[0].isError).toBe(false);
 	});
 });
+
+describe("Cross-provider composite tool-call id pairing", () => {
+	const anthropicModel: Model<"anthropic-messages"> = buildModel({
+		api: "anthropic-messages",
+		provider: "anthropic",
+		id: "claude-3-5-sonnet-20241022",
+		name: "Claude 3.5 Sonnet",
+		baseUrl: "https://api.anthropic.com",
+		input: ["text"],
+		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+		maxTokens: 8192,
+		contextWindow: 200000,
+		reasoning: true,
+	});
+
+	// SOURCE turn is a Responses-family composite (`callId|itemId`); the TARGET
+	// models below are Anthropic and openai-completions, so these are genuine
+	// cross-provider replays. A composite RESULT whose item half differs from
+	// the call's must still pair onto the emitted call id via
+	// `responsesCompositeIdMap`; if it does not, transformMessages treats the
+	// call as unanswered and back-fills a synthetic "No result provided" stub
+	// beside the real result.
+	const makeToolCallAssistant = (ids: string[], timestamp: number): AssistantMessage => ({
+		role: "assistant",
+		content: ids.map(id => ({ type: "toolCall", id, name: "tool_search", arguments: {} })),
+		api: "openai-responses",
+		provider: "openai",
+		model: "gpt-5-codex",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp,
+	});
+
+	const makeToolResult = (id: string, text: string, timestamp: number): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: id,
+		toolName: "tool_search",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp,
+	});
+
+	const hasSynthetic = (messages: Message[]): boolean =>
+		messages.some(
+			m =>
+				m.role === "toolResult" &&
+				(m as ToolResultMessage).content.some(part => part.type === "text" && part.text === "No result provided"),
+		);
+
+	it("pairs a composite result across providers when the item half differs", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "do", timestamp: 1 },
+			makeToolCallAssistant(["call_X|fc_A"], 2),
+			makeToolResult("call_X|fc_B", "the real result", 3),
+		];
+
+		const transformed = transformMessages(messages, anthropicModel);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "the real result" }]);
+	});
+
+	it("pairs a composite result across providers into a non-anthropic target", () => {
+		// Non-anthropic target supplying a SANITIZING normalizeToolCallId (the
+		// shape google-shared / amazon-bedrock use: rewrite every char outside
+		// [a-zA-Z0-9_-]). This drives the sibling normalization branch that the
+		// Anthropic case above does not reach. Sanitizing rewrites `|` to `_`
+		// (call_X|fc_A -> call_X_fc_A), so the call is remapped and the
+		// composite result must follow it onto the emitted id.
+		const openaiTarget: Model<"openai-completions"> = buildModel({
+			api: "openai-completions",
+			provider: "openai",
+			id: "gpt-4o-mini",
+			name: "GPT-4o Mini",
+			baseUrl: "https://api.openai.com/v1",
+			input: ["text"],
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 8192,
+			contextWindow: 128000,
+			reasoning: false,
+		});
+		const sanitize = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+
+		const messages: Message[] = [
+			{ role: "user", content: "do", timestamp: 1 },
+			makeToolCallAssistant(["call_X|fc_A"], 2),
+			makeToolResult("call_X|fc_B", "the real result", 3),
+		];
+
+		const transformed = transformMessages(messages, openaiTarget, id => sanitize(id));
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "the real result" }]);
+	});
+
+	it("does not regress the cross-provider plain (non-composite) path", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "do", timestamp: 1 },
+			makeToolCallAssistant(["call_PLAIN"], 2),
+			makeToolResult("call_PLAIN", "the real result", 3),
+		];
+
+		const transformed = transformMessages(messages, anthropicModel);
+
+		expect(hasSynthetic(transformed)).toBe(false);
+		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results).toHaveLength(1);
+		expect(results[0]!.content).toEqual([{ type: "text", text: "the real result" }]);
+	});
+});
