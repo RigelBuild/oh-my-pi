@@ -1722,6 +1722,8 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 
 	async function createHarnessWithRealCompaction(extra?: {
 		customCommands?: LoadedCustomCommand[];
+		/** Persist to disk, so `fork()` has a real session file to swap. */
+		persist?: boolean;
 	}): Promise<AgentSession> {
 		const tempDir = TempDir.createSync("@pi-compact-tool-agent-initiated-");
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
@@ -1793,7 +1795,9 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 
 		const session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager: extra?.persist
+				? SessionManager.create(tempDir.path(), tempDir.path())
+				: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry,
 			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
@@ -1874,6 +1878,64 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		// The agent-initiated turn ran, and it ran only after the rewrite landed.
 		expect(order.filter(entry => entry === "agent_start").length).toBeGreaterThan(agentStartsBefore);
 		expect(order.lastIndexOf("agent_start")).toBeGreaterThan(order.indexOf("rewrite:summary"));
+	}, 15_000);
+
+	it("holds a session fork until the rewrite finishes", async () => {
+		// `fork()` is not a prompt, so it never passed through the prompt
+		// barrier — and every caller gates on `isStreaming`, which a requested
+		// compaction does not raise. `SessionManager.fork()` drains and closes
+		// the writer, mints a new session id and swaps the session file, so
+		// running it against a live pass makes it timing-dependent which file
+		// receives the rewrite.
+		//
+		// The contract is the barrier's POSITION: no session-id change may be
+		// observable while the rewrite is in flight.
+		const order: string[] = [];
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			order.push("rewrite:start");
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("rewrite:summary");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction({ persist: true });
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+		// Mid-rewrite, and idle on every predicate the caller can see.
+		expect(session.isStreaming).toBe(false);
+		const sessionIdBefore = session.sessionManager.getSessionId();
+
+		let forked: boolean | undefined;
+		const fork = session.fork().then(result => {
+			order.push("fork:done");
+			forked = result;
+		});
+		// Drain every already-scheduled microtask/task: without the barrier the
+		// fork reaches `SessionManager.fork()` inside this window.
+		for (let i = 0; i < 20; i++) await Bun.sleep(0);
+
+		expect(forked).toBeUndefined();
+		expect(session.sessionManager.getSessionId()).toBe(sessionIdBefore);
+		expect(order).not.toContain("rewrite:summary");
+
+		summaryGate.resolve();
+		await fork;
+		await primary;
+		await session.waitForIdle();
+
+		// The fork completed, and only after the rewrite landed.
+		expect(forked).toBe(true);
+		expect(session.sessionManager.getSessionId()).not.toBe(sessionIdBefore);
+		expect(order.indexOf("fork:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
 	}, 15_000);
 
 	it("runs a local slash command immediately instead of waiting out the rewrite", async () => {
