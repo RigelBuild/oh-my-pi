@@ -5189,6 +5189,15 @@ export class AgentSession {
 	 * streaming or a foreground bash/python execution is in flight.
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
+		// A compaction owns the history this is about to clear, and it is invisible
+		// to the guard below: the pass calls `abort()`, so `isStreaming` reads
+		// false for the whole rewrite. Resetting underneath it would clear the
+		// conversation and then let the pass — still working from its pre-reset
+		// preparation — append the OLD conversation's summary into the context
+		// that was supposed to be empty. Wait it out first; the request is valid,
+		// only early. Before the refusal checks, so the predicates below are read
+		// against settled state rather than a session mid-rewrite.
+		await this.#settleActiveCompaction();
 		// Refuse while a response streams OR a foreground user bash/python
 		// execution is in flight: those complete via recordBashResult()/
 		// recordPythonResult(), which append directly to agent.state when not

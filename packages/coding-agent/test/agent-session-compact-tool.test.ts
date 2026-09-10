@@ -2391,4 +2391,55 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 			),
 		).toBe(true);
 	}, 15_000);
+
+	it("holds a context reset until the rewrite finishes", async () => {
+		// `resetSessionContext()` guards on `isStreaming || isBashRunning ||
+		// isEvalRunning`, none of which are true during a requested pass —
+		// `compact()` calls `abort()`, which resets the in-flight count. Resetting
+		// underneath it clears the conversation and then lets the pass append the
+		// OLD conversation's summary into the context that was supposed to be
+		// empty. The real `compact()` runs; only the LLM summarizer is stubbed and
+		// gated, so the reset is provably issued mid-rewrite.
+		const order: string[] = [];
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("rewrite:summary");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		const reset = session.resetSessionContext().then(result => {
+			order.push("reset:done");
+			return result;
+		});
+		// Give the reset every chance to run early: without the barrier it
+		// proceeds here, because each predicate it checks reads idle.
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+		expect(order).toEqual([]);
+
+		summaryGate.resolve();
+		const result = await reset;
+		await primary;
+		await session.waitForIdle();
+
+		// Barrier POSITION, not just completion: the reset landed after the
+		// summary, so it cleared a settled conversation rather than racing one.
+		expect(order).toEqual(["rewrite:summary", "reset:done"]);
+		// A wait, not a refusal — the request was valid, only early.
+		expect(result).toBeDefined();
+		expect(session.messages).toHaveLength(0);
+	}, 15_000);
 });
