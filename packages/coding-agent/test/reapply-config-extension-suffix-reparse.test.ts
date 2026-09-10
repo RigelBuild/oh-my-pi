@@ -136,4 +136,86 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			await session.dispose();
 		}
 	});
+
+	test("reparses a saved suffix whose id only exists in a cold dynamic catalog", async () => {
+		// The harder half of the same bug. A provider registered with a static
+		// `models` array is visible the moment the extension loads, so the reparse
+		// alone fixes it. A provider whose catalog comes from
+		// `fetchDynamicModels` is NOT: registration adds no models, and a cold
+		// start has no cache row for the offline hydration to load — so at reparse
+		// time `router:low` is still unknown and still splits at `:low`. Only a
+		// provider-scoped discovery pass makes the id visible.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		let dynamicFetches = 0;
+		const dynamicProviderExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				// No `models`: nothing is visible until the catalog is fetched.
+				fetchDynamicModels: async () => {
+					dynamicFetches++;
+					return [
+						{
+							id: "router:low",
+							name: "Router Low",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+						{
+							id: "config-pick",
+							name: "Config Pick",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "runtime-provider/config-pick");
+		const sessionFile = await writeBakedSession();
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-dynamic"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [dynamicProviderExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			// The catalog really was cold: something had to fetch it.
+			expect(dynamicFetches).toBeGreaterThan(0);
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
+	});
 });
