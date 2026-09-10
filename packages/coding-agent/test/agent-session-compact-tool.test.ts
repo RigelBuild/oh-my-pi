@@ -1938,6 +1938,58 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(order.indexOf("fork:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
 	}, 15_000);
 
+	it("holds a tree navigation until the rewrite finishes", async () => {
+		// Same gap as `fork()`, reached differently: an immediate extension
+		// command runs BEFORE the prompt barrier and exposes `ctx.navigateTree()`,
+		// which moves the leaf the compaction is reading and about to commit
+		// against. The contract is the barrier's POSITION: the leaf must not move
+		// while the rewrite is in flight.
+		const order: string[] = [];
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("rewrite:summary");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+		expect(session.isStreaming).toBe(false);
+
+		const userEntry = session.sessionManager
+			.getEntries()
+			.find(entry => entry.type === "message" && entry.message.role === "user");
+		expect(userEntry).toBeDefined();
+		const leafBefore = session.sessionManager.getLeafId();
+
+		let navigated = false;
+		const navigate = session.navigateTree(userEntry?.id ?? "").then(() => {
+			order.push("navigate:done");
+			navigated = true;
+		});
+		for (let i = 0; i < 20; i++) await Bun.sleep(0);
+
+		expect(navigated).toBe(false);
+		expect(session.sessionManager.getLeafId()).toBe(leafBefore);
+		expect(order).not.toContain("rewrite:summary");
+
+		summaryGate.resolve();
+		await navigate;
+		await primary;
+		await session.waitForIdle();
+
+		expect(order.indexOf("navigate:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
+	}, 15_000);
+
 	it("runs a local slash command immediately instead of waiting out the rewrite", async () => {
 		// CONTRACT: the immediate-command dispatch executes WITHOUT starting a
 		// model turn (its own comment: "execute immediately, even during
