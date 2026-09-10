@@ -8220,6 +8220,10 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		// A compaction owns the history and the session file this is about to
+		// replace, and neither pass shows up in `isStreaming` (see
+		// `#settleActiveCompaction`), so every caller's busy check reads idle.
+		await this.#settleActiveCompaction();
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -8349,6 +8353,11 @@ export class AgentSession {
 	 */
 	async fork(): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
+		// Same reason as `newSession()`: `SessionManager.fork()` shuts the writer
+		// down and swaps the session id and file, which races a compaction's read
+		// and commit of the same manager — and a compaction is invisible to the
+		// `isStreaming` check every caller gates on.
+		await this.#settleActiveCompaction();
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
 
@@ -8422,6 +8431,9 @@ export class AgentSession {
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
+		// Relocating the session directory under a live compaction would move the
+		// file out from under its commit.
+		await this.#settleActiveCompaction();
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
