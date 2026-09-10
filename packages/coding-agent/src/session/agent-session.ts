@@ -2143,7 +2143,7 @@ export class AgentSession {
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
-			dropImages: () => this.dropImages(),
+			dropImages: opts => this.dropImages(opts),
 			generateHandoffDocument: (customInstructions, options) =>
 				this.#handoff.generateDocument(customInstructions, options),
 			removeAssistantMessageFromActiveContext: message =>
@@ -5727,14 +5727,38 @@ export class AgentSession {
 	get compactionSpeculation(): "idle" | "running" | "armed" {
 		return this.#maintenance.speculationState;
 	}
-	/** Strip image content from the current branch and persist the rewrite. */
-	dropImages(): Promise<{ removed: number }> {
-		return this.#maintenance.dropImages();
+	/**
+	 * Strip image content from the current branch and persist the rewrite.
+	 *
+	 * Rewrites the same branch a compaction is summarizing, so external callers
+	 * wait the pass out; `fromCompaction` skips the barrier for the dead-end
+	 * rescue tier, which runs inside a pass. Same reasoning as {@link shake}.
+	 */
+	async dropImages(opts: { fromCompaction?: boolean } = {}): Promise<{ removed: number }> {
+		if (!opts.fromCompaction) await this.#settleActiveCompaction();
+		return await this.#maintenance.dropImages();
 	}
 
-	/** Reduce stored context with the selected shake strategy. */
-	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
-		return this.#maintenance.shake(mode, opts);
+	/**
+	 * Reduce stored context with the selected shake strategy.
+	 *
+	 * Waits out an active compaction first. Shake rewrites branch entries and
+	 * calls `replaceMessages()` — the same history a pass is summarizing — and
+	 * no caller can see the pass: it runs `abort()`, so `isStreaming` reads
+	 * false throughout. The TUI reaches here from an immediate `/shake` issued
+	 * ahead of its own compaction queue check, so the barrier belongs at this
+	 * boundary, which also covers SDK and RPC callers.
+	 *
+	 * `fromCompaction` skips the barrier, for the shakes a pass drives itself
+	 * (`#rescueCompactionDeadEnd()`, `#runAutoShake()`): those run INSIDE the
+	 * pass, so waiting for it to finish would deadlock.
+	 */
+	async shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; fromCompaction?: boolean } = {},
+	): Promise<ShakeResult> {
+		if (!opts.fromCompaction) await this.#settleActiveCompaction();
+		return await this.#maintenance.shake(mode, opts);
 	}
 
 	/** Compact the active session history. */

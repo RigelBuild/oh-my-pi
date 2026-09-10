@@ -2442,4 +2442,85 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(result).toBeDefined();
 		expect(session.messages).toHaveLength(0);
 	}, 15_000);
+
+	it("holds a history-mutating shake until the rewrite finishes", async () => {
+		// The TUI runs built-in commands ahead of its own compaction queue check,
+		// so an immediate `/shake` reaches `session.shake()` mid-pass. Shake
+		// rewrites branch entries and calls `replaceMessages()` against the very
+		// history the pass is summarizing, and nothing it can see reports the
+		// pass: `compact()` runs `abort()`, so `isStreaming` is false throughout.
+		const order: string[] = [];
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("rewrite:summary");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		const shake = session.shake("thinking").then(result => {
+			order.push("shake:done");
+			return result;
+		});
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+		expect(order).toEqual([]);
+
+		summaryGate.resolve();
+		const result = await shake;
+		await primary;
+		await session.waitForIdle();
+
+		// Barrier POSITION: the shake rewrote settled history, not history mid-pass.
+		expect(order).toEqual(["rewrite:summary", "shake:done"]);
+		// A wait, not a refusal.
+		expect(result.mode).toBe("thinking");
+	}, 15_000);
+
+	it("does not make a compaction's own rescue shake wait on that compaction", async () => {
+		// The barrier above must not apply to the shakes a pass drives itself:
+		// `#rescueCompactionDeadEnd()` and `#runAutoShake()` call `shake()` from
+		// INSIDE the pass, so waiting for `#requestedCompaction` there is a
+		// self-deadlock — the pass cannot finish until the shake it is awaiting
+		// returns. `fromCompaction` opts them out. Verified by driving the same
+		// call shape the rescue uses while a requested pass owns the gate: it
+		// must resolve rather than hang.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		// Resolves while the gate is still up; without the opt-out this awaits
+		// `#requestedCompaction` and the test times out.
+		const result = await session.shake("thinking", { fromCompaction: true });
+		expect(result.mode).toBe("thinking");
+
+		summaryGate.resolve();
+		await primary;
+		await session.waitForIdle();
+	}, 15_000);
 });
