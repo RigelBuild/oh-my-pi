@@ -815,6 +815,12 @@ export class AgentSession {
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
+	/**
+	 * The terminal `agent_end` most recently downgraded ONLY because a yield
+	 * entry looked deliverable. Kept so an idle flush that then claims no turn
+	 * can re-emit it as terminal — see `onIdleFlushUnclaimed`.
+	 */
+	#yieldDowngradedAgentEnd: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
@@ -1294,6 +1300,20 @@ export class AgentSession {
 		// the session idle. `injectIdle` then starts its own turn, so a subscriber
 		// that prompted on that idle signal races it.
 		const yieldContinuation = canDrain && !this.#isDisposed && this.yieldQueue.hasIdleDeliverable();
+		// A yield entry is the one continuation above that can evaporate before it
+		// is delivered: the flush is a scheduled task, and the entry can be
+		// superseded in between (a foreground `hub wait` acknowledges the job, a
+		// diagnostic's file moves on). `#build` then drops it and starts no
+		// successor turn, so the downgrade this predicate justifies would leave
+		// nothing to emit a terminal end and an RPC/ACP client would wait forever.
+		//
+		// Downgrading is still right — holding instead would race the delivering
+		// turn, whose own `#endInFlight` re-enters here before a later entry is
+		// queued. What the downgrade needs is a way BACK: remember that this end
+		// was downgraded only for the yield term, so `onIdleFlushUnclaimed` can
+		// restore it when the pass reports it claimed nothing.
+		this.#yieldDowngradedAgentEnd =
+			yieldContinuation && !(queuedContinuation || ircContinuation || inFlightContinuation) ? pending : undefined;
 		this.#emit(
 			queuedContinuation || ircContinuation || inFlightContinuation || yieldContinuation
 				? { ...pending, isTerminal: false }
@@ -1740,6 +1760,22 @@ export class AgentSession {
 					keepalive[Symbol.dispose]();
 					throw error;
 				}
+			},
+			// The pass drained only stale entries, so it started no successor turn
+			// and nothing else will emit an end. Re-emit the one that was downgraded
+			// solely because that entry looked deliverable, so a subscriber learns
+			// the session went idle instead of waiting on a turn that cannot come.
+			//
+			// Only a yield-only downgrade is restored. An end downgraded for a
+			// queued steer, an IRC wake or an in-flight prompt is owed a turn by
+			// something this pass does not speak for.
+			onIdleFlushUnclaimed: () => {
+				const downgraded = this.#yieldDowngradedAgentEnd;
+				if (!downgraded) return;
+				this.#yieldDowngradedAgentEnd = undefined;
+				if (this.#isDisposed || this.#promptInFlightCount > 0) return;
+				if (this.yieldQueue.hasIdleDeliverable()) return;
+				this.#emit(downgraded);
 			},
 		});
 		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {

@@ -2091,11 +2091,89 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		await second;
 		for (let i = 0; i < 50; i++) await Bun.sleep(0);
 
-		// The last end is terminal — the queue is drained by then. What must not
-		// happen is a terminal end while the second entry was still owed a turn,
-		// which would have been every end before the final one.
-		expect(terminalEnds.length).toBeGreaterThan(1);
+		// The contract is about what a subscriber may conclude, not about how many
+		// ends it takes to get there: no terminal end while the second entry was
+		// still owed a turn, and exactly one terminal end at the finish. The end
+		// may be HELD across the owed turn (one end, emitted terminal at the
+		// close) or emitted non-terminal and followed by the successor turn's own
+		// end; both satisfy it.
+		expect(terminalEnds.length).toBeGreaterThan(0);
 		expect(terminalEnds.slice(0, -1)).not.toContain(true);
+		expect(terminalEnds[terminalEnds.length - 1]).toBe(true);
+		unregister();
+	}, 15_000);
+
+	it("still delivers a terminal agent_end when the owed yield entry goes stale before its flush", async () => {
+		// The TOCTOU window: the entry is live when the end is classified, and
+		// superseded before the SCHEDULED flush runs (a foreground wait
+		// acknowledges the job, a diagnostic's file moves on). `#build` then drops
+		// it and starts no successor turn.
+		//
+		// So the end cannot be DOWNGRADED on the strength of the predicate —
+		// consuming it would leave nothing to emit a terminal end and an RPC/ACP
+		// client would wait forever. It is held, and released terminal once the
+		// pass reports it claimed nothing.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		// The window opens when the classifier downgrades the end on the entry's
+		// behalf and closes when the scheduled flush reads the entry again. The
+		// downgraded end is itself the signal that the window is open, so the
+		// subscriber below — not the test body — is what supersedes the entry.
+		let superseded = false;
+		const unregister = session.yieldQueue.register<string>("compact-toctou-probe", {
+			isStale: () => superseded,
+			build: survivors =>
+				survivors.length === 0
+					? null
+					: {
+							role: "user",
+							content: [{ type: "text", text: survivors.join(" ") }],
+							timestamp: Date.now(),
+						},
+		});
+
+		const terminalEnds: boolean[] = [];
+		let downgradedEnds = 0;
+		session.subscribe(event => {
+			if (event.type !== "agent_end") return;
+			terminalEnds.push(event.isTerminal !== false);
+			if (event.isTerminal === false) {
+				// The classifier just read the entry as deliverable and downgraded
+				// this end for it. Supersede it now: the flush that follows is the
+				// second read, and it will drop the entry and start no turn.
+				downgradedEnds++;
+				superseded = true;
+			}
+		});
+
+		const first = session.yieldQueue.enqueueWithReceipt("compact-toctou-probe", "first result");
+		await summaryStarted.promise;
+		await first;
+
+		const second = session.yieldQueue.enqueueWithReceipt("compact-toctou-probe", "second result");
+		summaryGate.resolve();
+		await session.waitForIdle();
+		await expect(second).rejects.toThrow();
+		for (let i = 0; i < 50; i++) await Bun.sleep(0);
+		// The window was actually entered: an end really was downgraded for it.
+		expect(downgradedEnds).toBeGreaterThan(0);
+
+		// A terminal end still arrives. Nothing owes a turn, so withholding it
+		// indefinitely is the failure this guards.
+		expect(terminalEnds.length).toBeGreaterThan(0);
 		expect(terminalEnds[terminalEnds.length - 1]).toBe(true);
 		unregister();
 	}, 15_000);

@@ -15,6 +15,13 @@ export interface YieldQueueOptions {
 	injectStreaming?(msg: AgentMessage): void;
 	injectIdle(messages: AgentMessage[]): Promise<void>;
 	scheduleIdleFlush(run: () => Promise<void>): void;
+	/**
+	 * A scheduled idle flush finished without claiming a turn — every entry it
+	 * drained was stale, so no successor turn will start. The host uses this to
+	 * release a terminal signal it withheld while the entry still looked
+	 * deliverable.
+	 */
+	onIdleFlushUnclaimed?(): void;
 }
 
 type YieldFlushMode = "streaming" | "idle";
@@ -160,7 +167,18 @@ export class YieldQueue {
 		return false;
 	}
 
-	async flush(mode: YieldFlushMode): Promise<void> {
+	/**
+	 * Drain and dispatch. Returns whether an idle flush actually CLAIMED a turn —
+	 * that is, reached `injectIdle` with at least one surviving message.
+	 *
+	 * A caller that withheld a terminal signal because {@link hasIdleDeliverable}
+	 * said a turn was owed needs the outcome, not the prediction: an entry live at
+	 * that check can be superseded before this runs (a foreground wait
+	 * acknowledges the job, a diagnostic's file moves on), and then `#build`
+	 * drops it here and no successor turn starts. `false` tells that caller to
+	 * release the signal it was holding.
+	 */
+	async flush(mode: YieldFlushMode): Promise<boolean> {
 		if (mode === "idle") {
 			this.#idleFlushPending = false;
 		}
@@ -201,7 +219,9 @@ export class YieldQueue {
 				}
 				logger.warn("Yield queue idle dispatch failed", { error: formatError(error) });
 			}
+			return true;
 		}
+		return false;
 	}
 
 	/**
@@ -252,8 +272,14 @@ export class YieldQueue {
 		try {
 			this.#options.scheduleIdleFlush(async () => {
 				this.#idleFlushPending = false;
+				// Streaming: the run in progress owns the delivery and emits its own
+				// end, so nothing is being withheld on this pass's behalf.
 				if (this.#options.isStreaming()) return;
-				await this.flush("idle");
+				if (await this.flush("idle")) return;
+				// Nothing survived to claim a turn. A caller that downgraded its
+				// terminal signal on `hasIdleDeliverable()` is now waiting on a turn
+				// that will never start, so tell it the pass came up empty.
+				this.#options.onIdleFlushUnclaimed?.();
 			});
 		} catch (error) {
 			this.#idleFlushPending = false;
