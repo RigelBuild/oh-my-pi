@@ -2514,11 +2514,33 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// carried onto the config- or CLI-selected model. Re-parse now that the
 		// providers are registered; the predicate can finally see those ids.
 		if ((adoptConfigModel || hasExplicitModel) && savedSessionModelStrings.length > 0) {
-			restoredSessionThinkingLevel = parseModelString(savedSessionModelStrings[0], {
-				allowMaxSuffix: true,
-				allowAutoAlias: true,
-				isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-			})?.thinkingLevel;
+			const savedSessionModelString = savedSessionModelStrings[0];
+			const reparseSavedSuffix = () =>
+				parseModelString(savedSessionModelString, {
+					allowMaxSuffix: true,
+					allowAutoAlias: true,
+					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+				});
+			let savedParse = reparseSavedSuffix();
+			// Registration alone is not visibility. A dynamic-only provider — an
+			// extension's `fetchDynamicModels`, or a models.yml `discovery:` — has
+			// no models until its catalog is fetched, and a cold start finds no
+			// cache row for the offline hydration above to load. So
+			// `isLiteralModelId` still answers no and the id is still split at its
+			// trailing `:low`. Only a split parse can be wrong this way, and only
+			// where a catalog exists to fetch: fetch that one provider (cache-aware
+			// and coalesced with any in-flight pass) and ask again. `hasProvider`
+			// is the predicate that covers BOTH halves — `getDiscoverableProviders`
+			// reports only the config-declared one, which would skip exactly the
+			// extension-registered provider this reparse exists for.
+			if (savedParse?.thinkingLevel !== undefined && modelRegistry.hasProvider(savedParse.provider)) {
+				const savedProvider = savedParse.provider;
+				await logger.time("restoreSessionSuffixDiscoveryFallback", () =>
+					modelRegistry.refreshDiscoverableProviders(new Set([savedProvider]), "online-if-uncached"),
+				);
+				savedParse = reparseSavedSuffix();
+			}
+			restoredSessionThinkingLevel = savedParse?.thinkingLevel;
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role
