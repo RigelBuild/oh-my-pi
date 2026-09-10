@@ -684,9 +684,16 @@ export interface CreateAgentSessionOptions {
 	 * - Do NOT re-pass {@link preloadedExtensions}. Its `Extension` instances
 	 *   close over the disposed session's `ExtensionAPI` (cwd, eventBus, runtime)
 	 *   and are documented unsafe across session boundaries; reusing them routes
-	 *   tools/handlers/commands back through the dead session. Omit them (or
-	 *   forward only {@link preloadedExtensionPaths}) so the new session binds
-	 *   fresh extensions to its own runtime.
+	 *   tools/handlers/commands back through the dead session. Omit them so the
+	 *   new session binds fresh extensions to its own runtime.
+	 * - Do NOT re-pass {@link preloadedExtensionPaths} either, when it is a
+	 *   snapshot captured from the outgoing session. Supplying it takes the
+	 *   preload branch and skips `discoverSessionExtensionPaths()` entirely, so
+	 *   an extension added or removed on disk stays absent or present across the
+	 *   restart — and rediscovering extensions is a purpose of the feature. Omit
+	 *   it so discovery runs. Paths the host chose explicitly (not harvested from
+	 *   the old session) belong in {@link additionalExtensionPaths}, which adds
+	 *   to discovery rather than replacing it.
 	 * - Do NOT re-pass {@link contextFiles}, {@link skills},
 	 *   {@link promptTemplates}, or {@link slashCommands} with the values captured
 	 *   at first launch. Each bypasses disk discovery when supplied, so re-passing
