@@ -70,6 +70,32 @@ export interface SettingGatedToolGroup {
 export type SettingGatedToolSetting = "generate_image.enabled" | "speechgen.enabled";
 
 /**
+ * Marks a tool object as the built-in a {@link SETTING_GATED_TOOL_GROUPS} entry
+ * installs, so a later disable can tell it from an extension or SDK tool that
+ * merely re-registered the same name.
+ *
+ * A name is not enough: these reach the registry through the custom-tools
+ * extension, so `builtInToolNames` excludes them exactly as it excludes an
+ * override. The marker rides the tool object, and `applyToolProxy` republishes
+ * own keys onto every wrapper, so it survives adaptation and wrapping.
+ */
+export const SETTING_GATED_TOOL_MARKER: unique symbol = Symbol.for("omp.settingGatedTool");
+
+/** Stamps `tool` as a setting-gated built-in. Idempotent. */
+export function markSettingGatedTool(tool: object): void {
+	Object.defineProperty(tool, SETTING_GATED_TOOL_MARKER, { value: true, enumerable: false, configurable: true });
+}
+
+/** Whether `tool` is a built-in installed by a setting-gated group. */
+export function isSettingGatedTool(tool: unknown): boolean {
+	return (
+		typeof tool === "object" &&
+		tool !== null &&
+		(tool as Record<PropertyKey, unknown>)[SETTING_GATED_TOOL_MARKER] === true
+	);
+}
+
+/**
  * Tool sets sdk.ts installs at construction from a boolean setting and never
  * revisits, so `refresh('settings')` has to reconcile them explicitly.
  */
@@ -1621,9 +1647,22 @@ export class SessionTools {
 		// Names this session has ever had installed for the group, so a disable
 		// reaches a set the STARTUP path installed (which this instance never
 		// recorded) as well as one an earlier reconcile built.
+		//
+		// Filtered by PROVENANCE, not just by name: an extension or SDK tool may
+		// re-register `generate_image`/`tts`, replacing the registry entry while
+		// keeping the name. Disabling the built-in feature must leave that tool
+		// active — under the new setting a freshly started session still offers
+		// it. The marker rides the tool object the group installed, so an entry
+		// without it belongs to somebody else. A name with no entry at all is
+		// treated as owned, matching the pre-existing behaviour.
 		const installed = this.#settingGatedToolNames.get(group.setting);
-		const owned = new Set<string>(group.toolNames);
-		if (installed) for (const name of installed) owned.add(name);
+		const candidates = new Set<string>(group.toolNames);
+		if (installed) for (const name of installed) candidates.add(name);
+		const owned = new Set<string>();
+		for (const name of candidates) {
+			const entry = this.#toolRegistry.get(name);
+			if (entry === undefined || isSettingGatedTool(entry)) owned.add(name);
+		}
 		if (!enabled) {
 			const next = active.filter(name => !owned.has(name));
 			if (next.length === active.length) return false;
@@ -1646,8 +1685,13 @@ export class SessionTools {
 				// tool context — the same binding an MCP tool refresh performs, and
 				// the reason a subagent's copy of these tools reaches its own cwd,
 				// exec, and pending-action queue rather than the parent's.
+				markSettingGatedTool(customTool);
 				const adapted = CustomToolAdapter.wrap(customTool, this.#getCustomToolContext) as AgentTool;
 				const wrapped = this.#wrapRuntimeTool(adapted);
+				// Stamp the registry entry too: `applyToolProxy` republishes own keys,
+				// but only a plain wrap chain guarantees it, and this is the object a
+				// later disable reads.
+				markSettingGatedTool(wrapped);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 			}
 			this.#settingGatedToolNames.set(group.setting, names);

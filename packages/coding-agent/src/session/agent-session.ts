@@ -614,9 +614,9 @@ function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[]
  * own prompt-state move (the flag is not the render's input anyway: the
  * `<redacted-content>` block tracks whether the built obfuscator actually
  * reports secrets). So are the values sdk.ts captures OUTSIDE the closure
- * (`inlineToolDescriptors`, `task.eager`, `tools.intentTracing`,
- * `includeWorkspaceTree`): those are frozen at construction by design, so a
- * reload cannot move what the render reads.
+ * (`inlineToolDescriptors`, `task.eager`, `tools.intentTracing`): those are
+ * frozen at construction by design, so a reload cannot move what the render
+ * reads.
  */
 const PROMPT_AFFECTING_SETTING_PATHS = [
 	// Workstation block: the model-identification line.
@@ -661,6 +661,11 @@ const PROMPT_AFFECTING_SETTING_PATHS = [
 	// Without this the model kept being told async was unavailable (or still
 	// offered it) after `/refresh settings` flipped it.
 	"async.enabled",
+	// Whether the workspace tree is rendered into the prompt. The render reads
+	// it live and rescans the tree on the off→on flip, so a refresh that edits
+	// it must rebuild — otherwise the refresh reports success while the model
+	// keeps seeing (or keeps missing) the tree.
+	"includeWorkspaceTree",
 ] as const satisfies readonly SettingPath[];
 
 /**
