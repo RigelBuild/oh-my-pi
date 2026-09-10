@@ -9903,6 +9903,10 @@ export class AgentSession {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
+		// Branching replaces the session file and the active leaf, which a live
+		// compaction is reading and about to commit against. Same barrier as
+		// `fork()` and `navigateTree()`.
+		await this.#settleActiveCompaction();
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -10192,6 +10196,11 @@ export class AgentSession {
 		 */
 		askReanswerCommitted?: boolean;
 	}> {
+		// Moving the leaf rewrites the history a live compaction is reading and
+		// about to commit. Same barrier, same reason as `fork()`: an immediate
+		// extension command reaches `ctx.navigateTree()` without passing the
+		// prompt barrier, and a requested pass raises no `isStreaming`.
+		await this.#settleActiveCompaction();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
 

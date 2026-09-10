@@ -2011,6 +2011,18 @@ export class EventController {
 		this.#resolveDisplaceablePoll();
 		this.#resolveDisplaceableTodo();
 		this.ctx.flushPendingCommandOutput();
+		// A model-requested compaction (the `compact` tool) runs detached and
+		// never passes through `CommandController.executeCompaction()`, whose
+		// completion is what normally drains this queue, and it emits no
+		// `auto_compaction_end` either. So text the user typed while
+		// `isCompacting` was true — parked by the input controller and reported
+		// as "queued for after compaction" — had no flush site at all and waited
+		// for an unrelated later turn. The terminal end is that site: the pass is
+		// over by the time one is emitted, and it is a no-op when the queue is
+		// empty. Not `willRetry`, since no retry is pending at a terminal end.
+		if (!this.ctx.session.isCompacting) {
+			await this.ctx.flushCompactionQueue({ willRetry: false });
+		}
 		this.#lastAssistantComponent = undefined;
 		// When the interrupted/failed turn died on a tool call, this replaces the
 		// torn-down "Working…" row with the "F5 to Retry" affordance.

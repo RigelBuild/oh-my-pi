@@ -68,6 +68,9 @@ function createToolSession(asyncJobManager?: AsyncJobManager): ToolSession {
 
 function createHarness(initialStreaming: boolean) {
 	let streaming = initialStreaming;
+	/** Set to make `injectIdle` reject, as `Agent.prompt()` does on AgentBusyError. */
+	let injectIdleError: Error | undefined;
+	let unclaimedCount = 0;
 	const followUps: AgentMessage[] = [];
 	const prompts: AgentMessage[][] = [];
 	const scheduledFlushes: Array<() => Promise<void>> = [];
@@ -77,10 +80,14 @@ function createHarness(initialStreaming: boolean) {
 			followUps.push(message);
 		},
 		injectIdle: async messages => {
+			if (injectIdleError) throw injectIdleError;
 			prompts.push(messages);
 		},
 		scheduleIdleFlush: run => {
 			scheduledFlushes.push(run);
+		},
+		onIdleFlushUnclaimed: () => {
+			unclaimedCount++;
 		},
 	});
 	queue.register<AsyncEntry>("async-result", {
@@ -108,6 +115,10 @@ function createHarness(initialStreaming: boolean) {
 		setStreaming: (value: boolean) => {
 			streaming = value;
 		},
+		failIdleInjection: (error: Error) => {
+			injectIdleError = error;
+		},
+		unclaimed: () => unclaimedCount,
 	};
 }
 
@@ -298,5 +309,33 @@ describe("async result yield queue delivery", () => {
 		expect(settled).toBe(true);
 		// Nothing was injected: the pass exists to settle, not to start a turn.
 		expect(harness.prompts).toHaveLength(0);
+	});
+
+	test("reports an idle flush unclaimed when the injection itself fails", async () => {
+		// `injectIdle` rejects when another direct caller wins the scheduling race
+		// and `Agent.prompt()` throws `AgentBusyError`. The catch discards the
+		// entries, so no successor turn starts — exactly the state a fully-stale
+		// drain leaves behind. Reporting the pass as claimed would strand a
+		// terminal `agent_end` that was downgraded for one of these entries.
+		const harness = createHarness(true);
+		const receipt = harness.queue.enqueueWithReceipt<AsyncEntry>("async-result", {
+			jobId: "busy-injection",
+			result: "done",
+			job: undefined,
+			durationMs: undefined,
+		});
+		void receipt.catch(() => {});
+		// Live, not stale: the entry survives `#build` and reaches the injection.
+		expect(harness.queue.hasIdleDeliverable()).toBe(true);
+
+		harness.failIdleInjection(new Error("Agent is busy"));
+		harness.setStreaming(false);
+		harness.queue.requestIdleFlush();
+		expect(harness.scheduledFlushes).toHaveLength(1);
+
+		await harness.scheduledFlushes[0]!();
+		// No turn ran, and the pass said so.
+		expect(harness.prompts).toHaveLength(0);
+		expect(harness.unclaimed()).toBe(1);
 	});
 });

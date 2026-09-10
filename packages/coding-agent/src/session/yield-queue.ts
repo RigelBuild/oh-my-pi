@@ -218,6 +218,11 @@ export class YieldQueue {
 					]?.(dispatchError);
 				}
 				logger.warn("Yield queue idle dispatch failed", { error: formatError(error) });
+				// The entries are discarded and no successor turn started, so this
+				// pass claimed nothing — the same state a fully-stale drain leaves
+				// behind. Saying otherwise would strand a terminal `agent_end` that
+				// was downgraded for one of these entries.
+				return false;
 			}
 			return true;
 		}
