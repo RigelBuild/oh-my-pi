@@ -862,7 +862,7 @@ export class MCPManager {
 				// response answers. Sampling it inside `set()` would order two
 				// sessions by response latency, so a delayed answer to THIS request
 				// could overwrite a newer catalog another session already persisted.
-				const observedAt = toolCatalogObservedAt();
+				const observedAt = this.toolCache?.observeCatalogAt(name) ?? toolCatalogObservedAt();
 				try {
 					const serverTools = await listTools(connection);
 					return { connection, serverTools, observedAt };
@@ -1535,7 +1535,7 @@ export class MCPManager {
 		try {
 			// Token claimed before the request, not after the response: see the
 			// same capture on the connect path.
-			const observedAt = toolCatalogObservedAt();
+			const observedAt = this.toolCache?.observeCatalogAt(name) ?? toolCatalogObservedAt();
 			const serverTools = await listTools(connection);
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
@@ -1618,7 +1618,7 @@ export class MCPManager {
 			// Reload tools. Token claimed before the request, not after the
 			// response: a `/mcp refresh` whose `tools/list` is delayed must not
 			// outrank a newer catalog another session already persisted.
-			const observedAt = toolCatalogObservedAt();
+			const observedAt = this.toolCache?.observeCatalogAt(name) ?? toolCatalogObservedAt();
 			const serverTools = await listTools(connection);
 
 			// The connection may have been replaced (disconnect+reconnect under the
