@@ -21,10 +21,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -63,7 +65,10 @@ interface Harness {
  * layers through a process-lifetime capability cache, so an override is the
  * layer a test can set once and rely on across the reload.
  */
-async function makeHarness(initialConfig: string, options?: { persistSession?: boolean }): Promise<Harness> {
+async function makeHarness(
+	initialConfig: string,
+	options?: { persistSession?: boolean; customTools?: CustomTool[] },
+): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-tiers-tools-");
 	const cwd = tempDir.path();
 	await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
@@ -98,6 +103,7 @@ async function makeHarness(initialConfig: string, options?: { persistSession?: b
 		enableMCP: false,
 		enableLsp: false,
 		skipPythonPreflight: true,
+		customTools: options?.customTools,
 	});
 
 	return {
@@ -493,6 +499,35 @@ describe("createAgentSession resume: a historical role-less cycle pin survives a
 			expect(result.settingsChanged).toBe(true);
 			expect(result.modelSwapped).toBe(true);
 			expect(h.session.model?.id).toBe(modelB.id);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("keeps a same-named custom tool active when the built-in feature is disabled", async () => {
+		// An extension or SDK tool may re-register `tts`, replacing the registry
+		// entry while keeping the name. Disabling `speechgen` must drop only the
+		// built-in it gates: the override is somebody else's tool, and a freshly
+		// started session under the new setting would still offer it. Pre-fix the
+		// disable removed the ACTIVE NAME, taking the override down with it.
+		const override: CustomTool = {
+			name: "tts",
+			label: "Custom TTS",
+			description: "An extension-provided tool that happens to share the built-in's name.",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "custom tts" }] }),
+		} as unknown as CustomTool;
+		const h = await makeHarness("speechgen:\n  enabled: true\n", { customTools: [override] });
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("tts");
+
+			await fs.writeFile(h.settingsPath, "speechgen:\n  enabled: false\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			// The name survives because the entry behind it is the override, not
+			// the setting-gated built-in.
+			expect(h.session.getEnabledToolNames()).toContain("tts");
+			expect(h.session.getToolByName("tts")?.description).toContain("An extension-provided tool");
 		} finally {
 			await h.dispose();
 		}

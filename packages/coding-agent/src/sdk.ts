@@ -181,7 +181,12 @@ import {
 } from "./session/retry-fallback-chains";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
-import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
+import {
+	collectMountedMCPToolRoutes,
+	isSettingGatedTool,
+	markSettingGatedTool,
+	projectMountedMCPXdevGuidance,
+} from "./session/session-tools";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -1053,7 +1058,13 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 	const uniqueTools = deduplicateMCPToolsByName(tools);
 	return api => {
 		for (const tool of uniqueTools) {
-			api.registerTool(customToolToDefinition(tool, sourcePaths?.get(tool.name)));
+			const definition = customToolToDefinition(tool, sourcePaths?.get(tool.name));
+			// `customToolToDefinition` builds a fresh object, so carry the
+			// setting-gated marker across: it is what lets a later
+			// `refresh('settings')` disable tell this built-in from an extension
+			// that re-registered the same name.
+			if (isSettingGatedTool(tool)) markSettingGatedTool(definition);
+			api.registerTool(definition);
 		}
 
 		const runOnSession = async (event: CustomToolSessionEvent, ctx: ExtensionContext) => {
@@ -2137,11 +2148,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (settings.get("generate_image.enabled") && imageGenRequested) {
 				const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
 				if (imageGenTools.length > 0) {
+					// Mark them as the setting's own built-ins so a later
+					// `refresh('settings')` disable can tell them from an extension
+					// that re-registers the same name (see SETTING_GATED_TOOL_MARKER).
+					for (const tool of imageGenTools) markSettingGatedTool(tool);
 					customTools.push(...(imageGenTools as unknown as CustomTool[]));
 				}
 			}
 
 			if (settings.get("speechgen.enabled")) {
+				markSettingGatedTool(ttsTool);
 				customTools.push(ttsTool as unknown as CustomTool);
 			}
 
@@ -3151,7 +3167,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const eagerTasks = settings.get("task.eager") !== "default";
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
-		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		// Read live, per render: `/refresh settings` can flip this on disk, and a
+		// value captured here would leave the prompt reporting a refresh while the
+		// model kept seeing (or kept missing) the tree. The tree itself follows:
+		// `liveWorkspaceTree()` reuses the startup scan while the flag stays on and
+		// rescans only after a refresh turned it on, so a refresh pays the
+		// recursive walk only when the setting actually asks for one.
+		let workspaceTreeScan: Promise<WorkspaceTree> = workspaceTreePromise;
+		let workspaceTreeScanned = (settings.get("includeWorkspaceTree") ?? false) || options.workspaceTree !== undefined;
+		const liveWorkspaceTree = (enabled: boolean): Promise<WorkspaceTree> => {
+			if (!enabled) return workspaceTreeScan;
+			if (!workspaceTreeScanned) {
+				workspaceTreeScanned = true;
+				workspaceTreeScan = logger.time("buildWorkspaceTree", () =>
+					buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
+				);
+				workspaceTreeScan.catch(() => {});
+			}
+			return workspaceTreeScan;
+		};
 		// Latest memory backend instructions rendered for advisor system prompts.
 		// Populated by the initial rebuildSystemPrompt below (before the session is
 		// constructed) and refreshed on every later rebuild via
@@ -3163,6 +3197,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
+			const renderWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
@@ -3280,8 +3315,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
 				secretsEnabled,
-				workspaceTree: workspaceTreePromise,
-				includeWorkspaceTree,
+				workspaceTree: liveWorkspaceTree(renderWorkspaceTree),
+				includeWorkspaceTree: renderWorkspaceTree,
 				memoryRootEnabled: memoryBackend?.id === "local",
 				securityEnabled: settings.get("security.enabled"),
 				browserEnabled: getEvalPreludes().some(definition => definition.name === "browser"),

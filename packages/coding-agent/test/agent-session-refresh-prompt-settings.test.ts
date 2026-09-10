@@ -364,3 +364,51 @@ describe("AgentSession refresh('settings'): the secret-placeholder prompt block 
 		}
 	});
 });
+
+describe("AgentSession refresh('settings'): includeWorkspaceTree reaches the prompt", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("renders the workspace tree after a refresh turns the setting on", async () => {
+		// The setting and the tree scan were both captured at construction, so a
+		// session started with it OFF could never gain the tree: the refresh
+		// reported success while the model kept seeing no tree at all.
+		const h = await makeHarness("compaction:\n  enabled: false\nincludeWorkspaceTree: false\n", async cwd => {
+			await fs.mkdir(path.join(cwd, "src", "deep"), { recursive: true });
+			await fs.writeFile(path.join(cwd, "src", "deep", "marker-file.ts"), "export const marker = 1;\n");
+		});
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).not.toContain("marker-file.ts");
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\nincludeWorkspaceTree: true\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			// The scan runs on the off→on flip, so the tree is both enabled AND
+			// populated — a live flag with a frozen empty scan would still be blank.
+			expect(h.session.systemPrompt.join("\n")).toContain("marker-file.ts");
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("drops the workspace tree after a refresh turns the setting off", async () => {
+		// The inverse: started ON, the frozen capture kept rendering the tree.
+		const h = await makeHarness("compaction:\n  enabled: false\nincludeWorkspaceTree: true\n", async cwd => {
+			await fs.mkdir(path.join(cwd, "src", "deep"), { recursive: true });
+			await fs.writeFile(path.join(cwd, "src", "deep", "marker-file.ts"), "export const marker = 1;\n");
+		});
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).toContain("marker-file.ts");
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\nincludeWorkspaceTree: false\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			expect(h.session.systemPrompt.join("\n")).not.toContain("marker-file.ts");
+		} finally {
+			await h.dispose();
+		}
+	});
+});
