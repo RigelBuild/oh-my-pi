@@ -103,9 +103,46 @@ async function hashConfig(config: MCPServerConfig): Promise<string> {
  * response to an EARLIER `tools/list` would carry the LARGER token and
  * overwrite the newer catalog a faster later request already persisted — for
  * the full cache TTL, with nothing to correct it.
+ *
+ * The reading is floored above the token already on the row, which is what
+ * keeps the sequence usable across a BACKWARD wall-clock step. `timeOrigin` is
+ * fixed when a process starts, so a correction splits live processes across two
+ * scales: one started before keeps reading high, one started after reads low.
+ * The second process's genuinely newer `tools/list` would then carry the
+ * SMALLER token, lose every comparison, and leave the retired catalog cached
+ * for the full TTL. Flooring makes the persisted sequence monotonic whatever a
+ * single clock reads.
+ *
+ * The bare function takes no store, so it cannot read that floor — callers that
+ * have a cache should use {@link MCPToolCache.observeCatalogAt}, which does.
+ * This spelling stays for callers with no cache (a test, an out-of-band
+ * invalidation) and is the behaviour a single-process run already had. Neither
+ * makes two processes that never see each other's row comparable — only a
+ * shared logical counter would — but an unordered pair is the case
+ * `unorderable` already handles conservatively.
  */
 export function toolCatalogObservedAt(): number {
 	return performance.timeOrigin + performance.now();
+}
+
+/**
+ * The smallest token strictly greater than `value`.
+ *
+ * The tokens are fractional-millisecond doubles, so an integer bump would
+ * overshoot a sub-millisecond ordering the readings themselves can express.
+ * `Math.nextUp` is not available, and adding a fixed epsilon is a no-op once
+ * the value is large enough that the epsilon falls below its ULP — which is
+ * exactly the range these live in. Scaling by the next representable double
+ * keeps the step at one ULP.
+ */
+function nextAfter(value: number): number {
+	if (!Number.isFinite(value)) return value;
+	if (value === 0) return Number.MIN_VALUE;
+	const buffer = new DataView(new ArrayBuffer(8));
+	buffer.setFloat64(0, value);
+	const bits = buffer.getBigUint64(0);
+	buffer.setBigUint64(0, value > 0 ? bits + 1n : bits - 1n);
+	return buffer.getFloat64(0);
 }
 
 function cacheKey(serverName: string): string {
@@ -114,6 +151,22 @@ function cacheKey(serverName: string): string {
 
 export class MCPToolCache {
 	constructor(private storage: AgentStorage) {}
+
+	/**
+	 * Claim the ordering token for a `tools/list` about to be issued for
+	 * `serverName`, floored above the token already on that server's row.
+	 *
+	 * The floor is what survives a backward wall-clock step: see
+	 * {@link toolCatalogObservedAt} for why a bare reading can fall behind a
+	 * live process that started on the pre-correction scale. Read here, at
+	 * sample time, rather than when the write lands — by then `#writeOrdered`
+	 * has already rejected the low reading against the same row.
+	 */
+	observeCatalogAt(serverName: string): number {
+		const reading = toolCatalogObservedAt();
+		const persisted = readWriteStartedAt(this.storage.getCache(cacheKey(serverName)));
+		return persisted === undefined ? reading : Math.max(reading, nextAfter(persisted));
+	}
 
 	/**
 	 * The newest request-time ordering token any `set()` on this instance has
@@ -249,7 +302,7 @@ export class MCPToolCache {
 			// an older one, and re-decide when the row moves under us.
 			this.#writeOrdered({
 				serverName,
-				serialized: JSON.stringify(emptyPayload),
+				payload: emptyPayload,
 				ttlMs: CACHE_TOMBSTONE_TTL_MS,
 				writeStartedAt,
 				unorderable: "replace",
@@ -280,14 +333,6 @@ export class MCPToolCache {
 			writeStartedAt,
 		};
 
-		let serialized: string;
-		try {
-			serialized = JSON.stringify(payload);
-		} catch (error) {
-			logger.warn("MCP tool cache serialize failed", { serverName, error: String(error) });
-			return;
-		}
-
 		// Re-check the same-instance ordering AFTER the async hash: a `set()`
 		// whose `tools/list` went out later (any toolset, empty or not) has
 		// entered on this instance, so its result is authoritative and persisting
@@ -299,7 +344,7 @@ export class MCPToolCache {
 		// subagents and separate CLI processes add more.
 		this.#writeOrdered({
 			serverName,
-			serialized,
+			payload,
 			ttlMs: CACHE_TTL_MS,
 			writeStartedAt,
 			baseline: { bytes: persistedBeforeHash },
@@ -350,10 +395,15 @@ export class MCPToolCache {
 	 * a catalog write drops (never displace a row that might be newer), while an
 	 * invalidation marker replaces it (its worst case is one forced live re-list,
 	 * and retiring an unorderable stale catalog is the reason it is written).
+	 *
+	 * The token itself is floored above whatever the store already holds when it
+	 * is SAMPLED, not here — see {@link toolCatalogObservedAt}. Flooring at write
+	 * time would be too late: the comparison above would already have rejected a
+	 * reading that fell behind the stored row.
 	 */
 	#writeOrdered(args: {
 		serverName: string;
-		serialized: string;
+		payload: MCPToolCachePayload;
 		ttlMs: number;
 		writeStartedAt: number;
 		baseline?: { bytes: string | null };
@@ -371,8 +421,16 @@ export class MCPToolCache {
 				return;
 			}
 
+			let serialized: string;
+			try {
+				serialized = JSON.stringify(args.payload);
+			} catch (error) {
+				logger.warn("MCP tool cache serialize failed", { serverName: args.serverName, error: String(error) });
+				return;
+			}
+
 			const expiresAtSec = Math.floor((Date.now() + args.ttlMs) / 1000);
-			if (this.storage.setCacheIfMatches(key, persistedNow, args.serialized, expiresAtSec)) return;
+			if (this.storage.setCacheIfMatches(key, persistedNow, serialized, expiresAtSec)) return;
 		}
 
 		logger.debug("MCP tool cache write contended out", { serverName: args.serverName });

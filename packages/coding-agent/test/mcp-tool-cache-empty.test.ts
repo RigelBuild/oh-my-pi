@@ -619,4 +619,53 @@ describe("MCPToolCache empty-toolset guard", () => {
 
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
+
+	test("a newer catalog still wins when the writer's clock reads behind the stored token", async () => {
+		// `performance.timeOrigin` is fixed when a process starts, so a backward
+		// wall-clock correction splits live processes across two scales: one that
+		// started before keeps reading on the old, higher scale, while one started
+		// after reads on the corrected, lower one. The second process's genuinely
+		// newer `tools/list` then carries the SMALLER token and would lose every
+		// comparison, leaving the retired catalog cached for the full TTL.
+		//
+		// `observeCatalogAt()` floors its reading above the token already on the
+		// row, so the persisted sequence is monotonic whatever a single clock says.
+		const storage = createFakeStorage();
+		const beforeCorrection = new MCPToolCache(storage);
+		const afterCorrection = new MCPToolCache(storage);
+
+		// The long-lived process writes first, on the pre-correction scale.
+		const highReading = beforeCorrection.observeCatalogAt("litellm");
+		await beforeCorrection.set("litellm", CONFIG, [OLD_TOOL], highReading);
+		expect(await beforeCorrection.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
+
+		// The post-correction process reads an hour lower than the stored token,
+		// yet its request goes out later in real time. Mock the raw clock rather
+		// than the token so the floor is what has to rescue the ordering.
+		vi.spyOn(performance, "now").mockReturnValue(performance.now() - 60 * 60 * 1000);
+		const lowReading = afterCorrection.observeCatalogAt("litellm");
+		expect(lowReading).toBeGreaterThan(highReading);
+
+		await afterCorrection.set("litellm", CONFIG, [NEW_TOOL], lowReading);
+
+		expect(await afterCorrection.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+	});
+
+	test("an earlier request on the corrected clock still loses to the floored row", async () => {
+		// The floor must not turn every low reading into a winner: a request that
+		// genuinely went out before the stored one must still defer, or the floor
+		// would have replaced the ordering with last-writer-wins.
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+
+		const first = cache.observeCatalogAt("litellm");
+		const second = tokenAfter(first);
+		await cache.set("litellm", CONFIG, [NEW_TOOL], second);
+
+		// `first` was sampled before the row existed, so it carries no floor and
+		// is genuinely the earlier observation.
+		await cache.set("litellm", CONFIG, [OLD_TOOL], first);
+
+		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+	});
 });
