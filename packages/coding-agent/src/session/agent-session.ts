@@ -1081,6 +1081,22 @@ export class AgentSession {
 			this.#irc.queueAside(records);
 			return;
 		}
+		// A compaction owns the history this wake would build a turn on, and it is
+		// invisible to every predicate the delivery path checks: `compact()` calls
+		// `abort()`, so `IrcBridge.deliver()` reads `isStreaming()` as false and
+		// routes a peer message straight here while the summarizer runs and the
+		// agent listener is disconnected. Park rather than await: the barrier
+		// `prompt()` takes cannot go here, because `#beginInFlight()` below has an
+		// abort-driven reset hazard across an await (see the note in
+		// `#dispatchCustomMessageTurn`). Deferred wakes resume once the pass
+		// reconnects — `compact()`'s finally calls `drainStrandedQueuedMessages()`,
+		// which reaches `#resumeStrandedIrcAsides()`, and `hasPending()` counts the
+		// deferred queue — so the peer still gets its turn, just after the rewrite.
+		if (this.#requestedCompaction !== undefined || this.isCompacting) {
+			this.#irc.queueDeferredWake(records);
+			logger.debug("IRC wake turn parked across an active compaction");
+			return;
+		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
 		// already-resumable follow-up can ride the wake turn normally without reordering.
 		const parkedFollowUps =
@@ -8901,6 +8917,13 @@ export class AgentSession {
 			if (this.#requestedCompaction === undefined) {
 				this.#flushPendingAgentEnd();
 				this.yieldQueue.requestIdleFlush();
+				// An IRC wake that landed mid-pass parked itself on the deferred
+				// queue rather than prompt into the rewrite. `compact()`'s own
+				// finally already ran its resume, but this gate was still up then
+				// — the resume re-parked and nothing else re-checks a deferred
+				// wake — so the peer's turn has to be released here, once the gate
+				// is genuinely clear. No-op when nothing parked.
+				this.#resumeStrandedIrcAsides();
 			}
 		});
 		this.#requestedCompaction = run;
