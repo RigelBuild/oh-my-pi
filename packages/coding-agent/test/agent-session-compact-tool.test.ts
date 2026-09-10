@@ -14,6 +14,7 @@ import type {
 	CustomCommandSource,
 	LoadedCustomCommand,
 } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -2335,5 +2336,59 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(await send).toBe(true);
 		await primary;
 		await session.waitForIdle();
+	}, 15_000);
+
+	it("parks an IRC wake across a requested pass and releases it from the finalizer", async () => {
+		// The requested pass is gated by `#requestedCompaction`, which is still set
+		// while `compact()`'s own finally runs its resume — so that resume re-parks
+		// and nothing else re-checks a deferred wake. Only the requested
+		// finalizer's own resume, after the gate clears, can release the peer's
+		// turn. The real `compact()` runs (stubbing it removes the `abort()` that
+		// makes the session read idle to `IrcBridge.deliver()`); only the LLM
+		// summarizer is stubbed, and it is gated so the wake provably lands
+		// mid-rewrite.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		// Delivered mid-rewrite: `isStreaming()` reads false here, so the bridge
+		// routes straight to the direct wake path.
+		const outcome = await session.deliverIrcMessage({
+			id: "irc-1",
+			from: "peer",
+			to: "Main",
+			body: "ping",
+			ts: Date.now(),
+		} as IrcMessage);
+		expect(outcome).toBe("woken");
+		// Parked, so no turn started against the history being replaced.
+		expect(session.isStreaming).toBe(false);
+
+		summaryGate.resolve();
+		await primary;
+		await session.waitForIdle();
+
+		// Released once the gate cleared: the peer's message reached the transcript
+		// rather than being stranded on the deferred queue.
+		const transcript = session.messages;
+		expect(
+			transcript.some(
+				message => message.role === "custom" && JSON.stringify(message.content ?? "").includes("ping"),
+			),
+		).toBe(true);
 	}, 15_000);
 });
