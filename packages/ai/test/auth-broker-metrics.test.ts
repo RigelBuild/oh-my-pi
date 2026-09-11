@@ -966,14 +966,18 @@ describe("accountLabelOf", () => {
 		// — under account-one's identity. `AuthStorage`'s own scope reader already
 		// requires agreement for the same reason. Falls through to the sentinel,
 		// which is the honest answer for an unattributable report.
+		// The metadata deliberately carries BOTH lower-priority fallbacks and the
+		// limits share a `projectId`: disagreement has to be terminal, not merely
+		// "no scoped account", or the chain continues and labels every limit with
+		// one of these instead. A fixture without them passes either way.
 		const report: UsageReport = {
 			provider: "openai-codex",
 			fetchedAt: 1,
-			metadata: { planType: "pro" },
+			metadata: { planType: "pro", projectId: "proj-meta", account: "alias-acct" },
 			limits: ["acct-one", "acct-two"].map(accountId => ({
 				id: `openai-codex:${accountId}`,
 				label: "Extra",
-				scope: { provider: "openai-codex" as const, accountId },
+				scope: { provider: "openai-codex" as const, accountId, projectId: "proj-shared" },
 				amount: { usedFraction: 0.1, unit: "percent" as const },
 			})),
 		};
@@ -995,6 +999,27 @@ describe("accountLabelOf", () => {
 			})),
 		};
 		expect(accountLabelOf(report)).toBe("meta-acct");
+	});
+
+	test("an absent account scope still reaches the lower-priority fallbacks", () => {
+		// The other side of the terminal-conflict rule, so it cannot be satisfied
+		// by refusing to label anything: with NO scoped account the metadata
+		// project fallback is still the right answer, and only disagreement stops
+		// the chain.
+		const report: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: 1,
+			metadata: { planType: "pro", projectId: "proj-meta" },
+			limits: [
+				{
+					id: "openai-codex:extra:primary",
+					label: "Extra",
+					scope: { provider: "openai-codex" as const },
+					amount: { usedFraction: 0.1, unit: "percent" as const },
+				},
+			],
+		};
+		expect(accountLabelOf(report)).toBe("project:proj-meta");
 	});
 
 	test("repeated identical account scopes still resolve", () => {
@@ -1028,6 +1053,8 @@ describe("accountLabelOf", () => {
 			})),
 		};
 		expect(accountLabelOf(report)).toBe(UNIDENTIFIED_ACCOUNT);
+		// And no `project:` prefix leaked out of the disagreeing scopes.
+		expect(accountLabelOf(report)).not.toContain("proj-");
 	});
 
 	// Also pins the sentinel's literal value: `UNIDENTIFIED_ACCOUNT` is the
