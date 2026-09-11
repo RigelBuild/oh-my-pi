@@ -5,6 +5,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	OpenAIResponsesHistoryPayload,
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
@@ -12,6 +13,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { prepareAnthropicManyImageContext } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { getOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -60,7 +62,7 @@ function collectImageStats(context: Context, byteModel: Model | undefined): { to
 			// An assistant's generic `content` images are display-only, but its
 			// replayed native image results are NOT — see
 			// `replayedImageResultSizes`.
-			if (byteModel !== undefined) inlineSizes.push(...replayedImageResultSizes(message));
+			if (byteModel !== undefined) inlineSizes.push(...replayedImageResultSizes(message, byteModel));
 			continue;
 		}
 		if (!Array.isArray(message.content)) continue;
@@ -86,15 +88,31 @@ function collectImageStats(context: Context, byteModel: Model | undefined): { to
  * Bytes only: the count cap is the provider's per-request cap on image parts,
  * which a replayed generation result is not.
  */
-function replayedImageResultSizes(message: AssistantMessage): number[] {
-	const payload = message.providerPayload;
-	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return [];
+function replayedImageResultSizes(message: AssistantMessage, model: Model): number[] {
+	const payload = replayableHistoryPayload(message, model);
+	if (!payload) return [];
 	const sizes: number[] = [];
 	for (const item of payload.items) {
 		const result = replayedImageResult(item);
 		if (result !== undefined) sizes.push(result.length);
 	}
 	return sizes;
+}
+
+/**
+ * This turn's replayed Responses payload, but only when the request will
+ * actually carry it.
+ *
+ * `openai-shared.ts` `convertConversationMessages()` replays a payload solely
+ * when the turn's `api` and `model` match the request's and
+ * `getOpenAIResponsesHistoryPayload` accepts the provider. A payload that fails
+ * any of those is dead weight on this request — charging it would let a stale
+ * generation result evict a live user image that IS being sent, which is the
+ * exact harm the byte budget exists to avoid.
+ */
+function replayableHistoryPayload(message: AssistantMessage, model: Model): OpenAIResponsesHistoryPayload | undefined {
+	if (message.api !== model.api || message.model !== model.id) return undefined;
+	return getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider, message.provider);
 }
 
 /** The replayable base64 of `item`, or `undefined` when it carries none. */
@@ -196,8 +214,10 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
  */
 function clampAssistantMessage(message: AssistantMessage, state: ImageClampState): AssistantMessage {
 	if (state.remainingInlineDrops <= 0) return message;
-	const payload = message.providerPayload;
-	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return message;
+	// Same eligibility gate as the accounting: never rewrite a payload this
+	// request was not going to replay anyway.
+	const payload = replayableHistoryPayload(message, state.model);
+	if (!payload) return message;
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
 		if (state.remainingInlineDrops <= 0) break;

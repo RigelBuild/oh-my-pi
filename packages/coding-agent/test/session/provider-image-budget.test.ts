@@ -24,6 +24,19 @@ const UMANS_MODEL = buildModel({
 	maxTokens: 4096,
 });
 
+const OPENAI_MODEL = buildModel({
+	id: "gpt-6-codex",
+	name: "gpt-6-codex",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+});
+
 const ANTHROPIC_MODEL = buildModel({
 	id: "claude-opus-4-8",
 	name: "claude-opus-4-8",
@@ -118,12 +131,18 @@ function textData(context: Context): string[] {
  * `providerPayload`, never in `content` — which is exactly why a content-only
  * tally reads zero for it.
  */
-function replayTurn(results: string[], timestamp: number): AssistantMessage {
+function replayTurn(results: string[], timestamp: number, model: Model = OPENAI_MODEL): AssistantMessage {
 	return {
 		...assistantTurn([], timestamp),
+		// Tagged to MATCH `model`: replay is gated on the turn's api/model/provider
+		// agreeing with the request's, so a mismatched fixture would exercise the
+		// dead-payload path instead of the live one.
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
 		providerPayload: {
 			type: "openaiResponsesHistory",
-			provider: "openai",
+			provider: model.provider,
 			items: [
 				{ type: "reasoning", id: "rs_keepme", summary: [] },
 				...results.map((result, index) => ({
@@ -554,12 +573,12 @@ describe("provider context image budgets", () => {
 		// verbatim on a continuing same-model Responses request. The tally read
 		// only generic `content`, so several generated images could bust the byte
 		// budget while the count stayed zero and nothing was ever evicted.
-		const budget = providerImageByteBudget(ANTHROPIC_MODEL.provider);
-		const generated = Buffer.from(largeDecodablePng(1100)).toString("base64");
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider);
+		const generated = Buffer.from(largeDecodablePng(1700)).toString("base64");
 		if (generated.length * 2 <= budget) throw new Error("fixture cannot bust the byte budget");
 		const context: Context = { messages: [replayTurn([generated, generated], 1)] };
 
-		const clamped = clampProviderContextImages(context, ANTHROPIC_MODEL);
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
 
 		// One is evicted to fit; the other survives.
 		expect(replayedResults(clamped)).toEqual([generated]);
@@ -569,6 +588,31 @@ describe("provider context image budgets", () => {
 		const items = payload?.type === "openaiResponsesHistory" ? payload.items : [];
 		expect(items.some(item => item.type === "reasoning" && item.id === "rs_keepme")).toBe(true);
 		expect(items).toHaveLength(3);
+	});
+
+	it("ignores a replayed result the request will not carry, sparing the older user image", async () => {
+		// The reviewer's routing case: replay is gated on the turn's api/model/
+		// provider matching the request's, so a payload from a DIFFERENT model is
+		// dead weight. Charging it made the oldest-first calculation delete the
+		// older user image that IS being sent, to make room for bytes that never
+		// travel — the same harm the byte budget exists to prevent.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider);
+		const generated = Buffer.from(largeDecodablePng(1700)).toString("base64");
+		if (generated.length * 2 <= budget) throw new Error("fixture cannot bust the byte budget");
+		const live = image(generated);
+		const context: Context = {
+			messages: [
+				{ role: "user", content: [live], timestamp: 0 },
+				// Same provider, DIFFERENT model: `convertConversationMessages`
+				// excludes this payload, so its bytes are not on the wire.
+				replayTurn([generated, generated], 1, { ...OPENAI_MODEL, id: "gpt-6-other" }),
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		// Untouched by identity: only the live user image is charged, and it fits.
+		expect(clamped).toBe(context);
 	});
 
 	it("still never charges a display-only assistant content image", async () => {
