@@ -6,6 +6,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "@oh-my-pi/pi-coding-agent/blob-broker/stream-fallback";
 import { providerImageByteBudget } from "@oh-my-pi/snapcompact";
+import { smoothDecodablePng } from "./session/fixtures/decodable-png";
 
 const model: Model = buildModel({
 	id: "gpt-4.1",
@@ -247,3 +248,57 @@ describe("byte budget on materialized fallback images", () => {
 		expect(retried.messages[0]?.content).toEqual([{ type: "text", text: "[image omitted: provider image limit]" }]);
 	});
 });
+
+/**
+ * Materializes 21 oversized-but-low-detail frames: one past Anthropic's
+ * many-image threshold, huge before its 2000px downscale and small after.
+ */
+class OversizedManyImageService extends ImageUrlService {
+	constructor() {
+		super("/tmp/provider-fallback-many-image-test", [], { daemon: false });
+	}
+
+	override async fallbackContext(_context: Context, _model: Model): Promise<Context> {
+		const data = Buffer.from(smoothDecodablePng(2400)).toString("base64");
+		return {
+			messages: Array.from({ length: 21 }, (_, index) => ({
+				role: "user" as const,
+				content: [{ type: "image" as const, data, mimeType: "image/png" }],
+				timestamp: index,
+			})),
+		};
+	}
+}
+
+describe("provider sizing on materialized fallback images", () => {
+	it("downscales before charging the byte budget", async () => {
+		// This path re-spelled only the pipeline's LAST stage, so it charged
+		// pre-resize bytes: `streamAnthropic` downsizes the survivors afterward,
+		// meaning a recovery request whose resized payload fits still lost its
+		// oldest images. It now goes through the shared helper, which runs the
+		// provider size pass first.
+		const seen: Context[] = [];
+		const base: StreamFn = (_model, context) => {
+			seen.push(context);
+			return scriptedStream(seen.length === 1 ? "error" : "success");
+		};
+		const wrapped = wrapStreamFnWithBlobUrlFallback(base, new OversizedManyImageService());
+
+		expect(await eventTypes(await wrapped(anthropicModel, lazyFrameContext()))).toEqual(["start", "done"]);
+
+		const retried = seen[1];
+		if (!retried) throw new Error("expected an inline retry");
+		// Every frame survives, and the payload sent fits — measured post-resize.
+		expect(imageCount(retried)).toBe(21);
+		expect(inlineImageBytes(retried)).toBeLessThanOrEqual(providerImageByteBudget("anthropic"));
+	});
+});
+
+function imageCount(context: Context): number {
+	let count = 0;
+	for (const message of context.messages) {
+		if (!Array.isArray(message.content)) continue;
+		for (const part of message.content) if (part.type === "image") count++;
+	}
+	return count;
+}

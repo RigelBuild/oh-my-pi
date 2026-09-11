@@ -8,7 +8,7 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { logger } from "@oh-my-pi/pi-utils";
-import { clampProviderContextImages } from "../session/provider-image-budget";
+import { applyProviderImageByteBudget } from "../session/provider-image-budget";
 import { contextHasImageUrls, contextHasProviderFiles } from "./context-images";
 import type { ImageUrlService } from "./service";
 
@@ -53,7 +53,12 @@ export function wrapStreamFnWithBlobUrlFallback(base: StreamFn, broker: ImageUrl
 						// pipeline never runs again. Re-clamp here or a fallback
 						// built from many lazy frames 413s on the same limit the
 						// retry exists to escape.
-						const fallback = clampProviderContextImages(
+						//
+						// Through the shared helper, so the provider's own downscale
+						// runs FIRST here as it does in the pipeline: clamping the
+						// pre-resize bytes of a >20-image Anthropic request evicts
+						// older images whose resized payload would have fit.
+						const fallback = await applyProviderImageByteBudget(
 							await broker.fallbackContext(attemptContext, model),
 							model,
 						);

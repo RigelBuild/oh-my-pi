@@ -1,4 +1,5 @@
 import type {
+	AssistantMessage,
 	Context,
 	DeveloperMessage,
 	ImageContent,
@@ -55,7 +56,14 @@ function collectImageStats(context: Context, byteModel: Model | undefined): { to
 	let total = 0;
 	const inlineSizes: number[] = [];
 	for (const message of context.messages) {
-		if (message.role === "assistant" || !Array.isArray(message.content)) continue;
+		if (message.role === "assistant") {
+			// An assistant's generic `content` images are display-only, but its
+			// replayed native image results are NOT — see
+			// `replayedImageResultSizes`.
+			if (byteModel !== undefined) inlineSizes.push(...replayedImageResultSizes(message));
+			continue;
+		}
+		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type !== "image") continue;
 			total++;
@@ -63,6 +71,37 @@ function collectImageStats(context: Context, byteModel: Model | undefined): { to
 		}
 	}
 	return { total, inlineSizes };
+}
+
+/**
+ * Base64 sizes of the native image results this assistant turn replays.
+ *
+ * A completed `image_generation_call` keeps its base64 in `providerPayload`
+ * rather than in `content`, and `openai-shared.ts`
+ * `convertConversationMessages()` replays the sanitized item verbatim on a
+ * continuing same-model Responses request — so those bytes DO travel, and a
+ * few generated images can exceed the byte budget on their own while the
+ * content-only tally reads zero.
+ *
+ * Bytes only: the count cap is the provider's per-request cap on image parts,
+ * which a replayed generation result is not.
+ */
+function replayedImageResultSizes(message: AssistantMessage): number[] {
+	const payload = message.providerPayload;
+	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return [];
+	const sizes: number[] = [];
+	for (const item of payload.items) {
+		const result = replayedImageResult(item);
+		if (result !== undefined) sizes.push(result.length);
+	}
+	return sizes;
+}
+
+/** The replayable base64 of `item`, or `undefined` when it carries none. */
+function replayedImageResult(item: Record<string, unknown>): string | undefined {
+	if (item.type !== "image_generation_call") return undefined;
+	const result = item.result;
+	return typeof result === "string" && result.length > 0 ? result : undefined;
 }
 
 /** Count of oldest images to drop so the surviving image payload fits `byteLimit`. */
@@ -145,6 +184,32 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] };
 }
 
+/**
+ * Evicts this turn's replayed native image results while byte pressure remains.
+ *
+ * Clears the item's `result` rather than removing the item or the payload:
+ * `utils.ts` `sanitizeOpenAIResponsesImageGenerationCallForReplay` returns
+ * `undefined` for an empty result, so the emptied item stops being replayed —
+ * while the payload's other items (reasoning, call ids, compaction markers,
+ * none of which the generic content reproduces) survive untouched. Only the
+ * byte allowance is paid down; these are not image parts under the count cap.
+ */
+function clampAssistantMessage(message: AssistantMessage, state: ImageClampState): AssistantMessage {
+	if (state.remainingInlineDrops <= 0) return message;
+	const payload = message.providerPayload;
+	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return message;
+	let items: Array<Record<string, unknown>> | undefined;
+	for (let index = 0; index < payload.items.length; index++) {
+		if (state.remainingInlineDrops <= 0) break;
+		const item = payload.items[index];
+		if (!item || replayedImageResult(item) === undefined) continue;
+		state.remainingInlineDrops--;
+		items ??= [...payload.items];
+		items[index] = { ...item, result: "" };
+	}
+	return items ? { ...message, providerPayload: { ...payload, items } } : message;
+}
+
 /** Applies an already-computed drop allowance oldest-first across the context. */
 function applyImageClamp(context: Context, state: ImageClampState): Context {
 	const messages = context.messages.map(message => {
@@ -156,10 +221,11 @@ function applyImageClamp(context: Context, state: ImageClampState): Context {
 			case "toolResult":
 				return clampToolResultMessage(message, state);
 			case "assistant":
-				// Assistant images are display artifacts the request never
-				// carries, so they consume no budget and there is nothing to
-				// reclaim by dropping them from the transcript.
-				return message;
+				// Generic assistant images are display artifacts the request never
+				// carries, so there is nothing to reclaim by dropping them. A
+				// replayed native image result is different: those bytes travel, so
+				// they are charged and must be evictable.
+				return clampAssistantMessage(message, state);
 		}
 		return message;
 	});
@@ -214,7 +280,10 @@ export function clampProviderContextImageCount(context: Context, model: Model): 
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const { total, inlineSizes } = collectImageStats(context, model);
-	if (total === 0) return context;
+	// Not `total === 0`: a replayed native image result contributes bytes but no
+	// image part, so a context whose only images are generated ones has
+	// `total === 0` and a payload that can still bust the byte budget.
+	if (total === 0 && inlineSizes.length === 0) return context;
 	const countDrops = Math.max(0, total - providerImageBudget(model.provider));
 	const inlineDrops = imageDropCountForBytes(inlineSizes, providerImageByteBudget(model.provider));
 	if (countDrops === 0 && inlineDrops === 0) return context;
@@ -525,4 +594,18 @@ export async function applyProviderImagePipeline(
 function applyProviderSizePass(context: Context, model: Model): Promise<Context> {
 	if (model.api !== "anthropic-messages") return Promise.resolve(context);
 	return prepareAnthropicManyImageContext(context, model.input.includes("image"));
+}
+
+/**
+ * The size pass plus the byte budget, in that order, for a caller that has
+ * already materialized its images and cannot re-run the whole pipeline.
+ *
+ * Exists so the blob broker's URL-to-inline recovery does not re-spell the
+ * final two stages: it calls the low-level stream fn directly, so
+ * `transformProviderContext` never runs again — but clamping bytes without the
+ * provider's own downscale charges pre-resize sizes and evicts images a
+ * resized payload would have fit.
+ */
+export async function applyProviderImageByteBudget(context: Context, model: Model): Promise<Context> {
+	return clampProviderContextImages(await applyProviderSizePass(context, model), model);
 }
