@@ -1262,3 +1262,68 @@ describe("AgentSession setModel: a model-only switch does not pin thinking", () 
 		}
 	});
 });
+
+describe("AgentSession: thinking provenance survives a role pick and a new session", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("still follows a changed defaultThinkingLevel after /new carried a settings-derived level", async () => {
+		// `/new` appends a thinking receipt for the level it carries across. That
+		// receipt is the new transcript's ONLY record of where the level came
+		// from, so writing it unflagged converts a level the old session merely
+		// inherited from `defaultThinkingLevel` into an explicit pin — and the
+		// user never selected anything.
+		const h = await makeHarness({
+			rawConfig: `compaction:\n  enabled: false\ndefaultThinkingLevel: low\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+		});
+		try {
+			// No thinking selection anywhere: the level is purely settings-derived.
+			expect(await h.session.newSession()).toBe(true);
+
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\ndefaultThinkingLevel: minimal\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Minimal);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("pins a role's explicit thinking suffix even when it matches the active level", async () => {
+		// `applyRoleModel` only records a pin when the effective effort MOVES, so
+		// a role whose suffix equals the level already active recorded nothing —
+		// and a later `defaultThinkingLevel` edit plus a refresh overwrote the
+		// role's explicit suffix. Starting the session settings-tracking is what
+		// makes the omission reachable.
+		const h = await makeHarness({
+			rawConfig: `compaction:\n  enabled: false\ndefaultThinkingLevel: low\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+		});
+		try {
+			// The suffix deliberately equals the level the settings already give.
+			await h.session.applyRoleModel({
+				role: "default",
+				model: h.modelA,
+				thinkingLevel: h.session.configuredThinkingLevel(),
+				explicitThinkingLevel: true,
+			});
+
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\ndefaultThinkingLevel: minimal\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// The role's explicit choice is a pin, so the refresh must not
+			// re-derive over it.
+			expect(h.session.configuredThinkingLevel()).not.toBe(ThinkingLevel.Minimal);
+		} finally {
+			await h.dispose();
+		}
+	});
+});

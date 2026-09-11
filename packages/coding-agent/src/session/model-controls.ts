@@ -452,7 +452,13 @@ export class ModelControls {
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
 		await this.setModel(entry.model, entry.role);
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
-			this.setThinkingLevel(entry.thinkingLevel);
+			// `explicitThinkingLevel` means the role carried a thinking suffix, so
+			// this IS a selection and must be recorded as a pin. Without the flag a
+			// suffix equal to the level already active writes no receipt at all —
+			// the effective effort never moves, so the only thing that would have
+			// recorded the choice is the pin — and a later `defaultThinkingLevel`
+			// edit plus `/refresh settings` then overwrites the role's suffix.
+			this.setThinkingLevel(entry.thinkingLevel, false, { explicit: true });
 		}
 	}
 

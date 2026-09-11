@@ -9424,6 +9424,13 @@ export class AgentSession {
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		// Sampled BEFORE `newSession()` truncates the transcript: the carried
+		// level's provenance lives in the outgoing branch's receipts, and the
+		// receipt appended further down is the new session's only record of it.
+		// Unflagged, a level the old session merely inherited from
+		// `defaultThinkingLevel` reads as an explicit pin, so a later edit to that
+		// setting plus `/refresh settings` leaves a level the user never chose.
+		const carriedThinkingFollowsSettings = this.#thinkingFollowsSettings();
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -9499,7 +9506,9 @@ export class AgentSession {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
-			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
+			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel(), {
+				settingsTracking: carriedThinkingFollowsSettings,
+			});
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 
 			this.#todo.resetCycle();
