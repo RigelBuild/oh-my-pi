@@ -54,7 +54,11 @@ const IMAGE_OMISSION_NOTICE: TextContent = {
  * count pass runs before normalization rewrites inline sizes, so tallying bytes
  * there would only produce a number it must not use.
  */
-function collectImageStats(context: Context, byteModel: Model | undefined): { total: number; inlineSizes: number[] } {
+function collectImageStats(
+	context: Context,
+	byteModel: Model | undefined,
+	replaysNativeHistory: boolean,
+): { total: number; inlineSizes: number[] } {
 	let total = 0;
 	const inlineSizes: number[] = [];
 	for (const message of context.messages) {
@@ -62,7 +66,8 @@ function collectImageStats(context: Context, byteModel: Model | undefined): { to
 			// An assistant's generic `content` images are display-only, but its
 			// replayed native image results are NOT — see
 			// `replayedImageResultSizes`.
-			if (byteModel !== undefined) inlineSizes.push(...replayedImageResultSizes(message, byteModel));
+			if (byteModel !== undefined)
+				inlineSizes.push(...replayedImageResultSizes(message, byteModel, replaysNativeHistory));
 			continue;
 		}
 		if (!Array.isArray(message.content)) continue;
@@ -88,8 +93,8 @@ function collectImageStats(context: Context, byteModel: Model | undefined): { to
  * Bytes only: the count cap is the provider's per-request cap on image parts,
  * which a replayed generation result is not.
  */
-function replayedImageResultSizes(message: AssistantMessage, model: Model): number[] {
-	const payload = replayableHistoryPayload(message, model);
+function replayedImageResultSizes(message: AssistantMessage, model: Model, replaysNativeHistory: boolean): number[] {
+	const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
 	if (!payload) return [];
 	const sizes: number[] = [];
 	for (const item of payload.items) {
@@ -109,8 +114,19 @@ function replayedImageResultSizes(message: AssistantMessage, model: Model): numb
  * any of those is dead weight on this request — charging it would let a stale
  * generation result evict a live user image that IS being sent, which is the
  * exact harm the byte budget exists to avoid.
+ *
+ * Matching those is necessary but NOT sufficient: `buildParams` also sends no
+ * native history at all until the session's replay state is warmed, so on the
+ * first request after a restore every payload here is dead weight however well
+ * it matches. `replaysNativeHistory` carries that decision in; a caller with no
+ * provider state passes `true`, the same default `buildParams` takes.
  */
-function replayableHistoryPayload(message: AssistantMessage, model: Model): OpenAIResponsesHistoryPayload | undefined {
+function replayableHistoryPayload(
+	message: AssistantMessage,
+	model: Model,
+	replaysNativeHistory: boolean,
+): OpenAIResponsesHistoryPayload | undefined {
+	if (!replaysNativeHistory) return undefined;
 	if (message.api !== model.api || message.model !== model.id) return undefined;
 	return getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider, message.provider);
 }
@@ -140,6 +156,8 @@ interface ImageClampState {
 	/** INLINE images still to drop for the byte cap; only inline bytes travel. */
 	remainingInlineDrops: number;
 	model: Model;
+	/** Whether this request will replay native `providerPayload` history at all. */
+	replaysNativeHistory: boolean;
 }
 
 /**
@@ -216,7 +234,7 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 	if (state.remainingInlineDrops <= 0) return message;
 	// Same eligibility gate as the accounting: never rewrite a payload this
 	// request was not going to replay anyway.
-	const payload = replayableHistoryPayload(message, state.model);
+	const payload = replayableHistoryPayload(message, state.model, state.replaysNativeHistory);
 	if (!payload) return message;
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
@@ -288,18 +306,25 @@ export const PROVIDER_IMAGE_COUNT_DECODE_SLACK = 1;
 export function clampProviderContextImageCount(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const admissible = providerImageBudget(model.provider) * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK);
-	const countDrops = collectImageStats(context, undefined).total - admissible;
+	// The count cap never reads a replayed payload (a generation result is not an
+	// image part), so the flag cannot change this tally.
+	const countDrops = collectImageStats(context, undefined, true).total - admissible;
 	if (countDrops <= 0) return context;
-	return applyImageClamp(context, { remainingDrops: countDrops, remainingInlineDrops: 0, model });
+	return applyImageClamp(context, {
+		remainingDrops: countDrops,
+		remainingInlineDrops: 0,
+		model,
+		replaysNativeHistory: true,
+	});
 }
 
 /** Drops oldest transient image blocks so outgoing vision requests fit the
  *  active provider's image budget — both the per-request image COUNT cap and the
  *  combined image-BYTE cap (a long snapcompact archive can stay under the count
  *  cap yet bust the request-size limit on summed frame bytes). */
-export function clampProviderContextImages(context: Context, model: Model): Context {
+export function clampProviderContextImages(context: Context, model: Model, replaysNativeHistory = true): Context {
 	if (!model.input.includes("image")) return context;
-	const { total, inlineSizes } = collectImageStats(context, model);
+	const { total, inlineSizes } = collectImageStats(context, model, replaysNativeHistory);
 	// Not `total === 0`: a replayed native image result contributes bytes but no
 	// image part, so a context whose only images are generated ones has
 	// `total === 0` and a payload that can still bust the byte budget.
@@ -315,7 +340,12 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 	// `inlineDrops` is the number of INLINE images that must go; `countDrops` is
 	// the number of image parts of any kind. A dropped inline image pays down
 	// both.
-	return applyImageClamp(context, { remainingDrops: countDrops, remainingInlineDrops: inlineDrops, model });
+	return applyImageClamp(context, {
+		remainingDrops: countDrops,
+		remainingInlineDrops: inlineDrops,
+		model,
+		replaysNativeHistory,
+	});
 }
 
 /**
@@ -598,12 +628,21 @@ export async function applyProviderImagePipeline(
 	context: Context,
 	model: Model,
 	normalizeForModel: (context: Context, model: Model) => Promise<Context>,
+	replaysNativeHistory = true,
+	decorate?: (context: Context, model: Model) => Promise<Context>,
 ): Promise<Context> {
 	let transformed = clampProviderContextImageCount(context, model);
 	transformed = await normalizeForModel(transformed, model);
 	transformed = await dropUnreadableContextImages(transformed, model);
 	transformed = await applyProviderSizePass(transformed, model);
-	return clampProviderContextImages(transformed, model);
+	// Decoration BEFORE the byte budget. A successful blob upload turns inline
+	// base64 into a provider file or a URL, and a reference puts no bytes on the
+	// wire — so clamping first charged bytes the request was about to stop
+	// sending and evicted images that would have travelled as references. The
+	// count cap is unaffected either way: a reference is still an image part and
+	// consumes it, which is why the two budgets are tallied separately.
+	if (decorate) transformed = await decorate(transformed, model);
+	return clampProviderContextImages(transformed, model, replaysNativeHistory);
 }
 
 /**
@@ -626,6 +665,10 @@ function applyProviderSizePass(context: Context, model: Model): Promise<Context>
  * provider's own downscale charges pre-resize sizes and evicts images a
  * resized payload would have fit.
  */
-export async function applyProviderImageByteBudget(context: Context, model: Model): Promise<Context> {
-	return clampProviderContextImages(await applyProviderSizePass(context, model), model);
+export async function applyProviderImageByteBudget(
+	context: Context,
+	model: Model,
+	replaysNativeHistory = true,
+): Promise<Context> {
+	return clampProviderContextImages(await applyProviderSizePass(context, model), model, replaysNativeHistory);
 }
