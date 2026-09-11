@@ -6732,7 +6732,14 @@ export class AgentSession {
 		// holding are different questions, and only the latter belongs here.
 		const publishedTtsrRules = ttsrManager.getRules().filter(rule => ttsrRuleNames.has(rule.name));
 		const activeRules = [...rulebookRules, ...alwaysApplyRules, ...publishedTtsrRules];
-		setActiveRules(activeRules);
+		// Only a TOP-LEVEL session may replace the process-global rule snapshot,
+		// the same gate the roster reload applies via `publishGlobals`. A
+		// structured subagent's set is bucketed under the CHILD's agent name, so
+		// publishing it from a child's `refresh("settings")` left contextless
+		// consumers in the parent process (a `RuleProtocolHandler` with no
+		// session-local array) serving the child's scoped rules. The child still
+		// gets its own session-local roster update below.
+		if (this.#agentKind === "main") setActiveRules(activeRules);
 		const nextRosterRules = [...rulebookRules, ...alwaysApplyRules];
 		const rulesChanged = !rulesEqual(this.#rosterRules, nextRosterRules);
 		this.#rosterRules = nextRosterRules;
@@ -6861,14 +6868,28 @@ export class AgentSession {
 			return false;
 		}
 		if (!this.#modelRegistry.hasConfiguredAuth(resolved)) return false;
+		// The pin as it stood BEFORE the swap. `setModel` re-applies thinking for
+		// the new model unconditionally, so a target whose
+		// `thinking.defaultLevel` differs from an explicitly pinned level MOVES
+		// that pin — and it does so before the follows-settings guard below can
+		// protect it, which only ever sees the post-swap value.
+		const pinnedBeforeSwap = thinkingFollowsSettings ? undefined : this.configuredThinkingLevel();
 		await this.setModel(resolved, "default", { settingsTracking: true });
+		if (!thinkingFollowsSettings) {
+			// Restore the user's pin the re-apply displaced. Re-pinned explicitly:
+			// the swap's own receipt is settings-tracking, so leaving it would
+			// reclassify a real pin as config-tracking.
+			if (this.configuredThinkingLevel() !== pinnedBeforeSwap) {
+				this.#models.setThinkingLevel(pinnedBeforeSwap, false, { explicit: true });
+			}
+			return true;
+		}
 		// Apply the SAME full fallback onto the swapped model, not just an explicit
 		// suffix: `setModel` preserves the previous model's level whenever the new
 		// one exposes no `thinking.defaultLevel`, so a swap onto a suffix-less
 		// model left a `:high` predecessor's level active where startup would have
-		// picked the global `defaultThinkingLevel`. Gated on the pre-swap
-		// follows-settings read so a real user selection is still never clobbered.
-		if (thinkingFollowsSettings && this.configuredThinkingLevel() !== targetThinkingLevel) {
+		// picked the global `defaultThinkingLevel`.
+		if (this.configuredThinkingLevel() !== targetThinkingLevel) {
 			this.#models.setThinkingLevel(targetThinkingLevel, false, { settingsTracking: true });
 		}
 		return true;
