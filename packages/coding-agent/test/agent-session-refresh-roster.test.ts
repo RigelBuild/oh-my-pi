@@ -18,7 +18,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, getActiveRules, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { BUILTIN_DEFAULTS_PROVIDER_ID, getActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { RuleProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/rule-protocol";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1038,6 +1038,81 @@ describe("AgentSession refresh: agent scoping and the session rule snapshot", ()
 			expect(h.session.systemPrompt.join("\n")).not.toContain(scopedBody);
 		} finally {
 			await h.dispose();
+		}
+	});
+
+	it("does not let a subagent's refresh('settings') replace the process-global rule snapshot", async () => {
+		// A `refresh("settings")` in a CHILD session reconciles its own scoped
+		// rule set. Publishing that globally left contextless consumers in the
+		// parent process (a `RuleProtocolHandler` with no session-local array)
+		// serving the child's rules — the same hazard the roster reload already
+		// guards with `publishGlobals: this.#agentKind === "main"`.
+		//
+		// The reconcile is reached only through the TTSR gating path (it returns
+		// early without a manager), so the seed carries a CONDITIONED rule and
+		// the refresh edits `ttsr.disabledRules`. Without that the publication
+		// line never runs and the test would pass either way.
+		const marker = Bun.nanoseconds().toString(36);
+		const mainName = `main-global-${marker}`;
+		const ttsrName = `gated-${marker}`;
+		const seed = async (cwd: string): Promise<void> => {
+			await fs.mkdir(path.join(cwd, ".omp", "rules"), { recursive: true });
+			await fs.writeFile(
+				path.join(cwd, ".omp", "rules", `${mainName}.md`),
+				`---\nname: ${mainName}\nalwaysApply: true\nagents:\n  - main\n---\nMAIN_GLOBAL_BODY_${marker}\n`,
+			);
+			await fs.writeFile(
+				path.join(cwd, ".omp", "rules", `${ttsrName}.md`),
+				`---\nname: ${ttsrName}\ndescription: blocks\ncondition: "zzz-${marker}"\nscope: "text"\n---\nbody\n`,
+			);
+		};
+		const main = await makeHarness({}, {}, seed);
+		try {
+			await main.session.refresh("rules");
+			expect(getActiveRules().map(r => r.name)).toContain(mainName);
+
+			// A child in the same process, over the same on-disk rules. Its own
+			// bucketing is scoped to `sub`, so the `main`-scoped rule is absent
+			// from the set it would publish.
+			const child = await makeHarness({}, { parentTaskPrefix: `Child-${marker}` }, seed);
+			try {
+				expect(child.session.ttsrManager).toBeDefined();
+				// A real gating change, so the child's reconcile actually runs.
+				await fs.writeFile(child.settingsPath, `ttsr:\n  disabledRules:\n    - ${ttsrName}\n`);
+				await child.session.refresh("settings");
+				expect(child.session.ttsrManager?.hasRule(ttsrName)).toBe(false);
+
+				// The parent's global snapshot is untouched.
+				expect(getActiveRules().map(r => r.name)).toContain(mainName);
+			} finally {
+				await child.dispose();
+			}
+		} finally {
+			await main.dispose();
+		}
+	});
+
+	it("still reconciles a subagent's own rule gating", async () => {
+		// The guard must narrow only the GLOBAL publication: gating TTSR off in
+		// a child still has to take effect in that child.
+		const marker = Bun.nanoseconds().toString(36);
+		const ttsrName = `sub-gated-${marker}`;
+		const child = await makeHarness({}, { parentTaskPrefix: `Child-${marker}` }, async cwd => {
+			await fs.mkdir(path.join(cwd, ".omp", "rules"), { recursive: true });
+			await fs.writeFile(
+				path.join(cwd, ".omp", "rules", `${ttsrName}.md`),
+				`---\nname: ${ttsrName}\ndescription: blocks\ncondition: "zzz-${marker}"\nscope: "text"\n---\nbody\n`,
+			);
+		});
+		try {
+			expect(child.session.ttsrManager?.hasRule(ttsrName)).toBe(true);
+
+			await fs.writeFile(child.settingsPath, `ttsr:\n  disabledRules:\n    - ${ttsrName}\n`);
+			await child.session.refresh("settings");
+
+			expect(child.session.ttsrManager?.hasRule(ttsrName)).toBe(false);
+		} finally {
+			await child.dispose();
 		}
 	});
 
