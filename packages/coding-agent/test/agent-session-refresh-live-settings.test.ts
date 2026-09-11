@@ -432,3 +432,64 @@ describe("AgentSession refresh('settings'): live workspace roots", () => {
 		}
 	});
 });
+
+// `AgentSessionConfig.onBeforeRefresh` documents itself as "wired from
+// `CreateAgentSessionOptions.onBeforeRefresh`", but the public factory neither
+// declared the option nor forwarded it: a JS caller's hook was silently
+// ignored, and a TS caller could not pass it at all.
+describe("createAgentSession: onBeforeRefresh", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("runs a host's pre-refresh hook before the refresh re-reads config", async () => {
+		const tempDir = TempDir.createSync("@pi-refresh-before-hook-");
+		const cwd = tempDir.path();
+		await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
+		const settingsPath = path.join(cwd, "config.yml");
+		await fs.writeFile(settingsPath, "compaction:\n  enabled: false\n");
+		const api = `refresh-before-hook-${Bun.nanoseconds().toString(36)}`;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("managed-primary", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+
+		const scopes: string[] = [];
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			sessionManager: SessionManager.inMemory(cwd),
+			authStorage,
+			modelRegistry,
+			settings: await Settings.loadIsolated({ cwd, agentDir: cwd }),
+			model: buildLocalModel(api),
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			skills: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			// The hook stages config the refresh must then pick up, which is the
+			// documented purpose — so this asserts the ORDERING, not just the call.
+			onBeforeRefresh: async scope => {
+				scopes.push(scope);
+				await fs.writeFile(settingsPath, "compaction:\n  enabled: true\n");
+			},
+		});
+		try {
+			expect(session.settings.get("compaction.enabled")).toBe(false);
+
+			const result = await session.refresh("settings");
+
+			expect(scopes).toEqual(["settings"]);
+			// Staged INSIDE the hook, so seeing it proves the hook ran first.
+			expect(result.settingsChanged).toBe(true);
+			expect(session.settings.get("compaction.enabled")).toBe(true);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+			await tempDir.remove();
+		}
+	});
+});

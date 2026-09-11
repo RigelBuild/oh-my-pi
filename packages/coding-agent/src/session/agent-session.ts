@@ -5973,6 +5973,23 @@ export class AgentSession {
 			// live connections directly; the `all` reconnect below then re-subscribes
 			// the freshly reconnected servers under the now-current flag.
 			if (changed) this.#mcpManager?.setNotificationsEnabled(this.settings.get("mcp.notifications") ?? false);
+			// Same shape for `mcp.enableProjectConfig`: `MCPManager` consumes it only
+			// during discovery, so flipping it off and running `/refresh settings`
+			// left the project servers this session already started connected and
+			// their tools callable. The reconnect block below is skipped on a
+			// settings-only refresh, so reconcile the filter here — like the browser
+			// MCP filter — and register the join so the refresh does not report
+			// success while servers are still being torn down. Self-guards on
+			// no-change, so an unrelated settings edit touches no connection.
+			if (changed && !doMcp && this.#mcpManager) {
+				const manager = this.#mcpManager;
+				this.registerHostReconciliation(
+					(async () => {
+						await manager.reconcileProjectConfigFilter(this.settings.get("mcp.enableProjectConfig") ?? true);
+						await this.refreshMCPTools(manager.getTools());
+					})(),
+				);
+			}
 			// A settings-only refresh must also install the reloaded `skills.*`
 			// snapshot and notify command-metadata subscribers. Reloading `Settings`
 			// alone never touches `SessionTools.#skillsSettings`, and that cached

@@ -158,6 +158,7 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "./secrets";
+import type { RefreshScope } from "./extensibility/reload";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
@@ -442,6 +443,13 @@ export interface CreateAgentSessionOptions {
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
+	/**
+	 * Pre-refresh hook for embedded hosts. Awaited as the first statement inside
+	 * {@link AgentSession.refresh}'s critical section, before any config surface
+	 * is re-read, so the host can stage fresh skills/rules/settings/MCP to disk
+	 * and have that refresh pick them up.
+	 */
+	onBeforeRefresh?: (scope: RefreshScope) => void | Promise<void>;
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
@@ -3975,6 +3983,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
 			prewalk: options.prewalk,
+			onBeforeRefresh: options.onBeforeRefresh,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
