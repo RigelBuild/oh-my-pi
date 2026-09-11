@@ -341,7 +341,7 @@ describe("Anthropic many-image payload resizing", () => {
 			return realWebp.call(this, opts);
 		};
 
-		let images: ReturnType<typeof extractToolResultImages>;
+		let images: AnthropicImageBlock[];
 		try {
 			images = extractToolResultImages(await capturePayload(context));
 		} finally {
