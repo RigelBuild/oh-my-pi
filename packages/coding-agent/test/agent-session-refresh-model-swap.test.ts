@@ -1349,3 +1349,63 @@ describe("AgentSession: thinking provenance survives a role pick and a new sessi
 		}
 	});
 });
+
+// A retry fallback swaps the model and the thinking level automatically, with
+// no user involvement — but recovery bound its thinking setter to the PUBLIC
+// selection wrapper, which always records an explicit pin. Entering or leaving
+// a fallback therefore converted a settings-tracking session into a pinned one,
+// and a later `defaultThinkingLevel` edit plus `/refresh settings` was ignored.
+describe("AgentSession: an automatic fallback thinking swap does not pin thinking", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("still follows a changed defaultThinkingLevel after a recovery thinking swap", async () => {
+		const h = await makeHarness({
+			rawConfig: `compaction:\n  enabled: false\ndefaultThinkingLevel: low\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+		});
+		try {
+			// No user thinking selection: the level is purely settings-derived.
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+
+			// The swap recovery performs on fallback entry/restoration.
+			h.session.setThinkingLevelForRecovery(ThinkingLevel.High);
+
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\ndefaultThinkingLevel: minimal\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Minimal);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("keeps an explicit thinking pin across a later recovery swap", async () => {
+		// The guard against over-reaching: inheriting provenance must not
+		// *unpin* a level the user really did choose.
+		const h = await makeHarness({
+			rawConfig: `compaction:\n  enabled: false\ndefaultThinkingLevel: low\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+		});
+		try {
+			h.session.setThinkingLevel(ThinkingLevel.Medium, false);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Medium);
+
+			h.session.setThinkingLevelForRecovery(ThinkingLevel.High);
+
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\ndefaultThinkingLevel: minimal\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.configuredThinkingLevel()).not.toBe(ThinkingLevel.Minimal);
+		} finally {
+			await h.dispose();
+		}
+	});
+});
