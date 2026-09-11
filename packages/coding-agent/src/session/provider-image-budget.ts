@@ -10,6 +10,7 @@ import type {
 	ToolResultProviderMetadata,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
+import { prepareAnthropicManyImageContext } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -490,7 +491,15 @@ export async function dropUnreadableContextImages(context: Context, model: Model
  *    downscales) and so must precede any byte accounting.
  * 3. The unreadable backstop, after the normalizers because they carry better
  *    wording for the cases they own.
- * 4. Byte budget LAST, over the images that actually travel. Clamping earlier
+ * 4. The provider's OWN size pass, so step 5 weighs the payload the provider
+ *    will really receive. Anthropic downscales every image in a many-image
+ *    request to 2000px, which can shrink the wire payload a lot — measuring
+ *    before it evicted the oldest images of a request that would have fit once
+ *    resized. It also gates on having MORE than 20 images, so a byte clamp
+ *    landing first could cut the count to 20 and stop the downscale running at
+ *    all. Running it here is safe: an already-small image is returned
+ *    untouched, so the provider's own later call is a no-op.
+ * 5. Byte budget LAST, over the images that actually travel. Clamping earlier
  *    charged an undecodable image against the budget and evicted an older VALID
  *    one to fit it, and the unreadable pass then replaced the corrupt image too
  *    — so a request lost every image where the readable one would have fit
@@ -504,5 +513,16 @@ export async function applyProviderImagePipeline(
 	let transformed = clampProviderContextImageCount(context, model);
 	transformed = await normalizeForModel(transformed, model);
 	transformed = await dropUnreadableContextImages(transformed, model);
+	transformed = await applyProviderSizePass(transformed, model);
 	return clampProviderContextImages(transformed, model);
+}
+
+/**
+ * Runs `model`'s provider-side image resizing early, when that provider has
+ * one, so the byte budget measures post-resize bytes. Only Anthropic's
+ * many-image path resizes today; every other provider is returned unchanged.
+ */
+function applyProviderSizePass(context: Context, model: Model): Promise<Context> {
+	if (model.api !== "anthropic-messages") return Promise.resolve(context);
+	return prepareAnthropicManyImageContext(context, model.input.includes("image"));
 }

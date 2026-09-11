@@ -1117,7 +1117,15 @@ async function resizeAnthropicManyImageMessage(
 	return message;
 }
 
-async function prepareAnthropicManyImageContext(context: Context, supportsImages: boolean): Promise<Context> {
+/**
+ * Applies this provider's own many-image downscale to `context`, so a caller
+ * measuring wire bytes can measure the payload Anthropic will actually receive
+ * rather than the pre-resize one. The request path calls this itself; calling
+ * it earlier is safe and does not resize twice — a block already within
+ * {@link ANTHROPIC_MANY_IMAGE_MAX_DIMENSION} is returned untouched, so the
+ * second pass is a no-op.
+ */
+export async function prepareAnthropicManyImageContext(context: Context, supportsImages: boolean): Promise<Context> {
 	if (!supportsImages) return context;
 	const imageCount = countAnthropicImageBlocks(context.messages);
 	if (imageCount <= ANTHROPIC_MANY_IMAGE_THRESHOLD) return context;
