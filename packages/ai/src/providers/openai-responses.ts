@@ -248,6 +248,29 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 	return state;
 }
 
+/**
+ * Whether a Responses turn's native `providerPayload` will be replayed on the
+ * NEXT request for `model`.
+ *
+ * The first request after restoring a session has not warmed its replay state,
+ * so `buildParams` sends no native history at all. A caller accounting for the
+ * bytes a request will carry has to ask: a payload that will not be sent is
+ * dead weight, and charging it lets a stale generation result evict a live user
+ * image that IS being sent.
+ *
+ * Absent state means an unmanaged session, which always replays — the same
+ * default `buildParams` takes.
+ */
+export function willReplayOpenAIResponsesNativeHistory(
+	model: Model,
+	providerSessionState: Map<string, ProviderSessionState> | undefined,
+): boolean {
+	if (!providerSessionState) return true;
+	const key = `${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`;
+	const existing = providerSessionState.get(key) as OpenAIResponsesProviderSessionState | undefined;
+	return existing?.nativeHistoryReplayWarmed ?? true;
+}
+
 function getOpenAIResponsesProviderSessionState(
 	model: Model<"openai-responses">,
 	providerSessionState: Map<string, ProviderSessionState> | undefined,

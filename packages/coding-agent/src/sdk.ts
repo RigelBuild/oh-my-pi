@@ -23,6 +23,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
@@ -3509,8 +3510,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				transformed,
 				transformModel,
 				normalizeProviderContextImagesForModel,
+				// A restored session has not warmed its Responses replay state, so the
+				// first request sends no native history — charging those bytes would
+				// evict a live user image for a payload that is not travelling.
+				willReplayOpenAIResponsesNativeHistory(transformModel, session?.providerSessionState),
+				// Inside the pipeline so the byte budget runs over the payload that
+				// actually travels: an uploaded image leaves as a reference and puts
+				// no bytes on the wire.
+				blobBroker
+					? (decorating, decoratingModel) => blobBroker.decorateContext(decorating, decoratingModel)
+					: undefined,
 			);
-			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).
@@ -4223,8 +4233,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							transformed,
 							transformModel,
 							normalizeProviderContextImagesForModel,
+							willReplayOpenAIResponsesNativeHistory(transformModel, captureOptions.providerSessionState),
+							blobBroker
+								? (decorating, decoratingModel) => blobBroker.decorateContext(decorating, decoratingModel)
+								: undefined,
 						);
-						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
 						return captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),

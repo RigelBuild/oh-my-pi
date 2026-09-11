@@ -8,6 +8,7 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { logger } from "@oh-my-pi/pi-utils";
+import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { applyProviderImageByteBudget } from "../session/provider-image-budget";
 import { contextHasImageUrls, contextHasProviderFiles } from "./context-images";
 import type { ImageUrlService } from "./service";
@@ -61,6 +62,10 @@ export function wrapStreamFnWithBlobUrlFallback(base: StreamFn, broker: ImageUrl
 						const fallback = await applyProviderImageByteBudget(
 							await broker.fallbackContext(attemptContext, model),
 							model,
+							// Same replay question the pipeline asks: an unwarmed
+							// Responses session sends no native history, so its payload
+							// bytes must not evict an image this request IS carrying.
+							willReplayOpenAIResponsesNativeHistory(model, options?.providerSessionState),
 						);
 						const fallbackSource = imageSource(fallback);
 						if (source !== "inline" && fallbackSource !== source) {

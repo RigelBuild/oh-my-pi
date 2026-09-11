@@ -615,6 +615,71 @@ describe("provider context image budgets", () => {
 		expect(clamped).toBe(context);
 	});
 
+	it("ignores every replayed result on a request that will not replay at all", async () => {
+		// The reviewer's restore case, a step past the routing one above. On the
+		// FIRST request after restoring a Responses session the replay state is
+		// unwarmed, so `buildParams` sends NO native history — every payload here
+		// is dead weight however well its api/model/provider match. Charging them
+		// deleted the older user image the request genuinely carries.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider);
+		const generated = Buffer.from(largeDecodablePng(1700)).toString("base64");
+		if (generated.length * 2 <= budget) throw new Error("fixture cannot bust the byte budget");
+		const live = image(generated);
+		const context: Context = {
+			messages: [
+				{ role: "user", content: [live], timestamp: 0 },
+				// A perfectly matching payload: same api, model and provider.
+				replayTurn([generated, generated], 1),
+			],
+		};
+
+		// Warmed (the default) the payload is charged and the older user image goes.
+		const warmed = clampProviderContextImages(context, OPENAI_MODEL, true);
+		expect(imageData(warmed)).not.toContain(generated);
+
+		// Unwarmed, nothing is charged and the live image survives untouched.
+		const unwarmed = clampProviderContextImages(context, OPENAI_MODEL, false);
+		expect(unwarmed).toBe(context);
+	});
+
+	it("weighs the byte budget against the references decoration produced", async () => {
+		// A successful blob upload turns inline base64 into a URL or provider file,
+		// and a reference puts no bytes on the wire. Clamping ahead of decoration
+		// charged bytes the request was about to stop sending, evicting images that
+		// would have travelled as references.
+		const budget = providerImageByteBudget(ANTHROPIC_MODEL.provider);
+		const inline = Buffer.from(largeDecodablePng(1400)).toString("base64");
+		const count = Math.ceil((budget * 2) / inline.length);
+		if (count < 2) throw new Error("fixture cannot bust the byte budget");
+		const context: Context = {
+			messages: Array.from({ length: count }, (_unused, index) => ({
+				role: "user" as const,
+				content: [image(inline)],
+				timestamp: index,
+			})),
+		};
+
+		// Decoration publishes every image as a URL: no inline bytes survive.
+		const decorate = async (decorating: Context): Promise<Context> => ({
+			...decorating,
+			messages: decorating.messages.map(message => {
+				if (message.role !== "user" || !Array.isArray(message.content)) return message;
+				return {
+					...message,
+					content: message.content.map(part =>
+						part.type === "image" ? { ...part, data: "", url: "https://blobs.example/x.png" } : part,
+					),
+				};
+			}),
+		});
+
+		const piped = await applyProviderImagePipeline(context, ANTHROPIC_MODEL, async ctx => ctx, true, decorate);
+
+		// Every image survives: none of them put bytes on the wire.
+		expect(piped.messages.length).toBe(count);
+		expect(imageData(piped).length).toBe(count);
+	});
+
 	it("still never charges a display-only assistant content image", async () => {
 		// The original rule stands for generic content: those blocks are dropped
 		// before a request is built, so charging them would evict a live user
