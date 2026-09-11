@@ -668,4 +668,53 @@ describe("MCPToolCache empty-toolset guard", () => {
 
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
+
+	test("a claim reserves its token so a concurrent process floors above it", async () => {
+		// The floor only orders a claim against writes that have already LANDED.
+		// After a backward correction the dangerous peer is a long-lived
+		// pre-correction process whose `tools/list` is still in flight: its high
+		// token is nowhere on the row, so a post-correction process reads the
+		// older persisted write, floors just above that, and ends up UNDER the
+		// stale request — which then outranks the newer catalog for the full TTL.
+		const storage = createFakeStorage();
+		const beforeCorrection = new MCPToolCache(storage);
+		const afterCorrection = new MCPToolCache(storage);
+
+		// A landed write from some earlier pass, so the row carries a low token.
+		const seed = beforeCorrection.observeCatalogAt("litellm");
+		await beforeCorrection.set("litellm", CONFIG, [OLD_TOOL], seed);
+
+		// The pre-correction process issues a request on the HIGHER scale and
+		// parks: nothing of it has been written except its claim.
+		vi.spyOn(performance, "now").mockReturnValue(performance.now() + 60 * 60 * 1000);
+		const inFlight = beforeCorrection.observeCatalogAt("litellm");
+		vi.restoreAllMocks();
+
+		// The post-correction process claims afterwards, in real time, on the
+		// corrected scale. Without the reservation it would floor above the
+		// landed row only and sit below the parked request.
+		const later = afterCorrection.observeCatalogAt("litellm");
+		expect(later).toBeGreaterThan(inFlight);
+
+		// Its catalog is the newest observation, so it must survive the stale
+		// response landing afterwards.
+		await afterCorrection.set("litellm", CONFIG, [NEW_TOOL], later);
+		await beforeCorrection.set("litellm", CONFIG, [OLD_TOOL], inFlight);
+
+		expect(await afterCorrection.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+	});
+
+	test("a reservation keeps serving the catalog already on the row", async () => {
+		// The claim rewrites the row before the request answers, so it must carry
+		// the existing catalog through untouched: a cache that went cold on every
+		// refresh would force a live `tools/list` on each startup.
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+
+		await cache.set("litellm", CONFIG, [OLD_TOOL], cache.observeCatalogAt("litellm"));
+
+		cache.observeCatalogAt("litellm");
+
+		expect(await cache.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
+	});
 });
