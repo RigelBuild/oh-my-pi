@@ -441,3 +441,62 @@ describe("AgentSession refresh('settings'): includeWorkspaceTree reaches the pro
 		}
 	});
 });
+
+describe("AgentSession refresh('settings'): bash.autoBackground.enabled reaches the prompt", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	// The line `bash.md` and `eval.md` gate on `autoBackgroundEnabled`. Asserted
+	// as prompt TEXT rather than by spying on the rebuild, because the defect was
+	// that the model kept reading retired guidance — execution and the tool
+	// property already followed the setting live.
+	const GUIDANCE = "auto-background by the configured threshold";
+
+	it("advertises auto-background after a refresh turns the setting on", async () => {
+		// The setting is read live by `BashTool.description`, but under
+		// `inlineToolDescriptors` that description is rendered INTO the system
+		// prompt, and only a rebuild moves it. The path was missing from the
+		// prompt-settings snapshot, so the refresh compared equal and skipped the
+		// rebuild: the model kept being told long calls never auto-background.
+		const h = await makeHarness(
+			"compaction:\n  enabled: false\ninlineToolDescriptors: true\nbash:\n  autoBackground:\n    enabled: false\n",
+		);
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).not.toContain(GUIDANCE);
+
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  enabled: false\ninlineToolDescriptors: true\nbash:\n  autoBackground:\n    enabled: true\n",
+			);
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			expect(h.session.systemPrompt.join("\n")).toContain(GUIDANCE);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("withdraws the auto-background guidance after a refresh turns the setting off", async () => {
+		// The inverse, which is the worse direction: the model keeps being offered
+		// a behaviour the policy has withdrawn.
+		const h = await makeHarness(
+			"compaction:\n  enabled: false\ninlineToolDescriptors: true\nbash:\n  autoBackground:\n    enabled: true\n",
+		);
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).toContain(GUIDANCE);
+
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  enabled: false\ninlineToolDescriptors: true\nbash:\n  autoBackground:\n    enabled: false\n",
+			);
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			expect(h.session.systemPrompt.join("\n")).not.toContain(GUIDANCE);
+		} finally {
+			await h.dispose();
+		}
+	});
+});
