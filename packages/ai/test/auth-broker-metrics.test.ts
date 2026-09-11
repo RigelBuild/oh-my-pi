@@ -5,6 +5,7 @@ import {
 	canonicalizePlan,
 	emailLabelOf,
 	nextRenewalSeconds,
+	orgLabelOf,
 	renderUsageMetrics,
 	stableLabelId,
 	UNIDENTIFIED_ACCOUNT,
@@ -1214,5 +1215,103 @@ describe("emailLabelOf", () => {
 			limits: [],
 		};
 		expect(emailLabelOf(report)).toBe("");
+	});
+});
+
+describe("orgLabelOf", () => {
+	test("prefers metadata.orgId, canonicalized", () => {
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { orgId: "  Org-ABC\n" },
+			limits: [],
+		};
+		expect(orgLabelOf(report)).toBe("org-abc");
+	});
+
+	test("falls back to a limit scope.orgId when metadata lacks one", () => {
+		// UsageScope carries orgId too, so an embedding caller can supply the org
+		// only there. Without the fallback two different orgs both label org="",
+		// collapse to one series identity, and add() drops the second one's
+		// samples — while the subscription lookup is handed the wrong scope.
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-claude-1" },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", orgId: " Scope-Org " },
+					amount: { usedFraction: 0.2, unit: "percent" },
+				},
+			],
+		};
+		expect(orgLabelOf(report)).toBe("scope-org");
+	});
+
+	test("two orgs differing only in scope.orgId keep separate series", () => {
+		// The consumer-visible consequence: same provider/account/email, so the
+		// org label is the only thing separating them in the exposition.
+		const forOrg = (orgId: string): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-claude-1", email: "a@example.com" },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", orgId, windowId: "5h" },
+					amount: { usedFraction: 0.25, unit: "percent" },
+				},
+			],
+		});
+		const out = renderUsageMetrics([forOrg("org-one"), forOrg("org-two")]);
+		expect(out).toContain('org="org-one"');
+		expect(out).toContain('org="org-two"');
+	});
+
+	test('returns "" when neither metadata nor any scope carries an org', () => {
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-claude-1" },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic" },
+					amount: { usedFraction: 0.2, unit: "percent" },
+				},
+			],
+		};
+		expect(orgLabelOf(report)).toBe("");
+	});
+
+	test("a whitespace-only metadata org falls through to the scope", () => {
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { orgId: "   " },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", orgId: "scope-org" },
+					amount: { usedFraction: 0.2, unit: "percent" },
+				},
+			],
+		};
+		expect(orgLabelOf(report)).toBe("scope-org");
+	});
+
+	test('returns "" for a non-string org value', () => {
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { orgId: 42 },
+			limits: [],
+		};
+		expect(orgLabelOf(report)).toBe("");
 	});
 });

@@ -171,21 +171,35 @@ export function emailLabelOf(report: UsageReport): string {
 }
 
 /**
- * Organization/workspace scope label, read from `report.metadata?.orgId`.
+ * Organization/workspace scope label, read from `report.metadata?.orgId` and
+ * falling back to the first `limit.scope.orgId`.
  *
  * One account (Anthropic email, ChatGPT workspace) can hold several org-scoped
  * subscriptions; the storage layer preserves them as separate reports keyed by
  * `metadata.orgId` (see `#getUsageReportIdentifiers`), so the exported series
  * must carry the org too or two subscriptions collapse to one `{provider,
  * account, email}` identity and one org's usage is silently dropped in `add()`.
+ *
+ * The scope fallback matters because `UsageScope` carries `orgId` too, and an
+ * embedding caller can build a report whose org lives only there. Without it
+ * two different orgs produce the same empty `org=""` identity and the second
+ * is dropped, and the subscription `lookup` is called with the wrong scope.
+ * `accountLabelOf` already falls back to `limit.scope.accountId` for the same
+ * reason; this keeps the two labels reading the same sources.
+ *
  * Canonicalized (trim + lowercase) to match the storage layer's org keying, and
  * emitted as `org=""` when absent (single-org accounts) so the label set stays
  * consistent across every sample of a family — an inconsistent set fails the
- * scrape at parse.
+ * scrape at parse. A value that trims to empty falls THROUGH rather than
+ * winning, mirroring the account label's trim-then-test order.
  */
 export function orgLabelOf(report: UsageReport): string {
 	const orgId = report.metadata?.orgId;
-	if (typeof orgId === "string") return orgId.trim().toLowerCase();
+	if (typeof orgId === "string" && orgId.trim().length > 0) return orgId.trim().toLowerCase();
+	for (const limit of report.limits) {
+		const scopeOrg = limit.scope.orgId;
+		if (typeof scopeOrg === "string" && scopeOrg.trim().length > 0) return scopeOrg.trim().toLowerCase();
+	}
 	return "";
 }
 
