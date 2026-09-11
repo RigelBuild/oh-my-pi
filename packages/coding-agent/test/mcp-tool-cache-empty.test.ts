@@ -717,4 +717,56 @@ describe("MCPToolCache empty-toolset guard", () => {
 
 		expect(await cache.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
 	});
+
+	test("a claim never renews the cached catalog's expiry", async () => {
+		// A claim is published BEFORE its `tools/list` answers, so a server whose
+		// listing reliably hangs or fails issues claim after claim with no new
+		// catalog behind any of them. Writing the claim onto the catalog's row
+		// would restate that row's `expires_at` every time — `setCacheIfMatches`
+		// always overwrites it — so the obsolete toolset would be renewed
+		// indefinitely instead of ageing out 30 days after its last successful
+		// listing.
+		const storage = createExpiringFakeStorage();
+		const cache = new MCPToolCache(storage);
+
+		await cache.set("litellm", CONFIG, [OLD_TOOL], cache.observeCatalogAt("litellm"));
+		const writtenExpiry = storage.expiryOf("mcp_tools:litellm");
+		expect(writtenExpiry).toBeDefined();
+		// Later failed attempts: each claims a token, none produces a catalog.
+		// The stored expiry is `now + TTL` in whole seconds, so the clock has to
+		// advance past a second boundary for a renewal to be a DIFFERENT value —
+		// without that, a rewrite lands on the identical number and hides.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5000);
+		cache.observeCatalogAt("litellm");
+		cache.observeCatalogAt("litellm");
+
+		expect(storage.expiryOf("mcp_tools:litellm")).toBe(writtenExpiry);
+		// And the catalog is still served, so nothing went cold either.
+		expect(await cache.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
+	});
+
+	test("re-floors a claim that lost the reservation race", async () => {
+		// The reviewer's race: a peer's claim lands between this process's read of
+		// the claim row and the CAS that read decided. Ignoring the `false` return
+		// would hand back a token computed against a row that no longer exists —
+		// BELOW the winner's — and the request would then lose to a catalog it is
+		// genuinely newer than. The retry has to re-read and re-floor.
+		const storage = createInterleavedStorage();
+		const cache = new MCPToolCache(storage);
+
+		// A peer claims an hour ahead, landing in the read/write window.
+		const peerToken = Date.now() + 60 * 60 * 1000;
+		storage.armPeerWrite(store => {
+			store.put(
+				"mcp_tools_claim:litellm",
+				JSON.stringify({ claimedAt: peerToken }),
+				Math.floor(Date.now() / 1000) + 60 * 60,
+			);
+		});
+
+		const claimed = cache.observeCatalogAt("litellm");
+
+		// Floored above the peer that won, not above the row it had read.
+		expect(claimed).toBeGreaterThan(peerToken);
+	});
 });

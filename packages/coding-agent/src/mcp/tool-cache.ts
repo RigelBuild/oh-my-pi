@@ -11,6 +11,31 @@ const CACHE_VERSION = 1;
 const CACHE_PREFIX = "mcp_tools:";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /**
+ * Prefix for the per-server ordering CLAIM, kept in its own row rather than on
+ * the catalog's.
+ *
+ * A claim has to be published before the `tools/list` it orders has answered,
+ * so it would otherwise rewrite the catalog row while that catalog is still
+ * the newest thing known. `setCacheIfMatches` always restates `expires_at` and
+ * the store cannot report a row's current expiry, so every such rewrite would
+ * renew the cached listing's 30-day life without a new listing behind it — a
+ * server whose `tools/list` reliably hangs would keep an obsolete catalog alive
+ * forever. A separate key means the catalog row is never touched by a claim, so
+ * it ages out from its last SUCCESSFUL write no matter how many requests are
+ * attempted against it.
+ */
+const CLAIM_PREFIX = "mcp_tools_claim:";
+/**
+ * How long a claim row lives.
+ *
+ * It only has to outlast an in-flight `tools/list`, which has no bounded
+ * lifetime (the timeout is configurable and `timeout: 0` disables it), so this
+ * matches the catalog TTL rather than guessing a request duration. A stale
+ * claim is harmless: it can only push the next claim slightly higher, never
+ * suppress a write.
+ */
+const CLAIM_TTL_MS = CACHE_TTL_MS;
+/**
  * How long an invalidation marker stays readable — the same TTL a populated
  * row gets.
  *
@@ -53,22 +78,20 @@ type MCPToolCachePayload = {
 	 * reports that as unknown and the comparison stays conservative.
 	 */
 	writeStartedAt?: number;
-	/**
-	 * The highest token any `tools/list` still IN FLIGHT has claimed for this
-	 * server, as a Unix-epoch millisecond reading.
-	 *
-	 * Separate from {@link writeStartedAt} because the two answer different
-	 * questions: that one says when the catalog on this row was requested, this
-	 * one says how far ahead a request that has not answered yet has already
-	 * reserved. Folding a claim into `writeStartedAt` would make an unfinished
-	 * request look like a completed write and block its own result from
-	 * landing.
-	 *
-	 * Only the claim floor reads it, so a stale value left by a request that
-	 * died can at worst push the next claim slightly higher — never suppress a
-	 * write.
-	 */
-	reservedAt?: number;
+};
+
+/**
+ * The claim row's payload: one server's highest in-flight ordering token.
+ *
+ * Kept out of {@link MCPToolCachePayload} on purpose. A claim is published
+ * before its `tools/list` answers, so writing it onto the catalog row would
+ * restate that row's expiry and keep an obsolete catalog alive for as long as
+ * requests keep being attempted; and folding it into `writeStartedAt` would
+ * make an unfinished request look like a completed write and block its own
+ * result from landing.
+ */
+type MCPToolClaimPayload = {
+	claimedAt: number;
 };
 
 /**
@@ -89,14 +112,9 @@ function readWriteStartedAt(raw: string | null): number | undefined {
 }
 
 /**
- * The highest of the row's completed-write and in-flight-claim tokens, or
- * `undefined` when the row carries neither.
- *
- * The claim floor must clear both: a row can hold a finished write while a
- * newer request is still outstanding, and flooring above only one of them
- * lets the next claim land under the other.
+ * The token on a claim row, or `undefined` when it is absent or unparseable.
  */
-function readOrderingCeiling(raw: string | null): number | undefined {
+function readClaimedAt(raw: string | null): number | undefined {
 	if (raw === null) return undefined;
 	let parsed: unknown;
 	try {
@@ -105,8 +123,21 @@ function readOrderingCeiling(raw: string | null): number | undefined {
 		return undefined;
 	}
 	if (!isRecord(parsed)) return undefined;
-	const candidates = [parsed.writeStartedAt, parsed.reservedAt].filter(
-		(value): value is number => typeof value === "number" && Number.isFinite(value),
+	const claimed = parsed.claimedAt;
+	return typeof claimed === "number" && Number.isFinite(claimed) ? claimed : undefined;
+}
+
+/**
+ * The highest of a completed write's token and an in-flight claim's, or
+ * `undefined` when neither exists.
+ *
+ * A new claim must clear both: a server can hold a finished catalog while a
+ * newer request is still outstanding, and flooring above only one of them
+ * lands the next claim under the other.
+ */
+function orderingCeiling(catalogRaw: string | null, claimRaw: string | null): number | undefined {
+	const candidates = [readWriteStartedAt(catalogRaw), readClaimedAt(claimRaw)].filter(
+		(value): value is number => value !== undefined,
 	);
 	return candidates.length === 0 ? undefined : Math.max(...candidates);
 }
@@ -188,84 +219,60 @@ function cacheKey(serverName: string): string {
 	return `${CACHE_PREFIX}${serverName}`;
 }
 
+function claimKey(serverName: string): string {
+	return `${CLAIM_PREFIX}${serverName}`;
+}
+
 export class MCPToolCache {
 	constructor(private storage: AgentStorage) {}
 
 	/**
 	 * Claim the ordering token for a `tools/list` about to be issued for
-	 * `serverName`, floored above the token already on that server's row and
-	 * RESERVED on that row before returning.
+	 * `serverName`, floored above everything already known for that server and
+	 * PUBLISHED before returning.
 	 *
 	 * The floor is what survives a backward wall-clock step: see
 	 * {@link toolCatalogObservedAt} for why a bare reading can fall behind a
 	 * live process that started on the pre-correction scale.
 	 *
 	 * Flooring alone orders this claim against writes that have already landed,
-	 * not against claims still in flight elsewhere. Several CLI processes share
-	 * one `agent.db`, so after a backward correction a long-lived pre-correction
-	 * process can hold a high in-flight token while a post-correction process
-	 * reads only the older persisted row and floors just above it — the stale
-	 * request then outranks the newer catalog and wins for the whole TTL.
-	 * Publishing the token makes a concurrent claim visible, so the next claimer
-	 * floors above it instead of under it.
+	 * not against requests still in flight elsewhere. Several CLI processes
+	 * share one `agent.db`, so after a backward correction a long-lived
+	 * pre-correction process holds a high token that appears nowhere until its
+	 * `tools/list` answers — a process started after the correction floors above
+	 * the older catalog only, lands under that parked request, and loses to a
+	 * catalog that was already stale. Publishing the claim makes it visible, so
+	 * the next claimer floors above it instead of under it.
 	 *
-	 * The reservation is a CAS, and a lost race is not retried: the winner's
-	 * token is at least ours, so the next read floors above it either way.
+	 * The claim goes in its OWN row ({@link CLAIM_PREFIX}), never on the
+	 * catalog's: see {@link MCPToolClaimPayload}.
 	 *
-	 * It lands in {@link MCPToolCachePayload.reservedAt}, never in
-	 * `writeStartedAt` — a claim is an unfinished request, and writing it to the
-	 * completed-write field would make this request's own `set()` see a row at
-	 * its exact token and drop the result it was claiming for.
+	 * Publishing is a CAS, and a lost race is re-driven rather than ignored.
+	 * Losing means a peer's claim landed between this read and this write, so
+	 * the token just computed was floored against state that no longer holds —
+	 * returning it would hand back an unpublished token BELOW the winner's,
+	 * which is the inversion this exists to prevent. Every loss is a peer
+	 * succeeding, so a contended server still terminates.
 	 */
 	observeCatalogAt(serverName: string): number {
-		const key = cacheKey(serverName);
-		const raw = this.storage.getCache(key);
-		const reading = toolCatalogObservedAt();
-		const ceiling = readOrderingCeiling(raw);
-		const claimed = ceiling === undefined ? reading : Math.max(reading, nextAfter(ceiling));
-		this.#reserveCatalogToken(key, raw, claimed);
+		const catalog = cacheKey(serverName);
+		const claim = claimKey(serverName);
+		let claimed = 0;
+		for (let attempt = 0; attempt < CACHE_WRITE_ATTEMPTS; attempt++) {
+			const claimRaw = this.storage.getCache(claim);
+			const ceiling = orderingCeiling(this.storage.getCache(catalog), claimRaw);
+			const reading = toolCatalogObservedAt();
+			claimed = ceiling === undefined ? reading : Math.max(reading, nextAfter(ceiling));
+			const serialized = JSON.stringify({ claimedAt: claimed } satisfies MCPToolClaimPayload);
+			const expiresAtSec = Math.floor((Date.now() + CLAIM_TTL_MS) / 1000);
+			if (this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec)) return claimed;
+		}
+		// Out of attempts, every one lost to a peer whose token is at least as
+		// high as the one we computed against the row it replaced. Returning the
+		// last floored reading keeps this request ordered above the catalog it
+		// can see; an unpublished claim only risks being outranked, never
+		// outranking something newer.
 		return claimed;
-	}
-
-	/**
-	 * Publish `claimed` as the row's in-flight reservation.
-	 *
-	 * Touches only `reservedAt`, so it never changes what a reader gets: a
-	 * populated row keeps its catalog and a marker stays a marker. That is why
-	 * it can reserve over ANY row — the TTL it restates is the one the row
-	 * would need to keep serving what it already holds.
-	 *
-	 * Best-effort: the only cost of failing is the pre-existing read-only
-	 * behaviour, so a contended or unparseable row is left alone rather than
-	 * retried or rebuilt.
-	 */
-	#reserveCatalogToken(key: string, raw: string | null, claimed: number): void {
-		let payload: MCPToolCachePayload;
-		let ttlMs = CACHE_TOMBSTONE_TTL_MS;
-		if (raw === null) {
-			// A claim-only placeholder. An empty `tools` array reads as an
-			// invalidation marker, which `get` reports as a MISS — so this never
-			// serves an empty catalog, it only makes the claim visible.
-			payload = { version: CACHE_VERSION, configHash: "", tools: [], reservedAt: claimed };
-		} else {
-			let parsed: unknown;
-			try {
-				parsed = JSON.parse(raw);
-			} catch {
-				return;
-			}
-			if (!isRecord(parsed)) return;
-			payload = { ...parsed, reservedAt: claimed } as MCPToolCachePayload;
-			if (Array.isArray(parsed.tools) && parsed.tools.length > 0) ttlMs = CACHE_TTL_MS;
-		}
-		let serialized: string;
-		try {
-			serialized = JSON.stringify(payload);
-		} catch {
-			return;
-		}
-		const expiresAtSec = Math.floor((Date.now() + ttlMs) / 1000);
-		this.storage.setCacheIfMatches(key, raw, serialized, expiresAtSec);
 	}
 
 	/**
