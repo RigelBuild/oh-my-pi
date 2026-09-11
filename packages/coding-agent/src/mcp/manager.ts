@@ -547,6 +547,57 @@ export class MCPManager {
 	}
 
 	/**
+	 * Reconcile project-level MCP servers with `mcp.enableProjectConfig`.
+	 *
+	 * The setting is consumed only during discovery, so flipping it off left the
+	 * project servers this session had already started connected and callable
+	 * until an MCP-scoped refresh or a restart. Serialized on the same tail as
+	 * the browser filter: both mutate the connection set and rewrite
+	 * `#discoverOptions`, so interleaving them would let the loser's cached
+	 * options overwrite the winner's.
+	 */
+	reconcileProjectConfigFilter(enableProjectConfig: boolean): Promise<void> {
+		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyProjectConfigFilter(enableProjectConfig));
+		this.#browserFilterMutationTail = reconcile.catch(() => undefined);
+		return reconcile;
+	}
+
+	async #applyProjectConfigFilter(enableProjectConfig: boolean): Promise<void> {
+		const options = this.#discoverOptions;
+		if ((options?.enableProjectConfig ?? true) === enableProjectConfig) return;
+		// Record the new value first: a later browser reconcile reads these
+		// options, and `loadConfigs` must not be asked to honor the stale one.
+		this.#discoverOptions = { ...options, enableProjectConfig };
+		if (!enableProjectConfig) {
+			// Drop what is already running. `#sources` carries each connected
+			// server's level, which is the same discriminator `loadConfigs` uses.
+			const names = [...this.#serverConfigs.keys()].filter(name => this.#sources.get(name)?.level === "project");
+			await Promise.all(names.map(name => this.disconnectServer(name)));
+			return;
+		}
+		// Re-enabled: connect the project servers discovery now admits, leaving
+		// every other connection in place (`connectServers` is incremental).
+		const loaded = await this.loadConfigs(this.cwd, {
+			enableProjectConfig: true,
+			filterExa: options?.filterExa,
+			filterBrowser: options?.filterBrowser,
+			extensionRoots: options?.extensionRoots,
+		});
+		const configs: Record<string, MCPServerConfig> = {};
+		const sources: Record<string, SourceMeta> = {};
+		for (const name in loaded.configs) {
+			const config = loaded.configs[name];
+			if (!config || loaded.sources[name]?.level !== "project") continue;
+			if (this.#serverConfigs.has(name)) continue;
+			configs[name] = config;
+			const source = loaded.sources[name];
+			if (source) sources[name] = source;
+		}
+		if (Object.keys(configs).length === 0) return;
+		await this.connectServers(configs, sources, options?.onStatus);
+	}
+
+	/**
 	 * Connect to specific MCP servers.
 	 * Connections are made in parallel for faster startup.
 	 *

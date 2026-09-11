@@ -17,6 +17,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -370,5 +371,79 @@ describe("AgentSession.refresh('mcp')", () => {
 
 		await origin.remove();
 		await moved.remove();
+	});
+
+	// `mcp.enableProjectConfig` is consumed only during discovery, and a
+	// `settings`-scope refresh never enters the reconnect block — so flipping it
+	// off left the project servers this session had already started connected and
+	// their tools callable until an `mcp`/`all` refresh or a restart.
+	it("disconnects already-running project MCP servers when enableProjectConfig is turned off", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-projectcfg-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		// On-disk, so the reload sees the value genuinely MOVE.
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		// One project-level server and one user-level server, so the reconcile has
+		// to discriminate by source level rather than dropping everything.
+		const configs = {
+			"proj-server": { command: "true", args: [] },
+			"user-server": { command: "true", args: [] },
+		};
+		const sources: Record<string, SourceMeta> = {
+			"proj-server": {
+				level: "project",
+				path: `${dir.path()}/.mcp.json`,
+				provider: "mcp",
+				providerName: "MCP",
+			},
+			"user-server": {
+				level: "user",
+				path: `${dir.path()}/user.json`,
+				provider: "mcp",
+				providerName: "MCP",
+			},
+		};
+		const manager = new MCPManager(dir.path(), null, async () => ({ configs, exaApiKeys: [], sources }));
+		const disconnected: string[] = [];
+		const realDisconnect = manager.disconnectServer.bind(manager);
+		manager.disconnectServer = async (name: string) => {
+			disconnected.push(name);
+			return realDisconnect(name);
+		};
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+		});
+		sessions.push(session);
+
+		// Start both servers, as a session with the setting on would.
+		await manager.connectServers(configs, sources);
+
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: false\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		// Pre-fix nothing was disconnected: the setting moved, the merged value
+		// updated, and the running subprocess stayed callable.
+		expect(disconnected).toContain("proj-server");
+		// The user-level server is not a project opt-out and must survive.
+		expect(disconnected).not.toContain("user-server");
+
+		await dir.remove();
 	});
 });
