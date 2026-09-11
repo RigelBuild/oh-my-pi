@@ -729,61 +729,12 @@ describe("renderUsageMetrics", () => {
 	});
 
 	// Eliding the instant makes two ids that differ ONLY inside the digit run
-	// collide. Dropping the second limit's samples is not acceptable — the
-	// provider's ids are opaque and may be genuinely stable long numbers — so the
-	// renderer disambiguates with a bounded `#<rank>` suffix instead of narrowing
-	// the elision, which would reopen the unbounded-cardinality hole.
-	test("limits colliding under elision each keep their own series", () => {
-		const twoWindows: UsageReport = {
-			provider: "google-gemini-cli",
-			fetchedAt: 1,
-			metadata: { accountId: "acct-1" },
-			limits: [1_700_000_900_000, 1_700_086_400_000].map(resetsAt => ({
-				id: `gemini-3-pro:reset-${resetsAt}`,
-				label: "Gemini gemini-3-pro",
-				scope: { provider: "google-gemini-cli", modelId: "gemini-3-pro", windowId: `reset-${resetsAt}` },
-				window: { id: `reset-${resetsAt}`, label: "Quota window", resetsAt },
-				amount: { usedFraction: 0.5, unit: "percent" as const },
-				status: "ok" as const,
-			})),
-		};
-
-		const out = renderUsageMetrics([twoWindows]);
-		const fractionSamples = out.split("\n").filter(line => line.startsWith("llm_usage_limit_used_fraction{"));
-		expect(fractionSamples).toHaveLength(2);
-		expect(out).toContain('limit_id="gemini-3-pro:reset-ts"');
-		expect(out).toContain('limit_id="gemini-3-pro:reset-ts#1"');
-		expect(out).not.toContain("duplicate series dropped");
-	});
-
-	test("stable long numeric limit ids keep distinct series", () => {
-		// `UsageLimit.id` is opaque and providers are extensible, so a provider may
-		// hold genuinely stable long numeric ids. Before the disambiguation both
-		// collapsed to `quota-ts` and the second limit's samples were dropped.
-		const report: UsageReport = {
-			provider: "anthropic",
-			fetchedAt: 1,
-			metadata: { accountId: "acct-1" },
-			limits: ["quota-1234567890", "quota-1234567891"].map(id => ({
-				id,
-				label: "Quota",
-				scope: { provider: "anthropic" as const },
-				amount: { usedFraction: 0.5, unit: "percent" as const },
-				status: "ok" as const,
-			})),
-		};
-
-		const out = renderUsageMetrics([report]);
-		const fractionSamples = out.split("\n").filter(line => line.startsWith("llm_usage_limit_used_fraction{"));
-		expect(fractionSamples).toHaveLength(2);
-		expect(out).not.toContain("duplicate series dropped");
-	});
-
-	test("a colliding id keeps its series identity when the provider reorders its limits", () => {
-		// The suffix ranks the ORIGINAL ids, so it cannot depend on array order —
-		// a provider that reorders between fetches would otherwise swap two
-		// series' identities and make each one's history a mix of both limits.
-		const forOrder = (ids: readonly string[]): UsageReport => ({
+	// collide. The collision falls through to `add()`'s drop-and-note rather than
+	// being suffixed with the id's rank among its colliding peers: that rank is
+	// derived from the current report's membership, so a surviving series would
+	// silently inherit a departed peer's history.
+	test("a limit's series identity does not change when a colliding peer disappears", () => {
+		const forIds = (ids: readonly string[]): UsageReport => ({
 			provider: "anthropic",
 			fetchedAt: 1,
 			metadata: { accountId: "acct-1" },
@@ -795,18 +746,46 @@ describe("renderUsageMetrics", () => {
 				status: "ok" as const,
 			})),
 		});
-		const sampleFor = (out: string, limitId: string): string | undefined =>
+		const labelsOf = (out: string): string[] =>
 			out
 				.split("\n")
-				.find(line => line.startsWith(`llm_usage_limit_used_fraction{`) && line.includes(`limit_id="${limitId}"`));
+				.filter(line => line.startsWith("llm_usage_limit_used_fraction{"))
+				.map(line => line.slice(line.indexOf('limit_id="'), line.indexOf('"', line.indexOf('limit_id="') + 10) + 1));
+
+		// `quota-1234567891` alone, then with a lexically-earlier colliding peer.
+		const alone = renderUsageMetrics([forIds(["quota-1234567891"])]);
+		const withPeer = renderUsageMetrics([forIds(["quota-1234567890", "quota-1234567891"])]);
+
+		// Its label is the same in both, so adding or losing a peer never renames
+		// it into the other limit's series.
+		expect(labelsOf(alone)).toEqual(['limit_id="quota-ts"']);
+		expect(labelsOf(withPeer)).toEqual(['limit_id="quota-ts"']);
+		// The collision is surfaced, not silently absorbed into a renamed series.
+		expect(withPeer).toContain("duplicate series dropped");
+	});
+
+	test("a colliding id keeps its series identity when the provider reorders its limits", () => {
+		// Label identity must not depend on array order: a provider that reorders
+		// between fetches would otherwise swap two series' histories.
+		const forOrder = (ids: readonly string[]): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-1" },
+			limits: ids.map(id => ({
+				id,
+				label: "Quota",
+				scope: { provider: "anthropic" as const },
+				amount: { usedFraction: 0.5, unit: "percent" as const },
+				status: "ok" as const,
+			})),
+		});
+		const fractions = (out: string): string[] =>
+			out.split("\n").filter(line => line.startsWith("llm_usage_limit_used_fraction{"));
 
 		const ascending = renderUsageMetrics([forOrder(["quota-1234567890", "quota-1234567891"])]);
 		const descending = renderUsageMetrics([forOrder(["quota-1234567891", "quota-1234567890"])]);
 
-		// The same original id keeps the same label and therefore the same value
-		// in both orders.
-		expect(sampleFor(ascending, "quota-ts")).toBe(sampleFor(descending, "quota-ts"));
-		expect(sampleFor(ascending, "quota-ts#1")).toBe(sampleFor(descending, "quota-ts#1"));
+		expect(fractions(ascending)).toEqual(fractions(descending));
 	});
 });
 
@@ -1319,6 +1298,59 @@ describe("orgLabelOf", () => {
 		const out = renderUsageMetrics([forOrg("org-one"), forOrg("org-two")]);
 		expect(out).toContain('org="org-one"');
 		expect(out).toContain('org="org-two"');
+	});
+
+	test('returns "" when limits are scoped to different orgs', () => {
+		// The label is per-report but `scope.orgId` is per-limit, so taking the
+		// first would stamp `org-one` onto org-two's limits and onto the
+		// subscription lookup, misattributing that org's usage and plan.
+		// Unattributed is recoverable; misattributed is not.
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-claude-1" },
+			limits: ["org-one", "org-two"].map(orgId => ({
+				id: `anthropic:${orgId}`,
+				label: "Claude 5 Hour",
+				scope: { provider: "anthropic" as const, orgId },
+				amount: { usedFraction: 0.25, unit: "percent" as const },
+			})),
+		};
+		expect(orgLabelOf(report)).toBe("");
+	});
+
+	test("a report-level org still wins over disagreeing scopes", () => {
+		// `metadata.orgId` is authoritative, so the disagreement check must not
+		// discard an org the report itself stated.
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-claude-1", orgId: "org-real" },
+			limits: ["org-one", "org-two"].map(orgId => ({
+				id: `anthropic:${orgId}`,
+				label: "Claude 5 Hour",
+				scope: { provider: "anthropic" as const, orgId },
+				amount: { usedFraction: 0.25, unit: "percent" as const },
+			})),
+		};
+		expect(orgLabelOf(report)).toBe("org-real");
+	});
+
+	test("repeated identical scope orgs still resolve", () => {
+		// Agreement across limits is the common multi-window case and must keep
+		// resolving; only genuine disagreement falls through.
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-claude-1" },
+			limits: ["5h", "7d"].map(windowId => ({
+				id: `anthropic:${windowId}`,
+				label: "Claude",
+				scope: { provider: "anthropic" as const, orgId: "Org-Same", windowId },
+				amount: { usedFraction: 0.25, unit: "percent" as const },
+			})),
+		};
+		expect(orgLabelOf(report)).toBe("org-same");
 	});
 
 	test('returns "" when neither metadata nor any scope carries an org', () => {
