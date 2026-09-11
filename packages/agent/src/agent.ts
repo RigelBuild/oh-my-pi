@@ -765,6 +765,20 @@ export class Agent {
 		this.#preferWebsockets = value;
 	}
 
+	get intentTracing(): boolean {
+		return this.#intentTracing;
+	}
+
+	/**
+	 * Live, because `tools.intentTracing` decides whether the required intent
+	 * field is injected into every tool schema. Frozen at construction, a
+	 * `/refresh settings` left request assembly and the prompt guidance on the
+	 * launch-time policy while the reloaded settings view reported the new one.
+	 */
+	set intentTracing(value: boolean) {
+		this.#intentTracing = value;
+	}
+
 	get abortOnFabricatedToolResult(): boolean | undefined {
 		return this.#abortOnFabricatedToolResult;
 	}
