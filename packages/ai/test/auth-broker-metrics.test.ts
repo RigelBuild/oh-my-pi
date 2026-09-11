@@ -750,7 +750,9 @@ describe("renderUsageMetrics", () => {
 			out
 				.split("\n")
 				.filter(line => line.startsWith("llm_usage_limit_used_fraction{"))
-				.map(line => line.slice(line.indexOf('limit_id="'), line.indexOf('"', line.indexOf('limit_id="') + 10) + 1));
+				.map(line =>
+					line.slice(line.indexOf('limit_id="'), line.indexOf('"', line.indexOf('limit_id="') + 10) + 1),
+				);
 
 		// `quota-1234567891` alone, then with a lexically-earlier colliding peer.
 		const alone = renderUsageMetrics([forIds(["quota-1234567891"])]);
@@ -956,6 +958,76 @@ describe("accountLabelOf", () => {
 		expect(out).toContain(
 			'llm_usage_limit_used_fraction{provider="openai-codex",account="scope-acct",org="",email="",limit_id="openai-codex:extra:primary",window=""} 0.1',
 		);
+	});
+
+	test("does not label a report whose limits are scoped to different accounts", () => {
+		// The label is per-report but `scope.accountId` is per-limit, so taking the
+		// first would export account-two's usage — and run the subscription lookup
+		// — under account-one's identity. `AuthStorage`'s own scope reader already
+		// requires agreement for the same reason. Falls through to the sentinel,
+		// which is the honest answer for an unattributable report.
+		const report: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: 1,
+			metadata: { planType: "pro" },
+			limits: ["acct-one", "acct-two"].map(accountId => ({
+				id: `openai-codex:${accountId}`,
+				label: "Extra",
+				scope: { provider: "openai-codex" as const, accountId },
+				amount: { usedFraction: 0.1, unit: "percent" as const },
+			})),
+		};
+		expect(accountLabelOf(report)).toBe(UNIDENTIFIED_ACCOUNT);
+	});
+
+	test("a metadata accountId still wins over disagreeing scopes", () => {
+		// `metadata.accountId` is authoritative, so the agreement check must not
+		// discard an identity the report itself stated.
+		const report: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: 1,
+			metadata: { accountId: "meta-acct" },
+			limits: ["acct-one", "acct-two"].map(accountId => ({
+				id: `openai-codex:${accountId}`,
+				label: "Extra",
+				scope: { provider: "openai-codex" as const, accountId },
+				amount: { usedFraction: 0.1, unit: "percent" as const },
+			})),
+		};
+		expect(accountLabelOf(report)).toBe("meta-acct");
+	});
+
+	test("repeated identical account scopes still resolve", () => {
+		// Agreement across limits is the ordinary multi-window case and must keep
+		// resolving; only genuine disagreement falls through.
+		const report: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: 1,
+			metadata: { planType: "pro" },
+			limits: ["5h", "7d"].map(windowId => ({
+				id: `openai-codex:${windowId}`,
+				label: "Extra",
+				scope: { provider: "openai-codex" as const, accountId: "scope-acct", windowId },
+				amount: { usedFraction: 0.1, unit: "percent" as const },
+			})),
+		};
+		expect(accountLabelOf(report)).toBe("scope-acct");
+	});
+
+	test("does not label a report whose limits are scoped to different projects", () => {
+		// Same rule on the project fallback: it is the last scope-derived
+		// distinguisher, and it was equally first-wins.
+		const report: UsageReport = {
+			provider: "google-gemini-cli",
+			fetchedAt: 1,
+			limits: ["proj-one", "proj-two"].map(projectId => ({
+				id: `gemini:${projectId}`,
+				label: "Quota",
+				scope: { provider: "google-gemini-cli" as const, projectId },
+				amount: { usedFraction: 0.1, unit: "percent" as const },
+			})),
+		};
+		expect(accountLabelOf(report)).toBe(UNIDENTIFIED_ACCOUNT);
 	});
 
 	// Also pins the sentinel's literal value: `UNIDENTIFIED_ACCOUNT` is the

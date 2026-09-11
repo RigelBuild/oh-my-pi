@@ -133,10 +133,14 @@ export function accountLabelOf(report: UsageReport): string {
 	// the plan/renewal lookup miss and silently omits that account's series.
 	const metaId = report.metadata?.accountId;
 	if (typeof metaId === "string" && metaId.trim().length > 0) return primaryIdentity(metaId);
-	for (const limit of report.limits) {
-		const scopeId = limit.scope.accountId;
-		if (typeof scopeId === "string" && scopeId.trim().length > 0) return primaryIdentity(scopeId);
-	}
+	// A scope fallback applies only when every scoped value AGREES. The label is
+	// per-report but the scope is per-limit, so taking the first would export the
+	// other accounts' limits — and run the subscription lookup — under one
+	// account's identity. `AuthStorage.#getUsageReportScopeAccountId` already
+	// requires the same agreement for the same reason, so a mixed report is
+	// representable and genuinely ambiguous.
+	const scopeAccount = uniqueScopeValue(report, limit => limit.scope.accountId);
+	if (scopeAccount !== undefined) return primaryIdentity(scopeAccount);
 	// Identity-less: reach for a stable per-credential distinguisher so distinct
 	// credentials do not collapse into one dropped-duplicate series. Namespaced
 	// per source, and not case-folded — these are opaque provider ids.
@@ -144,11 +148,34 @@ export function accountLabelOf(report: UsageReport): string {
 	if (projectFallback !== undefined) return projectFallback;
 	const accountFallback = metadataIdentity(report, "account", ["account", "user", "username"]);
 	if (accountFallback !== undefined) return accountFallback;
-	for (const limit of report.limits) {
-		const scopeProject = limit.scope.projectId;
-		if (typeof scopeProject === "string" && scopeProject.trim().length > 0) return `project:${scopeProject.trim()}`;
-	}
+	const scopeProject = uniqueScopeValue(report, limit => limit.scope.projectId);
+	if (scopeProject !== undefined) return `project:${scopeProject}`;
 	return UNIDENTIFIED_ACCOUNT;
+}
+
+/**
+ * The one trimmed, non-empty value `read` yields across every limit, or
+ * `undefined` when the limits disagree (or none carries it).
+ *
+ * Scope fields are per-limit while every label here is per-report, so a
+ * disagreement has no correct single answer: emitting one limit's value would
+ * attribute the others' usage to it. Unattributed is recoverable;
+ * misattributed is not.
+ */
+function uniqueScopeValue(
+	report: UsageReport,
+	read: (limit: UsageReport["limits"][number]) => unknown,
+): string | undefined {
+	let found: string | undefined;
+	for (const limit of report.limits) {
+		const raw = read(limit);
+		if (typeof raw !== "string") continue;
+		const value = raw.trim();
+		if (value.length === 0) continue;
+		if (found !== undefined && found !== value) return undefined;
+		found = value;
+	}
+	return found;
 }
 
 /**
@@ -203,17 +230,13 @@ export function emailLabelOf(report: UsageReport): string {
 export function orgLabelOf(report: UsageReport): string {
 	const orgId = report.metadata?.orgId;
 	if (typeof orgId === "string" && orgId.trim().length > 0) return orgId.trim().toLowerCase();
-	let scoped: string | undefined;
-	for (const limit of report.limits) {
-		const scopeOrg = limit.scope.orgId;
-		if (typeof scopeOrg !== "string") continue;
-		const canonical = scopeOrg.trim().toLowerCase();
-		if (canonical.length === 0) continue;
-		// A second, different org means no single value can label the report.
-		if (scoped !== undefined && scoped !== canonical) return "";
-		scoped = canonical;
-	}
-	return scoped ?? "";
+	// Lowercased before the comparison, so two spellings of one org still agree;
+	// `uniqueScopeValue` does the trimming and the disagreement check.
+	return (
+		uniqueScopeValue(report, limit =>
+			typeof limit.scope.orgId === "string" ? limit.scope.orgId.toLowerCase() : undefined,
+		) ?? ""
+	);
 }
 
 /**
