@@ -69,12 +69,32 @@ describe("findDuplicateJsonKey", () => {
 		expect(findDuplicateJsonKey(`{"unterminated`)).toBeUndefined();
 	});
 
-	// The colon is the boundary: `"a"` with no colon is not yet a member, while
-	// `"a":` is one even though the document stops there. Both spellings are
-	// truncated, so this pins the member rule itself rather than the truncation.
-	it("treats a key as a member only once its colon arrives", () => {
+	// The colon is the member boundary, but a truncated document is malformed
+	// either way, so BOTH spellings must stay silent. The previous expectation
+	// here — `{"a":1,"a":` reporting `"a"` — contradicted the documented
+	// contract: it is not valid JSON, so the caller's parser owns it.
+	it("reports no duplicate for a truncated document, colon or not", () => {
 		expect(findDuplicateJsonKey(`{"a":1,"a"`)).toBeUndefined();
-		expect(findDuplicateJsonKey(`{"a":1,"a":`)).toBe("a");
+		expect(findDuplicateJsonKey(`{"a":1,"a":`)).toBeUndefined();
+	});
+
+	// The scan walks structure, not grammar, so these reach a genuine second
+	// `"a":` and the raw scan would report a duplicate. A real parse refuses
+	// them, so the retained candidate must be discarded.
+	it("reports no duplicate when a complete repeat sits in malformed input", () => {
+		// Unclosed object.
+		expect(findDuplicateJsonKey(`{"a":1,"a":2`)).toBeUndefined();
+		// Missing value.
+		expect(findDuplicateJsonKey(`{"a":1,"a":}`)).toBeUndefined();
+		// Trailing garbage after a document that is otherwise fine.
+		expect(findDuplicateJsonKey(`{"a":1,"a":2}}`)).toBeUndefined();
+	});
+
+	// The confirmation must not suppress real duplicates in valid documents,
+	// including nested inside an array.
+	it("still reports a duplicate in a valid document", () => {
+		expect(findDuplicateJsonKey(`{"a":1,"a":2}`)).toBe("a");
+		expect(findDuplicateJsonKey(`[{"a":1,"a":2}]`)).toBe("a");
 	});
 
 	// An unterminated key never became a real member, so it cannot have been
