@@ -475,3 +475,34 @@ export async function dropUnreadableContextImages(context: Context, model: Model
 	}
 	return messages ? { ...context, messages } : context;
 }
+
+/**
+ * The outbound image pipeline, in the one order that is correct.
+ *
+ * Order is load-bearing and each step constrains the next, so it lives here as
+ * a single callable rather than being re-spelled at each `transformContext`:
+ *
+ * 1. Count cap FIRST, but only down to a slack multiple of the real cap: the
+ *    passes below are per-image expensive (a full decode each, behind a cache a
+ *    longer history evicts every request), and a history far past the cap
+ *    discards its oldest images regardless of what those passes conclude.
+ * 2. Model-specific normalization, which rewrites sizes (WebP conversion,
+ *    downscales) and so must precede any byte accounting.
+ * 3. The unreadable backstop, after the normalizers because they carry better
+ *    wording for the cases they own.
+ * 4. Byte budget LAST, over the images that actually travel. Clamping earlier
+ *    charged an undecodable image against the budget and evicted an older VALID
+ *    one to fit it, and the unreadable pass then replaced the corrupt image too
+ *    — so a request lost every image where the readable one would have fit
+ *    alone.
+ */
+export async function applyProviderImagePipeline(
+	context: Context,
+	model: Model,
+	normalizeForModel: (context: Context, model: Model) => Promise<Context>,
+): Promise<Context> {
+	let transformed = clampProviderContextImageCount(context, model);
+	transformed = await normalizeForModel(transformed, model);
+	transformed = await dropUnreadableContextImages(transformed, model);
+	return clampProviderContextImages(transformed, model);
+}

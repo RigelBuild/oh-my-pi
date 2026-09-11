@@ -172,11 +172,7 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
-import {
-	clampProviderContextImageCount,
-	clampProviderContextImages,
-	dropUnreadableContextImages,
-} from "./session/provider-image-budget";
+import { applyProviderImagePipeline } from "./session/provider-image-budget";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
@@ -3290,11 +3286,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		) {
 			explicitlyRequestedToolNames.push("yield");
 		}
-		// Session-managed builtins may be force-included by createTools. Keep the
-		// active set consistent with that registry decision, using built-in
-		// provenance so same-named extension tools are never force-activated.
+		// Auto-learn builtins are force-included into the registry by `createTools`
+		// for enabled top-level sessions (tools/index.ts), but — like `yield` above —
+		// an explicit `toolNames` list would otherwise drop them from the ACTIVE set,
+		// leaving the nudge/guidance pointing at tools the model cannot call. Activate
+		// exactly the builtins createTools built (`builtInToolNames` — provenance, so a
+		// same-named custom/extension tool is never force-activated when auto-learn is
+		// off) to keep guidance, controller, and the active set consistent.
 		if (!restrictToolNames && explicitlyRequestedToolNames) {
-			for (const name of ["manage_skill", "learn", "context_notes", "new_context"]) {
+			for (const name of ["manage_skill", "learn"]) {
 				if (builtInToolNames.includes(name) && !explicitlyRequestedToolNames.includes(name)) {
 					explicitlyRequestedToolNames.push(name);
 				}
@@ -3495,26 +3495,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
-			// Count cap FIRST, but only down to a slack multiple of it: the two
-			// passes below are per-image expensive (a full decode each, behind a
-			// cache a longer history evicts every request), and a history far past
-			// the cap discards its oldest images regardless of what those passes
-			// would conclude. The slack is what stops this from spending a cap slot
-			// on an image the decode pass is about to turn into text — the real cap
-			// is enforced by the count-aware clamp below, over the survivors.
-			transformed = clampProviderContextImageCount(transformed, transformModel);
-			transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
-			// After the model-specific normalizers: they carry better wording for the
-			// cases they own (STB WebP), so this stays the backstop for everything
-			// else, and it runs before the blob broker uploads any of these bytes.
-			transformed = await dropUnreadableContextImages(transformed, transformModel);
-			// Budget LAST, over the images that actually travel. Clamping first
-			// charged an undecodable image against the byte budget and evicted an
-			// older VALID one to fit it, and the unreadable pass then replaced the
-			// corrupt image too — so a request lost every image where the readable
-			// one would have fit alone. Normalization also rewrites sizes (WebP
-			// conversion, downscales), so only here are the byte counts final.
-			transformed = clampProviderContextImages(transformed, transformModel);
+			// Count cap, normalization, unreadable backstop, then the byte budget
+			// over final sizes — the order is documented on the pipeline, and it
+			// runs before the blob broker uploads any of these bytes.
+			transformed = await applyProviderImagePipeline(
+				transformed,
+				transformModel,
+				normalizeProviderContextImagesForModel,
+			);
 			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
@@ -4224,13 +4212,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
 						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-						// Count cap first, then the expensive passes, then the byte
-						// budget over final sizes — see the primary
-						// `transformProviderContext` above.
-						transformed = clampProviderContextImageCount(transformed, transformModel);
-						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
-						transformed = await dropUnreadableContextImages(transformed, transformModel);
-						transformed = clampProviderContextImages(transformed, transformModel);
+						transformed = await applyProviderImagePipeline(
+							transformed,
+							transformModel,
+							normalizeProviderContextImagesForModel,
+						);
 						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
 						return captureDateCwdReminder.transform(
 							transformed,
