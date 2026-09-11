@@ -369,10 +369,25 @@ export class ModelControls {
 			// is a session choice, so it pins even when it matches the active level
 			// — without the flag an unchanged selection writes no receipt and the
 			// previous settings-tracking one survives, so a later
-			// `defaultThinkingLevel` edit overwrites the user's pick. An ephemeral
-			// switch (prewalk, plan-yolo) carries a CONFIGURED level, not a user
-			// selection, so it must keep following settings.
-			this.setThinkingLevel(thinkingLevel, false, { explicit: !options?.ephemeral });
+			// `defaultThinkingLevel` edit overwrites the user's pick.
+			//
+			// An ephemeral switch (prewalk, plan-yolo) carries a CONFIGURED level,
+			// not a user selection, so it must keep following settings. Clearing
+			// `explicit` is not enough: when the handoff's level differs from the
+			// active one the receipt is written anyway (the level MOVED), and with
+			// `settingsTracking` unset `thinkingFollowsSettings()` then reads that
+			// automatic handoff as a user pin — so a later `defaultThinkingLevel`
+			// edit plus `refresh("settings")` was ignored. Inherit the pre-handoff
+			// answer, as `#reapplyThinkingLevel` does for a model-derived re-apply;
+			// the branch still carries it because no thinking receipt is written
+			// between the `model_change` above and this call.
+			this.setThinkingLevel(
+				thinkingLevel,
+				false,
+				options?.ephemeral
+					? { settingsTracking: thinkingFollowsSettings(this.#host.sessionManager.getBranch()) }
+					: { explicit: true },
+			);
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}

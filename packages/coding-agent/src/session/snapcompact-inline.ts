@@ -439,10 +439,6 @@ export class SnapcompactInlineTransformer {
 		this.#options = options;
 	}
 
-	private get options(): SnapcompactInlineOptions {
-		return this.#options;
-	}
-
 	/**
 	 * Adopt a new rendering configuration in place, so a live settings reload
 	 * reaches the instance the request path already closed over.
@@ -466,7 +462,7 @@ export class SnapcompactInlineTransformer {
 		// rendering would lose the content entirely.
 		if (!model.input.includes("image")) return context;
 
-		const shape = snapcompact.resolveShape(model, this.options.shape);
+		const shape = snapcompact.resolveShape(model, this.#options.shape);
 		const tokenizer = new Tokenizer(model);
 		const budget = snapcompact.providerImageBudget(model.provider) - countMessageImages(context.messages);
 		if (budget <= 0) return context;
@@ -478,7 +474,7 @@ export class SnapcompactInlineTransformer {
 		const candidates: InlineToolResultCandidate[] = [];
 		const targets = new Map<string, { index: number; message: ToolResultMessage; text: string }>();
 		const liveToolCallIds = new Set<string>();
-		if (this.options.renderToolResults) {
+		if (this.#options.renderToolResults) {
 			for (let i = 0; i < messages.length; i++) {
 				const message = messages[i];
 				if (message.role !== "toolResult") continue;
@@ -497,8 +493,8 @@ export class SnapcompactInlineTransformer {
 
 		let systemPromptTarget: SystemPromptImageTarget | undefined;
 		let systemPromptCandidate: InlineSystemPromptCandidate | undefined;
-		if (this.options.renderSystemPrompt !== "none") {
-			systemPromptTarget = selectSystemPromptImageTarget(context.systemPrompt, this.options.renderSystemPrompt);
+		if (this.#options.renderSystemPrompt !== "none") {
+			systemPromptTarget = selectSystemPromptImageTarget(context.systemPrompt, this.#options.renderSystemPrompt);
 			if (systemPromptTarget) {
 				systemPromptCandidate = {
 					textTokens: tokenizer.countTokens(systemPromptTarget.text),
@@ -509,7 +505,7 @@ export class SnapcompactInlineTransformer {
 
 		const userIndex = messages.findIndex(message => message.role === "user");
 		const plan = planInlineSwaps({
-			options: this.options,
+			options: this.#options,
 			shape,
 			budget,
 			toolResults: candidates,
@@ -542,7 +538,7 @@ export class SnapcompactInlineTransformer {
 			});
 		}
 		if (savings.length > 0) this.onToolResultSavings?.(savings, model);
-		if (this.options.renderToolResults) {
+		if (this.#options.renderToolResults) {
 			// Drop cache entries for tool calls no longer in the context
 			// (compacted away) so the cache stays bounded by live history.
 			for (const key of this.#toolCache.keys()) {

@@ -672,6 +672,13 @@ const PROMPT_AFFECTING_SETTING_PATHS = [
 	// instructing the model about a field the schemas no longer carry (or omits
 	// guidance for one they now require).
 	"tools.intentTracing",
+	// Gates the auto-background guidance line in BOTH the `bash` and `eval`
+	// rendered descriptions, which `inlineToolDescriptors` embeds in the system
+	// prompt. Same shape as `async.enabled` above: execution and the tool
+	// property follow the setting live, so without a rebuild only the model kept
+	// the retired guidance. The threshold is NOT here — neither template renders
+	// the number, so changing it moves no prompt text.
+	"bash.autoBackground.enabled",
 ] as const satisfies readonly SettingPath[];
 
 /**

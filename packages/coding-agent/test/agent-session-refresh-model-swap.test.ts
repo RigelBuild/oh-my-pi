@@ -1392,6 +1392,55 @@ describe("AgentSession: thinking provenance survives a role pick and a new sessi
 			await h.dispose();
 		}
 	});
+
+	it("still follows a changed defaultThinkingLevel after an ephemeral switch moved the level", async () => {
+		// A prewalk / plan-yolo handoff is automatic, so it must leave the session
+		// settings-tracking. Clearing `explicit` was not enough: the handoff level
+		// (`high`) DIFFERS from the configured one (`low`), so the receipt is
+		// written anyway because the level moved — and with no `settingsTracking`
+		// flag `thinkingFollowsSettings()` read that automatic handoff as a user
+		// pin, so this refresh was ignored.
+		//
+		// `claude-sonnet-4-5` carries the full minimal..xhigh ladder and no
+		// `thinking.defaultLevel`, so neither level is clamped and the move is real.
+		const h = await makeHarness({
+			rawConfig: `compaction:\n  enabled: false\ndefaultThinkingLevel: low\n`,
+		});
+		try {
+			await h.session.setModelTemporary(h.modelA, ThinkingLevel.High, { ephemeral: true });
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
+
+			await fs.writeFile(h.settingsPath, `compaction:\n  enabled: false\ndefaultThinkingLevel: medium\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Medium);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("keeps an explicit pin across a later ephemeral switch", async () => {
+		// The other direction: inheriting the pre-handoff answer must leave a real
+		// user pin pinned, not launder it into settings-tracking.
+		const h = await makeHarness({
+			rawConfig: `compaction:\n  enabled: false\ndefaultThinkingLevel: low\n`,
+		});
+		try {
+			// The public session setter IS the user-selection surface: it always
+			// records an explicit pin, which is what this test needs.
+			h.session.setThinkingLevel(ThinkingLevel.XHigh);
+			await h.session.setModelTemporary(h.modelA, ThinkingLevel.High, { ephemeral: true });
+
+			await fs.writeFile(h.settingsPath, `compaction:\n  enabled: false\ndefaultThinkingLevel: medium\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.configuredThinkingLevel()).not.toBe(ThinkingLevel.Medium);
+		} finally {
+			await h.dispose();
+		}
+	});
 });
 
 // A retry fallback swaps the model and the thinking level automatically, with
