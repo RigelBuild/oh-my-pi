@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -39,12 +41,14 @@ function session(
 		isolationEnabled?: boolean;
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
+		skills?: readonly Skill[];
 	} = {},
 ): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		outputSchema: options.outputSchema,
+		skills: options.skills,
 		settings: Settings.isolated({
 			"task.maxRecursionDepth": options.maxDepth ?? 2,
 			"task.isolation.enabled": options.isolationEnabled ?? false,
@@ -263,6 +267,56 @@ describe("structured subagent primitive", () => {
 		);
 		expect(dispatched[0]?.description).toBe("Refactor the auth flow");
 		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("warns when an agent's autoloadSkills names no available skill", async () => {
+		const skill: Skill = {
+			name: "code-review",
+			description: "Review code",
+			filePath: "/tmp/skills/code-review/SKILL.md",
+			baseDir: "/tmp/skills/code-review",
+			source: "project",
+		};
+		mockDiscovery({ ...AGENT, autoloadSkills: ["code-review", "cod-review"] });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		const settled = await runStructuredSubagent(
+			request({ session: session({ skills: [skill] }), retainArtifacts: true }),
+		);
+
+		// The typo'd name is dropped, so only the warning distinguishes this
+		// from a correctly-spelled single-skill config.
+		expect(dispatched[0]?.autoloadSkills).toEqual([skill]);
+		const reported = warn.mock.calls.find(([message]) =>
+			String(message).includes("autoloadSkills names matched no available skill"),
+		);
+		expect(reported?.[1]).toMatchObject({ agent: "worker", missing: ["cod-review"] });
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("stays quiet when every autoloadSkills name resolves", async () => {
+		const skill: Skill = {
+			name: "code-review",
+			description: "Review code",
+			filePath: "/tmp/skills/code-review/SKILL.md",
+			baseDir: "/tmp/skills/code-review",
+			source: "project",
+		};
+		mockDiscovery({ ...AGENT, autoloadSkills: ["code-review"] });
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => result());
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		const settled = await runStructuredSubagent(
+			request({ session: session({ skills: [skill] }), retainArtifacts: true }),
+		);
+
+		expect(warn.mock.calls.filter(([message]) => String(message).includes("autoloadSkills"))).toEqual([]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("derives modelRole from the raw selector source in request, override, definition order", async () => {

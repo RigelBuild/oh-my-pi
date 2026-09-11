@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -385,9 +385,19 @@ async function leaseArtifacts(
 
 function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	const skills = [...(session.skills ?? [])];
-	const autoloadSkills = agent.autoloadSkills?.length
-		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
-		: [];
+	if (!agent.autoloadSkills?.length) return { skills, autoloadSkills: [] };
+	const autoloadSkills = agent.autoloadSkills
+		.map(name => skills.find(skill => skill.name === name))
+		.filter(skill => skill !== undefined);
+	if (autoloadSkills.length !== agent.autoloadSkills.length) {
+		// Silently autoloading nothing looks identical to a working config.
+		const resolved = new Set(autoloadSkills.map(skill => skill.name));
+		logger.warn("Agent autoloadSkills names matched no available skill", {
+			agent: agent.name,
+			missing: agent.autoloadSkills.filter(name => !resolved.has(name)),
+			available: skills.map(skill => skill.name),
+		});
+	}
 	return { skills, autoloadSkills };
 }
 
