@@ -312,4 +312,46 @@ describe("Anthropic many-image payload resizing", () => {
 		expect(height).toBeLessThanOrEqual(2000);
 		expect(images[0].source.data.length).toBeLessThanOrEqual(source.length);
 	});
+
+	/**
+	 * The wide uniform source is the one that reaches the ladder at all (its
+	 * initial resize is heavier than the source). Failing every rung leaves the
+	 * within-cap initial resize as the only valid rendition, so a rung rejection
+	 * must not escape to the outer catch and restore the 2001px original.
+	 */
+	it("keeps the completed resize when every ladder encode fails", async () => {
+		const source = await makeWebp(2001, 100, 1, "flat");
+		const largeImage: ImageContent = { type: "image", data: source, mimeType: "image/webp" };
+		const smallImage: ImageContent = { type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" };
+		const context = makeToolResultContext([largeImage, ...Array.from({ length: 20 }, () => smallImage)]);
+
+		const proto = Bun.Image.prototype as unknown as {
+			jpeg: (opts?: { quality?: number }) => unknown;
+			webp: (opts?: { quality?: number }) => unknown;
+		};
+		const realJpeg = proto.jpeg;
+		const realWebp = proto.webp;
+		// The initial probe encodes at q85; every ladder rung is below it.
+		proto.jpeg = function patchedJpeg(opts?: { quality?: number }) {
+			if (opts?.quality !== undefined && opts.quality < 85) throw new Error("jpeg encode failed");
+			return realJpeg.call(this, opts);
+		};
+		proto.webp = function patchedWebp(opts?: { quality?: number }) {
+			if (opts?.quality !== undefined && opts.quality < 85) throw new Error("webp encode failed");
+			return realWebp.call(this, opts);
+		};
+
+		let images: ReturnType<typeof extractToolResultImages>;
+		try {
+			images = extractToolResultImages(await capturePayload(context));
+		} finally {
+			proto.jpeg = realJpeg;
+			proto.webp = realWebp;
+		}
+
+		expect(images).toHaveLength(21);
+		const { width, height } = await new Bun.Image(Buffer.from(images[0].source.data, "base64")).metadata();
+		expect(width).toBeLessThanOrEqual(2000);
+		expect(height).toBeLessThanOrEqual(2000);
+	});
 });

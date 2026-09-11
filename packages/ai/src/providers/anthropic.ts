@@ -1035,7 +1035,15 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 			for (const quality of ANTHROPIC_MANY_IMAGE_QUALITIES) {
 				if (best.buffer.length <= inputBuffer.length) break outer;
 				const image = new Bun.Image(inputBuffer).resize(targetWidth, targetHeight);
-				const candidate = await (format === "jpeg" ? image.jpeg({ quality }) : image.webp({ quality })).bytes();
+				// A rung that cannot encode only costs us that candidate: `best` already
+				// holds a within-cap rendition, and letting the rejection reach the outer
+				// catch would return the over-cap original instead.
+				let candidate: Uint8Array;
+				try {
+					candidate = await (format === "jpeg" ? image.jpeg({ quality }) : image.webp({ quality })).bytes();
+				} catch {
+					continue;
+				}
 				if (candidate.length < best.buffer.length) best = { buffer: candidate, mimeType: `image/${format}` };
 			}
 		}
