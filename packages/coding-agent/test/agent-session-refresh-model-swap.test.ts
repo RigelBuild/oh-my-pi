@@ -528,6 +528,50 @@ describe("AgentSession refresh('settings'): thinking-level precedence", () => {
 		}
 	});
 
+	it("keeps an explicit thinking pin when a settings-driven swap lands on a different model default", async () => {
+		// The target must expose a `thinking.defaultLevel` that DIFFERS from the
+		// pin, or `setModel`'s re-apply has nothing to move and the test passes
+		// vacuously: `cline-pass/glm-5.2` carries `high`, and no bundled anthropic
+		// model exposes one at all.
+		//
+		// The pin is `low`, not `minimal`: glm-5.2's effort ladder is
+		// `low|high|max`, so a `minimal` pin is CLAMPED to `low` on the swap and
+		// the assertion would pass without the fix — the clamp, not the restore,
+		// would be doing the work.
+		//
+		// Pre-fix, the swap's own `#reapplyThinkingLevel(target.thinking
+		// .defaultLevel)` overwrote the pinned level with `high` before the
+		// follows-settings guard ran — and that guard only ever sees the
+		// post-swap value, so it could not restore it.
+		const target = getBundledModel("cline-pass", "glm-5.2");
+		if (!target) throw new Error("Expected bundled cline-pass model glm-5.2");
+		const h = await makeHarness({
+			extraProviders: ["cline-pass"],
+			rawConfig: `compaction:\n  enabled: false\nmodelRoles:\n  default: anthropic/claude-sonnet-4-5\n`,
+		});
+		try {
+			// An explicit user pin, not a settings-derived level.
+			h.session.setThinkingLevel(ThinkingLevel.Low);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+
+			// The operator repoints the default role at the model whose own
+			// thinking default is `high`.
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\nmodelRoles:\n  default: ${target.provider}/${target.id}\n`,
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// The swap itself is still allowed — only the thinking pin is protected.
+			expect(result.modelSwapped).toBe(true);
+			expect(h.session.model?.id).toBe(target.id);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+		} finally {
+			await h.dispose();
+		}
+	});
+
 	it("applies the global fallback after swapping onto a suffix-less model", async () => {
 		// The reviewer's scenario: a `:high` default selector, then the default
 		// moves to a DIFFERENT, suffix-less model while `defaultThinkingLevel` is
