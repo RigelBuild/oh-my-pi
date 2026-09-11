@@ -139,7 +139,15 @@ export function accountLabelOf(report: UsageReport): string {
 	// account's identity. `AuthStorage.#getUsageReportScopeAccountId` already
 	// requires the same agreement for the same reason, so a mixed report is
 	// representable and genuinely ambiguous.
+	//
+	// Disagreement is TERMINAL, not just "no scoped account": falling through
+	// would reach `metadata.projectId`, the account aliases, or a shared
+	// `scope.projectId` and label the whole report — every limit, plus the
+	// subscription lookup — with one of those instead. Those fallbacks answer
+	// "this report has no account identity", which is a different question from
+	// "this report has several".
 	const scopeAccount = uniqueScopeValue(report, limit => limit.scope.accountId);
+	if (scopeAccount === CONFLICTING_SCOPE) return UNIDENTIFIED_ACCOUNT;
 	if (scopeAccount !== undefined) return primaryIdentity(scopeAccount);
 	// Identity-less: reach for a stable per-credential distinguisher so distinct
 	// credentials do not collapse into one dropped-duplicate series. Namespaced
@@ -149,13 +157,24 @@ export function accountLabelOf(report: UsageReport): string {
 	const accountFallback = metadataIdentity(report, "account", ["account", "user", "username"]);
 	if (accountFallback !== undefined) return accountFallback;
 	const scopeProject = uniqueScopeValue(report, limit => limit.scope.projectId);
-	if (scopeProject !== undefined) return `project:${scopeProject}`;
-	return UNIDENTIFIED_ACCOUNT;
+	if (scopeProject === CONFLICTING_SCOPE || scopeProject === undefined) return UNIDENTIFIED_ACCOUNT;
+	return `project:${scopeProject}`;
 }
 
 /**
- * The one trimmed, non-empty value `read` yields across every limit, or
- * `undefined` when the limits disagree (or none carries it).
+ * {@link uniqueScopeValue}'s third outcome: the limits carry several different
+ * values. Distinct from `undefined` (none carries one) because a caller must be
+ * able to stop rather than try a lower-priority identity — a report with two
+ * accounts in it does not have a missing account.
+ *
+ * A unique symbol, so it cannot collide with a provider-supplied id.
+ */
+const CONFLICTING_SCOPE = Symbol("conflicting-scope");
+
+/**
+ * The one trimmed, non-empty value `read` yields across every limit;
+ * `undefined` when no limit carries one, and {@link CONFLICTING_SCOPE} when
+ * they disagree.
  *
  * Scope fields are per-limit while every label here is per-report, so a
  * disagreement has no correct single answer: emitting one limit's value would
@@ -165,14 +184,14 @@ export function accountLabelOf(report: UsageReport): string {
 function uniqueScopeValue(
 	report: UsageReport,
 	read: (limit: UsageReport["limits"][number]) => unknown,
-): string | undefined {
+): string | typeof CONFLICTING_SCOPE | undefined {
 	let found: string | undefined;
 	for (const limit of report.limits) {
 		const raw = read(limit);
 		if (typeof raw !== "string") continue;
 		const value = raw.trim();
 		if (value.length === 0) continue;
-		if (found !== undefined && found !== value) return undefined;
+		if (found !== undefined && found !== value) return CONFLICTING_SCOPE;
 		found = value;
 	}
 	return found;
@@ -231,12 +250,13 @@ export function orgLabelOf(report: UsageReport): string {
 	const orgId = report.metadata?.orgId;
 	if (typeof orgId === "string" && orgId.trim().length > 0) return orgId.trim().toLowerCase();
 	// Lowercased before the comparison, so two spellings of one org still agree;
-	// `uniqueScopeValue` does the trimming and the disagreement check.
-	return (
-		uniqueScopeValue(report, limit =>
-			typeof limit.scope.orgId === "string" ? limit.scope.orgId.toLowerCase() : undefined,
-		) ?? ""
+	// `uniqueScopeValue` does the trimming and the disagreement check. Both of
+	// its non-answers mean the same thing here — this label's own absent value
+	// IS `""`, so there is no lower-priority source to guard against.
+	const scoped = uniqueScopeValue(report, limit =>
+		typeof limit.scope.orgId === "string" ? limit.scope.orgId.toLowerCase() : undefined,
 	);
+	return typeof scoped === "string" ? scoped : "";
 }
 
 /**
