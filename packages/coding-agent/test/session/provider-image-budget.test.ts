@@ -118,13 +118,30 @@ function textData(context: Context): string[] {
  * replicated or flat raster compresses to a few KB, far under any byte budget.
  * Deflate "stored" blocks (BTYPE=00) keep the IDAT stream the size of the raw
  * scanlines, so a 1100px square lands near 4.8 MB of base64.
+ *
+ * Per-pixel noise, so it stays large through a re-encode as well.
  */
 function largeDecodablePng(edge: number): Uint8Array {
+	return decodablePng(edge, (y, x) => (y * 7 + x * 13) % 256);
+}
+
+/**
+ * As {@link largeDecodablePng}, but low-detail: still enormous stored
+ * uncompressed, yet it collapses to tens of KB once resized and re-encoded.
+ * That gap is what distinguishes a byte budget measured before the provider's
+ * downscale from one measured after it.
+ */
+function smoothDecodablePng(edge: number): Uint8Array {
+	return decodablePng(edge, y => (y >> 4) & 0xf0);
+}
+
+/** Truecolour PNG with an uncompressed IDAT, each sample from `sample`. */
+function decodablePng(edge: number, sample: (y: number, x: number) => number): Uint8Array {
 	const raw = new Uint8Array(edge * (1 + edge * 3));
 	for (let y = 0; y < edge; y++) {
 		const row = y * (1 + edge * 3);
 		raw[row] = 0; // filter: None
-		for (let x = 0; x < edge * 3; x++) raw[row + 1 + x] = (y * 7 + x * 13) % 256;
+		for (let x = 0; x < edge * 3; x++) raw[row + 1 + x] = sample(y, x);
 	}
 	const chunk = (type: string, data: Uint8Array): Uint8Array => {
 		const body = new Uint8Array(4 + data.length);
@@ -559,6 +576,46 @@ describe("provider context image budgets", () => {
 
 		// The readable image survives whole; only the corrupt one is replaced.
 		expect(imageData(piped)).toEqual([valid]);
+	});
+
+	it("weighs the byte budget against the provider's downscaled payload", async () => {
+		// The bug: this clamp ran before Anthropic's own many-image downscale
+		// (`prepareAnthropicManyImageContext`), which resizes every image in a
+		// >20-image request down to 2000px. So a request whose RESIZED payload fit
+		// the budget still lost its oldest images, measured at full size — and
+		// because the downscale only triggers above 20 images, a clamp that cut
+		// the count to 20 also stopped it from ever running.
+		//
+		// 21 images: one over the provider's many-image threshold, so the
+		// downscale applies and the count cap (90 for anthropic) does not.
+		const budget = providerImageByteBudget(ANTHROPIC_MODEL.provider);
+		// Smooth, not the noisy `largeDecodablePng` raster: this fixture has to be
+		// huge BEFORE the resize and small after, and per-pixel noise survives a
+		// downscale as noise (measured: ~3 MB each post-resize, so 21 still bust
+		// the budget and the test could not distinguish the fix). A low-detail
+		// raster stays large when stored uncompressed and re-encodes to ~26 KB.
+		const oversized = Buffer.from(smoothDecodablePng(2400)).toString("base64");
+		const context: Context = {
+			messages: Array.from({ length: 21 }, (_, index) => ({
+				role: "user" as const,
+				content: [image(oversized)],
+				timestamp: index,
+			})),
+		};
+		// The premise: at full size this payload busts the budget many times over,
+		// so a pre-resize measurement must evict.
+		if (oversized.length * 21 <= budget) throw new Error("fixture payload cannot bust the byte budget");
+
+		const piped = await applyProviderImagePipeline(context, ANTHROPIC_MODEL, async ctx => ctx);
+
+		// Every image survives: once resized to 2000px the whole request fits.
+		const survivors = imageData(piped);
+		expect(survivors).toHaveLength(21);
+		// And they survive RESIZED, not merely unclamped — the payload the byte
+		// budget was weighed against is the one the provider will receive.
+		const total = survivors.reduce((sum, data) => sum + data.length, 0);
+		expect(total).toBeLessThanOrEqual(budget);
+		expect(survivors[0]?.length).toBeLessThan(oversized.length);
 	});
 });
 
