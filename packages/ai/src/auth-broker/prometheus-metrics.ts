@@ -187,6 +187,13 @@ export function emailLabelOf(report: UsageReport): string {
  * `accountLabelOf` already falls back to `limit.scope.accountId` for the same
  * reason; this keeps the two labels reading the same sources.
  *
+ * The scope fallback applies ONLY when every scoped org agrees. The label is
+ * per-report but `scope.orgId` is per-limit, so picking the first one would
+ * stamp one org onto every other org's limits — and onto the subscription
+ * `lookup` — misattributing their usage and plan. Disagreement therefore falls
+ * through to `org=""`, which is merely unattributed rather than wrong; the
+ * report-level `metadata.orgId` remains authoritative when present.
+ *
  * Canonicalized (trim + lowercase) to match the storage layer's org keying, and
  * emitted as `org=""` when absent (single-org accounts) so the label set stays
  * consistent across every sample of a family — an inconsistent set fails the
@@ -196,11 +203,17 @@ export function emailLabelOf(report: UsageReport): string {
 export function orgLabelOf(report: UsageReport): string {
 	const orgId = report.metadata?.orgId;
 	if (typeof orgId === "string" && orgId.trim().length > 0) return orgId.trim().toLowerCase();
+	let scoped: string | undefined;
 	for (const limit of report.limits) {
 		const scopeOrg = limit.scope.orgId;
-		if (typeof scopeOrg === "string" && scopeOrg.trim().length > 0) return scopeOrg.trim().toLowerCase();
+		if (typeof scopeOrg !== "string") continue;
+		const canonical = scopeOrg.trim().toLowerCase();
+		if (canonical.length === 0) continue;
+		// A second, different org means no single value can label the report.
+		if (scoped !== undefined && scoped !== canonical) return "";
+		scoped = canonical;
 	}
-	return "";
+	return scoped ?? "";
 }
 
 /**
@@ -538,31 +551,19 @@ export function renderUsageMetrics(
 		}
 
 		// Two limits whose ids differ ONLY inside an elided digit run collapse to
-		// the same `limit_id`, and `add()` would then drop the second as a
-		// duplicate. Elision has to stay unconditional — restricting it to known
-		// reset-derived shapes reopens the unbounded-cardinality hole for the next
-		// provider — so disambiguate the collision instead.
+		// the same `limit_id`. Elision has to stay unconditional — restricting it
+		// to known reset-derived shapes reopens the unbounded-cardinality hole for
+		// the next provider — so the collision falls through to `add()`, which
+		// drops the second and records a note.
 		//
-		// The suffix is the id's rank among the colliding ORIGINAL ids, sorted, not
-		// its position in `report.limits`: a provider that reorders its array
-		// between fetches would otherwise swap two series' identities and make each
-		// one's history a mix of both limits. Cardinality stays bounded by the
-		// report's limit count — what it was before elision — and the ids that do
-		// not collide (every provider today) render byte-identically.
-		const collidingIds = new Map<string, string[]>();
+		// A rank suffix among the colliding ids is NOT an option: the rank is
+		// derived from the current report's collision membership, so a limit's
+		// series identity would change whenever a peer appears or disappears —
+		// `quota-ts#1` becoming `quota-ts` when its lexically-earlier peer drops
+		// out silently inherits the other limit's history, which is worse than a
+		// gap. Keeping `add()`'s drop-and-note leaves the surviving series' own
+		// identity invariant and surfaces the loss in the exposition.
 		for (const limit of report.limits) {
-			const elided = stableLabelId(limit.id);
-			const group = collidingIds.get(elided);
-			if (group) group.push(limit.id);
-			else collidingIds.set(elided, [limit.id]);
-		}
-		for (const group of collidingIds.values()) {
-			if (group.length > 1) group.sort();
-		}
-		for (const limit of report.limits) {
-			const elided = stableLabelId(limit.id);
-			const group = collidingIds.get(elided);
-			const rank = group && group.length > 1 ? group.indexOf(limit.id) : 0;
 			const base: readonly Label[] = [
 				["provider", provider],
 				["account", account],
@@ -571,7 +572,7 @@ export function renderUsageMetrics(
 				// Both ids are provider-authored and some providers derive them
 				// from the window's reset instant, which would re-key every
 				// series on each reset — see stableLabelId.
-				["limit_id", rank === 0 ? elided : `${elided}#${rank}`],
+				["limit_id", stableLabelId(limit.id)],
 				["window", limit.window === undefined ? "" : stableLabelId(limit.window.id)],
 			];
 			addLimit(add, base, limit);
