@@ -853,37 +853,30 @@ describe("nextRenewalSeconds", () => {
 		);
 	});
 
-	// `SubscriptionLookup` is an interface an embedder implements, so
-	// `renewsAtSeconds` is only nominally a number. A non-representable anchor
-	// makes every derived date component NaN; a forward search for the first
-	// candidate `>= now` never terminates on one, wedging the scrape. Each arm
-	// must instead yield no renewal at all.
-	test("a non-representable anchor yields no renewal rather than searching forever", () => {
-		const now = Date.UTC(2026, 7, 5) / 1000;
-		expect(nextRenewalSeconds(Number.NaN, now)).toBeUndefined();
-		expect(nextRenewalSeconds(Number.POSITIVE_INFINITY, now)).toBeUndefined();
-		expect(nextRenewalSeconds(Number.NEGATIVE_INFINITY, now)).toBeUndefined();
-		// Finite, but past the ±8.64e15 ms `Date` range, so an Invalid Date.
-		expect(nextRenewalSeconds(1e15, now)).toBeUndefined();
-		expect(nextRenewalSeconds(-1e15, now)).toBeUndefined();
-		// A bad clock is the symmetric case and must not wedge either.
-		expect(nextRenewalSeconds(Date.UTC(2026, 0, 15) / 1000, Number.NaN)).toBeUndefined();
-		expect(nextRenewalSeconds(Date.UTC(2026, 0, 15) / 1000, 1e15)).toBeUndefined();
-	});
-
-	// The renderer's own guard: a bad anchor drops its own gauge and nothing
-	// else. Out-of-process because the pre-fix failure mode is a hang, which
-	// in-process would take down the whole file instead of failing one test.
+	// Every non-representable anchor is exercised HERE, out of process, and
+	// never in-process: the pre-fix failure mode is a forward search that never
+	// terminates, so the first in-process call would wedge the worker before any
+	// later assertion — or this subprocess — could run, turning a regression into
+	// a suite-wide hang instead of one failing test. The child covers both
+	// `nextRenewalSeconds` directly and the renderer's own guard (a bad anchor
+	// drops its own gauge and nothing else), and is raced against a timer so a
+	// wedge is a bounded failure.
 	test("a non-representable anchor drops only its gauge, and the scrape terminates", async () => {
 		const child = Bun.spawn(
 			[process.execPath, path.join(import.meta.dir, "fixtures/auth-broker-metrics-renewal-anchor.ts")],
 			{ cwd: path.resolve(import.meta.dir, "../../.."), stdout: "pipe", stderr: "pipe" },
 		);
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(child.stdout).text(),
-			new Response(child.stderr).text(),
-			child.exited,
-		]);
+		// Killed and reaped on timeout: an unreaped wedged child outlives the test
+		// and holds the runner open.
+		const settled = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+		const timer = Bun.sleep(30_000).then(() => "timeout" as const);
+		const outcome = await Promise.race([settled, timer]);
+		if (outcome === "timeout") {
+			child.kill("SIGKILL");
+			await child.exited;
+			throw new Error("the renewal-anchor scrape did not terminate within 30s");
+		}
+		const [stdout, stderr, exitCode] = outcome;
 
 		expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
 		// Every arm renders, and none emits a renewal series — not even a NaN one.

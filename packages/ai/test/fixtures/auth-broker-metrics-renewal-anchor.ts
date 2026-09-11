@@ -1,4 +1,4 @@
-import { renderUsageMetrics } from "@oh-my-pi/pi-ai/auth-broker/prometheus-metrics";
+import { nextRenewalSeconds, renderUsageMetrics } from "@oh-my-pi/pi-ai/auth-broker/prometheus-metrics";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
 
 // A scrape whose subscription lookup returns a non-representable renewal anchor.
@@ -47,6 +47,31 @@ for (const [name, renewsAtSeconds] of anchors) {
 	if (!out.includes('llm_usage_limit_used_fraction{provider="anthropic"')) {
 		throw new Error(`${name}: usage series was lost`);
 	}
+}
+
+// `nextRenewalSeconds` is probed here too, not in-process: it is the function
+// that actually searches, so a regression hangs on the FIRST call and the
+// in-process arms would never reach this subprocess at all. A bad clock is the
+// symmetric case and must not wedge either.
+const goodAnchor = Date.UTC(2026, 0, 15) / 1000;
+const nowSec = Date.UTC(2026, 7, 5) / 1000;
+const direct: Array<readonly [string, number, number]> = [
+	["anchor-nan", Number.NaN, nowSec],
+	["anchor-infinity", Number.POSITIVE_INFINITY, nowSec],
+	["anchor-negative-infinity", Number.NEGATIVE_INFINITY, nowSec],
+	["anchor-out-of-range", 1e15, nowSec],
+	["anchor-negative-out-of-range", -1e15, nowSec],
+	["now-nan", goodAnchor, Number.NaN],
+	["now-out-of-range", goodAnchor, 1e15],
+];
+for (const [name, anchor, now] of direct) {
+	const result = nextRenewalSeconds(anchor, now);
+	if (result !== undefined) throw new Error(`${name}: expected no renewal, got ${result}`);
+}
+// A representable pair must still resolve, so "returns undefined" cannot pass
+// by refusing every input.
+if (nextRenewalSeconds(goodAnchor, nowSec) !== Date.UTC(2026, 7, 15) / 1000) {
+	throw new Error("a representable anchor must still roll forward");
 }
 
 process.stdout.write(`${JSON.stringify(renewalLines)}\n`);
