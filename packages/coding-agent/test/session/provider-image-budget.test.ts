@@ -3,9 +3,9 @@ import type { AssistantMessage, Context, ImageContent, Model, TextContent } from
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	applyProviderImagePipeline,
 	clampProviderContextImageCount,
 	clampProviderContextImages,
-	dropUnreadableContextImages,
 	PROVIDER_IMAGE_COUNT_DECODE_SLACK,
 } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
@@ -521,11 +521,17 @@ describe("provider context image budgets", () => {
 	});
 
 	it("does not spend the byte budget on an image the unreadable pass will drop anyway", async () => {
-		// `sdk.ts` runs this clamp BEFORE `dropUnreadableContextImages` (`:3454`
-		// then `:3459`), so a corrupt newest image was charged against the byte
-		// budget, the oldest-first clamp evicted the VALID older image to make
-		// room, and the unreadable pass then replaced the corrupt one too — the
-		// request lost every image although the readable one fit on its own.
+		// Exercises `applyProviderImagePipeline` — the unit both `sdk.ts`
+		// `transformProviderContext` callbacks now call — rather than a
+		// hand-composed step order. A manual composition here would keep passing
+		// if a production callsite later reversed the order and reintroduced this
+		// eviction.
+		//
+		// The bug: the byte clamp ran BEFORE the unreadable pass, so a corrupt
+		// newest image was charged against the budget, the oldest-first clamp
+		// evicted the VALID older image to make room, and the unreadable pass then
+		// replaced the corrupt one too — the request lost every image although the
+		// readable one fit on its own.
 		const budget = providerImageByteBudget(ANTHROPIC_MODEL.provider);
 
 		// A REAL decodable PNG, over half the budget. The unreadable check decodes
@@ -547,17 +553,12 @@ describe("provider context image budgets", () => {
 			],
 		};
 
-		// Readable-first — the order the fix establishes.
-		const readableFirst = await dropUnreadableContextImages(context, ANTHROPIC_MODEL);
-		expect(imageData(clampProviderContextImages(readableFirst, ANTHROPIC_MODEL))).toEqual([valid]);
+		// Identity normalizer: the model-specific pass is not what this covers,
+		// and it keeps the assertion about the surviving image's own bytes.
+		const piped = await applyProviderImagePipeline(context, ANTHROPIC_MODEL, async ctx => ctx);
 
-		// Clamp-first — the order `sdk.ts` used — evicts the valid image to make
-		// room for bytes that are about to be thrown away, leaving none.
-		const clampFirst = await dropUnreadableContextImages(
-			clampProviderContextImages(context, ANTHROPIC_MODEL),
-			ANTHROPIC_MODEL,
-		);
-		expect(imageData(clampFirst)).toEqual([]);
+		// The readable image survives whole; only the corrupt one is replaced.
+		expect(imageData(piped)).toEqual([valid]);
 	});
 });
 
