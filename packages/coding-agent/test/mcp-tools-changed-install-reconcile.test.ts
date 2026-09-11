@@ -20,7 +20,7 @@
  * the same re-list the recovery loop performs, with no listener installed —
  * reproduces the window with no sleeps and no reliance on the retry backoff.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -49,12 +49,18 @@ describe("MCP tools-changed install-time reconcile", () => {
 	// directory. Redirect both that path and os.homedir() so the session
 	// connects only to the fixture and never spawns the developer's real MCP
 	// servers.
+	//
+	// Held for ONE test, not for the describe block: `setAgentDir` rewrites the
+	// shared resolver and `process.env.PI_CODING_AGENT_DIR`, so a block-scoped
+	// override is visible to every other suite running in the same Bun process —
+	// and points them at a directory this file deletes on teardown. Restoring
+	// per test keeps the window to the test that needs it.
 	let originalAgentDir: string;
 	let isolatedHome: string;
 	let isolatedAgentDir: string;
 	let previousInstance: MCPManager | undefined;
 
-	beforeAll(async () => {
+	beforeEach(async () => {
 		isolatedHome = path.join(os.tmpdir(), `omp-mcp-install-reconcile-home-${Snowflake.next()}`);
 		isolatedAgentDir = path.join(isolatedHome, ".omp", "agent");
 		fs.mkdirSync(isolatedAgentDir, { recursive: true });
@@ -62,15 +68,6 @@ describe("MCP tools-changed install-time reconcile", () => {
 		setAgentDir(isolatedAgentDir);
 		authStorage = await AuthStorage.create(":memory:");
 		modelRegistry = new ModelRegistry(authStorage);
-	});
-
-	afterAll(() => {
-		authStorage.close();
-		setAgentDir(originalAgentDir);
-		removeSyncWithRetries(isolatedHome);
-	});
-
-	beforeEach(() => {
 		previousInstance = MCPManager.instance();
 		tempDir = path.join(os.tmpdir(), `omp-mcp-install-reconcile-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
@@ -97,6 +94,9 @@ describe("MCP tools-changed install-time reconcile", () => {
 
 	afterEach(() => {
 		MCPManager.setInstance(previousInstance);
+		authStorage.close();
+		setAgentDir(originalAgentDir);
+		removeSyncWithRetries(isolatedHome);
 		removeSyncWithRetries(tempDir);
 		mock.restore();
 	});
