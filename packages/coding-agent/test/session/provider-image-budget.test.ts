@@ -9,6 +9,7 @@ import {
 	PROVIDER_IMAGE_COUNT_DECODE_SLACK,
 } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
+import { largeDecodablePng, smoothDecodablePng } from "./fixtures/decodable-png";
 
 const UMANS_MODEL = buildModel({
 	id: "umans-glm-5.2",
@@ -112,115 +113,44 @@ function textData(context: Context): string[] {
 }
 
 /**
- * A decodable PNG whose encoded size tracks its raster size.
- *
- * Built by hand rather than upscaled from a seed: `Bun.Image` re-encodes, and a
- * replicated or flat raster compresses to a few KB, far under any byte budget.
- * Deflate "stored" blocks (BTYPE=00) keep the IDAT stream the size of the raw
- * scanlines, so a 1100px square lands near 4.8 MB of base64.
- *
- * Per-pixel noise, so it stays large through a re-encode as well.
+ * An assistant turn replaying native `image_generation_call` results, the way a
+ * continuing same-model Responses request does. The base64 lives on
+ * `providerPayload`, never in `content` — which is exactly why a content-only
+ * tally reads zero for it.
  */
-function largeDecodablePng(edge: number): Uint8Array {
-	return decodablePng(edge, (y, x) => (y * 7 + x * 13) % 256);
-}
-
-/**
- * As {@link largeDecodablePng}, but low-detail: still enormous stored
- * uncompressed, yet it collapses to tens of KB once resized and re-encoded.
- * That gap is what distinguishes a byte budget measured before the provider's
- * downscale from one measured after it.
- */
-function smoothDecodablePng(edge: number): Uint8Array {
-	return decodablePng(edge, y => (y >> 4) & 0xf0);
-}
-
-/** Truecolour PNG with an uncompressed IDAT, each sample from `sample`. */
-function decodablePng(edge: number, sample: (y: number, x: number) => number): Uint8Array {
-	const raw = new Uint8Array(edge * (1 + edge * 3));
-	for (let y = 0; y < edge; y++) {
-		const row = y * (1 + edge * 3);
-		raw[row] = 0; // filter: None
-		for (let x = 0; x < edge * 3; x++) raw[row + 1 + x] = sample(y, x);
-	}
-	const chunk = (type: string, data: Uint8Array): Uint8Array => {
-		const body = new Uint8Array(4 + data.length);
-		body.set(new TextEncoder().encode(type), 0);
-		body.set(data, 4);
-		const out = new Uint8Array(4 + body.length + 4);
-		new DataView(out.buffer).setUint32(0, data.length);
-		out.set(body, 4);
-		new DataView(out.buffer).setUint32(4 + body.length, crc32(body));
-		return out;
+function replayTurn(results: string[], timestamp: number): AssistantMessage {
+	return {
+		...assistantTurn([], timestamp),
+		providerPayload: {
+			type: "openaiResponsesHistory",
+			provider: "openai",
+			items: [
+				{ type: "reasoning", id: "rs_keepme", summary: [] },
+				...results.map((result, index) => ({
+					type: "image_generation_call",
+					id: `ig_${index}`,
+					status: "completed",
+					result,
+				})),
+			],
+		},
 	};
-	const ihdr = new Uint8Array(13);
-	const view = new DataView(ihdr.buffer);
-	view.setUint32(0, edge);
-	view.setUint32(4, edge);
-	ihdr[8] = 8; // bit depth
-	ihdr[9] = 2; // colour type: truecolour
-	const parts = [
-		new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		chunk("IHDR", ihdr),
-		chunk("IDAT", zlibStored(raw)),
-		chunk("IEND", new Uint8Array(0)),
-	];
-	const total = parts.reduce((sum, part) => sum + part.length, 0);
-	const png = new Uint8Array(total);
-	let at = 0;
-	for (const part of parts) {
-		png.set(part, at);
-		at += part.length;
-	}
-	return png;
 }
 
-/** zlib stream of `data` in uncompressed deflate blocks. */
-function zlibStored(data: Uint8Array): Uint8Array {
-	const MAX = 65535;
-	const blocks = Math.ceil(data.length / MAX);
-	const out = new Uint8Array(2 + blocks * 5 + data.length + 4);
-	out[0] = 0x78;
-	out[1] = 0x01;
-	let at = 2;
-	for (let start = 0; start < data.length; start += MAX) {
-		const slice = data.subarray(start, Math.min(start + MAX, data.length));
-		out[at++] = start + MAX >= data.length ? 1 : 0;
-		out[at++] = slice.length & 0xff;
-		out[at++] = (slice.length >> 8) & 0xff;
-		out[at++] = ~slice.length & 0xff;
-		out[at++] = (~slice.length >> 8) & 0xff;
-		out.set(slice, at);
-		at += slice.length;
+/** Replayed base64 still present on `context`'s assistant payloads. */
+function replayedResults(context: Context): string[] {
+	const out: string[] = [];
+	for (const message of context.messages) {
+		if (message.role !== "assistant") continue;
+		const payload = message.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) continue;
+		for (const item of payload.items) {
+			if (item.type === "image_generation_call" && typeof item.result === "string" && item.result.length > 0) {
+				out.push(item.result);
+			}
+		}
 	}
-	new DataView(out.buffer).setUint32(at, adler32(data));
-	return out.subarray(0, at + 4);
-}
-
-function adler32(data: Uint8Array): number {
-	let a = 1;
-	let b = 0;
-	for (const byte of data) {
-		a = (a + byte) % 65521;
-		b = (b + a) % 65521;
-	}
-	return ((b << 16) | a) >>> 0;
-}
-
-const CRC_TABLE = (() => {
-	const table = new Uint32Array(256);
-	for (let n = 0; n < 256; n++) {
-		let c = n;
-		for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-		table[n] = c >>> 0;
-	}
-	return table;
-})();
-
-function crc32(data: Uint8Array): number {
-	let c = 0xffffffff;
-	for (const byte of data) c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
-	return (c ^ 0xffffffff) >>> 0;
+	return out;
 }
 
 describe("provider context image budgets", () => {
@@ -616,6 +546,47 @@ describe("provider context image budgets", () => {
 		const total = survivors.reduce((sum, data) => sum + data.length, 0);
 		expect(total).toBeLessThanOrEqual(budget);
 		expect(survivors[0]?.length).toBeLessThan(oversized.length);
+	});
+
+	it("charges replayed native image results, which do reach the wire", async () => {
+		// A completed `image_generation_call` keeps its base64 on
+		// `providerPayload`, and `openai-shared.ts` replays the sanitized item
+		// verbatim on a continuing same-model Responses request. The tally read
+		// only generic `content`, so several generated images could bust the byte
+		// budget while the count stayed zero and nothing was ever evicted.
+		const budget = providerImageByteBudget(ANTHROPIC_MODEL.provider);
+		const generated = Buffer.from(largeDecodablePng(1100)).toString("base64");
+		if (generated.length * 2 <= budget) throw new Error("fixture cannot bust the byte budget");
+		const context: Context = { messages: [replayTurn([generated, generated], 1)] };
+
+		const clamped = clampProviderContextImages(context, ANTHROPIC_MODEL);
+
+		// One is evicted to fit; the other survives.
+		expect(replayedResults(clamped)).toEqual([generated]);
+		// Evicted by CLEARING the result, so the rest of the payload survives —
+		// the sanitizer then drops the emptied item from replay on its own.
+		const payload = clamped.messages[0]?.role === "assistant" ? clamped.messages[0].providerPayload : undefined;
+		const items = payload?.type === "openaiResponsesHistory" ? payload.items : [];
+		expect(items.some(item => item.type === "reasoning" && item.id === "rs_keepme")).toBe(true);
+		expect(items).toHaveLength(3);
+	});
+
+	it("still never charges a display-only assistant content image", async () => {
+		// The original rule stands for generic content: those blocks are dropped
+		// before a request is built, so charging them would evict a live user
+		// image to make room for something never sent.
+		const budget = providerImageByteBudget(ANTHROPIC_MODEL.provider);
+		const big = Buffer.from(largeDecodablePng(1100)).toString("base64");
+		if (big.length * 2 <= budget) throw new Error("fixture cannot bust the byte budget");
+		const user = image(big);
+		const context: Context = {
+			messages: [assistantTurn([image(big), image(big)], 1), { role: "user", content: [user], timestamp: 2 }],
+		};
+
+		const clamped = clampProviderContextImages(context, ANTHROPIC_MODEL);
+
+		// Nothing is dropped: only the single user image is charged, and it fits.
+		expect(clamped).toBe(context);
 	});
 });
 
