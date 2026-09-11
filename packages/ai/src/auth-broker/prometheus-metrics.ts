@@ -16,7 +16,7 @@
  * cannot mint a fresh series set on every quota reset.
  */
 import type { UsageLimit, UsageReport, UsageStatus } from "../usage";
-import { resolveUsedFraction } from "../usage";
+import { canonicalizePlan, resolveUsedFraction } from "../usage";
 
 /** Content-type for a Prometheus v0.0.4 text exposition response. */
 export const PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
@@ -291,19 +291,11 @@ export interface SubscriptionLookup {
 }
 
 /**
- * Canonicalize a plan string the same way the storage layer's `getUsagePlanType`
- * does (`auth-storage.ts` trim / lowercase / whitespace-and-hyphen-to-`_` /
- * strip leading `chatgpt_`), so a config-declared plan and a Codex-derived
- * `planType` produce the identical `plan` label and the `on(provider, plan)`
- * join matches.
+ * Re-exported so the metrics renderer's callers keep one import site. The
+ * implementation is shared with the storage layer's plan classification — see
+ * {@link canonicalizePlan} in `../usage`.
  */
-export function canonicalizePlan(plan: string): string {
-	const normalized = plan
-		.trim()
-		.toLowerCase()
-		.replace(/[\s-]+/g, "_");
-	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
-}
+export { canonicalizePlan };
 
 /**
  * Given a renewal ANCHOR (unix seconds, a known past-or-future bill date) and

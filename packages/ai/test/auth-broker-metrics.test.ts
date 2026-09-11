@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import {
 	accountLabelOf,
+	canonicalizePlan,
 	emailLabelOf,
 	nextRenewalSeconds,
 	renderUsageMetrics,
@@ -425,6 +426,29 @@ describe("renderUsageMetrics", () => {
 		// Per-plan facts carry only {provider, plan}, plan canonicalized identically.
 		expect(out).toContain('llm_subscription_plan_capacity_weight{provider="anthropic",plan="max_20x"} 4');
 		expect(out).toContain('llm_subscription_plan_price_usd{provider="anthropic",plan="max_20x"} 200');
+	});
+
+	test("classifies a credential's plan by the same canonicalization the label uses", () => {
+		// The two readers of a provider plan identifier — credential classification
+		// and the exported `plan` label — must not drift. `classifyOpenAICodexPlan`
+		// matches on canonical tokens (`pro_lite`), so a raw provider string that
+		// only canonicalizes to one proves both sides went through the shared
+		// helper rather than two copies of the rules.
+		const raw = "  ChatGPT-Pro Lite  ";
+		expect(canonicalizePlan(raw)).toBe("pro_lite");
+
+		const report = codexReport();
+		report.metadata = { ...report.metadata, planType: raw };
+		const subscriptions = {
+			lookup: (provider: string, account: string) =>
+				provider === "openai-codex" && account === "acct-codex-9" ? {} : undefined,
+			plans: [],
+		};
+		const out = renderUsageMetrics([report], { subscriptions });
+
+		// The label carries the canonical form, not the raw provider string.
+		expect(out).toContain('plan="pro_lite"');
+		expect(out).not.toContain("ChatGPT-Pro Lite");
 	});
 
 	test("skips a plan-table row whose canonical plan is empty", () => {
