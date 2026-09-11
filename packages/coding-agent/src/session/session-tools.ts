@@ -1665,6 +1665,16 @@ export class SessionTools {
 		}
 		if (!enabled) {
 			const next = active.filter(name => !owned.has(name));
+			// The registry entry goes too, not just the active name. A retained
+			// inactive entry is indistinguishable from a live tool to the
+			// late-registration path in `sdk.ts`, which sees an existing entry and
+			// declines to install an extension's same-named tool — so a session
+			// that disabled the feature would hide an extension tool that a freshly
+			// started session with the same setting exposes. Only OWNED names are
+			// dropped, so an entry another registrant already replaced survives.
+			for (const name of owned) {
+				if (isSettingGatedTool(this.#toolRegistry.get(name))) this.#toolRegistry.delete(name);
+			}
 			if (next.length === active.length) return false;
 			await this.#applyActiveToolsByName(next);
 			return true;

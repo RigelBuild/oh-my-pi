@@ -532,4 +532,25 @@ describe("createAgentSession resume: a historical role-less cycle pin survives a
 			await h.dispose();
 		}
 	});
+
+	it("clears the registry entry when a setting-gated built-in is disabled", async () => {
+		// Dropping only the ACTIVE NAME leaves an inactive registry entry behind,
+		// and the late-registration path in `sdk.ts` reads any existing entry as
+		// an incumbent to defer to — so an extension registering `tts` after the
+		// disable would be declined, while a session freshly started under the
+		// same setting exposes it. The gated group therefore removes the entries
+		// it owns, leaving the name genuinely free.
+		const h = await makeHarness("speechgen:\n  enabled: true\n");
+		try {
+			expect(h.session.getToolByName("tts")).toBeDefined();
+
+			await fs.writeFile(h.settingsPath, "speechgen:\n  enabled: false\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			expect(h.session.getEnabledToolNames()).not.toContain("tts");
+			expect(h.session.getToolByName("tts")).toBeUndefined();
+		} finally {
+			await h.dispose();
+		}
+	});
 });

@@ -4503,7 +4503,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// updates `agent.kimiApiFormat`, while the construction-time
 					// constant would pin every later capture to the old wire format.
 					kimiApiFormat: agent.kimiApiFormat,
-					preferWebsockets: preferOpenAICodexWebsockets,
+					// Live too, for the same reason as `kimiApiFormat` above: a
+					// `providers.openaiWebsockets` change reconciles onto
+					// `agent.preferWebsockets`, and the construction-time constant
+					// would keep every later capture on the old transport.
+					preferWebsockets: agent.preferWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,
