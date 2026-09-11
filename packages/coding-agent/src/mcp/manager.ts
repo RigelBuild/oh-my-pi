@@ -584,12 +584,14 @@ export class MCPManager {
 	}
 
 	/**
-	 * Connect every server discovery now admits that is not already connected.
+	 * Converge the running set on what discovery admits under the new value.
 	 *
-	 * Additive by construction: existing connections are left in place
-	 * (`connectServers` is incremental) and an already-connected name is skipped,
-	 * so this reveals newly unshadowed or newly admitted servers without
-	 * restarting anything that is already healthy.
+	 * An already-connected name is not evidence of convergence: the flip changes
+	 * which SOURCE wins a contested name, so a user-level `foo` that owned the
+	 * name while project config was off must be REPLACED by the project `foo`
+	 * that now outranks it — otherwise the live session keeps running a command
+	 * a freshly started session would not. Names whose selection did not move
+	 * are left strictly alone, so nothing healthy restarts.
 	 */
 	async #connectNewlyDiscovered(enableProjectConfig: boolean, options: MCPDiscoverOptions | undefined): Promise<void> {
 		const loaded = await this.loadConfigs(this.cwd, {
@@ -600,14 +602,31 @@ export class MCPManager {
 		});
 		const configs: Record<string, MCPServerConfig> = {};
 		const sources: Record<string, SourceMeta> = {};
+		const superseded: string[] = [];
 		for (const name in loaded.configs) {
 			const config = loaded.configs[name];
-			if (!config || this.#serverConfigs.has(name)) continue;
+			if (!config) continue;
+			const running = this.#serverConfigs.get(name);
+			if (running !== undefined) {
+				// Compare the SELECTION, not the name. The source's level and path say
+				// which file won the name; the config catches an edit inside the
+				// winning file that the level alone would hide. `Bun.deepEquals` is
+				// what the settings and capability layers already use for this shape.
+				const current = this.#sources.get(name);
+				const next = loaded.sources[name];
+				if (current?.level === next?.level && current?.path === next?.path && Bun.deepEquals(running, config)) {
+					continue;
+				}
+				superseded.push(name);
+			}
 			configs[name] = config;
 			const source = loaded.sources[name];
 			if (source) sources[name] = source;
 		}
 		if (Object.keys(configs).length === 0) return;
+		// Drop superseded connections first: `connectServers` is incremental and
+		// would otherwise see the name as already live and leave the loser running.
+		await Promise.all(superseded.map(name => this.disconnectServer(name)));
 		await this.connectServers(configs, sources, options?.onStatus);
 	}
 

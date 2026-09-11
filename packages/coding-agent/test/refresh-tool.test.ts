@@ -263,6 +263,33 @@ describe("/refresh failure sanitization", () => {
 		expect(message).not.toContain(longToken);
 	});
 
+	// `shortenPath` already resolves a drive-letter or UNC home, but the matcher
+	// that feeds it only recognized Unix `/...`, so a Windows config path printed
+	// in full. Asserted through the real command, with the home injected via
+	// `os.homedir` so the case runs on this Linux CI box as well as on Windows.
+	it("shortens a Windows home path in the reload error", async () => {
+		const windowsHome = "C:\\Users\\name";
+		const homedir = vi.spyOn(os, "homedir").mockReturnValue(windowsHome);
+		try {
+			const err = new Error(`Settings config is invalid: ${windowsHome}\\.omp\\config.yml: bad indentation`);
+			const refresh = vi.fn(async (_scope: RefreshScope) => {
+				throw err;
+			});
+			const h = commandRuntime(refresh);
+
+			const result = await executeAcpBuiltinSlashCommand("/refresh settings", h.runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const message = (h.output.mock.calls[0]?.[0] as string) ?? "";
+			// Pre-fix the Unix-only matcher skipped this entirely and the full
+			// `C:\Users\name\...` path reached the TUI.
+			expect(message).not.toContain(windowsHome);
+			expect(message).toContain("~/.omp/config.yml");
+		} finally {
+			homedir.mockRestore();
+		}
+	});
+
 	it("strips ANSI escapes and other terminal control bytes from the reload error", async () => {
 		// A YAML-parser or filesystem error can carry terminal control bytes
 		// verbatim. The whitespace replacements handle none of these, so without

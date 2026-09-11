@@ -4629,7 +4629,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// MCP tool, side effects included. A hallucinated call from here
 					// correctly stays `not found`, and suggesting session devices it
 					// cannot call would only mislead it.
-					intentTracing: !!intentField,
+					//
+					// Live too, for the same reason as `kimiApiFormat` and
+					// `preferWebsockets` above: a `tools.intentTracing` change
+					// reconciles onto `agent.intentTracing`, and the construction-time
+					// constant would pin every later capture to the launch-time
+					// tool-schema policy.
+					intentTracing: agent.intentTracing,
 					pruneToolDescriptions: inlineToolDescriptors,
 					dialect: resolveDialect(settings.get("tools.format"), captureModel),
 					abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
