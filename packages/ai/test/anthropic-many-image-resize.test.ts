@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { crc32 as zlibCrc32, deflateSync as zlibDeflateSync } from "node:zlib";
-import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { setAnthropicManyImageRungEncoder, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, Context, ImageContent, Model, TextContent, Usage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -325,28 +325,19 @@ describe("Anthropic many-image payload resizing", () => {
 		const smallImage: ImageContent = { type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" };
 		const context = makeToolResultContext([largeImage, ...Array.from({ length: 20 }, () => smallImage)]);
 
-		const proto = Bun.Image.prototype as unknown as {
-			jpeg: (opts?: { quality?: number }) => unknown;
-			webp: (opts?: { quality?: number }) => unknown;
-		};
-		const realJpeg = proto.jpeg;
-		const realWebp = proto.webp;
-		// The initial probe encodes at q85; every ladder rung is below it.
-		proto.jpeg = function patchedJpeg(opts?: { quality?: number }) {
-			if (opts?.quality !== undefined && opts.quality < 85) throw new Error("jpeg encode failed");
-			return realJpeg.call(this, opts);
-		};
-		proto.webp = function patchedWebp(opts?: { quality?: number }) {
-			if (opts?.quality !== undefined && opts.quality < 85) throw new Error("webp encode failed");
-			return realWebp.call(this, opts);
-		};
+		// Through the rung-encoder seam rather than `Bun.Image.prototype`: this
+		// package runs `bun test --parallel`, so patching the prototype reaches
+		// every image operation in the process and fails concurrent encodes in
+		// other files. The seam is scoped to the ladder this test is about.
+		const restoreEncoder = setAnthropicManyImageRungEncoder(async () => {
+			throw new Error("rung encode failed");
+		});
 
 		let images: AnthropicImageBlock[];
 		try {
 			images = extractToolResultImages(await capturePayload(context));
 		} finally {
-			proto.jpeg = realJpeg;
-			proto.webp = realWebp;
+			restoreEncoder();
 		}
 
 		expect(images).toHaveLength(21);
