@@ -83,6 +83,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
+	$flag,
 	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
@@ -614,9 +615,8 @@ function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[]
  * own prompt-state move (the flag is not the render's input anyway: the
  * `<redacted-content>` block tracks whether the built obfuscator actually
  * reports secrets). So are the values sdk.ts captures OUTSIDE the closure
- * (`inlineToolDescriptors`, `task.eager`, `tools.intentTracing`): those are
- * frozen at construction by design, so a reload cannot move what the render
- * reads.
+ * (`inlineToolDescriptors`, `task.eager`): those are frozen at construction by
+ * design, so a reload cannot move what the render reads.
  */
 const PROMPT_AFFECTING_SETTING_PATHS = [
 	// Workstation block: the model-identification line.
@@ -666,6 +666,12 @@ const PROMPT_AFFECTING_SETTING_PATHS = [
 	// it must rebuild — otherwise the refresh reports success while the model
 	// keeps seeing (or keeps missing) the tree.
 	"includeWorkspaceTree",
+	// Whether the intent-field guidance block is rendered, and whether the
+	// required field is injected into every tool schema. The render reads it
+	// live, so a refresh that edits it must rebuild — otherwise the prompt keeps
+	// instructing the model about a field the schemas no longer carry (or omits
+	// guidance for one they now require).
+	"tools.intentTracing",
 ] as const satisfies readonly SettingPath[];
 
 /**
@@ -719,6 +725,14 @@ interface GenerationSettings {
 	readonly preferWebsockets: boolean | undefined;
 	readonly abortOnFabricatedToolResult: boolean;
 	readonly kimiApiFormat: Agent["kimiApiFormat"];
+	/**
+	 * Decides whether the required intent field is injected into every tool
+	 * schema, so it is part of the provider-facing request shape, not just the
+	 * prompt. `PI_INTENT_TRACING` overrides the setting and is read here the same
+	 * way sdk.ts reads it at construction, so an env-pinned session keeps its
+	 * value across a refresh.
+	 */
+	readonly intentTracing: boolean;
 }
 
 export class AgentSession {
@@ -1046,6 +1060,30 @@ export class AgentSession {
 	 * request) against the pre-refresh window.
 	 */
 	#extendedContextReconciliation: Promise<void> = Promise.resolve();
+	/**
+	 * Join handle for reconciliations owned OUTSIDE this class — the settings
+	 * listeners `createAgentSession` installs for the subsystems it constructs
+	 * (workspace roots, and anything later added beside them).
+	 *
+	 * Same eager-start / promise-only-handle contract as the fields above: the
+	 * listener starts its work immediately and only hands the promise here, so a
+	 * refresh can join it. Settings listeners are synchronous and their return
+	 * values are discarded, so without a registered handle a refresh reports
+	 * completion — and the turn loop can dispatch the next provider request —
+	 * while the prompt still advertises the pre-refresh state.
+	 * Failure-swallowing like {@link #refreshTail}; the listener owns recovery.
+	 */
+	#hostReconciliation: Promise<void> = Promise.resolve();
+
+	/**
+	 * Register work a `/refresh settings` must wait for, from a settings listener
+	 * outside this class. Both the in-flight and any earlier reconciliation stay
+	 * joinable, so a refresh that moved several such settings waits for all.
+	 */
+	registerHostReconciliation(work: Promise<unknown>): void {
+		const previous = this.#hostReconciliation;
+		this.#hostReconciliation = Promise.allSettled([previous, work]).then(() => {});
+	}
 
 	readonly #ttsr: TtsrCoordinator;
 	readonly #stats: SessionStatsTracker;
@@ -6043,6 +6081,11 @@ export class AgentSession {
 				// the new context window and the next turn would compute compaction
 				// limits from the stale one.
 				await this.#extendedContextReconciliation;
+				// Same shape again for the reconciliations `createAgentSession`'s own
+				// listeners own (workspace roots): they persist the new value and
+				// rebuild the prompt, so returning before they land leaves an added
+				// root unadvertised and a removed one still in the model's prompt.
+				await this.#hostReconciliation;
 			}
 			// The obfuscator is built ONCE at construction from `secrets.enabled`
 			// + `secrets.yml`. The `secrets.enabled` setting hook only toggles
@@ -6352,6 +6395,10 @@ export class AgentSession {
 			// metadata" and must reach the agent as `undefined`, not as a literal
 			// format — the mapping sdk.ts applies at construction.
 			kimiApiFormat: kimiApiFormat === "auto" ? undefined : kimiApiFormat,
+			// Same env-override precedence sdk.ts applies at construction, so a
+			// `PI_INTENT_TRACING`-pinned session is not silently un-pinned by a
+			// settings edit.
+			intentTracing: $flag("PI_INTENT_TRACING", this.settings.get("tools.intentTracing")),
 		};
 	}
 
@@ -6403,6 +6450,9 @@ export class AgentSession {
 		}
 		if (next.kimiApiFormat !== previous.kimiApiFormat) {
 			this.agent.kimiApiFormat = next.kimiApiFormat;
+		}
+		if (next.intentTracing !== previous.intentTracing) {
+			this.agent.intentTracing = next.intentTracing;
 		}
 		// The session-level copy backs SIDE-CHANNEL requests (`/btw`, compaction,
 		// advisors), which read `#preferWebsockets` directly rather than the

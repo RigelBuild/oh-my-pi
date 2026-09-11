@@ -1467,7 +1467,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.additionalDirectories
 			? []
 			: additionalWorkspaceDirectories(
-					normalizeSessionWorkspace({ cwd, directories: settings.get("workspace.additionalDirectories") }),
+					normalizeSessionWorkspace({
+						// `sessionManager.getCwd()` for the same reason the live
+						// reconcile uses it: it is the directory the roots are actually
+						// resolved against.
+						cwd: sessionManager.getCwd(),
+						directories: settings.get("workspace.additionalDirectories"),
+					}),
 				),
 	);
 	if (configuredDirs.length > 0) {
@@ -3184,7 +3190,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const inlineToolDescriptors = shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), model?.id);
 		const eagerTasks = settings.get("task.eager") !== "default";
 		const eagerTasksAlways = settings.get("task.eager") === "always";
-		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
+		// Read live, per render, for the same reason the workspace tree below is:
+		// `tools.intentTracing` decides whether the required intent field is
+		// injected into every tool schema, so a value captured here left both the
+		// prompt guidance and request assembly on the launch-time policy while a
+		// reloaded settings view reported the new one. `PI_INTENT_TRACING` still
+		// overrides the setting, checked on each read so the precedence holds.
+		const liveIntentField = (): string | undefined =>
+			$flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
+		const intentField = liveIntentField();
 		// Read live, per render: `/refresh settings` can flip this on disk, and a
 		// value captured here would leave the prompt reporting a refresh while the
 		// model kept seeing (or kept missing) the tree. The tree itself follows:
@@ -3324,7 +3338,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				skillsSettings: settings.getGroup("skills"),
 				inlineToolDescriptors,
 				nativeTools,
-				intentField,
+				intentField: liveIntentField(),
 				eagerTasks,
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
@@ -4346,16 +4360,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// against the live list: the live list already contains them, so a union
 			// could never revoke a removed root. See
 			// `reconcileSettingsWorkspaceRoots` for why the origin has to be tracked.
+			//
+			// Resolved against the session's CURRENT directory, not the
+			// construction-time `cwd`: after `/move` or a cross-project resume both
+			// `SessionManager` and `Settings` already point at the destination, so a
+			// relative root like `../shared` would otherwise normalize under the old
+			// project and grant a directory the operator never named.
 			const { roots, owned } = reconcileSettingsWorkspaceRoots({
-				cwd,
+				cwd: sessionManager.getCwd(),
 				live: sessionManager.getAdditionalDirectories(),
 				previouslyOwned: settingsOwnedRoots,
 				configured: Array.isArray(value) ? (value as string[]) : [],
 			});
 			settingsOwnedRoots = owned;
-			void sessionManager.setAdditionalDirectories(roots).then(
-				() => session.refreshBaseSystemPrompt(),
-				error => logger.warn("Failed to apply refreshed workspace directories", { error: String(error) }),
+			// Started eagerly, and the handle is registered so `/refresh settings`
+			// joins it: a listener return value is discarded, so without this the
+			// refresh reports completion while the prompt still advertises the
+			// pre-refresh roots.
+			session.registerHostReconciliation(
+				sessionManager.setAdditionalDirectories(roots).then(
+					() => session.refreshBaseSystemPrompt(),
+					error => logger.warn("Failed to apply refreshed workspace directories", { error: String(error) }),
+				),
 			);
 		});
 		disposeCallbacks.add(unsubscribeLiveWorkspaceSettings);

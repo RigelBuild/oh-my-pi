@@ -26,6 +26,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { makeAssistantMessage } from "./session-manager/helpers";
 
 function buildLocalModel(api: string): Model<Api> {
 	return buildModel({
@@ -49,7 +50,7 @@ interface Harness {
 	dispose: () => Promise<void>;
 }
 
-async function makeHarness(initialConfig: string): Promise<Harness> {
+async function makeHarness(initialConfig: string, opts?: { persist?: boolean }): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-settings-");
 	const cwd = tempDir.path();
 	await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
@@ -65,7 +66,11 @@ async function makeHarness(initialConfig: string): Promise<Harness> {
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir: cwd,
-		sessionManager: SessionManager.inMemory(cwd),
+		// A persisted manager when the test needs the session header's async write
+		// to be observable; `inMemory` applies roots synchronously.
+		sessionManager: opts?.persist
+			? SessionManager.create(cwd, path.join(cwd, "sessions"))
+			: SessionManager.inMemory(cwd),
 		authStorage,
 		modelRegistry,
 		settings: await Settings.loadIsolated({ cwd, agentDir: cwd }),
@@ -291,6 +296,137 @@ describe("AgentSession refresh('settings'): live request-generation settings", (
 
 			expect(result.settingsChanged).toBe(true);
 			expect(h.session.agent.temperature).toBe(0.42);
+		} finally {
+			await h.dispose();
+		}
+	});
+});
+
+describe("AgentSession refresh('settings'): live intent tracing", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("applies a reloaded tools.intentTracing to the live agent", async () => {
+		// The value decides whether the required intent field is injected into
+		// every tool schema. Captured at construction, a refresh left request
+		// assembly and the prompt guidance on the launch-time policy while the
+		// reloaded settings view reported the new one.
+		const h = await makeHarness("compaction:\n  enabled: false\ntools:\n  intentTracing: false\n");
+		try {
+			expect(h.session.agent.intentTracing).toBe(false);
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\ntools:\n  intentTracing: true\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.agent.intentTracing).toBe(true);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("applies a reloaded tools.intentTracing turning it back off", async () => {
+		const h = await makeHarness("compaction:\n  enabled: false\ntools:\n  intentTracing: true\n");
+		try {
+			expect(h.session.agent.intentTracing).toBe(true);
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\ntools:\n  intentTracing: false\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.agent.intentTracing).toBe(false);
+		} finally {
+			await h.dispose();
+		}
+	});
+});
+
+describe("AgentSession refresh('settings'): live workspace roots", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("has persisted the reconciled roots to the session header by the time refresh returns", async () => {
+		// The listener starts persistence + prompt rebuild and returns; a settings
+		// listener's return value is discarded, so without a registered join handle
+		// the refresh reports completion while the work is still in flight.
+		//
+		// Uses a PERSISTED session manager deliberately. `setAdditionalDirectories`
+		// mutates its in-memory field synchronously, so an `inMemory` session shows
+		// the new roots even fire-and-forget — the header write is the step that
+		// actually only lands after the promise resolves.
+		const h = await makeHarness("compaction:\n  enabled: false\n", { persist: true });
+		try {
+			const added = path.join(h.cwd, "extra-root");
+			await fs.mkdir(added, { recursive: true });
+			// Persistence is lazy: the header only reaches disk once the session has
+			// durable output, so seeding roots never materializes an empty session.
+			h.session.sessionManager.appendMessage(makeAssistantMessage());
+			await h.session.sessionManager.flush();
+
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\nworkspace:\n  additionalDirectories:\n    - ${added}\n`,
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// No intervening await: a fire-and-forget reconcile is still in flight.
+			const sessionFile = h.session.sessionManager.getSessionFile();
+			expect(sessionFile).toBeDefined();
+			expect(await fs.readFile(sessionFile as string, "utf8")).toContain(added);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("revokes a root removed from settings by the time refresh returns", async () => {
+		const h = await makeHarness("compaction:\n  enabled: false\n");
+		try {
+			const added = path.join(h.cwd, "extra-root");
+			await fs.mkdir(added, { recursive: true });
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\nworkspace:\n  additionalDirectories:\n    - ${added}\n`,
+			);
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+			expect(h.session.sessionManager.getAdditionalDirectories()).toEqual([added]);
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			expect(h.session.sessionManager.getAdditionalDirectories()).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("resolves a relative configured root against the session's CURRENT directory after a move", async () => {
+		// The construction-time `cwd` and `sessionManager.getCwd()` agree until the
+		// session moves, so this has to actually relocate: otherwise either cwd
+		// source passes and the test proves nothing.
+		const h = await makeHarness("compaction:\n  enabled: false\n");
+		try {
+			const destination = path.join(h.cwd, "destination");
+			await fs.mkdir(path.join(destination, ".git"), { recursive: true });
+			// The relative root resolves under the DESTINATION, not the launch cwd.
+			const wanted = path.join(destination, "sibling-root");
+			const stale = path.join(h.cwd, "sibling-root");
+			await fs.mkdir(wanted, { recursive: true });
+			await fs.mkdir(stale, { recursive: true });
+
+			await h.session.sessionManager.moveTo(destination);
+			expect(h.session.sessionManager.getCwd()).toBe(destination);
+
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  enabled: false\nworkspace:\n  additionalDirectories:\n    - sibling-root\n",
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.sessionManager.getAdditionalDirectories()).toEqual([wanted]);
 		} finally {
 			await h.dispose();
 		}
