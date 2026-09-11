@@ -728,15 +728,12 @@ describe("renderUsageMetrics", () => {
 		expect(stableLabelId("1700000900000-to-1700086400000")).toBe("ts-to-ts");
 	});
 
-	// The cost of eliding the instant: two windows of ONE model that differ only
-	// by reset time collapse to a single identity. Prometheus rejects a scrape
-	// carrying a duplicate {name, labels}, so the renderer's existing collision
-	// handling drops the later sample and records a `# note` line — a visible
-	// loss rather than a corrupt scrape. Pinned here because it is the tradeoff
-	// this elision buys, and a future widening of the digit threshold would
-	// enlarge it: an id whose ONLY distinguishing part is a long digit run needs
-	// a bounded window kind from the provider, not a broader elision.
-	test("windows differing only by reset instant collapse, and the collision is noted not silent", () => {
+	// Eliding the instant makes two ids that differ ONLY inside the digit run
+	// collide. Dropping the second limit's samples is not acceptable — the
+	// provider's ids are opaque and may be genuinely stable long numbers — so the
+	// renderer disambiguates with a bounded `#<rank>` suffix instead of narrowing
+	// the elision, which would reopen the unbounded-cardinality hole.
+	test("limits colliding under elision each keep their own series", () => {
 		const twoWindows: UsageReport = {
 			provider: "google-gemini-cli",
 			fetchedAt: 1,
@@ -753,10 +750,63 @@ describe("renderUsageMetrics", () => {
 
 		const out = renderUsageMetrics([twoWindows]);
 		const fractionSamples = out.split("\n").filter(line => line.startsWith("llm_usage_limit_used_fraction{"));
-		expect(fractionSamples).toHaveLength(1);
-		expect(out).toContain(
-			'# note duplicate series dropped: llm_usage_limit_used_fraction{limit_id="gemini-3-pro:reset-ts"}',
-		);
+		expect(fractionSamples).toHaveLength(2);
+		expect(out).toContain('limit_id="gemini-3-pro:reset-ts"');
+		expect(out).toContain('limit_id="gemini-3-pro:reset-ts#1"');
+		expect(out).not.toContain("duplicate series dropped");
+	});
+
+	test("stable long numeric limit ids keep distinct series", () => {
+		// `UsageLimit.id` is opaque and providers are extensible, so a provider may
+		// hold genuinely stable long numeric ids. Before the disambiguation both
+		// collapsed to `quota-ts` and the second limit's samples were dropped.
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-1" },
+			limits: ["quota-1234567890", "quota-1234567891"].map(id => ({
+				id,
+				label: "Quota",
+				scope: { provider: "anthropic" as const },
+				amount: { usedFraction: 0.5, unit: "percent" as const },
+				status: "ok" as const,
+			})),
+		};
+
+		const out = renderUsageMetrics([report]);
+		const fractionSamples = out.split("\n").filter(line => line.startsWith("llm_usage_limit_used_fraction{"));
+		expect(fractionSamples).toHaveLength(2);
+		expect(out).not.toContain("duplicate series dropped");
+	});
+
+	test("a colliding id keeps its series identity when the provider reorders its limits", () => {
+		// The suffix ranks the ORIGINAL ids, so it cannot depend on array order —
+		// a provider that reorders between fetches would otherwise swap two
+		// series' identities and make each one's history a mix of both limits.
+		const forOrder = (ids: readonly string[]): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-1" },
+			limits: ids.map(id => ({
+				id,
+				label: "Quota",
+				scope: { provider: "anthropic" as const },
+				amount: { usedFraction: id.endsWith("0") ? 0.25 : 0.75, unit: "percent" as const },
+				status: "ok" as const,
+			})),
+		});
+		const sampleFor = (out: string, limitId: string): string | undefined =>
+			out
+				.split("\n")
+				.find(line => line.startsWith(`llm_usage_limit_used_fraction{`) && line.includes(`limit_id="${limitId}"`));
+
+		const ascending = renderUsageMetrics([forOrder(["quota-1234567890", "quota-1234567891"])]);
+		const descending = renderUsageMetrics([forOrder(["quota-1234567891", "quota-1234567890"])]);
+
+		// The same original id keeps the same label and therefore the same value
+		// in both orders.
+		expect(sampleFor(ascending, "quota-ts")).toBe(sampleFor(descending, "quota-ts"));
+		expect(sampleFor(ascending, "quota-ts#1")).toBe(sampleFor(descending, "quota-ts#1"));
 	});
 });
 
