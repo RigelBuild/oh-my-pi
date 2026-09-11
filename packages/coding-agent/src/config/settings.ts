@@ -3271,6 +3271,14 @@ const EFFECTIVE_CHANGE_NOTIFIED_PATHS: readonly SettingPath[] = [
 	// reconciles nothing on its own and the listener must push the new value in.
 	"workspace.additionalDirectories",
 	"async.maxJobs",
+	// The request path closes over a `SnapcompactInlineTransformer` built at
+	// construction, so re-reading the merged value alone left the live session
+	// rendering under the launch-time configuration: enabling stayed inactive,
+	// disabling kept rasterizing, and a shape change kept the retired variant —
+	// all while `/context` estimates read the new values.
+	"snapcompact.systemPrompt",
+	"snapcompact.toolResults",
+	"snapcompact.shape",
 ];
 
 /** Subscribe to Code Mode setting changes. Returns an unsubscribe function. */

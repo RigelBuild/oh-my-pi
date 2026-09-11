@@ -1676,7 +1676,7 @@ export class AgentSession {
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
-			setThinkingLevel: level => this.setThinkingLevel(level),
+			setThinkingLevel: level => this.setThinkingLevelForRecovery(level),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
@@ -9709,6 +9709,23 @@ export class AgentSession {
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist, { explicit: true });
+	}
+
+	/**
+	 * Move the thinking level for an automatic retry-fallback swap, carrying the
+	 * session's existing thinking provenance rather than pinning it.
+	 *
+	 * `setThinkingLevel` is the *user* selection surface and always writes an
+	 * explicit pin, which is wrong for a swap nobody asked for: entering or
+	 * leaving a fallback would silently convert a settings-tracking session into
+	 * a pinned one, and a later `defaultThinkingLevel` edit plus
+	 * `/refresh settings` would stop updating the level. Inheriting the current
+	 * answer keeps a config-tracking level config-tracking and leaves a real pin
+	 * pinned — the same reasoning `#reapplyThinkingLevel` applies to a
+	 * model-derived re-apply.
+	 */
+	setThinkingLevelForRecovery(level: ConfiguredThinkingLevel | undefined): void {
+		this.#models.setThinkingLevel(level, false, { settingsTracking: this.#thinkingFollowsSettings() });
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */

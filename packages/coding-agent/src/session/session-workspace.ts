@@ -51,3 +51,38 @@ export function normalizeSessionWorkspace(args: { cwd: string; directories?: str
 export function additionalWorkspaceDirectories(workspace: SessionWorkspace): string[] {
 	return workspace.directories.filter(directory => directory !== workspace.cwd);
 }
+
+/**
+ * Reconcile the live workspace roots against a new settings-owned list.
+ *
+ * Startup copies `workspace.additionalDirectories` out of settings into
+ * `SessionManager`, which owns the roots from then on, so a live re-read has to
+ * reconcile two populations that are mixed together in one list: roots this
+ * setting granted, and roots that came from the session header (resume/fork) or
+ * `/add-dir`. Only the first population may be revoked.
+ *
+ * Unioning the live list with the new value is what makes the removal case
+ * unreachable — the live list already contains every previously granted root,
+ * so `[A]` to `[]` keeps `A` and `[A]` to `[B]` yields `[A, B]`. Passing the
+ * previously granted set instead makes a root's origin decidable: a live root
+ * is dropped only when it was granted by the old value and is absent from the
+ * new one.
+ *
+ * Returns the next root list and the set that owns it, for the caller to carry
+ * into the following reconcile.
+ */
+export function reconcileSettingsWorkspaceRoots(args: {
+	cwd: string;
+	/** Roots currently live on the session, settings-owned or not. */
+	live: readonly string[];
+	/** Roots the previous settings value granted (normalized). */
+	previouslyOwned: ReadonlySet<string>;
+	/** The new settings value, unnormalized. */
+	configured: readonly string[];
+}): { roots: string[]; owned: Set<string> } {
+	const owned = new Set(
+		additionalWorkspaceDirectories(normalizeSessionWorkspace({ cwd: args.cwd, directories: [...args.configured] })),
+	);
+	const retained = args.live.filter(dir => !args.previouslyOwned.has(dir) || owned.has(dir));
+	return { roots: [...new Set([...retained, ...owned])], owned };
+}

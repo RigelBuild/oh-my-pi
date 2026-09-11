@@ -227,4 +227,47 @@ describe("Settings.reloadFromDisk: eval-prelude enable settings notify their lis
 			unsubscribe();
 		}
 	});
+
+	it("notifies the snapcompact listeners when a persisted edit changes rendering", async () => {
+		// The request path closes over a `SnapcompactInlineTransformer` built at
+		// construction. Unnotified, a refresh updated the merged value (so
+		// `/context` estimates moved) while the live session kept rendering under
+		// the launch-time configuration.
+		await writeSettings({ snapcompact: { toolResults: false, shape: "5x8-sent" } });
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const { seen, unsubscribe } = observe(settings);
+
+		try {
+			await settings.reloadFromDisk();
+			expect(seen).toEqual([]);
+
+			await writeSettings({ snapcompact: { toolResults: true, shape: "8on16-bw" } });
+			await settings.reloadFromDisk();
+
+			expect(seen).toEqual([
+				{ path: "snapcompact.toolResults", value: true, previous: false },
+				{ path: "snapcompact.shape", value: "8on16-bw", previous: "5x8-sent" },
+			]);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("notifies the snapcompact.systemPrompt listener when a persisted edit changes the mode", async () => {
+		await writeSettings({ snapcompact: { systemPrompt: "none" } });
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const { seen, unsubscribe } = observe(settings);
+
+		try {
+			await settings.reloadFromDisk();
+			expect(seen).toEqual([]);
+
+			await writeSettings({ snapcompact: { systemPrompt: "all" } });
+			await settings.reloadFromDisk();
+
+			expect(seen).toEqual([{ path: "snapcompact.systemPrompt", value: "all", previous: "none" }]);
+		} finally {
+			unsubscribe();
+		}
+	});
 });

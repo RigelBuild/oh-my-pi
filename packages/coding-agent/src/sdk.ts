@@ -182,6 +182,11 @@ import {
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import {
+	additionalWorkspaceDirectories,
+	normalizeSessionWorkspace,
+	reconcileSettingsWorkspaceRoots,
+} from "./session/session-workspace";
+import {
 	collectMountedMCPToolRoutes,
 	isSettingGatedTool,
 	markSettingGatedTool,
@@ -1452,6 +1457,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: settings.get("workspace.additionalDirectories");
+	// The roots the current settings value granted, normalized the same way
+	// SessionManager normalizes them so the live list can be compared by value.
+	// A live re-read reconciles against this set rather than the whole list, so
+	// removing a directory from settings actually revokes it while header and
+	// `/add-dir` roots stay. Empty when `--add-dir` pinned the list: the
+	// listener returns early in that case, so nothing is settings-owned.
+	let settingsOwnedRoots = new Set(
+		options.additionalDirectories
+			? []
+			: additionalWorkspaceDirectories(
+					normalizeSessionWorkspace({ cwd, directories: settings.get("workspace.additionalDirectories") }),
+				),
+	);
 	if (configuredDirs.length > 0) {
 		// Merge with any roots restored from the session header (resume/fork), not replace.
 		const existing = sessionManager.getAdditionalDirectories();
@@ -3546,23 +3564,39 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		blobBroker?.prewarm();
 		const dateCwdReminder = new DateCwdReminderInjector();
-		const snapcompactSystemPromptMode = settings.get("snapcompact.systemPrompt");
-		const snapcompactInline =
-			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
-				? new SnapcompactInlineTransformer(
-						{
-							renderSystemPrompt: snapcompactSystemPromptMode,
-							renderToolResults: settings.get("snapcompact.toolResults"),
-							shape: settings.get("snapcompact.shape"),
-						},
-						// Journal the tokens each imaged tool result keeps off the wire
-						// (frames never reach session.jsonl, so this is their only trace).
-						createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
-						// With a serving blob broker, frames become lazy URLs: rasterized
-						// only when a provider fetches them, never held as pixels here.
-						blobBroker?.frameSink,
-					)
-				: undefined;
+		// Built from settings that `/refresh settings` can change, and the request
+		// path closes over this binding rather than an instance, so a reload can
+		// construct one where there was none (enabling) or drop it (disabling) —
+		// not just update the merged value while the old instance keeps running.
+		const buildSnapcompactInline = (): SnapcompactInlineTransformer | undefined => {
+			const renderSystemPrompt = settings.get("snapcompact.systemPrompt");
+			const renderToolResults = settings.get("snapcompact.toolResults");
+			if (renderSystemPrompt === "none" && !renderToolResults) return undefined;
+			return new SnapcompactInlineTransformer(
+				{ renderSystemPrompt, renderToolResults, shape: settings.get("snapcompact.shape") },
+				// Journal the tokens each imaged tool result keeps off the wire
+				// (frames never reach session.jsonl, so this is their only trace).
+				createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
+				// With a serving blob broker, frames become lazy URLs: rasterized
+				// only when a provider fetches them, never held as pixels here.
+				blobBroker?.frameSink,
+			);
+		};
+		let snapcompactInline = buildSnapcompactInline();
+		// Reconfigure in place when one already exists, so the render caches (and
+		// the savings journal's identity) survive a change that does not retire
+		// the frames they hold.
+		const reloadSnapcompactInline = () => {
+			const renderSystemPrompt = settings.get("snapcompact.systemPrompt");
+			const renderToolResults = settings.get("snapcompact.toolResults");
+			if (renderSystemPrompt === "none" && !renderToolResults) {
+				snapcompactInline = undefined;
+				return;
+			}
+			const next = { renderSystemPrompt, renderToolResults, shape: settings.get("snapcompact.shape") };
+			if (snapcompactInline) snapcompactInline.reconfigure(next);
+			else snapcompactInline = buildSnapcompactInline();
+		};
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
@@ -4296,16 +4330,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				scopedAsyncJobManager?.setMaxRunningJobs(Math.min(100, Math.max(1, (value as number) ?? 100)));
 				return;
 			}
+			if (
+				path === "snapcompact.systemPrompt" ||
+				path === "snapcompact.toolResults" ||
+				path === "snapcompact.shape"
+			) {
+				reloadSnapcompactInline();
+				return;
+			}
 			if (path !== "workspace.additionalDirectories") return;
 			// An explicit `--add-dir` list owns the roots for the session; a config
 			// edit must not override what the invocation pinned.
 			if (options.additionalDirectories) return;
-			// Merge, matching the startup seed: roots restored from the session
-			// header or added live via `/add-dir` are not settings-owned, so a
-			// re-read must not drop them.
-			const configured = Array.isArray(value) ? (value as string[]) : [];
-			const merged = [...new Set([...sessionManager.getAdditionalDirectories(), ...configured])];
-			void sessionManager.setAdditionalDirectories(merged).then(
+			// Reconcile against the roots the PREVIOUS settings value granted, not
+			// against the live list: the live list already contains them, so a union
+			// could never revoke a removed root. See
+			// `reconcileSettingsWorkspaceRoots` for why the origin has to be tracked.
+			const { roots, owned } = reconcileSettingsWorkspaceRoots({
+				cwd,
+				live: sessionManager.getAdditionalDirectories(),
+				previouslyOwned: settingsOwnedRoots,
+				configured: Array.isArray(value) ? (value as string[]) : [],
+			});
+			settingsOwnedRoots = owned;
+			void sessionManager.setAdditionalDirectories(roots).then(
 				() => session.refreshBaseSystemPrompt(),
 				error => logger.warn("Failed to apply refreshed workspace directories", { error: String(error) }),
 			);

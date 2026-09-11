@@ -429,12 +429,37 @@ export class SnapcompactInlineTransformer {
 	/** Rendered tool-result frames keyed by toolCallId. */
 	#toolCache = new Map<string, FrameCacheEntry>();
 	#systemCache?: FrameCacheEntry;
+	#options: SnapcompactInlineOptions;
 
 	constructor(
-		private readonly options: SnapcompactInlineOptions,
+		options: SnapcompactInlineOptions,
 		private readonly onToolResultSavings?: SnapcompactSavingsSink,
 		private readonly frameSink?: SnapcompactFrameSink,
-	) {}
+	) {
+		this.#options = options;
+	}
+
+	private get options(): SnapcompactInlineOptions {
+		return this.#options;
+	}
+
+	/**
+	 * Adopt a new rendering configuration in place, so a live settings reload
+	 * reaches the instance the request path already closed over.
+	 *
+	 * The render caches are keyed by content hash but rendered under the OLD
+	 * shape, so a shape change has to drop them or the session keeps serving
+	 * frames in the retired variant. A change confined to which surfaces are
+	 * rendered leaves them: those frames are still valid for the content they
+	 * were rendered from.
+	 */
+	reconfigure(options: SnapcompactInlineOptions): void {
+		const shapeChanged = options.shape !== this.#options.shape;
+		this.#options = options;
+		if (!shapeChanged) return;
+		this.#toolCache.clear();
+		this.#systemCache = undefined;
+	}
 
 	async transform(context: Context, model: Model): Promise<Context> {
 		// Vision gate: providers silently DROP images on text-only models —
