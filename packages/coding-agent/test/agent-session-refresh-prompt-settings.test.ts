@@ -411,4 +411,33 @@ describe("AgentSession refresh('settings'): includeWorkspaceTree reaches the pro
 			await h.dispose();
 		}
 	});
+
+	it("rescans the workspace tree after the session moves to another project", async () => {
+		// The scan was cached behind a "have scanned" flag and built from the
+		// construction-time cwd, so a session that moved kept advertising the
+		// ORIGINAL project's files — and because the flag never reset, a later
+		// off->on flip resurrected that same stale tree rather than rescanning.
+		const h = await makeHarness("compaction:\n  enabled: false\nincludeWorkspaceTree: true\n", async cwd => {
+			await fs.mkdir(path.join(cwd, "src", "deep"), { recursive: true });
+			await fs.writeFile(path.join(cwd, "src", "deep", "marker-file.ts"), "export const marker = 1;\n");
+		});
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).toContain("marker-file.ts");
+
+			// A second project, with a file the first one does not have.
+			const moved = path.join(path.dirname(h.cwd), "moved-project");
+			await fs.mkdir(path.join(moved, "lib"), { recursive: true });
+			await fs.writeFile(path.join(moved, "lib", "moved-marker.ts"), "export const moved = 1;\n");
+			h.session.sessionManager.setCwdWithoutRelocation(moved);
+
+			await h.session.refreshBaseSystemPrompt();
+
+			const prompt = h.session.systemPrompt.join("\n");
+			expect(prompt).toContain("moved-marker.ts");
+			expect(prompt).not.toContain("marker-file.ts");
+		} finally {
+			await h.dispose();
+		}
+	});
 });
