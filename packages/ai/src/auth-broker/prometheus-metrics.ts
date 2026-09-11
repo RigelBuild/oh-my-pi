@@ -239,6 +239,13 @@ const TIMESTAMP_PLACEHOLDER = "ts";
  * flows through the emit site, so a provider added later cannot reintroduce the
  * same growth, and it is a no-op for the bounded ids every other provider
  * already produces (see {@link TIMESTAMP_DIGITS}).
+ *
+ * Unconditional by design. `UsageLimit.id` is opaque and providers are
+ * extensible, so a provider MAY hold genuinely stable long numeric ids
+ * (`quota-1234567890`) that this collapses together — but narrowing elision to
+ * known reset-derived shapes would let the next provider reintroduce the
+ * unbounded growth this exists to stop. The caller disambiguates a collision
+ * with a bounded per-report suffix instead, so no limit's samples are dropped.
  */
 export function stableLabelId(id: string): string {
 	return id.replace(TIMESTAMP_DIGITS, TIMESTAMP_PLACEHOLDER);
@@ -530,7 +537,32 @@ export function renderUsageMetrics(
 			);
 		}
 
+		// Two limits whose ids differ ONLY inside an elided digit run collapse to
+		// the same `limit_id`, and `add()` would then drop the second as a
+		// duplicate. Elision has to stay unconditional — restricting it to known
+		// reset-derived shapes reopens the unbounded-cardinality hole for the next
+		// provider — so disambiguate the collision instead.
+		//
+		// The suffix is the id's rank among the colliding ORIGINAL ids, sorted, not
+		// its position in `report.limits`: a provider that reorders its array
+		// between fetches would otherwise swap two series' identities and make each
+		// one's history a mix of both limits. Cardinality stays bounded by the
+		// report's limit count — what it was before elision — and the ids that do
+		// not collide (every provider today) render byte-identically.
+		const collidingIds = new Map<string, string[]>();
 		for (const limit of report.limits) {
+			const elided = stableLabelId(limit.id);
+			const group = collidingIds.get(elided);
+			if (group) group.push(limit.id);
+			else collidingIds.set(elided, [limit.id]);
+		}
+		for (const group of collidingIds.values()) {
+			if (group.length > 1) group.sort();
+		}
+		for (const limit of report.limits) {
+			const elided = stableLabelId(limit.id);
+			const group = collidingIds.get(elided);
+			const rank = group && group.length > 1 ? group.indexOf(limit.id) : 0;
 			const base: readonly Label[] = [
 				["provider", provider],
 				["account", account],
@@ -539,7 +571,7 @@ export function renderUsageMetrics(
 				// Both ids are provider-authored and some providers derive them
 				// from the window's reset instant, which would re-key every
 				// series on each reset — see stableLabelId.
-				["limit_id", stableLabelId(limit.id)],
+				["limit_id", rank === 0 ? elided : `${elided}#${rank}`],
 				["window", limit.window === undefined ? "" : stableLabelId(limit.window.id)],
 			];
 			addLimit(add, base, limit);
