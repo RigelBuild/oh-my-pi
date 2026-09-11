@@ -2,9 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
-	clampProviderContextImageCount,
-	clampProviderContextImages,
-	dropUnreadableContextImages,
+	applyProviderImagePipeline,
 	PROVIDER_IMAGE_COUNT_DECODE_SLACK,
 } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
@@ -81,12 +79,15 @@ function imageData(context: Context): string[] {
 	return data;
 }
 
-/** The `sdk.ts` provider-context image order, end to end. */
-async function runPipeline(context: Context): Promise<Context> {
-	const counted = clampProviderContextImageCount(context, UMANS_MODEL);
-	const normalized = await imageLoading.normalizeProviderContextImagesForModel(counted, UMANS_MODEL);
-	const guarded = await dropUnreadableContextImages(normalized, UMANS_MODEL);
-	return clampProviderContextImages(guarded, UMANS_MODEL);
+/**
+ * The production pipeline, with the real normalizer — NOT a local recomposition
+ * of its stages. Both `sdk.ts` `transformProviderContext` callbacks call
+ * `applyProviderImagePipeline`, so a callsite that later drops or reorders the
+ * early count clamp reds these tests instead of leaving them passing against a
+ * private copy of the desired order.
+ */
+function runPipeline(context: Context): Promise<Context> {
+	return applyProviderImagePipeline(context, UMANS_MODEL, imageLoading.normalizeProviderContextImagesForModel);
 }
 
 afterEach(() => {
@@ -105,11 +106,9 @@ describe("count cap precedes the decode pass", () => {
 		const context = historyOf(admissible + 20, "survivors");
 		const decode = spyOn(imageLoading, "imageDecodeFailureReason");
 
-		// The pipeline order `sdk.ts` establishes: count cap, then the expensive
-		// per-image passes, then the byte budget over final sizes.
-		const counted = clampProviderContextImageCount(context, UMANS_MODEL);
-		const normalized = await imageLoading.normalizeProviderContextImagesForModel(counted, UMANS_MODEL);
-		clampProviderContextImages(await dropUnreadableContextImages(normalized, UMANS_MODEL), UMANS_MODEL);
+		// Through the production pipeline, so the decode ceiling is measured
+		// against the order `sdk.ts` actually runs.
+		await runPipeline(context);
 
 		// Only the admissible window is decoded — never the 20 beyond it. The
 		// window is a constant multiple of the cap, so this stays a fixed ceiling
