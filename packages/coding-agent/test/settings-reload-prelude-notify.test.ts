@@ -181,4 +181,50 @@ describe("Settings.reloadFromDisk: eval-prelude enable settings notify their lis
 			unsubscribe();
 		}
 	});
+
+	it("notifies the workspace.additionalDirectories listener when a persisted edit adds a root", async () => {
+		// Startup copies these roots OUT of settings into `SessionManager`, which
+		// owns them afterwards: tool access and `rebuildSystemPrompt` both read
+		// `sessionManager.getAdditionalDirectories()`. Unnotified, the merged value
+		// gained the root while the live session kept the launch-time list, so the
+		// new root stayed unusable and unadvertised until `/new` or a restart.
+		await writeSettings({ workspace: { additionalDirectories: [] } });
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const { seen, unsubscribe } = observe(settings);
+
+		try {
+			await settings.reloadFromDisk();
+			expect(seen).toEqual([]);
+
+			const added = tempDir.join("extra-root");
+			fs.mkdirSync(added, { recursive: true });
+			await writeSettings({ workspace: { additionalDirectories: [added] } });
+			await settings.reloadFromDisk();
+
+			expect(seen).toEqual([{ path: "workspace.additionalDirectories", value: [added], previous: [] }]);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("notifies the async.maxJobs listener when a persisted edit changes the cap", async () => {
+		// `AsyncJobManager` takes this value at construction; `atCapacity` and
+		// `register()` enforce the stored field. Unnotified, a refresh reported the
+		// new configuration while background-job admission kept the launch value.
+		await writeSettings({ async: { maxJobs: 4 } });
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const { seen, unsubscribe } = observe(settings);
+
+		try {
+			await settings.reloadFromDisk();
+			expect(seen).toEqual([]);
+
+			await writeSettings({ async: { maxJobs: 9 } });
+			await settings.reloadFromDisk();
+
+			expect(seen).toEqual([{ path: "async.maxJobs", value: 9, previous: 4 }]);
+		} finally {
+			unsubscribe();
+		}
+	});
 });

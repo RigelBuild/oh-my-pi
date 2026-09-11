@@ -1326,4 +1326,26 @@ describe("AgentSession: thinking provenance survives a role pick and a new sessi
 			await h.dispose();
 		}
 	});
+
+	it("pins a temporary switch's thinking suffix even when it matches the active level", async () => {
+		// Same omission on the `/switch provider/model:<level>` path: the suffix
+		// reached `setThinkingLevel()` without explicit provenance, so a selection
+		// matching the active level wrote no receipt and the earlier
+		// settings-tracking one survived — a later `defaultThinkingLevel` edit plus
+		// a refresh then overwrote the user's suffix.
+		const h = await makeHarness({
+			rawConfig: `compaction:\n  enabled: false\ndefaultThinkingLevel: low\n`,
+		});
+		try {
+			await h.session.setModelTemporary(h.modelA, h.session.configuredThinkingLevel());
+
+			await fs.writeFile(h.settingsPath, `compaction:\n  enabled: false\ndefaultThinkingLevel: minimal\n`);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.configuredThinkingLevel()).not.toBe(ThinkingLevel.Minimal);
+		} finally {
+			await h.dispose();
+		}
+	});
 });

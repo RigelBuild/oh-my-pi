@@ -4284,6 +4284,33 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 		}
+
+		// Both settings are read once at startup into an object that owns the
+		// behaviour from then on, so `/refresh settings` updating the merged value
+		// alone leaves the live session on the launch-time value while reporting
+		// success. Push the new value into the owner instead.
+		const unsubscribeLiveWorkspaceSettings = settings.onEffectiveChange((path, value) => {
+			if (path === "async.maxJobs") {
+				// Same clamp as construction, so a config edit cannot widen the cap
+				// past what a launch-time value could have asked for.
+				scopedAsyncJobManager?.setMaxRunningJobs(Math.min(100, Math.max(1, (value as number) ?? 100)));
+				return;
+			}
+			if (path !== "workspace.additionalDirectories") return;
+			// An explicit `--add-dir` list owns the roots for the session; a config
+			// edit must not override what the invocation pinned.
+			if (options.additionalDirectories) return;
+			// Merge, matching the startup seed: roots restored from the session
+			// header or added live via `/add-dir` are not settings-owned, so a
+			// re-read must not drop them.
+			const configured = Array.isArray(value) ? (value as string[]) : [];
+			const merged = [...new Set([...sessionManager.getAdditionalDirectories(), ...configured])];
+			void sessionManager.setAdditionalDirectories(merged).then(
+				() => session.refreshBaseSystemPrompt(),
+				error => logger.warn("Failed to apply refreshed workspace directories", { error: String(error) }),
+			);
+		});
+		disposeCallbacks.add(unsubscribeLiveWorkspaceSettings);
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,
 		});
