@@ -3259,6 +3259,12 @@ const EFFECTIVE_CHANGE_NOTIFIED_PATHS: readonly SettingPath[] = [
 	"statusLine.sessionAccent",
 	"browser.enabled",
 	"computer.enabled",
+	// Its listener cancels and re-arms the per-owner idle-close deadline, which
+	// is state already armed on live tabs rather than something read at next
+	// use. Omitted, a persisted edit updated the merged value while existing
+	// tabs kept closing on the old schedule — most visibly on a change to `0`,
+	// where an armed timer still closed tabs after idle closing was disabled.
+	"browser.idleCloseSec",
 ];
 
 /** Subscribe to Code Mode setting changes. Returns an unsubscribe function. */

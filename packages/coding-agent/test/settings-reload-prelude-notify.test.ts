@@ -156,4 +156,29 @@ describe("Settings.reloadFromDisk: eval-prelude enable settings notify their lis
 			unsubscribe();
 		}
 	});
+
+	it("notifies the browser.idleCloseSec listener when a persisted edit disables idle close", async () => {
+		// Same omission, different consequence: this setting's listener cancels
+		// and re-arms the per-owner idle-close deadline, which is state ALREADY
+		// ARMED on live tabs rather than read at next use. Unnotified, a
+		// persisted edit updated the merged value while armed timers kept the old
+		// schedule — most visibly on a change to `0`, where a tab still closed
+		// after idle closing was switched off.
+		await writeSettings({ browser: { idleCloseSec: 300 } });
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const { seen, unsubscribe } = observe(settings);
+
+		try {
+			await settings.reloadFromDisk();
+			expect(seen).toEqual([]);
+
+			await writeSettings({ browser: { idleCloseSec: 0 } });
+			await settings.reloadFromDisk();
+
+			expect(settings.get("browser.idleCloseSec")).toBe(0);
+			expect(seen).toEqual([{ path: "browser.idleCloseSec", value: 0, previous: 300 }]);
+		} finally {
+			unsubscribe();
+		}
+	});
 });
