@@ -434,6 +434,15 @@ export class JsonLexer {
  * arrives — a trailing `"a"` with no colon never became one, so nothing was
  * dropped for it to collide with. A string left unterminated at the end of
  * input is not a candidate either.
+ *
+ * Holding to that contract needs more than the scan can see on its own: the
+ * lexer walks structure, not grammar, so `{"a":1,"a":2` (unclosed) and
+ * `{"a":1,"a":}` (missing value) both reach a genuine second `"a":` and would
+ * be reported as duplicates even though a real parse refuses them. The first
+ * repeat is therefore RETAINED, not returned, and confirmed with one
+ * `JSON.parse` of the whole document once the scan finishes. That parse runs
+ * only on the rare duplicate path — a document with no repeated key returns
+ * without it.
  */
 export function findDuplicateJsonKey(src: string): string | undefined {
 	// `incoming` closes double-quoted strings on the first unescaped quote, like
@@ -451,6 +460,8 @@ export function findDuplicateJsonKey(src: string): string | undefined {
 	// real `"a"`, which contradicts the documented contract that this scan
 	// reports no duplicate for input a real parse would refuse.
 	let pendingKey: string | undefined;
+	// The first repeat found, held until the document is known to be valid.
+	let candidate: string | undefined;
 	while (!lex.atEnd) {
 		const cp = lex.peek();
 		if (cp === QUOTE) {
@@ -475,7 +486,7 @@ export function findDuplicateJsonKey(src: string): string | undefined {
 			if (pendingKey !== undefined) {
 				const keys = stack[stack.length - 1];
 				if (keys !== undefined) {
-					if (keys.has(pendingKey)) return pendingKey;
+					if (keys.has(pendingKey)) candidate ??= pendingKey;
 					keys.add(pendingKey);
 				}
 				pendingKey = undefined;
@@ -488,5 +499,13 @@ export function findDuplicateJsonKey(src: string): string | undefined {
 		}
 		lex.pos++;
 	}
-	return undefined;
+	if (candidate === undefined) return undefined;
+	try {
+		JSON.parse(src);
+	} catch {
+		// Malformed: the caller's parser owns this, and reporting a duplicate here
+		// would misclassify a syntax error.
+		return undefined;
+	}
+	return candidate;
 }
