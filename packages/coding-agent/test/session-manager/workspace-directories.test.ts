@@ -6,6 +6,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
+	reconcileSettingsWorkspaceRoots,
 } from "@oh-my-pi/pi-coding-agent/session/session-workspace";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./helpers";
@@ -192,5 +193,83 @@ describe("SessionManager workspace directories", () => {
 
 		const forked = await SessionManager.forkFrom(source.getSessionFile()!, tempDir.path());
 		expect(forked.getAdditionalDirectories()).toEqual([path.join(tempDir.path(), "extra")]);
+	});
+});
+
+describe("reconcileSettingsWorkspaceRoots", () => {
+	const cwd = "/home/user/proj";
+	const A = path.resolve("/roots/a");
+	const B = path.resolve("/roots/b");
+	const HEADER = path.resolve("/roots/from-header");
+
+	it("revokes a root the new settings value dropped", () => {
+		// Unioning the live list with the new value made this unreachable: the live
+		// list already holds A, so [A] -> [] kept A granted and a directory removed
+		// from settings could never lose tool access.
+		const { roots, owned } = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: [A],
+			previouslyOwned: new Set([A]),
+			configured: [],
+		});
+		expect(roots).toEqual([]);
+		expect([...owned]).toEqual([]);
+	});
+
+	it("replaces rather than accumulates when the value changes wholesale", () => {
+		const { roots } = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: [A],
+			previouslyOwned: new Set([A]),
+			configured: [B],
+		});
+		expect(roots).toEqual([B]);
+	});
+
+	it("keeps a root that settings never granted", () => {
+		// Session-header (resume/fork) and `/add-dir` roots are not settings-owned,
+		// so a settings re-read must leave them alone even when it grants nothing.
+		const { roots } = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: [HEADER, A],
+			previouslyOwned: new Set([A]),
+			configured: [],
+		});
+		expect(roots).toEqual([HEADER]);
+	});
+
+	it("keeps a root that is both live-added and still configured", () => {
+		const { roots, owned } = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: [A, HEADER],
+			previouslyOwned: new Set([A]),
+			configured: [A, B],
+		});
+		expect(roots).toEqual([A, HEADER, B]);
+		expect([...owned]).toEqual([A, B]);
+	});
+
+	it("normalizes the incoming value so a relative entry compares equal", () => {
+		// The live list is normalized by SessionManager, so an unnormalized
+		// settings entry would otherwise look like a different root and both
+		// revoke the real one and add a duplicate.
+		const { roots } = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: [path.resolve(cwd, "sub")],
+			previouslyOwned: new Set([path.resolve(cwd, "sub")]),
+			configured: ["sub"],
+		});
+		expect(roots).toEqual([path.resolve(cwd, "sub")]);
+	});
+
+	it("grants a new root on the first reconcile, when nothing was owned yet", () => {
+		const { roots, owned } = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: [],
+			previouslyOwned: new Set(),
+			configured: [A],
+		});
+		expect(roots).toEqual([A]);
+		expect([...owned]).toEqual([A]);
 	});
 });
