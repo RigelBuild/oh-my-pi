@@ -28,7 +28,12 @@ import type { SlashCommandSpec } from "./types";
 function sanitizeRefreshText(text: string): string {
 	const singleLine = replaceTabs(sanitizeText(text))
 		.replace(/[\r\n]+/g, " ")
-		.replace(/\/[^\s'")\]]+/g, p => shortenPath(p));
+		// Windows absolute forms too (`C:\…`, `C:/…`, and UNC `\\server\share`):
+		// `shortenPath` already resolves a drive-letter or UNC home, so leaving
+		// them unmatched here was the only reason a Windows config path printed in
+		// full. Drive letters are matched before the bare-`/` alternative so the
+		// colon is not left stranded outside the replacement.
+		.replace(/(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s'")\]]+/g, p => shortenPath(p));
 	return truncateToWidth(singleLine, TRUNCATE_LENGTHS.LINE);
 }
 

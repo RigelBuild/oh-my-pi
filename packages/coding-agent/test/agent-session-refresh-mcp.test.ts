@@ -586,4 +586,137 @@ describe("AgentSession.refresh('mcp')", () => {
 
 		await dir.remove();
 	});
+
+	// The other direction of the same shadow. A session that STARTED with project
+	// config off has the user-level `foo` connected; turning the setting on makes
+	// the project `foo` outrank it, so leaving the user server running keeps a
+	// command a freshly started session would not run.
+	it("replaces a user server when re-enabling project config promotes a project entry", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-promote-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: false\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		const projectSource: SourceMeta = {
+			level: "project",
+			path: `${dir.path()}/.mcp.json`,
+			provider: "mcp",
+			providerName: "MCP",
+		};
+		const userSource: SourceMeta = {
+			level: "user",
+			path: `${dir.path()}/user.json`,
+			provider: "mcp",
+			providerName: "MCP",
+		};
+		const manager = new MCPManager(dir.path(), null, async (_cwd, options) =>
+			options?.enableProjectConfig === false
+				? { configs: { foo: { command: "true", args: ["user"] } }, exaApiKeys: [], sources: { foo: userSource } }
+				: {
+						configs: { foo: { command: "true", args: ["project"] } },
+						exaApiKeys: [],
+						sources: { foo: projectSource },
+					},
+		);
+		const disconnected: string[] = [];
+		const realDisconnect = manager.disconnectServer.bind(manager);
+		manager.disconnectServer = async (name: string) => {
+			disconnected.push(name);
+			return realDisconnect(name);
+		};
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+		});
+		sessions.push(session);
+
+		// The real startup path, so the manager records the same discover options a
+		// session would carry — including `enableProjectConfig: false`, which is
+		// what makes the later flip a genuine transition rather than a no-op.
+		await manager.discoverAndConnect({ enableProjectConfig: false });
+
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		// Pre-fix the name was already connected, so the reconcile skipped it and
+		// the session kept running the user command the project entry outranks.
+		expect(disconnected).toContain("foo");
+		const promoted = manager.getServerConfig("foo");
+		expect(promoted && "args" in promoted ? promoted.args : undefined).toEqual(["project"]);
+
+		await dir.remove();
+	});
+
+	// The converse guard: an unrelated server whose selection did not move must
+	// not be torn down and restarted just because the setting was touched.
+	it("leaves an uncontested server connected across a project config flip", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-stable-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: false\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		const userSource: SourceMeta = {
+			level: "user",
+			path: `${dir.path()}/user.json`,
+			provider: "mcp",
+			providerName: "MCP",
+		};
+		const configs = { solo: { command: "true", args: ["user"] } };
+		const manager = new MCPManager(dir.path(), null, async () => ({
+			configs,
+			exaApiKeys: [],
+			sources: { solo: userSource },
+		}));
+		const disconnected: string[] = [];
+		const realDisconnect = manager.disconnectServer.bind(manager);
+		manager.disconnectServer = async (name: string) => {
+			disconnected.push(name);
+			return realDisconnect(name);
+		};
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+		});
+		sessions.push(session);
+
+		await manager.discoverAndConnect({ enableProjectConfig: false });
+
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		// Nothing about `solo` moved, so the running process is untouched.
+		expect(disconnected).toEqual([]);
+
+		await dir.remove();
+	});
 });
