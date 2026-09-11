@@ -1002,6 +1002,27 @@ function createResizeLimiter(limit: number): ResizeLimiter {
  */
 const ANTHROPIC_MANY_IMAGE_QUALITIES = [70, 55, 40, 25, 15, 5] as const;
 
+/**
+ * Encodes one ladder rung. Indirected solely so a test can drive the
+ * encode-failure path: patching `Bun.Image.prototype` reaches every image
+ * operation in the process, which under this package's `bun test --parallel`
+ * makes concurrent encodes fail nondeterministically.
+ */
+type ManyImageRungEncoder = (image: Bun.Image, format: "jpeg" | "webp", quality: number) => Promise<Uint8Array>;
+
+const encodeManyImageRung: ManyImageRungEncoder = (image, format, quality) =>
+	(format === "jpeg" ? image.jpeg({ quality }) : image.webp({ quality })).bytes();
+
+let manyImageRungEncoder: ManyImageRungEncoder = encodeManyImageRung;
+
+/** Test seam: replaces the rung encoder and returns a restore function. */
+export function setAnthropicManyImageRungEncoder(encoder: ManyImageRungEncoder): () => void {
+	manyImageRungEncoder = encoder;
+	return () => {
+		manyImageRungEncoder = encodeManyImageRung;
+	};
+}
+
 async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<ImageContent> {
 	try {
 		const inputBuffer = Buffer.from(block.data, "base64");
@@ -1040,7 +1061,7 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 				// catch would return the over-cap original instead.
 				let candidate: Uint8Array;
 				try {
-					candidate = await (format === "jpeg" ? image.jpeg({ quality }) : image.webp({ quality })).bytes();
+					candidate = await manyImageRungEncoder(image, format, quality);
 				} catch {
 					continue;
 				}
