@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 class FakeSession {
 	readonly listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -133,6 +134,19 @@ function interactionsResponse(): Response {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
+}
+
+/**
+ * The `properties` map of a normalized tool schema.
+ *
+ * `normalizeTools` emits plain JSON schema, but the declared `TSchema` is
+ * opaque, so the map is read through a narrow local shape rather than an inline
+ * cast at the assertion.
+ */
+function jsonSchemaProperties(schema: unknown): Record<string, unknown> | undefined {
+	if (typeof schema !== "object" || schema === null) return undefined;
+	const properties = (schema as { properties?: unknown }).properties;
+	return typeof properties === "object" && properties !== null ? (properties as Record<string, unknown>) : undefined;
 }
 
 describe("AutoLearnController", () => {
@@ -453,6 +467,46 @@ describe("isolated auto-learn capture", () => {
 		expect(captureMock.calls).toHaveLength(1);
 		expect(captureOnPayload).toBe(onPayload);
 		expect(captureOnResponse).toBe(onResponse);
+	});
+
+	// `tools.intentTracing` reconciles onto `agent.intentTracing` on a settings
+	// refresh, and the capture agent must be built from that LIVE value. Asserted
+	// on the wire schema the capture actually sends, not on the option: the field
+	// is what the provider sees, and a copied option proves nothing about it.
+	it("builds the capture from the source agent's live intent-tracing policy", async () => {
+		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [manageSkillTool] },
+			// Launch-time policy: OFF, as a session started before the edit.
+			intentTracing: false,
+		});
+		// The mid-session flip `/refresh settings` performs.
+		sourceAgent.intentTracing = true;
+
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: [manageSkillTool],
+			createAgent: options =>
+				new Agent({
+					...options,
+					convertToLlm,
+					streamFn: captureMock.stream,
+					// What sdk.ts passes: the live agent value, not the constant.
+					intentTracing: sourceAgent.intentTracing,
+				}),
+		});
+
+		await runCapture("Capture after an intent-tracing flip");
+
+		expect(captureMock.calls).toHaveLength(1);
+		const sentTools = captureMock.calls[0]?.context.tools ?? [];
+		const sent = sentTools.find(tool => tool.name === "manage_skill");
+		// Pre-fix the capture was pinned to the construction-time `!!intentField`
+		// (false here), so the required intent field never reached the schema.
+		// Read through the wire JSON shape: the injected schema is a plain
+		// JSON-schema record at runtime, which `TSchema` deliberately hides.
+		expect(jsonSchemaProperties(sent?.parameters)).toHaveProperty(INTENT_FIELD);
 	});
 
 	it("adds learn alongside manage_skill when a memory backend provides it", async () => {
