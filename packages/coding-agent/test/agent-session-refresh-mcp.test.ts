@@ -446,4 +446,144 @@ describe("AgentSession.refresh('mcp')", () => {
 
 		await dir.remove();
 	});
+
+	// `loadConfigs` drops project entries BEFORE deduplication, so a project
+	// `foo` that shadowed a user-level `foo` was keeping that user server from
+	// connecting at all. Disconnecting the project one alone therefore left NO
+	// `foo`, where a fresh session with the setting off runs the user's.
+	it("connects a user server the disabled project config was shadowing", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-shadow-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		// One NAME, two levels — the shadow case. The loader answers as the real
+		// one does: with project config on, the project entry wins the name; with
+		// it off, the project entry is dropped and the user entry is revealed.
+		const projectSource: SourceMeta = {
+			level: "project",
+			path: `${dir.path()}/.mcp.json`,
+			provider: "mcp",
+			providerName: "MCP",
+		};
+		const userSource: SourceMeta = {
+			level: "user",
+			path: `${dir.path()}/user.json`,
+			provider: "mcp",
+			providerName: "MCP",
+		};
+		const manager = new MCPManager(dir.path(), null, async (_cwd, options) =>
+			options?.enableProjectConfig === false
+				? { configs: { foo: { command: "true", args: ["user"] } }, exaApiKeys: [], sources: { foo: userSource } }
+				: {
+						configs: { foo: { command: "true", args: ["project"] } },
+						exaApiKeys: [],
+						sources: { foo: projectSource },
+					},
+		);
+		const connected: Array<Record<string, unknown>> = [];
+		const realConnect = manager.connectServers.bind(manager);
+		manager.connectServers = async (configs, sources, onStatus) => {
+			connected.push(configs as Record<string, unknown>);
+			return realConnect(configs, sources, onStatus);
+		};
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+		});
+		sessions.push(session);
+
+		// The project entry owns the name, as it would at startup.
+		await manager.connectServers({ foo: { command: "true", args: ["project"] } }, { foo: projectSource });
+		connected.length = 0;
+
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: false\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		// Pre-fix the disable path returned straight after disconnecting, so
+		// `connected` stayed empty and the session was left with no `foo`.
+		expect(connected.flatMap(batch => Object.keys(batch))).toContain("foo");
+		// The USER entry's config, not the project one that was disconnected —
+		// `args` distinguishes them, and narrowing keeps the union honest.
+		const revealed = manager.getServerConfig("foo");
+		expect(revealed && "args" in revealed ? revealed.args : undefined).toEqual(["user"]);
+
+		await dir.remove();
+	});
+
+	// A subagent granted the `refresh` tool INHERITS its parent's manager
+	// (`disconnectOwnedMcpManager` unset). Reconciling there would disconnect the
+	// parent's project servers and rewrite its discovery policy from the child's
+	// own settings scope — the same hazard the `mcp`-scope path already guards.
+	it("does not reconcile an inherited MCP manager from a child's settings", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-inherited-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		const configs = { "proj-server": { command: "true", args: [] } };
+		const sources: Record<string, SourceMeta> = {
+			"proj-server": {
+				level: "project",
+				path: `${dir.path()}/.mcp.json`,
+				provider: "mcp",
+				providerName: "MCP",
+			},
+		};
+		const manager = new MCPManager(dir.path(), null, async () => ({ configs, exaApiKeys: [], sources }));
+		const disconnected: string[] = [];
+		const realDisconnect = manager.disconnectServer.bind(manager);
+		manager.disconnectServer = async (name: string) => {
+			disconnected.push(name);
+			return realDisconnect(name);
+		};
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			// No `disconnectOwnedMcpManager`: this session did NOT create the
+			// manager, which is exactly how a subagent receives its parent's.
+		});
+		sessions.push(session);
+
+		await manager.connectServers(configs, sources);
+
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: false\n");
+		// The refresh still succeeds and the child still re-reads its tool view.
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		// The shared manager is untouched: the parent's server stays connected.
+		expect(disconnected).toEqual([]);
+		expect(manager.getServerConfig("proj-server")).toBeDefined();
+
+		await dir.remove();
+	});
 });

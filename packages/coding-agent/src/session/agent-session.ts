@@ -5988,11 +5988,21 @@ export class AgentSession {
 			// MCP filter — and register the join so the refresh does not report
 			// success while servers are still being torn down. Self-guards on
 			// no-change, so an unrelated settings edit touches no connection.
+			//
+			// Gated on OWNERSHIP, the same predicate the `doMcp` block below uses: a
+			// subagent granted the `refresh` tool inherits its parent's manager, and
+			// reconciling there would disconnect the PARENT's project servers and
+			// rewrite its discovery policy from the child's settings scope. The
+			// child still refreshes its own tool view from the shared manager, which
+			// mutates nothing.
 			if (changed && !doMcp && this.#mcpManager) {
 				const manager = this.#mcpManager;
+				const ownsManager = this.#disconnectOwnedMcpManager !== undefined;
 				this.registerHostReconciliation(
 					(async () => {
-						await manager.reconcileProjectConfigFilter(this.settings.get("mcp.enableProjectConfig") ?? true);
+						if (ownsManager) {
+							await manager.reconcileProjectConfigFilter(this.settings.get("mcp.enableProjectConfig") ?? true);
+						}
 						await this.refreshMCPTools(manager.getTools());
 					})(),
 				);

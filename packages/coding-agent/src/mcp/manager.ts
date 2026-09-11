@@ -573,12 +573,27 @@ export class MCPManager {
 			// server's level, which is the same discriminator `loadConfigs` uses.
 			const names = [...this.#serverConfigs.keys()].filter(name => this.#sources.get(name)?.level === "project");
 			await Promise.all(names.map(name => this.disconnectServer(name)));
-			return;
 		}
-		// Re-enabled: connect the project servers discovery now admits, leaving
-		// every other connection in place (`connectServers` is incremental).
+		// Then converge on what discovery admits under the NEW value, in both
+		// directions. Disabling is not disconnect-only: `loadConfigs` drops
+		// project entries BEFORE deduplication, so a project `foo` that shadowed a
+		// user-level `foo` was keeping that user server from ever connecting —
+		// disconnecting the project one alone left no `foo` at all, where a fresh
+		// session with the setting off would have run the user's.
+		await this.#connectNewlyDiscovered(enableProjectConfig, options);
+	}
+
+	/**
+	 * Connect every server discovery now admits that is not already connected.
+	 *
+	 * Additive by construction: existing connections are left in place
+	 * (`connectServers` is incremental) and an already-connected name is skipped,
+	 * so this reveals newly unshadowed or newly admitted servers without
+	 * restarting anything that is already healthy.
+	 */
+	async #connectNewlyDiscovered(enableProjectConfig: boolean, options: MCPDiscoverOptions | undefined): Promise<void> {
 		const loaded = await this.loadConfigs(this.cwd, {
-			enableProjectConfig: true,
+			enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
 			extensionRoots: options?.extensionRoots,
@@ -587,8 +602,7 @@ export class MCPManager {
 		const sources: Record<string, SourceMeta> = {};
 		for (const name in loaded.configs) {
 			const config = loaded.configs[name];
-			if (!config || loaded.sources[name]?.level !== "project") continue;
-			if (this.#serverConfigs.has(name)) continue;
+			if (!config || this.#serverConfigs.has(name)) continue;
 			configs[name] = config;
 			const source = loaded.sources[name];
 			if (source) sources[name] = source;
