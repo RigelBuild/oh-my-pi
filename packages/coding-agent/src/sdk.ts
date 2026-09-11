@@ -3170,17 +3170,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Read live, per render: `/refresh settings` can flip this on disk, and a
 		// value captured here would leave the prompt reporting a refresh while the
 		// model kept seeing (or kept missing) the tree. The tree itself follows:
-		// `liveWorkspaceTree()` reuses the startup scan while the flag stays on and
-		// rescans only after a refresh turned it on, so a refresh pays the
-		// recursive walk only when the setting actually asks for one.
+		// `liveWorkspaceTree()` reuses a scan while the flag stays on and rescans
+		// only when it has nothing valid, so a refresh pays the recursive walk
+		// only when the setting actually asks for one.
+		//
+		// Keyed by the directory it was taken under, not a "have scanned" flag: a
+		// session can move to another project between flips, and a boolean latch
+		// would then serve the previous project's files forever. Comparing the cwd
+		// both invalidates the scan on a move and keeps the flip lazy.
 		let workspaceTreeScan: Promise<WorkspaceTree> = workspaceTreePromise;
-		let workspaceTreeScanned = (settings.get("includeWorkspaceTree") ?? false) || options.workspaceTree !== undefined;
-		const liveWorkspaceTree = (enabled: boolean): Promise<WorkspaceTree> => {
+		let workspaceTreeScanCwd: string | undefined =
+			(settings.get("includeWorkspaceTree") ?? false) || options.workspaceTree !== undefined ? cwd : undefined;
+		const liveWorkspaceTree = (enabled: boolean, promptCwd: string): Promise<WorkspaceTree> => {
 			if (!enabled) return workspaceTreeScan;
-			if (!workspaceTreeScanned) {
-				workspaceTreeScanned = true;
+			if (workspaceTreeScanCwd !== promptCwd) {
+				workspaceTreeScanCwd = promptCwd;
 				workspaceTreeScan = logger.time("buildWorkspaceTree", () =>
-					buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
+					buildWorkspaceTree(promptCwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }),
 				);
 				workspaceTreeScan.catch(() => {});
 			}
@@ -3315,7 +3321,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
 				secretsEnabled,
-				workspaceTree: liveWorkspaceTree(renderWorkspaceTree),
+				workspaceTree: liveWorkspaceTree(renderWorkspaceTree, promptCwd),
 				includeWorkspaceTree: renderWorkspaceTree,
 				memoryRootEnabled: memoryBackend?.id === "local",
 				securityEnabled: settings.get("security.enabled"),
