@@ -180,8 +180,10 @@ describe("MCP empty-toolset warmup recovery", () => {
 
 			// The empty pass must never become an authoritative cached toolset
 			// (that is the 30-day poison). An invalidation marker may be stored,
-			// but nothing stored may carry tools.
-			for (const value of storage.raw.values()) {
+			// but no CATALOG row may carry tools. Ordering-claim rows are keyed
+			// separately and hold only a token, so they are not catalogs.
+			for (const [key, value] of storage.raw.entries()) {
+				if (!key.startsWith("mcp_tools:")) continue;
 				const parsed: unknown = JSON.parse(value);
 				const tools = parsed && typeof parsed === "object" && "tools" in parsed ? parsed.tools : undefined;
 				expect(tools).toEqual([]);
