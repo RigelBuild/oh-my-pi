@@ -111,8 +111,19 @@ describe("MCP tool cache request-time ordering token", () => {
 
 			fs.writeFileSync(gatePath, "go");
 			// The cache write is fire-and-forget and awaits the config hash, so it
-			// can still be pending when the tools are registered. Await the row.
-			expect(await waitFor(() => storage.raw.has("mcp_tools:gated"))).toBe(true);
+			// can still be pending when the tools are registered. Await the
+			// CATALOG, not merely the row: `observeCatalogAt()` reserves its
+			// ordering token on the row before the request goes out, so the key
+			// exists from the claim onward and its presence no longer means the
+			// write has landed.
+			expect(
+				await waitFor(() => {
+					const pending = storage.raw.get("mcp_tools:gated");
+					if (pending === undefined) return false;
+					const seen: unknown = JSON.parse(pending);
+					return isRecord(seen) && Array.isArray(seen.tools) && seen.tools.length > 0;
+				}),
+			).toBe(true);
 
 			const row = storage.raw.get("mcp_tools:gated");
 			const parsed: unknown = JSON.parse(row as string);
