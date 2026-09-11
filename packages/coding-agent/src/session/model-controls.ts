@@ -365,7 +365,14 @@ export class ModelControls {
 		// Apply explicit thinking level if given; otherwise prefer the model's
 		// configured defaultLevel; otherwise re-clamp the current level (or auto).
 		if (thinkingLevel !== undefined) {
-			this.setThinkingLevel(thinkingLevel);
+			// A suffix on a user-driven switch (`/switch p/m:<level>`, the selector)
+			// is a session choice, so it pins even when it matches the active level
+			// — without the flag an unchanged selection writes no receipt and the
+			// previous settings-tracking one survives, so a later
+			// `defaultThinkingLevel` edit overwrites the user's pick. An ephemeral
+			// switch (prewalk, plan-yolo) carries a CONFIGURED level, not a user
+			// selection, so it must keep following settings.
+			this.setThinkingLevel(thinkingLevel, false, { explicit: !options?.ephemeral });
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}

@@ -3265,6 +3265,12 @@ const EFFECTIVE_CHANGE_NOTIFIED_PATHS: readonly SettingPath[] = [
 	// tabs kept closing on the old schedule — most visibly on a change to `0`,
 	// where an armed timer still closed tabs after idle closing was disabled.
 	"browser.idleCloseSec",
+	// Both are copied OUT of settings at startup into a live object that owns
+	// the behaviour afterwards — the workspace roots into `SessionManager`, the
+	// job cap into `AsyncJobManager` — so re-reading the merged value
+	// reconciles nothing on its own and the listener must push the new value in.
+	"workspace.additionalDirectories",
+	"async.maxJobs",
 ];
 
 /** Subscribe to Code Mode setting changes. Returns an unsubscribe function. */
