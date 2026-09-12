@@ -35,6 +35,7 @@ import {
 import {
 	AuthBrokerClient,
 	canonicalizePlan,
+	canonicalizeProviderId,
 	DEFAULT_AUTH_BROKER_BIND,
 	type SubscriptionLookup,
 	startAuthBroker,
@@ -398,26 +399,6 @@ export async function loadSubscriptionsConfig(
 /** A non-null, non-array plain JSON object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Canonicalize a config-supplied provider id to the form live usage reports
- * carry: trimmed and lowercased.
- *
- * The renderer joins config to reports on an exact `provider` key, and every id
- * in the catalog table is lowercase, so a report's `provider` is always the
- * bare lowercase id. An operator writing `"Anthropic"` would otherwise be stored
- * verbatim, match no report, and silently drop that account's plan/renewal
- * series while the broker logged a healthy start — the same silent omission the
- * surrounding trim-and-reject checks exist to prevent.
- *
- * Normalizing beats rejecting here because the exported `org`, `email`, and
- * `plan` labels are already case-folded on both sides (see `orgLabelOf`,
- * `emailLabelOf`, `canonicalizePlan`); making `provider` the one field where
- * casing is fatal rather than folded would be the surprising rule.
- */
-function canonicalizeProviderId(provider: string): string {
-	return provider.trim().toLowerCase();
 }
 
 /**
