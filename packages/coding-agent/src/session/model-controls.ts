@@ -22,7 +22,7 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
-import { SERVICE_TIER_FAMILIES } from "../config/service-tier";
+import { buildServiceTierByFamily, SERVICE_TIER_FAMILIES } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsUltrathink } from "../modes/ultrathink";
 import {
@@ -226,14 +226,20 @@ export class ModelControls {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
 		this.#serviceTierByFamily = next;
-		// A `service_tier_change` is a WHOLE-MAP snapshot with no per-family
-		// provenance, and restoration (`switchSession`, resume) replays the last
-		// one wholesale. So an earlier `/fast`, selector, or RPC/ACP write for ONE
-		// family leaves a snapshot that still carries every other family's
-		// pre-refresh value: switching away and back, or restarting and resuming,
-		// resurrected the stale tier for exactly the families this reconcile had
-		// just moved. Re-persisting the merged map keeps the reconciled value
-		// across that round-trip.
+		// A `service_tier_change` is a WHOLE-MAP snapshot, and restoration
+		// (`switchSession`, resume) replays the last one wholesale. So an earlier
+		// `/fast`, selector, or RPC/ACP write for ONE family leaves a snapshot
+		// that still carries every other family's pre-refresh value: switching
+		// away and back, or restarting and resuming, resurrected the stale tier
+		// for exactly the families this reconcile had just moved. Re-persisting
+		// the merged map keeps the reconciled value across that round-trip.
+		//
+		// The snapshot now also records WHICH families still follow `tier.*`, so a
+		// pin for one family no longer freezes the others at the value they held
+		// when it was written. Without that, a stop + `tier.google` edit + resume
+		// replayed the stale Google tier, and no later refresh could notice —
+		// `Settings` has already loaded the new value, so `previousConfigured`
+		// equals `nextConfigured` and this reconcile sees no movement.
 		//
 		// Gated on a receipt already being on the branch, which is what keeps the
 		// snapshot from turning a config-derived family into a permanent pin:
@@ -243,8 +249,20 @@ export class ModelControls {
 		// writing the first one here would freeze every family — so it stays
 		// unwritten and restoration keeps re-deriving from `tier.*`.
 		if (this.#host.sessionManager.getBranch().some(entry => entry.type === "service_tier_change")) {
-			this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry());
+			this.#host.sessionManager.appendServiceTierChange(
+				this.serviceTierEntry(),
+				this.#settingsTrackingFamilies(nextConfigured),
+			);
 		}
+	}
+
+	/**
+	 * Families whose live tier still equals what `tier.*` configures, so
+	 * restoration can re-derive them from the config instead of replaying a
+	 * value that may since have changed on disk.
+	 */
+	#settingsTrackingFamilies(configured: ServiceTierByFamily): ReadonlyArray<keyof ServiceTierByFamily> {
+		return SERVICE_TIER_FAMILIES.filter(family => this.#serviceTierByFamily[family] === configured[family]);
 	}
 	resolveRoleModel(role: string): Model | undefined {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
@@ -916,7 +934,24 @@ export class ModelControls {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
 		this.#serviceTierByFamily = next;
-		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry());
+		// Provenance is recorded HERE because this is where the whole-map receipt
+		// originates: a pin on one family otherwise freezes every other family at
+		// the value it happened to hold, and restoration cannot tell the two apart.
+		// Computed against the live config, so the families still equal to it are
+		// the ones restoration may safely re-derive.
+		this.#host.sessionManager.appendServiceTierChange(
+			this.serviceTierEntry(),
+			this.#settingsTrackingFamilies(this.#configuredServiceTiers()),
+		);
+	}
+
+	/** The per-family tier map the live `tier.*` settings configure. */
+	#configuredServiceTiers(): ServiceTierByFamily {
+		return buildServiceTierByFamily(
+			this.#host.settings.get("tier.openai"),
+			this.#host.settings.get("tier.anthropic"),
+			this.#host.settings.get("tier.google"),
+		);
 	}
 
 	/**

@@ -2378,8 +2378,18 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendServiceTierChange(serviceTier: ServiceTierByFamily | null): string {
-		const entry: ServiceTierChangeEntry = { type: "service_tier_change", ...this.#freshEntryFields(), serviceTier };
+	appendServiceTierChange(
+		serviceTier: ServiceTierByFamily | null,
+		settingsTrackingFamilies?: ReadonlyArray<keyof ServiceTierByFamily>,
+	): string {
+		const entry: ServiceTierChangeEntry = {
+			type: "service_tier_change",
+			...this.#freshEntryFields(),
+			serviceTier,
+			// Omitted when empty so a receipt with no config-following family is
+			// byte-identical to one written before this field existed.
+			...(settingsTrackingFamilies?.length ? { settingsTrackingFamilies } : {}),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}

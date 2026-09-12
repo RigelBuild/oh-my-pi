@@ -312,6 +312,62 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	});
 
+	it("re-derives a config-following family after a tier edit made while stopped", async () => {
+		// The boundary a refresh cannot cover. Anthropic is PINNED by `/fast`, which
+		// writes a whole-map receipt carrying google's current value too. The
+		// process then stops, `tier.google` is edited on disk, and the session is
+		// resumed: restoration replayed the receipt wholesale, so the stale google
+		// tier came back. No later refresh can notice, because `Settings` has
+		// already loaded the new value — `previousConfigured` equals
+		// `nextConfigured`, so the reconcile sees no movement.
+		const h = await makeHarness("tier:\n  anthropic: none\n  google: flex\n", { persistSession: true });
+		try {
+			expect(h.session.serviceTierByFamily.google).toBe("flex");
+
+			// The pin on ANOTHER family, which is what writes the receipt.
+			h.session.setServiceTierFamily("anthropic", "priority");
+
+			h.session.sessionManager.appendMessage({
+				role: "assistant",
+				provider: "anthropic",
+				model: h.modelA.id,
+				content: [{ type: "text", text: "reply" }],
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				api: "anthropic-messages",
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			const sessionFile = h.session.sessionFile;
+			if (!sessionFile) throw new Error("Expected a persisted session file");
+			await h.session.sessionManager.flush();
+
+			// The edit happens while the session is NOT running, so nothing
+			// reconciles it — this is the case the refresh path cannot reach.
+			await fs.writeFile(h.settingsPath, "tier:\n  anthropic: none\n  google: priority\n");
+			// A real resume is a NEW process that loads the edited config before
+			// restoring the transcript. In-process, `reload()` is what puts the
+			// session in that state; without it the restore would read the launch-time
+			// value and the assertion below could not distinguish the fix.
+			await h.session.settings.reload();
+
+			expect(await h.session.switchSession(sessionFile)).toBe(true);
+
+			// Pre-fix this was the stale `flex` from the receipt.
+			expect(h.session.serviceTierByFamily.google).toBe("priority");
+			// The real pin is untouched: provenance distinguishes them.
+			expect(h.session.serviceTierByFamily.anthropic).toBe("priority");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("reapplies the shared-LSP flag when lsp.shared moves on disk", async () => {
 		// `lsp.shared` is copied into module state in `lsp/client.ts` that
 		// `getOrCreateClient` consults when it COLD-STARTS a server, never re-read

@@ -113,7 +113,7 @@ import {
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
-import { buildServiceTierByFamily } from "../config/service-tier";
+import { applySettingsTrackedServiceTiers, buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
 import {
 	onAppendOnlyModeChanged,
@@ -5989,7 +5989,14 @@ export class AgentSession {
 			// `setNotificationsEnabled` self-guards on no-change and subscribes the
 			// live connections directly; the `all` reconnect below then re-subscribes
 			// the freshly reconnected servers under the now-current flag.
-			if (changed) this.#mcpManager?.setNotificationsEnabled(this.settings.get("mcp.notifications") ?? false);
+			//
+			// Gated on OWNERSHIP, like the project-config reconcile below: a subagent
+			// granted the `refresh` tool inherits its parent's manager, and
+			// subscribing/unsubscribing there would rewrite the PARENT's live server
+			// subscriptions from the child's settings scope.
+			if (changed && this.#disconnectOwnedMcpManager !== undefined) {
+				this.#mcpManager?.setNotificationsEnabled(this.settings.get("mcp.notifications") ?? false);
+			}
 			// Same shape for `mcp.enableProjectConfig`: `MCPManager` consumes it only
 			// during discovery, so flipping it off and running `/refresh settings`
 			// left the project servers this session already started connected and
@@ -10978,7 +10985,16 @@ export class AgentSession {
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
-				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				hasServiceTierEntry
+					? // Families the receipt marked as config-following are re-derived from
+						// the live config, so a `tier.*` edit is not overridden by the value
+						// that receipt captured. Real pins keep their persisted value.
+						applySettingsTrackedServiceTiers(
+							sessionContext.serviceTier ?? {},
+							sessionContext.serviceTierSettingsTrackingFamilies,
+							configuredServiceTierByFamily,
+						)
+					: configuredServiceTierByFamily,
 			);
 
 			if (switchingToDifferentSession) {

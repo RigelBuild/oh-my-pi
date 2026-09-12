@@ -77,7 +77,7 @@ import {
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
-import { buildServiceTierByFamily } from "./config/service-tier";
+import { applySettingsTrackedServiceTiers, buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { resolveDialect } from "./config/tool-dialect";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
@@ -1821,6 +1821,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
+	// Whether THIS session constructed the manager above, rather than adopting a
+	// parent's or the pre-existing process singleton. Only the owner may
+	// reconcile process-wide admission limits from its own settings scope.
+	const ownsAsyncJobManager = asyncJobManager !== undefined;
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
@@ -3663,7 +3667,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
 			(hasServiceTierEntry
-				? (existingSession.serviceTier ?? {})
+				? // A receipt exists, so it wins — EXCEPT for the families it recorded as
+					// still following `tier.*`. Those are re-derived from the live config, so
+					// a `tier.*` edit made while the session was stopped is not overridden by
+					// the value that receipt happened to capture (a stale tier no later
+					// refresh could detect, since `Settings` has already loaded the new one).
+					applySettingsTrackedServiceTiers(
+						existingSession.serviceTier ?? {},
+						existingSession.serviceTierSettingsTrackingFamilies,
+						buildServiceTierByFamily(
+							settings.get("tier.openai"),
+							settings.get("tier.anthropic"),
+							settings.get("tier.google"),
+						),
+					)
 				: buildServiceTierByFamily(
 						settings.get("tier.openai"),
 						settings.get("tier.anthropic"),
@@ -4353,9 +4370,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// success. Push the new value into the owner instead.
 		const unsubscribeLiveWorkspaceSettings = settings.onEffectiveChange((path, value) => {
 			if (path === "async.maxJobs") {
-				// Same clamp as construction, so a config edit cannot widen the cap
-				// past what a launch-time value could have asked for.
-				scopedAsyncJobManager?.setMaxRunningJobs(Math.min(100, Math.max(1, (value as number) ?? 100)));
+				// Owner only. `scopedAsyncJobManager` is the process-wide singleton
+				// when this session inherited it (a structured subagent, which takes
+				// `AsyncJobManager.instance()`), so a child reloading its own
+				// project-scoped `async.maxJobs` would rewrite the PARENT's admission
+				// limit and start rejecting or admitting the parent's jobs.
+				if (ownsAsyncJobManager) {
+					// Same clamp as construction, so a config edit cannot widen the cap
+					// past what a launch-time value could have asked for.
+					scopedAsyncJobManager?.setMaxRunningJobs(Math.min(100, Math.max(1, (value as number) ?? 100)));
+				}
 				return;
 			}
 			if (
