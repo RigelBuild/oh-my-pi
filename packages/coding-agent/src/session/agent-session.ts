@@ -8976,15 +8976,61 @@ export class AgentSession {
 		// (#autoCompactionAbortController) controllers.
 		if (this.isCompacting) return;
 		try {
-			await this.compact(instructions);
+			const result = await this.compact(instructions);
+			// A requested pass runs DETACHED: it goes through neither
+			// `CommandController.executeCompaction()` (which rebuilds the chat and
+			// handles compacted scrollback) nor the automatic maintenance flow. So
+			// without a lifecycle event the history was replaced while the TUI kept
+			// rendering the summarized-away turns until some unrelated rebuild, and
+			// queued user input had no drain site at the moment the pass finished.
+			// Emitting the SAME event the automatic flow emits reuses both handlers
+			// rather than duplicating them at a second callsite.
+			this.#emitRequestedCompactionEnd({ result, aborted: false });
 		} catch (error) {
 			const detail = error instanceof Error ? error.message : String(error);
-			if (/nothing to compact|already compacted|too small|already in progress/i.test(detail)) {
+			const benign = /nothing to compact|already compacted|too small|already in progress/i.test(detail);
+			if (benign) {
 				logger.debug("Requested compaction was a no-op", { detail });
 			} else {
 				logger.warn("Requested compaction failed", { detail });
 			}
+			// A benign no-op is reported as `skipped`, which the UI handler
+			// deliberately renders as nothing: history did not move, so a rebuild
+			// would be noise. A real failure still needs the event, because the
+			// queued-input drain hangs off it either way.
+			this.#emitRequestedCompactionEnd({
+				result: undefined,
+				aborted: false,
+				errorMessage: benign ? undefined : detail,
+				skipped: benign,
+			});
 		}
+	}
+
+	/**
+	 * Report a model-requested compaction's completion on the shared
+	 * `auto_compaction_end` channel under its own `requested` action, so a
+	 * consumer can tell a detached tool-initiated pass from a threshold one while
+	 * the existing UI rebuild and queue-drain handlers apply unchanged.
+	 */
+	#emitRequestedCompactionEnd(event: {
+		result: CompactionResult | undefined;
+		aborted: boolean;
+		errorMessage?: string;
+		skipped?: boolean;
+	}): void {
+		this.#emitSessionEvent({
+			type: "auto_compaction_end",
+			action: "requested",
+			result: event.result,
+			aborted: event.aborted,
+			// No retry ladder exists for a requested pass: the tool asked once. A
+			// `true` here would make the input controller hold the queue for a
+			// continuation that never comes.
+			willRetry: false,
+			...(event.errorMessage === undefined ? {} : { errorMessage: event.errorMessage }),
+			...(event.skipped === undefined ? {} : { skipped: event.skipped }),
+		});
 	}
 
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */

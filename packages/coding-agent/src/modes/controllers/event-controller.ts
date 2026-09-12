@@ -2122,6 +2122,9 @@ export class EventController {
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
+		// A requested pass emits no `auto_compaction_start`, so there is no loader
+		// to tear down and no "cancelled" state to report: the tool either
+		// completed, skipped, or failed by the time this fires.
 		if (event.aborted) {
 			this.ctx.showStatus(
 				isHandoffAction
@@ -2183,6 +2186,10 @@ export class EventController {
 		} else if (event.skipped) {
 			// Benign skip: no model selected, no candidate models available, or nothing
 			// to compact yet. Not a failure — suppress the warning.
+		} else if (event.action === "requested") {
+			// The agent asked for this pass, so the message names the requester
+			// rather than implying an automatic threshold fired.
+			this.ctx.showWarning("Agent-requested compaction failed; continuing without compacting");
 		} else if (isSnapcompactAction) {
 			this.ctx.showWarning("Auto-snapcompact maintenance failed; continuing without maintenance");
 		} else if (isRemoteAction) {

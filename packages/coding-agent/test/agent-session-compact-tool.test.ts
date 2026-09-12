@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -531,6 +532,94 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		expect(order).toContain("agent_end");
 		// The idle signal must not reach subscribers until the rewrite pass is done.
 		expect(order.indexOf("agent_end")).toBeGreaterThan(order.indexOf("compact:done"));
+	}, 15_000);
+
+	it("reports a requested compaction's completion on the compaction lifecycle channel", async () => {
+		// The detached requested pass goes through neither
+		// `CommandController.executeCompaction()` nor the automatic maintenance
+		// flow, and emitted no lifecycle event at all. Those are the two places
+		// the TUI rebuilds the chat and drains input queued during compaction, so
+		// the session history was replaced while the transcript kept rendering the
+		// summarized-away turns, and a parked user steer had no drain site.
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		// A harness session is far too small for a real rewrite, and the
+		// too-small no-op reports `skipped` — a different branch from the one
+		// under test. Stand in a successful result so the SUCCESS emit is what
+		// this exercises.
+		vi.spyOn(session, "compact").mockResolvedValue({
+			summary: "summarized",
+			shortSummary: "summarized",
+			firstKeptEntryId: "1",
+			tokensBefore: 10_000,
+		} as CompactionResult);
+
+		const ends: Array<Extract<AgentSessionEvent, { type: "auto_compaction_end" }>> = [];
+		const order: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") {
+				ends.push(event);
+				order.push("compaction_end");
+			}
+			if (event.type === "agent_end") order.push("agent_end");
+		});
+
+		await session.prompt("do the thing then compact");
+		await session.waitForIdle();
+
+		expect(ends).toHaveLength(1);
+		// Its own action, so a consumer can distinguish a tool-initiated pass from
+		// a threshold one while the existing UI handlers still apply.
+		expect(ends[0].action).toBe("requested");
+		// No retry ladder exists for a requested pass: the tool asked once. A
+		// `willRetry: true` would make the input controller hold the queue for a
+		// continuation that never arrives.
+		expect(ends[0].willRetry).toBe(false);
+		expect(ends[0].aborted).toBe(false);
+		// The rebuild the TUI handler keys on: `result` present, not a skip.
+		expect(ends[0].result).toBeDefined();
+		expect(ends[0].skipped).toBeUndefined();
+		// Before the terminal idle signal, so the rebuild and the queue drain
+		// happen while the session is still settling rather than a turn later.
+		expect(order.indexOf("compaction_end")).toBeLessThan(order.lastIndexOf("agent_end"));
+	}, 15_000);
+
+	it("marks a benign requested no-op as skipped rather than a failure", async () => {
+		// `#applyRequestedCompaction` swallows "nothing to compact"/"too small" by
+		// design. The event still has to fire — the queue drain hangs off it — but
+		// reporting it as an error would put a spurious warning on screen and
+		// rebuild a transcript that did not move. `skipped` is the field the UI
+		// handler already renders as nothing.
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		vi.spyOn(session, "compact").mockImplementation(async () => {
+			throw new Error("Nothing to compact");
+		});
+
+		const ends: Array<Extract<AgentSessionEvent, { type: "auto_compaction_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") ends.push(event);
+		});
+
+		await session.prompt("do the thing then compact");
+		await session.waitForIdle();
+
+		expect(ends).toHaveLength(1);
+		expect(ends[0].skipped).toBe(true);
+		expect(ends[0].errorMessage).toBeUndefined();
+		expect(ends[0].result).toBeUndefined();
 	}, 15_000);
 
 	it("schedules a rewrite only when the compact result carries details.requested === true (marker, not name)", async () => {
