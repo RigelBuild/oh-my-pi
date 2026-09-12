@@ -6163,7 +6163,33 @@ export class AgentSession {
 						GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
 					)
 				) {
+					const evalWasActive = this.agent.state.tools.some(tool => tool.name === "eval");
 					await this.#tools.reconcileSettingGatedTools();
+					// The browser-MCP filter asks whether a callable browser prelude
+					// replaces those servers, which reads `eval`'s registered/active
+					// state — and this reconcile is now what moves it. Without a
+					// re-filter, enabling a backend activates the prelude while the
+					// browser servers stay connected, and disabling the last one
+					// leaves them filtered out with nothing serving browser
+					// automation. Evaluated against the POST-reconcile tool state,
+					// and only on a real transition so an unrelated gate edit
+					// touches no connection.
+					const evalIsActive = this.agent.state.tools.some(tool => tool.name === "eval");
+					if (
+						evalWasActive !== evalIsActive &&
+						this.#reconcileBrowserMcpFilter &&
+						this.#disconnectOwnedMcpManager
+					) {
+						const tools = await this.#reconcileBrowserMcpFilter(
+							shouldFilterBrowserMCPForPrelude({
+								restrictToolNames: false,
+								browserEnabled: this.settings.get("browser.enabled"),
+								evalRegistered: this.#tools.registry.has("eval"),
+								evalActive: evalIsActive,
+							}),
+						);
+						await this.refreshMCPTools(tools);
+					}
 				}
 				// `memory.backend` is prompt-affecting, so a change already rebuilds
 				// the prompt with the NEW backend's instructions — but the transition

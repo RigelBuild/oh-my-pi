@@ -19,6 +19,7 @@
  *     Ctrl+P cycle pin (must be preserved).
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -75,6 +76,7 @@ async function makeHarness(
 		toolNames?: string[];
 		/** Spawn depth, for the depth-dependent halves of the compound gates. */
 		taskDepth?: number;
+		enableMCP?: boolean;
 	},
 ): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-tiers-tools-");
@@ -108,7 +110,7 @@ async function makeHarness(
 		skills: [],
 		promptTemplates: [],
 		slashCommands: [],
-		enableMCP: false,
+		enableMCP: options?.enableMCP ?? false,
 		enableLsp: options?.enableLsp ?? false,
 		skipPythonPreflight: true,
 		customTools: options?.customTools,
@@ -685,6 +687,45 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 			// what dropped messaging here.
 			expect(h.session.getEnabledToolNames()).toContain("hub");
 		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
+	it("re-filters browser MCP when an eval gate transition moves the prelude", async () => {
+		// The browser filter asks whether a callable browser prelude replaces
+		// those servers, which reads `eval`'s registered/active state — and this
+		// reconcile is what moves it. Without a re-filter, enabling a backend
+		// activates the prelude while the browser servers stay connected, and
+		// disabling the last one leaves them filtered out with nothing serving
+		// browser automation.
+		// Owned, not inherited: the SDK creates the manager (and its disconnect
+		// hook) when `enableMCP` is on, which is the ownership the reconcile
+		// requires. The prototype spy captures the call whichever instance it is.
+		const filterCalls: boolean[] = [];
+		const reconcileSpy = vi
+			.spyOn(MCPManager.prototype, "reconcileBrowserFilter")
+			.mockImplementation(async filtered => {
+				filterCalls.push(filtered);
+			});
+		const h = await makeHarness("browser:\n  enabled: true\neval:\n  py: false\n  js: false\n", {
+			enableMCP: true,
+		});
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("eval");
+
+			filterCalls.length = 0;
+			await fs.writeFile(h.settingsPath, "browser:\n  enabled: true\neval:\n  py: false\n  js: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).toContain("eval");
+			expect(filterCalls).toEqual([true]);
+
+			filterCalls.length = 0;
+			await fs.writeFile(h.settingsPath, "browser:\n  enabled: true\neval:\n  py: false\n  js: false\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("eval");
+			expect(filterCalls).toEqual([false]);
+		} finally {
+			reconcileSpy.mockRestore();
 			await h.dispose();
 		}
 	}, 25_000);
