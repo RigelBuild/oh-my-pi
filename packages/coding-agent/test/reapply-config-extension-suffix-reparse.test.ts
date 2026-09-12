@@ -313,4 +313,91 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			await session.dispose();
 		}
 	}, 20000);
+
+	// A non-UI session starts the deferred runtime pass at creation
+	// (`hasUI: false`), so the suffix reparse below can run while a discovery
+	// over the same provider is still in flight. Coalescing does NOT save it:
+	// `#discoverProviderModelsCoalesced` shares only configured `discovery:`
+	// providers, and an extension's `fetchDynamicModels` is a runtime manager
+	// with no in-flight map — so both passes hit the remote and race each
+	// other's catalog and cache writes.
+	test("does not fetch the saved provider's catalog twice in a non-UI session", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		let concurrentFetches = 0;
+		let peakConcurrentFetches = 0;
+		const dynamicProviderExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					concurrentFetches++;
+					peakConcurrentFetches = Math.max(peakConcurrentFetches, concurrentFetches);
+					// Hold the fetch open so a second, overlapping pass is visible
+					// as concurrency rather than two sequential cache-warm reads.
+					await Bun.sleep(25);
+					concurrentFetches--;
+					return [
+						{
+							id: "router:low",
+							name: "Router Low",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+						{
+							id: "config-pick",
+							name: "Config Pick",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "runtime-provider/config-pick");
+		const sessionFile = await writeBakedSession();
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-nonui"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [dynamicProviderExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+			hasUI: false,
+		});
+
+		try {
+			expect(peakConcurrentFetches).toBe(1);
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
+	}, 20000);
 });

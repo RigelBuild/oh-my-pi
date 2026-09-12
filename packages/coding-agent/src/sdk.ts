@@ -2535,6 +2535,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// extension-registered provider this reparse exists for.
 			if (savedParse?.thinkingLevel !== undefined && modelRegistry.hasProvider(savedParse.provider)) {
 				const savedProvider = savedParse.provider;
+				// Coalescing covers configured `discovery:` providers only
+				// (`#discoverProviderModelsCoalesced`); the runtime and built-in
+				// managers an extension registers have no in-flight map, so a
+				// non-UI session that started the deferred pass above would fetch
+				// the same remote twice here and race its catalog and cache
+				// writes. Await the stashed promise first, exactly as the later
+				// fallback does — never `startRuntimeDiscovery()`, which would
+				// undo a UI session's deliberate deferral.
+				await runtimeDiscoveryPromise;
 				await logger.time("restoreSessionSuffixDiscoveryFallback", () =>
 					modelRegistry.refreshDiscoverableProviders(new Set([savedProvider]), "online-if-uncached"),
 				);
