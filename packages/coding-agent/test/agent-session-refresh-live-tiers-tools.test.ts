@@ -552,6 +552,80 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("reconciles the checkpoint pair when checkpoint.enabled moves", async () => {
+		// Compound gate: `checkpoint.enabled` plus a task-depth condition. The
+		// extra condition is invocation-scoped, so it must not freeze the setting.
+		const h = await makeHarness("checkpoint:\n  enabled: true\n");
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("checkpoint");
+			expect(h.session.getEnabledToolNames()).toContain("rewind");
+
+			await fs.writeFile(h.settingsPath, "checkpoint:\n  enabled: false\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("checkpoint");
+			expect(h.session.getEnabledToolNames()).not.toContain("rewind");
+
+			await fs.writeFile(h.settingsPath, "checkpoint:\n  enabled: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).toContain("checkpoint");
+			expect(h.session.getEnabledToolNames()).toContain("rewind");
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
+	it("applies a reloaded inlineToolDescriptors to the live agent", async () => {
+		// `pruneToolDescriptions` was captured at construction, so request
+		// assembly stayed on the launch-time catalog policy after a refresh.
+		const h = await makeHarness("inlineToolDescriptors: false\n");
+		try {
+			expect(h.session.agent.pruneToolDescriptions).toBe(false);
+
+			await fs.writeFile(h.settingsPath, "inlineToolDescriptors: true\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.agent.pruneToolDescriptions).toBe(true);
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("waits for a pending prompt rebuild before an agent turn reads the prompt", async () => {
+		// The child side of the parent's fan-out: the parent swaps a descendant's
+		// roster synchronously and rebuilds its prompt on the mutation tail, so a
+		// turn starting in that window must join the tail rather than read the
+		// pre-rebuild prompt.
+		const h = await makeHarness("");
+		try {
+			// Hold the tail with a mutation that records when it finishes, then ask
+			// for the agent-start prompt. Resolution ORDER is the observable: the
+			// read must not complete before the pending rebuild does.
+			const gate = Promise.withResolvers<void>();
+			const order: string[] = [];
+			const mutation = h.session.runToolRegistryMutation(async () => {
+				await gate.promise;
+				order.push("rebuild");
+			});
+
+			const started = h.session.buildSystemPromptForAgentStart("probe").then(prompt => {
+				order.push("agent-start");
+				return prompt;
+			});
+
+			// Pre-fix this resolved here, ahead of the gate, because a backend with
+			// no `beforeAgentStartPrompt` returned `#baseSystemPrompt` immediately.
+			await Bun.sleep(50);
+			expect(order).toEqual([]);
+
+			gate.resolve();
+			await mutation;
+			await started;
+			expect(order).toEqual(["rebuild", "agent-start"]);
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("leaves other core built-ins alone when one boolean gate moves", async () => {
 		// Each gate is its own lever: disabling `bash` must not disturb `glob`.
 		const h = await makeHarness("bash:\n  enabled: true\nglob:\n  enabled: true\n");

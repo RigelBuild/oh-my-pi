@@ -1897,16 +1897,24 @@ export class SessionTools {
 	/**
 	 * The gated core built-ins to reconcile, as `[name, setting]`.
 	 *
-	 * `lsp` is not in {@link BOOLEAN_GATED_TOOLS} because its gate is compound —
-	 * `createTools` requires `enableLsp && lsp.enabled`, and `enableLsp` is a
-	 * construction-time capability a settings edit must never widen. Scoping it
-	 * by permission keeps that restriction: `createTools` records `lsp` only for
-	 * a session it built with the capability, so the gate reconciles there and a
-	 * `--no-tools`/restricted session can never gain it from a settings edit.
+	 * `lsp` and the checkpoint pair are not in {@link BOOLEAN_GATED_TOOLS}
+	 * because their gates are COMPOUND: `createTools` requires
+	 * `enableLsp && lsp.enabled`, and `checkpoint.enabled` plus a task-depth
+	 * condition. The non-setting half is invocation-scoped and a settings edit
+	 * must never widen it. Scoping by permission keeps that split: `createTools`
+	 * records a name only for a session whose invocation allowed it, so the
+	 * setting half reconciles there and a `--no-tools`/restricted/subagent
+	 * session can never gain the tool from a settings edit.
 	 */
 	#booleanGatedToolGates(): Array<[string, SettingPath]> {
 		const gates = Object.entries(BOOLEAN_GATED_TOOLS) as Array<[string, SettingPath]>;
-		if (this.#settingGatedBuiltinPermissions.has("lsp")) gates.push(["lsp", "lsp.enabled"]);
+		for (const [name, setting] of [
+			["lsp", "lsp.enabled"],
+			["checkpoint", "checkpoint.enabled"],
+			["rewind", "checkpoint.enabled"],
+		] as const) {
+			if (this.#settingGatedBuiltinPermissions.has(name)) gates.push([name, setting]);
+		}
 		return gates;
 	}
 
@@ -2044,6 +2052,13 @@ export class SessionTools {
 		promptText: string,
 		isCurrent: () => boolean,
 	): Promise<SystemPromptPreparation> {
+		// Barrier first. A parent's refresh swaps this session's skill/rule
+		// snapshot synchronously but rebuilds the prompt on the mutation tail, so
+		// a child starting a turn in that window read `#baseSystemPrompt` before
+		// the rebuild landed and advertised the retired roster. Joining the tail
+		// here is what makes the parent's fan-out safe without blocking its
+		// refresh on every descendant.
+		await this.#toolRegistryMutationTail;
 		const backend = await resolveMemoryBackend(this.#host.settings);
 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
 
