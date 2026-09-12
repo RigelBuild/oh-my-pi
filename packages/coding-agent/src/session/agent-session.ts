@@ -45,6 +45,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
+	CompactionCancelledError,
 	type CompactionResult,
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
@@ -8985,8 +8986,18 @@ export class AgentSession {
 			// queued user input had no drain site at the moment the pass finished.
 			// Emitting the SAME event the automatic flow emits reuses both handlers
 			// rather than duplicating them at a second callsite.
-			this.#emitRequestedCompactionEnd({ result, aborted: false });
+			await this.#emitRequestedCompactionEnd({ result, aborted: false });
 		} catch (error) {
+			// Esc during the summary, or a `session_before_compact` hook declining,
+			// rejects with the canonical cancellation sentinel. That is a deliberate
+			// stop, not a failure: reporting it as an error message puts a warning on
+			// screen where the UI has a cancellation branch, so the outcome has to
+			// stay distinguishable from a genuine fault.
+			if (error instanceof CompactionCancelledError) {
+				logger.debug("Requested compaction was cancelled");
+				await this.#emitRequestedCompactionEnd({ result: undefined, aborted: true });
+				return;
+			}
 			const detail = error instanceof Error ? error.message : String(error);
 			const benign = /nothing to compact|already compacted|too small|already in progress/i.test(detail);
 			if (benign) {
@@ -8998,7 +9009,7 @@ export class AgentSession {
 			// deliberately renders as nothing: history did not move, so a rebuild
 			// would be noise. A real failure still needs the event, because the
 			// queued-input drain hangs off it either way.
-			this.#emitRequestedCompactionEnd({
+			await this.#emitRequestedCompactionEnd({
 				result: undefined,
 				aborted: false,
 				errorMessage: benign ? undefined : detail,
@@ -9012,14 +9023,20 @@ export class AgentSession {
 	 * `auto_compaction_end` channel under its own `requested` action, so a
 	 * consumer can tell a detached tool-initiated pass from a threshold one while
 	 * the existing UI rebuild and queue-drain handlers apply unchanged.
+	 *
+	 * AWAITED by the caller, so it is part of the requested-compaction promise:
+	 * an async extension handler suspends the emit before subscriber fan-out, and
+	 * fire-and-forget let the finalizer release the terminal `agent_end` — and
+	 * with it `waitForIdle()` and any queued input — before the TUI had received
+	 * the event and rebuilt the transcript.
 	 */
 	#emitRequestedCompactionEnd(event: {
 		result: CompactionResult | undefined;
 		aborted: boolean;
 		errorMessage?: string;
 		skipped?: boolean;
-	}): void {
-		this.#emitSessionEvent({
+	}): Promise<void> {
+		return this.#emitSessionEvent({
 			type: "auto_compaction_end",
 			action: "requested",
 			result: event.result,
