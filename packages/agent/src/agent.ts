@@ -779,6 +779,20 @@ export class Agent {
 		this.#intentTracing = value;
 	}
 
+	get pruneToolDescriptions(): boolean {
+		return this.#pruneToolDescriptions;
+	}
+
+	/**
+	 * Live, for the same reason as {@link intentTracing}: `inlineToolDescriptors`
+	 * decides whether the wire carries full tool descriptions or the pruned
+	 * form. Frozen at construction, a `/refresh settings` left request assembly
+	 * on the launch-time catalog policy.
+	 */
+	set pruneToolDescriptions(value: boolean) {
+		this.#pruneToolDescriptions = value;
+	}
+
 	get abortOnFabricatedToolResult(): boolean | undefined {
 		return this.#abortOnFabricatedToolResult;
 	}

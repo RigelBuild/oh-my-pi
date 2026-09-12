@@ -104,6 +104,7 @@ import { type Rule, setActiveRules } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	getModelMatchPreferences,
@@ -618,6 +619,18 @@ function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[]
  * (`inlineToolDescriptors`, `task.eager`): those are frozen at construction by
  * design, so a reload cannot move what the render reads.
  */
+/**
+ * Every setting whose edit must trigger the gated-tool reconcile: the plain
+ * boolean table, plus the setting half of each COMPOUND gate (`lsp.enabled`,
+ * `checkpoint.enabled`). Watching only the table meant an edit to a compound
+ * gate alone never fired the reconcile at all.
+ */
+const COMPOUND_GATED_TOOL_SETTINGS = [
+	...Object.values(BOOLEAN_GATED_TOOLS),
+	"lsp.enabled",
+	"checkpoint.enabled",
+] as const satisfies readonly SettingPath[];
+
 const PROMPT_AFFECTING_SETTING_PATHS = [
 	// Workstation block: the model-identification line.
 	"includeModelInPrompt",
@@ -748,6 +761,7 @@ interface GenerationSettings {
 	 * value across a refresh.
 	 */
 	readonly intentTracing: boolean;
+	readonly pruneToolDescriptions: boolean;
 }
 
 export class AgentSession {
@@ -5891,11 +5905,10 @@ export class AgentSession {
 				// Same shape for the CORE built-ins gated on a plain boolean
 				// (`bash.enabled`, `glob`, `grep`, …): `createTools` reads each gate
 				// once at construction and the tools never re-check it.
-				// `lsp.enabled` rides with the table: its tool gate is reconciled
-				// alongside them, so an edit to it alone still has to trigger.
-				booleanGatedTools: [...Object.values(BOOLEAN_GATED_TOOLS), "lsp.enabled" as const].map(setting =>
-					this.settings.get(setting),
-				),
+				// The compound-gated settings ride with the table: their tool gates
+				// are reconciled alongside them, so an edit to one alone still has
+				// to trigger.
+				booleanGatedTools: COMPOUND_GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
 				// Module-level state in `lsp/client.ts`, consulted on every client
 				// COLD-START, so a reload alone left servers started after the
 				// refresh on the launch-time shared/private choice.
@@ -6114,9 +6127,7 @@ export class AgentSession {
 					this.settings.get("speechgen.enabled") !== previousSubsystems.speechGenEnabled ||
 					!Bun.deepEquals(
 						previousSubsystems.booleanGatedTools,
-						[...Object.values(BOOLEAN_GATED_TOOLS), "lsp.enabled" as const].map(setting =>
-							this.settings.get(setting),
-						),
+						COMPOUND_GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
 					)
 				) {
 					await this.#tools.reconcileSettingGatedTools();
@@ -6502,6 +6513,13 @@ export class AgentSession {
 			// `PI_INTENT_TRACING`-pinned session is not silently un-pinned by a
 			// settings edit.
 			intentTracing: $flag("PI_INTENT_TRACING", this.settings.get("tools.intentTracing")),
+			// The model id matters: `shouldInlineToolDescriptors` resolves `auto`
+			// against it, so the effective value can move with a model swap as well
+			// as with the setting.
+			pruneToolDescriptions: shouldInlineToolDescriptors(
+				this.settings.get("inlineToolDescriptors"),
+				this.agent.state.model?.id,
+			),
 		};
 	}
 
@@ -6557,6 +6575,13 @@ export class AgentSession {
 		if (next.intentTracing !== previous.intentTracing) {
 			this.agent.intentTracing = next.intentTracing;
 		}
+		// `inlineToolDescriptors` decides whether the wire carries full tool
+		// descriptions. `#pruneToolDescriptions` moves with it so the session's
+		// own dump reports what the loop is actually sending.
+		if (next.pruneToolDescriptions !== previous.pruneToolDescriptions) {
+			this.agent.pruneToolDescriptions = next.pruneToolDescriptions;
+			this.#pruneToolDescriptions = next.pruneToolDescriptions;
+		}
 		// The session-level copy backs SIDE-CHANNEL requests (`/btw`, compaction,
 		// advisors), which read `#preferWebsockets` directly rather than the
 		// agent's field, so moving only the agent left every auxiliary host on the
@@ -6604,7 +6629,9 @@ export class AgentSession {
 	 * strictly one-directional: the snapshot swap is synchronous and complete on
 	 * return (so `skill://` resolves correctly immediately), and only the
 	 * rendered prompt settles asynchronously — before the child's next turn,
-	 * which reads the prompt through the same serialized tail. A failure is
+	 * which joins that same tail in `buildSystemPromptForAgentStart` (the child
+	 * side of this contract: without that barrier a turn starting in the window
+	 * would read the pre-rebuild prompt). A failure is
 	 * logged rather than propagated: one child's rebuild must not fail the
 	 * parent's refresh, whose own surfaces already applied.
 	 */
@@ -7154,7 +7181,7 @@ export class AgentSession {
 		return this.#tools.refreshBaseSystemPrompt();
 	}
 
-	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+	buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
 		return this.#tools.buildSystemPromptForAgentStart(promptText);
 	}
 
@@ -8256,7 +8283,7 @@ export class AgentSession {
 			const disposingBeforeTransition = this.#isDisposed;
 			await this.#memory.transition;
 			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return false;
-			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			const beforeAgentStartSystemPrompt = await this.buildSystemPromptForAgentStart(expandedText);
 
 			let baseXdevCatalogDelivered = true;
 			// Emit before_agent_start extension event
