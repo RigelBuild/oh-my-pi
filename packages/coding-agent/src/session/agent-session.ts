@@ -216,7 +216,7 @@ import {
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import { BOOLEAN_GATED_TOOLS, type ImageAttachmentEntry } from "../tools";
+import { GATED_TOOL_SETTINGS, type ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import {
@@ -615,22 +615,11 @@ function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[]
  * swap, and `secrets.enabled` through the obfuscator rebuild, which reports its
  * own prompt-state move (the flag is not the render's input anyway: the
  * `<redacted-content>` block tracks whether the built obfuscator actually
- * reports secrets). So are the values sdk.ts captures OUTSIDE the closure
- * (`inlineToolDescriptors`, `task.eager`): those are frozen at construction by
- * design, so a reload cannot move what the render reads.
+ * reports secrets). So are `inlineToolDescriptors` and `task.eager`, which
+ * `rebuildSystemPrompt` now resolves LIVE per render — the rebuild those
+ * trigger is driven by whatever else moved, and the render reads the current
+ * value whenever it runs.
  */
-/**
- * Every setting whose edit must trigger the gated-tool reconcile: the plain
- * boolean table, plus the setting half of each COMPOUND gate (`lsp.enabled`,
- * `checkpoint.enabled`). Watching only the table meant an edit to a compound
- * gate alone never fired the reconcile at all.
- */
-const COMPOUND_GATED_TOOL_SETTINGS = [
-	...Object.values(BOOLEAN_GATED_TOOLS),
-	"lsp.enabled",
-	"checkpoint.enabled",
-] as const satisfies readonly SettingPath[];
-
 const PROMPT_AFFECTING_SETTING_PATHS = [
 	// Workstation block: the model-identification line.
 	"includeModelInPrompt",
@@ -947,6 +936,7 @@ export class AgentSession {
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#reconcileSharedLsp: AgentSessionConfig["reconcileSharedLsp"];
+	#reconcileAutoLearn: AgentSessionConfig["reconcileAutoLearn"];
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -1733,6 +1723,7 @@ export class AgentSession {
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#reconcileSharedLsp = config.reconcileSharedLsp;
+		this.#reconcileAutoLearn = config.reconcileAutoLearn;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -5895,6 +5886,7 @@ export class AgentSession {
 			// `settings.get(...)` at use time.
 			const previousSubsystems = {
 				memoryBackend: this.settings.get("memory.backend"),
+				autoLearnEnabled: this.settings.get("autolearn.enabled"),
 				advisorEnabled: this.settings.get("advisor.enabled"),
 				externalThinking: this.settings.get("externalThinking"),
 				browserEnabled: this.settings.get("browser.enabled"),
@@ -5908,7 +5900,7 @@ export class AgentSession {
 				// The compound-gated settings ride with the table: their tool gates
 				// are reconciled alongside them, so an edit to one alone still has
 				// to trigger.
-				booleanGatedTools: COMPOUND_GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
+				booleanGatedTools: GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
 				// Module-level state in `lsp/client.ts`, consulted on every client
 				// COLD-START, so a reload alone left servers started after the
 				// refresh on the launch-time shared/private choice.
@@ -6127,7 +6119,7 @@ export class AgentSession {
 					this.settings.get("speechgen.enabled") !== previousSubsystems.speechGenEnabled ||
 					!Bun.deepEquals(
 						previousSubsystems.booleanGatedTools,
-						COMPOUND_GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
+						GATED_TOOL_SETTINGS.map(setting => this.settings.get(setting)),
 					)
 				) {
 					await this.#tools.reconcileSettingGatedTools();
@@ -6181,6 +6173,13 @@ export class AgentSession {
 				// settings read cannot recover.
 				if (this.settings.get("lsp.shared") !== previousSubsystems.sharedLsp) {
 					this.#reconcileSharedLsp?.();
+				}
+				// `autolearn.enabled` off→on: the controller is never constructed for
+				// a session that started with it off, so the nudge could not fire
+				// however the setting moved. The DISABLE direction already works —
+				// the controller re-checks the setting when it fires.
+				if (this.settings.get("autolearn.enabled") !== previousSubsystems.autoLearnEnabled) {
+					this.#reconcileAutoLearn?.();
 				}
 				// The Code Mode signal DOES reach a listener, but that listener
 				// launches `reconcileCodeMode()` fire-and-forget, so the refresh

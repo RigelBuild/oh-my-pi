@@ -545,6 +545,68 @@ export const BOOLEAN_GATED_TOOLS = {
 	web_search: "web_search.enabled",
 } as const satisfies Readonly<Record<string, SettingPath>>;
 
+/**
+ * Core built-ins whose existence is gated on settings COMPOUNDED with an
+ * invocation-scoped condition (task depth, an explicit tool list, a
+ * construction-time capability). Maps each to the settings its gate reads.
+ *
+ * The split matters: the settings half must reconcile on `/refresh settings`,
+ * while the invocation half must never be widened by a settings edit. The
+ * invocation half is captured once, at construction, in the session's
+ * permission set; {@link settingGatedToolEnabled} evaluates the settings half
+ * against live settings. Without the split, every one of these tools stayed
+ * frozen at its launch-time value while remaining callable — its `execute()`
+ * does not re-check the setting.
+ */
+export const COMPOUND_GATED_TOOLS = {
+	lsp: ["lsp.enabled"],
+	todo: ["todo.enabled"],
+	checkpoint: ["checkpoint.enabled"],
+	rewind: ["checkpoint.enabled"],
+	task: ["task.maxRecursionDepth"],
+	hub: ["task.maxRecursionDepth"],
+	manage_skill: ["autolearn.enabled"],
+	learn: ["autolearn.enabled", "memory.backend"],
+} as const satisfies Readonly<Record<string, readonly SettingPath[]>>;
+
+/** Every setting an edit to which must trigger the gated-tool reconcile. */
+export const GATED_TOOL_SETTINGS: readonly SettingPath[] = [
+	...Object.values(BOOLEAN_GATED_TOOLS),
+	...new Set(Object.values(COMPOUND_GATED_TOOLS).flat()),
+];
+
+/**
+ * Whether `name`'s SETTINGS half is satisfied — the same conditions
+ * `createTools`' predicate applies, minus the invocation-scoped ones the
+ * permission set carries. Returns `undefined` for a tool with no settings gate.
+ */
+export function settingGatedToolEnabled(name: string, settings: Settings, taskDepth: number): boolean | undefined {
+	const booleanGate = booleanGateFor(name);
+	if (booleanGate !== undefined) return settings.get(booleanGate) === true;
+	switch (name) {
+		case "lsp":
+			return settings.get("lsp.enabled") === true;
+		case "todo":
+			return settings.get("todo.enabled") === true;
+		case "checkpoint":
+		case "rewind":
+			return settings.get("checkpoint.enabled") === true;
+		case "task":
+			return canSpawnAtDepth(settings.get("task.maxRecursionDepth") ?? 2, taskDepth);
+		case "hub":
+			return isIrcEnabled(settings, taskDepth);
+		case "manage_skill":
+			return settings.get("autolearn.enabled") === true;
+		case "learn":
+			return (
+				settings.get("autolearn.enabled") === true &&
+				["hindsight", "mnemopi", "local"].includes(settings.get("memory.backend") ?? "")
+			);
+		default:
+			return undefined;
+	}
+}
+
 /** The boolean setting gating `name`'s existence, or `undefined` if it has none. */
 export function booleanGateFor(name: string): SettingPath | undefined {
 	return Object.hasOwn(BOOLEAN_GATED_TOOLS, name)
@@ -675,6 +737,28 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
+	// The invocation-scoped conditions on a compound-gated tool: task depth, an
+	// explicit tool list, a construction-time capability. Fixed for this
+	// session's lifetime, which is what makes it safe to capture in the
+	// permission set the settings refresh consults.
+	const topLevelOrRequested = (session.taskDepth ?? 0) === 0 || requestedTools !== undefined;
+	const invocationPermitsGatedTool = (name: string): boolean => {
+		switch (name) {
+			case "lsp":
+				return enableLsp;
+			case "todo":
+				return !includeYield || session.prewalkArmed === true;
+			case "checkpoint":
+			case "rewind":
+			case "manage_skill":
+			case "learn":
+				return topLevelOrRequested;
+			case "hub":
+				return !restrictToolNames && session.enableIrc !== false;
+			default:
+				return true;
+		}
+	};
 	const isToolAllowed = (name: string) => {
 		// Never in the default set. Explicitly activatable while goal.enabled and
 		// no goal record exists yet — /guided-goal enables it so the agent can
@@ -686,45 +770,19 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			const goalState = session.getGoalModeState?.();
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
-		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "eval") return allowEval;
-		if (name === "todo")
-			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
 		if (name === "think") return externalThinkingActive;
-		// The unconditional boolean gates, read from the shared table so the
-		// settings refresh reconciles against exactly this predicate.
-		const booleanGate = booleanGateFor(name);
-		if (booleanGate !== undefined) return session.settings.get(booleanGate) === true;
-		if (name === "checkpoint" || name === "rewind")
-			return (
-				session.settings.get("checkpoint.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "hub") {
-			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
-			);
-		}
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
-		if (name === "manage_skill")
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "learn") {
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
-			);
-		}
-		if (name === "task") {
-			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
-		}
-		return true;
+		// The invocation-scoped half of each compound gate, kept separate from the
+		// settings half below: a settings refresh reconciles the second and must
+		// never widen the first.
+		if (!invocationPermitsGatedTool(name)) return false;
+		// The settings half, from the shared table so the refresh reconciles
+		// against exactly this predicate.
+		return settingGatedToolEnabled(name, session.settings, session.taskDepth ?? 0) ?? true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
 		requestedTools.push("yield");
@@ -749,20 +807,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// tool list or `--no-tools` excluded it", and only the first may be built.
 	if (session.setSettingGatedBuiltinPermissions) {
 		const permitted = new Set<string>();
-		// `lsp` and the checkpoint pair ride along. Their gates are COMPOUND —
-		// `enableLsp && lsp.enabled`, and `checkpoint.enabled` plus a task-depth
-		// condition — and the extra conditions are invocation-scoped, which is
-		// exactly what this set records. Capturing them here lets the reconcile
-		// honor the setting half while the construction-time half stays fixed.
-		const compoundGated = [
-			...(enableLsp ? ["lsp"] : []),
-			...((session.taskDepth ?? 0) === 0 || requestedTools !== undefined ? ["checkpoint", "rewind"] : []),
-		];
-		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...compoundGated]) {
+		// Every gated core built-in whose INVOCATION conditions hold, from the
+		// shared tables so this cannot drift from the predicate above. The
+		// settings half is deliberately NOT consulted: this records what the
+		// invocation allows, and the reconcile evaluates the setting live.
+		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...Object.keys(COMPOUND_GATED_TOOLS)]) {
 			if (!(name in allTools)) continue;
-			// `isToolAllowed` minus the boolean gate: the remaining conditions are
-			// exactly the invocation-scoped ones.
 			if (filteredRequestedTools !== undefined && !requestedTools?.includes(name)) continue;
+			if (!invocationPermitsGatedTool(name)) continue;
 			permitted.add(name);
 		}
 		session.setSettingGatedBuiltinPermissions(permitted);

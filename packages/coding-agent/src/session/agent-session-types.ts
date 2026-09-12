@@ -271,6 +271,14 @@ export interface AgentSessionConfig {
 	 * subagent set) that a settings read cannot recover.
 	 */
 	reconcileSharedLsp?: () => void;
+	/**
+	 * Starts the auto-learn controller when `autolearn.enabled` is turned on
+	 * mid-session. Wired by the host because activation also depends on
+	 * construction-time inputs (`restrictToolNames`, task depth) that a settings
+	 * edit must not widen. Idempotent: a second call with a controller already
+	 * running is a no-op.
+	 */
+	reconcileAutoLearn?: () => void;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the built-in write transport when it is needed at runtime. */

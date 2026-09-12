@@ -5,7 +5,6 @@ import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { isRecord, logger, prompt, stringProperty, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import type { SettingPath } from "../config/settings-schema";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -21,7 +20,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
-import { BOOLEAN_GATED_TOOLS } from "../tools";
+import { BOOLEAN_GATED_TOOLS, COMPOUND_GATED_TOOLS, settingGatedToolEnabled } from "../tools";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
@@ -1674,11 +1673,21 @@ export class SessionTools {
 	async #applyBooleanGatedBuiltins(): Promise<boolean> {
 		const active = this.getEnabledToolNames();
 		const next = new Set(active);
-		for (const [name, setting] of this.#booleanGatedToolGates()) {
-			if (this.#host.settings.get(setting) !== true) {
+		// Depth 0: the depth-dependent conditions are the INVOCATION half, already
+		// decided in `#settingGatedBuiltinPermissions` at construction. Re-deriving
+		// depth here would apply it twice and, for a subagent, could re-evaluate a
+		// condition whose answer must stay fixed for the session's lifetime.
+		const permissionScopedDepth = 0;
+		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...Object.keys(COMPOUND_GATED_TOOLS)]) {
+			// Only what this session's construction permitted. A name absent from
+			// the set was excluded by the INVOCATION — a restricted tool list,
+			// `--no-tools`, a subagent's task depth — and no settings edit may add
+			// it. The two reasons a tool is missing have to stay distinguishable.
+			if (!this.#settingGatedBuiltinPermissions.has(name)) continue;
+			if (settingGatedToolEnabled(name, this.#host.settings, permissionScopedDepth) !== true) {
 				// Filtered by PROVENANCE, exactly as the setting-gated group
 				// reconcile below does: an extension or SDK tool may register over
-				// `bash` under the same name, and that entry is marked non-built-in.
+				// one of these names, and that entry is marked non-built-in.
 				// Disabling the BUILT-IN's gate must leave it active — a freshly
 				// started session with the same config omits only the native tool and
 				// still offers the custom one. A name with no entry at all is treated
@@ -1687,10 +1696,9 @@ export class SessionTools {
 				if (entry === undefined || this.#builtInToolNames.has(name)) next.delete(name);
 				continue;
 			}
-			// Enabled. Build it if this session never did, but only when its own
-			// construction permitted the name.
+			// Enabled and permitted. Build it if this session never did: when the
+			// gate was off at startup there is no registry entry to re-activate.
 			if (!this.#toolRegistry.has(name)) {
-				if (!this.#settingGatedBuiltinPermissions.has(name)) continue;
 				const built = await this.#createBooleanGatedTool?.(name);
 				if (built?.name !== name) continue;
 				const wrapped = this.#wrapRuntimeTool(built);
@@ -1702,30 +1710,6 @@ export class SessionTools {
 		if (next.size === active.length && active.every(name => next.has(name))) return false;
 		await this.#applyActiveToolsByName([...next]);
 		return true;
-	}
-
-	/**
-	 * The gated core built-ins to reconcile, as `[name, setting]`.
-	 *
-	 * `lsp` and the checkpoint pair are not in {@link BOOLEAN_GATED_TOOLS}
-	 * because their gates are COMPOUND: `createTools` requires
-	 * `enableLsp && lsp.enabled`, and `checkpoint.enabled` plus a task-depth
-	 * condition. The non-setting half is invocation-scoped and a settings edit
-	 * must never widen it. Scoping by permission keeps that split: `createTools`
-	 * records a name only for a session whose invocation allowed it, so the
-	 * setting half reconciles there and a `--no-tools`/restricted/subagent
-	 * session can never gain the tool from a settings edit.
-	 */
-	#booleanGatedToolGates(): Array<[string, SettingPath]> {
-		const gates = Object.entries(BOOLEAN_GATED_TOOLS) as Array<[string, SettingPath]>;
-		for (const [name, setting] of [
-			["lsp", "lsp.enabled"],
-			["checkpoint", "checkpoint.enabled"],
-			["rewind", "checkpoint.enabled"],
-		] as const) {
-			if (this.#settingGatedBuiltinPermissions.has(name)) gates.push([name, setting]);
-		}
-		return gates;
 	}
 
 	/** Records which boolean-gated built-ins this session's construction allowed. */
