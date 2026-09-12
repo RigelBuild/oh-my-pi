@@ -638,8 +638,15 @@ export function renderUsageMetrics(
 		// parser entirely, so re-check here rather than publishing `-1`, `NaN`,
 		// or `+Inf` into a gauge every consumer divides by.
 		if (!isPublishablePlanFact(capacityWeight) || !isPublishablePlanFact(monthlyPriceUsd)) continue;
+		// The provider label needs the same treatment as the plan: the info series
+		// carries the canonical id a live usage report arrives with, so a padded
+		// or mis-cased embedder value like " Anthropic" publishes capacity and
+		// price under a label the documented `on(provider, plan)` join never
+		// matches, and the facts vanish from every downstream calculation.
+		const canonicalProvider = canonicalizeProviderId(provider);
+		if (canonicalProvider.length === 0) continue;
 		const planLabels: readonly Label[] = [
-			["provider", provider],
+			["provider", canonicalProvider],
 			["plan", canonicalPlan],
 		];
 		add("llm_subscription_plan_capacity_weight", planLabels, capacityWeight);
@@ -657,6 +664,16 @@ export function renderUsageMetrics(
 	}
 	for (const note of notes) lines.push(`# note ${note}`);
 	return lines.length === 0 ? "" : `${lines.join("\n")}\n`;
+}
+
+/**
+ * Canonical provider id for a metric label: trimmed and case-folded, matching
+ * what a live usage report carries and what the CLI parser normalizes an
+ * operator's config key to. Normalizing beats rejecting because the `org`,
+ * `email`, and `plan` labels are already folded on both sides of the join.
+ */
+function canonicalizeProviderId(provider: string): string {
+	return provider.trim().toLowerCase();
 }
 
 /**
