@@ -567,6 +567,11 @@ export const COMPOUND_GATED_TOOLS = {
 	hub: ["task.maxRecursionDepth"],
 	manage_skill: ["autolearn.enabled"],
 	learn: ["autolearn.enabled", "memory.backend"],
+	// Reachability of the Python kernel is the invocation half, captured at
+	// construction; which backends the user allows is the settings half.
+	eval: ["eval.py", "eval.js"],
+	context_notes: ["compaction.experimentalContextManagement"],
+	new_context: ["compaction.experimentalContextManagement"],
 } as const satisfies Readonly<Record<string, readonly SettingPath[]>>;
 
 /** Every setting an edit to which must trigger the gated-tool reconcile. */
@@ -597,6 +602,15 @@ export function settingGatedToolEnabled(name: string, settings: Settings, taskDe
 			return isIrcEnabled(settings, taskDepth);
 		case "manage_skill":
 			return settings.get("autolearn.enabled") === true;
+		case "eval": {
+			// Env flags override the settings keys, so read the same resolver
+			// `createTools` uses rather than the raw settings.
+			const backends = resolveEvalBackends({ settings });
+			return backends.python || backends.js;
+		}
+		case "context_notes":
+		case "new_context":
+			return settings.get("compaction.experimentalContextManagement") === true;
 		case "learn":
 			return (
 				settings.get("autolearn.enabled") === true &&
@@ -762,6 +776,23 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				return topLevelOrRequested;
 			case "hub":
 				return !restrictToolNames && session.enableIrc !== false;
+			case "eval":
+				// Only the PROBE result, never the settings half: kernel
+				// reachability is decided once, here, and a settings edit cannot
+				// make an absent kernel appear. `pythonAvailable` stays true when
+				// the probe never ran (JS allowed, or eval unrequested), so
+				// both-backends-off records eval as permitted and the reconcile
+				// decides it from the live settings.
+				return allowJs || pythonAvailable;
+			case "context_notes":
+			case "new_context":
+				// Both read and annotate the transcript through the read/grep
+				// pipeline, so they are offered only where that pair is.
+				return (
+					!restrictToolNames &&
+					requestedTools?.includes("read") !== false &&
+					requestedTools?.includes("grep") !== false
+				);
 			default:
 				return true;
 		}
