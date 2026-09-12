@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
+import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -588,6 +589,88 @@ describe("AgentSession compact tool onTurnEnd wiring", () => {
 		// Before the terminal idle signal, so the rebuild and the queue drain
 		// happen while the session is still settling rather than a turn later.
 		expect(order.indexOf("compaction_end")).toBeLessThan(order.lastIndexOf("agent_end"));
+	}, 15_000);
+
+	it("reports a cancelled requested pass as aborted, not as a failure", async () => {
+		// Esc during the summary, or a `session_before_compact` hook declining,
+		// rejects with the canonical sentinel. Reporting that as an error message
+		// puts a warning on screen where the UI has a cancellation branch, so
+		// deliberate cancellation has to stay distinguishable from a fault.
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		vi.spyOn(session, "compact").mockImplementation(async () => {
+			throw new CompactionCancelledError();
+		});
+
+		const ends: Array<Extract<AgentSessionEvent, { type: "auto_compaction_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") ends.push(event);
+		});
+
+		await session.prompt("do the thing then compact");
+		await session.waitForIdle();
+
+		expect(ends).toHaveLength(1);
+		expect(ends[0].aborted).toBe(true);
+		// Not a failure and not a benign skip: those are the branches that would
+		// warn, or render nothing, instead of taking the cancellation path.
+		expect(ends[0].errorMessage).toBeUndefined();
+		expect(ends[0].skipped).toBeUndefined();
+	}, 15_000);
+
+	it("does not report idle until the compaction event has been delivered", async () => {
+		// `#emitSessionEvent` awaits the EXTENSION emit before subscriber fan-out,
+		// so an extension with an async `auto_compaction_end` handler suspends the
+		// whole delivery. Fire-and-forget let the finalizer release the terminal
+		// `agent_end` — and with it `waitForIdle()` and any queued input — while
+		// that delivery was still parked, so the next turn could start against a
+		// transcript still showing the summarized-away history.
+		//
+		// Suspends ONLY this event: claiming handlers for everything changes the
+		// settle path (a session_stop handler schedules a continuation) and the
+		// requested compaction never runs.
+		const delivery = Promise.withResolvers<void>();
+		const extensionRunner = {
+			emit: async (event: { type: string }) => {
+				if (event.type === "auto_compaction_end") await delivery.promise;
+				return undefined;
+			},
+			emitBeforeAgentStart: async () => undefined,
+			hasHandlers: (eventType: string) => eventType === "auto_compaction_end",
+			emitSessionStop: async () => undefined,
+		} as unknown as ExtensionRunner;
+
+		const { session } = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			{ extensionRunner },
+		);
+
+		// The whole settle is what must stay gated: the prompt's own completion
+		// releases queued input, so a fire-and-forget emit lets it resolve while
+		// the delivery is still parked.
+		const settled = session
+			.prompt("do the thing then compact")
+			.then(() => session.waitForIdle())
+			.then(() => "settled" as const);
+
+		// Bounded race, never an unbounded wait: the loser is released right after.
+		const raced = await Promise.race([settled, Bun.sleep(500).then(() => "still-parked" as const)]);
+		expect(raced).toBe("still-parked");
+
+		delivery.resolve();
+		await settled;
 	}, 15_000);
 
 	it("marks a benign requested no-op as skipped rather than a failure", async () => {
