@@ -8,6 +8,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
+import type { SettingPath } from "../config/settings-schema";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -512,6 +513,40 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 export type ToolName = BuiltinToolName;
 
 /**
+ * Built-ins whose presence is decided ONLY by a boolean setting.
+ *
+ * Single-sourced because two callers need the same answer: `createTools` filters
+ * the startup set through it, and the settings refresh reconciles the live set
+ * against it. `createTools` runs once per session, so before the refresh read
+ * this table a `bash.enabled` edit left shell execution advertised and callable
+ * on true→false and absent until restart on false→true.
+ *
+ * Deliberately only the unconditional gates. Every other entry in
+ * `isToolAllowed` mixes in state a reconcile must not re-derive — task depth,
+ * an explicit tool whitelist, goal-record status, model capability, backend
+ * probe results — so those stay expressed there and are not reconciled.
+ */
+export const BOOLEAN_GATED_TOOLS = {
+	ask: "ask.enabled",
+	ast_edit: "astEdit.enabled",
+	ast_grep: "astGrep.enabled",
+	bash: "bash.enabled",
+	debug: "debug.enabled",
+	github: "github.enabled",
+	glob: "glob.enabled",
+	grep: "grep.enabled",
+	security_scan: "security.enabled",
+	web_search: "web_search.enabled",
+} as const satisfies Readonly<Record<string, SettingPath>>;
+
+/** The boolean setting gating `name`'s existence, or `undefined` if it has none. */
+export function booleanGateFor(name: string): SettingPath | undefined {
+	return Object.hasOwn(BOOLEAN_GATED_TOOLS, name)
+		? BOOLEAN_GATED_TOOLS[name as keyof typeof BOOLEAN_GATED_TOOLS]
+		: undefined;
+}
+
+/**
  * Create tools from BUILTIN_TOOLS registry.
  */
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
@@ -646,20 +681,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
 		}
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
-		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
-		if (name === "debug") return session.settings.get("debug.enabled");
 		if (name === "todo")
 			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
-		if (name === "glob") return session.settings.get("glob.enabled");
-		if (name === "grep") return session.settings.get("grep.enabled");
-		if (name === "github") return session.settings.get("github.enabled");
-		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
-		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-		if (name === "web_search") return session.settings.get("web_search.enabled");
-		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;
-		if (name === "ask") return session.settings.get("ask.enabled");
+		// The unconditional boolean gates, read from the shared table so the
+		// settings refresh reconciles against exactly this predicate.
+		const booleanGate = booleanGateFor(name);
+		if (booleanGate !== undefined) return session.settings.get(booleanGate) === true;
 		if (name === "checkpoint" || name === "rewind")
 			return (
 				session.settings.get("checkpoint.enabled") &&

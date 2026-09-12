@@ -215,7 +215,7 @@ import {
 } from "../thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ImageAttachmentEntry } from "../tools";
+import { BOOLEAN_GATED_TOOLS, type ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import {
@@ -5877,6 +5877,10 @@ export class AgentSession {
 				// installed once at construction with no later add/remove path.
 				imageGenEnabled: this.settings.get("generate_image.enabled"),
 				speechGenEnabled: this.settings.get("speechgen.enabled"),
+				// Same shape for the CORE built-ins gated on a plain boolean
+				// (`bash.enabled`, `glob`, `grep`, …): `createTools` reads each gate
+				// once at construction and the tools never re-check it.
+				booleanGatedTools: Object.values(BOOLEAN_GATED_TOOLS).map(setting => this.settings.get(setting)),
 				computerEnabled: this.settings.get("computer.enabled"),
 				// Gates whether an obfuscator exists at all. The instance itself is
 				// built from `secrets.yml`, which this refresh also re-reads, so the
@@ -6058,7 +6062,11 @@ export class AgentSession {
 				// Code Mode partition, and a blind re-apply would clobber that.
 				if (
 					this.settings.get("generate_image.enabled") !== previousSubsystems.imageGenEnabled ||
-					this.settings.get("speechgen.enabled") !== previousSubsystems.speechGenEnabled
+					this.settings.get("speechgen.enabled") !== previousSubsystems.speechGenEnabled ||
+					!Bun.deepEquals(
+						previousSubsystems.booleanGatedTools,
+						Object.values(BOOLEAN_GATED_TOOLS).map(setting => this.settings.get(setting)),
+					)
 				) {
 					await this.#tools.reconcileSettingGatedTools();
 				}

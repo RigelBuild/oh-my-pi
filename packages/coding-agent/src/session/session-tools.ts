@@ -20,6 +20,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
+import { BOOLEAN_GATED_TOOLS, booleanGateFor } from "../tools";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
@@ -1637,8 +1638,39 @@ export class SessionTools {
 			for (const group of SETTING_GATED_TOOL_GROUPS) {
 				if (await this.#applySettingGatedToolGroup(group)) changed = true;
 			}
+			if (await this.#applyBooleanGatedBuiltins()) changed = true;
 			return changed;
 		});
+	}
+
+	/**
+	 * Reconcile the CORE built-ins gated on a plain boolean setting
+	 * ({@link BOOLEAN_GATED_TOOLS}) against the live settings.
+	 *
+	 * `createTools` evaluates those gates once, at construction, and the tools do
+	 * not re-check them per call, so a reload alone left `bash.enabled: false`
+	 * with shell execution still advertised AND callable, and a false→true edit
+	 * with the tool absent until restart.
+	 *
+	 * Only names this session's own startup actually admitted are rebuilt: a
+	 * `--no-tools`/whitelist session, a subagent's restricted set, and the
+	 * Code Mode partition all narrow the active set for reasons a settings read
+	 * cannot see, and re-adding a tool they excluded would widen the grant.
+	 */
+	async #applyBooleanGatedBuiltins(): Promise<boolean> {
+		const active = this.getEnabledToolNames();
+		const next = new Set(active);
+		for (const name of Object.keys(BOOLEAN_GATED_TOOLS)) {
+			const setting = booleanGateFor(name);
+			// Never installed here (restricted set, or a build this session skipped):
+			// out of scope entirely, in both directions.
+			if (setting === undefined || !this.#toolRegistry.has(name)) continue;
+			if (this.#host.settings.get(setting) === true) next.add(name);
+			else next.delete(name);
+		}
+		if (next.size === active.length && active.every(name => next.has(name))) return false;
+		await this.#applyActiveToolsByName([...next]);
+		return true;
 	}
 
 	async #applySettingGatedToolGroup(group: SettingGatedToolGroup): Promise<boolean> {
