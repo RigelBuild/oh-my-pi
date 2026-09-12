@@ -2232,7 +2232,7 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		await compactStarted.promise;
 
 		// A non-turn operation parked on the same barrier, launched the same way.
-		const shaken = session.shake().catch(() => undefined);
+		const shaken = session.shake("images").catch(() => undefined);
 		for (let i = 0; i < 5; i++) await Bun.sleep(0);
 
 		compactGate.resolve();
