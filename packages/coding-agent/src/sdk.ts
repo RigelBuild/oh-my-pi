@@ -4039,6 +4039,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
+			// Reapplies `enableLsp && lsp.shared` onto the module-level flag in
+			// `lsp/client.ts`. Owned here because `enableLsp` is a construction
+			// input (`--no-tools`, a restricted subagent set) the session cannot
+			// re-derive from settings.
+			reconcileSharedLsp: () => setSharedLspEnabled(enableLsp && settings.get("lsp.shared")),
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);

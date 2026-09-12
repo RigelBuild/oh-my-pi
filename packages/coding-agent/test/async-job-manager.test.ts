@@ -442,9 +442,9 @@ describe("AsyncJobManager", () => {
 			onJobComplete: async () => {},
 		});
 		const hold = async ({ signal }: { signal: AbortSignal }) => {
-			await new Promise<void>(resolve => {
-				signal.addEventListener("abort", () => resolve(), { once: true });
-			});
+			const aborted = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
 			return "done";
 		};
 
