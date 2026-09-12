@@ -1863,6 +1863,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
+		let settingGatedBuiltinPermissions: ReadonlySet<string> = new Set();
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
 			for (const name of names) {
@@ -1875,6 +1876,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
+			// Records what THIS invocation permitted, so a later false->true refresh
+			// can build a gated built-in without widening a restricted tool list.
+			// Captured locally: `createTools` runs long before the session exists,
+			// so this cannot forward straight to it.
+			setSettingGatedBuiltinPermissions: (names: ReadonlySet<string>) => {
+				settingGatedBuiltinPermissions = names;
+			},
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
@@ -4078,6 +4086,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
+			// Builds one boolean-gated core built-in on demand. Uses the same
+			// factory table and tool session as startup, so the tool binds to this
+			// session's cwd/exec rather than a re-derived context.
+			createBooleanGatedTool: async (name: string) => {
+				const factory = BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS];
+				if (!factory) return null;
+				const built = await factory(toolSession);
+				return built ? wrapToolWithMetaNotice(built) : null;
+			},
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)
@@ -4251,6 +4268,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		// Hand over what `createTools` recorded: it ran before this session
+		// existed, so the set was parked in a local until now.
+		session.setSettingGatedBuiltinPermissions(settingGatedBuiltinPermissions);
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).

@@ -1967,6 +1967,7 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
+			createBooleanGatedTool: config.createBooleanGatedTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -5916,7 +5917,16 @@ export class AgentSession {
 			const previousGenerationSettings = this.#generationSettings();
 			const { changed } = await this.settings.reload();
 			result.settingsChanged = changed;
-			result.modelSwapped = changed ? await this.#applyReloadedModel() : false;
+			// NOT gated on `changed`. A resumed session restores its transcript
+			// model while `Settings` already holds a default that was edited while
+			// the process was stopped, so the first refresh reloads nothing (the
+			// file has not moved since startup read it) and the retired default
+			// stayed active indefinitely. `#applyReloadedModel` is self-guarding —
+			// it honors a `/model` pin, reproduces startup's selection, and returns
+			// false when the model does not move — so running it on an unchanged
+			// reload costs one re-resolve and swaps only when the config genuinely
+			// disagrees with the live model.
+			result.modelSwapped = await this.#applyReloadedModel();
 			// Reconcile the LIVE agent's queue modes. These are read from `Agent`
 			// state (`getSteeringMode`/`getFollowUpMode`/`getInterruptMode`), not
 			// from settings at use time, and move only through the matching
@@ -6029,7 +6039,10 @@ export class AgentSession {
 							// PEER session's injected key. Without this, revealing a
 							// project Exa entry left the native integration
 							// unauthenticated and hiding one kept the stale key live.
-							applyMCPEnvironment(reconciled, manager);
+							// Only when discovery actually ran: an absent list means the
+							// setting did not move, and applying an empty one would read as
+							// "the configured key was removed" and clear a live key.
+							if (reconciled.exaApiKeys) applyMCPEnvironment({ exaApiKeys: reconciled.exaApiKeys }, manager);
 						}
 						await this.refreshMCPTools(manager.getTools());
 					})(),
@@ -7093,6 +7106,11 @@ export class AgentSession {
 	}
 
 	/** Applies the external-thinking setting to the private scratchpad tool immediately. */
+	/** Records which boolean-gated built-ins this session's construction allowed. */
+	setSettingGatedBuiltinPermissions(names: ReadonlySet<string>): void {
+		this.#tools.setSettingGatedBuiltinPermissions(names);
+	}
+
 	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.#tools.setThinkToolEnabled(enabled);
 	}

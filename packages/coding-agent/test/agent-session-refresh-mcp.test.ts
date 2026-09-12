@@ -19,6 +19,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { applyMCPEnvironment, getSessionExaApiKey } from "@oh-my-pi/pi-coding-agent/mcp/reload";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -777,6 +778,65 @@ describe("AgentSession.refresh('mcp')", () => {
 			// the revealed credential never reached the native integration. Asserted
 			// on the live environment, which is what the integration actually reads.
 			expect(process.env.EXA_API_KEY).toBe("project-exa-key");
+		} finally {
+			if (previousExaKey === undefined) delete process.env.EXA_API_KEY;
+			else process.env.EXA_API_KEY = previousExaKey;
+		}
+
+		await dir.remove();
+	});
+
+	// The inverse of the test above: an unrelated settings edit leaves
+	// `enableProjectConfig` alone, so discovery never runs — and an empty key
+	// list is NOT the same claim as "discovery found none". `applyMCPEnvironment`
+	// reads an empty list as "config removed the key" and clears the credential.
+	it("keeps the Exa credential when a settings refresh does not move project config", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-exa-keep-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		const manager = new MCPManager(dir.path(), null, async () => ({
+			configs: {},
+			exaApiKeys: ["session-exa-key"],
+			sources: {},
+		}));
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+		});
+		sessions.push(session);
+
+		await manager.discoverAndConnect({ enableProjectConfig: true });
+		applyMCPEnvironment({ exaApiKeys: ["session-exa-key"] }, manager);
+		expect(getSessionExaApiKey(manager)).toBe("session-exa-key");
+
+		const previousExaKey = process.env.EXA_API_KEY;
+		try {
+			// An edit that has nothing to do with MCP discovery.
+			await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n  notifications: true\n");
+			expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+			// Pre-fix the no-op reconcile returned `exaApiKeys: []`, which the caller
+			// applied as a removal — dropping the session's own key and clearing the
+			// environment the native Exa paths authenticate with.
+			expect(getSessionExaApiKey(manager)).toBe("session-exa-key");
+			expect(process.env.EXA_API_KEY).toBe("session-exa-key");
 		} finally {
 			if (previousExaKey === undefined) delete process.env.EXA_API_KEY;
 			else process.env.EXA_API_KEY = previousExaKey;
