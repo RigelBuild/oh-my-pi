@@ -474,6 +474,12 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
  * Repeating the same sanitized title is a no-op on every platform.
  */
 export function setTerminalTitle(title: string): void {
+	// The teardown latch belongs HERE, not only on the composed-state path: this
+	// is the sink every title write funnels through, and it is exported, so a
+	// direct importer firing from a delayed callback after
+	// `disposeTerminalTitleState()` would otherwise write straight into the
+	// parent shell's tab whose title teardown just restored.
+	if (terminalTitleRuntime.disposed) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
 	if (next === lastTerminalTitle) return;
@@ -581,9 +587,8 @@ export function buildTerminalTitleWithState(
 }
 
 function emitTerminalTitle(): void {
-	// After teardown the shell's own title has been restored; any further OSC write
-	// would land in the parent shell's tab.
-	if (terminalTitleRuntime.disposed) return;
+	// The teardown latch lives at the sink (`setTerminalTitle`), so every path
+	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
 	const next =

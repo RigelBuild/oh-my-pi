@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test
 import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
+	setTerminalTitle,
 	initTerminalTitleState,
 	setSessionTerminalTitle,
 	setTerminalTitleState,
@@ -147,6 +148,32 @@ describe("disposeTerminalTitleState", () => {
 		writes.length = 0;
 		vi.advanceTimersByTime(4000);
 		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ))).toEqual([]);
+	});
+
+	it("latches: a direct setTerminalTitle after dispose cannot write the shell's tab", () => {
+		// `setTerminalTitle` is EXPORTED and writes OSC/Win32 straight out, so it
+		// bypasses the composed-state path entirely. A direct importer firing from
+		// a delayed callback after teardown — the same window the spinner latch
+		// covers — would otherwise land in the parent shell's tab, whose title
+		// `popTerminalTitle()` has already restored.
+
+		// Control: before dispose the sink really does write, so the silence below
+		// is the latch and not a headless/TTY misconfiguration.
+		writes.length = 0;
+		setTerminalTitle("live write");
+		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ)).length).toBeGreaterThan(0);
+
+		disposeTerminalTitleState();
+
+		writes.length = 0;
+		setTerminalTitle("after teardown");
+		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ))).toEqual([]);
+
+		// And the latch releases only on the explicit ownership path.
+		initTerminalTitleState();
+		writes.length = 0;
+		setTerminalTitle("owned again");
+		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ)).length).toBeGreaterThan(0);
 	});
 
 	it("latches: a run-state change after dispose cannot re-arm the spinner", () => {
