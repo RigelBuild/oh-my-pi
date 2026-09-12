@@ -68,7 +68,14 @@ interface Harness {
  */
 async function makeHarness(
 	initialConfig: string,
-	options?: { persistSession?: boolean; customTools?: CustomTool[]; enableLsp?: boolean; toolNames?: string[] },
+	options?: {
+		persistSession?: boolean;
+		customTools?: CustomTool[];
+		enableLsp?: boolean;
+		toolNames?: string[];
+		/** Spawn depth, for the depth-dependent halves of the compound gates. */
+		taskDepth?: number;
+	},
 ): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-tiers-tools-");
 	const cwd = tempDir.path();
@@ -106,6 +113,7 @@ async function makeHarness(
 		skipPythonPreflight: true,
 		customTools: options?.customTools,
 		toolNames: options?.toolNames,
+		taskDepth: options?.taskDepth,
 	});
 
 	return {
@@ -653,6 +661,29 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 			await h.session.refresh("settings");
 
 			expect(h.session.getEnabledToolNames()).toContain("task");
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
+	it("evaluates the depth-dependent gates at the session's real depth", async () => {
+		// Reconciliation assumed depth 0, so a running subagent got the top-level
+		// answer for both compound gates. A depth-1 child whose max drops to 1
+		// can no longer spawn, but `task` stayed advertised and the rejection only
+		// surfaced at execution.
+		const h = await makeHarness("task:\n  maxRecursionDepth: 2\n", { taskDepth: 1 });
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("task");
+
+			await fs.writeFile(h.settingsPath, "task:\n  maxRecursionDepth: 1\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.getEnabledToolNames()).not.toContain("task");
+			// `hub` must SURVIVE: `isIrcEnabled` deliberately returns true for every
+			// subagent (it always has a parent to message), so the fix cannot be
+			// "pass the real depth to task and 0 to hub" — nor 0 to both, which is
+			// what dropped messaging here.
+			expect(h.session.getEnabledToolNames()).toContain("hub");
 		} finally {
 			await h.dispose();
 		}
