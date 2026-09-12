@@ -2127,15 +2127,19 @@ export class EventController {
 		// completed, skipped, or failed by the time this fires.
 		if (event.aborted) {
 			this.ctx.showStatus(
-				isHandoffAction
-					? "Auto-handoff cancelled"
-					: isRemoteAction
-						? "Auto server compaction cancelled"
-						: isShakeAction
-							? "Auto-shake cancelled"
-							: isSnapcompactAction
-								? "Auto-snapcompact cancelled"
-								: "Auto context-full maintenance cancelled",
+				// A requested pass is the agent's own operation, so the message must
+				// not report automatic threshold maintenance.
+				event.action === "requested"
+					? "Agent-requested compaction cancelled"
+					: isHandoffAction
+						? "Auto-handoff cancelled"
+						: isRemoteAction
+							? "Auto server compaction cancelled"
+							: isShakeAction
+								? "Auto-shake cancelled"
+								: isSnapcompactAction
+									? "Auto-snapcompact cancelled"
+									: "Auto context-full maintenance cancelled",
 			);
 		} else if (isShakeAction) {
 			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
