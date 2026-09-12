@@ -199,8 +199,15 @@ export type MCPAuthHandler = (serverName: string, challenge: MCPAuthChallenge) =
  */
 /** What a project-config reconcile discovered, for the caller to apply. */
 export interface MCPReconcileResult {
-	/** Exa keys discovery extracted, applied by the caller via `applyMCPEnvironment`. */
-	exaApiKeys: string[];
+	/**
+	 * Exa keys discovery extracted, applied by the caller via
+	 * `applyMCPEnvironment`.
+	 *
+	 * Absent when discovery did not run (an unchanged setting). That is distinct
+	 * from an empty array, which `applyMCPEnvironment` reads as "the configured
+	 * key was removed" and acts on.
+	 */
+	exaApiKeys?: string[];
 }
 
 export class MCPManager {
@@ -573,7 +580,12 @@ export class MCPManager {
 
 	async #applyProjectConfigFilter(enableProjectConfig: boolean): Promise<MCPReconcileResult> {
 		const options = this.#discoverOptions;
-		if ((options?.enableProjectConfig ?? true) === enableProjectConfig) return { exaApiKeys: [] };
+		// Discovery did NOT run, which is not the same as discovering no keys: an
+		// empty list tells `applyMCPEnvironment` the configured Exa key was
+		// removed, so returning one here would delete the session's key on any
+		// unrelated settings edit. `undefined` means "nothing was discovered, do
+		// not touch credentials".
+		if ((options?.enableProjectConfig ?? true) === enableProjectConfig) return {};
 		// Record the new value first: a later browser reconcile reads these
 		// options, and `loadConfigs` must not be asked to honor the stale one.
 		this.#discoverOptions = { ...options, enableProjectConfig };

@@ -309,6 +309,12 @@ export interface ToolSession {
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
+	/**
+	 * Records which boolean-gated built-ins this invocation permits, so a later
+	 * settings refresh can build one whose gate was off at startup without
+	 * widening a restricted tool list.
+	 */
+	setSettingGatedBuiltinPermissions?: (names: ReadonlySet<string>) => void;
 	/** Canonical map containing every registered tool exactly once. */
 	toolRegistry?: Map<string, Tool>;
 	/** `xd://` presentation state backed by {@link toolRegistry}. */
@@ -736,6 +742,22 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
 				];
+
+	// Which boolean-gated built-ins this INVOCATION permits, independent of what
+	// its settings happened to enable. A later false->true refresh needs both
+	// facts: the gate alone cannot tell "the setting was off" from "a restricted
+	// tool list or `--no-tools` excluded it", and only the first may be built.
+	if (session.setSettingGatedBuiltinPermissions) {
+		const permitted = new Set<string>();
+		for (const name of Object.keys(BOOLEAN_GATED_TOOLS)) {
+			if (!(name in allTools)) continue;
+			// `isToolAllowed` minus the boolean gate: the remaining conditions are
+			// exactly the invocation-scoped ones.
+			if (filteredRequestedTools !== undefined && !requestedTools?.includes(name)) continue;
+			permitted.add(name);
+		}
+		session.setSettingGatedBuiltinPermissions(permitted);
+	}
 
 	const activeToolNames = new Set(baseEntries.map(([name]) => name));
 	if (session.setActiveToolNames) {

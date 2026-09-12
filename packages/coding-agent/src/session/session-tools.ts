@@ -164,6 +164,8 @@ interface SessionToolsOptions {
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
+	/** Builds one boolean-gated built-in on demand, for a false->true refresh. */
+	createBooleanGatedTool?: (name: string) => Promise<AgentTool | null>;
 	baseSystemPrompt: string[];
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
@@ -334,6 +336,14 @@ export class SessionTools {
 		localProtocolOptions: this.#host.localProtocolOptions(),
 	});
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
+	#createBooleanGatedTool: SessionToolsOptions["createBooleanGatedTool"];
+	/**
+	 * Boolean-gated built-ins this session's construction PERMITTED, which is not
+	 * the same as those its startup settings enabled. Populated by `createTools`;
+	 * a name absent here was excluded by a restricted tool list or `--no-tools`
+	 * and must never be added by a settings refresh.
+	 */
+	#settingGatedBuiltinPermissions: ReadonlySet<string> = new Set();
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
 	#setDeviceOnlyWrite: SessionToolsOptions["setDeviceOnlyWrite"];
@@ -391,6 +401,7 @@ export class SessionTools {
 		}
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
+		this.#createBooleanGatedTool = options.createBooleanGatedTool;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
 		this.#skills = options.skills ?? [];
 		this.#skillWarnings = options.skillWarnings ?? [];
@@ -1649,28 +1660,46 @@ export class SessionTools {
 	 *
 	 * `createTools` evaluates those gates once, at construction, and the tools do
 	 * not re-check them per call, so a reload alone left `bash.enabled: false`
-	 * with shell execution still advertised AND callable, and a false→true edit
+	 * with shell execution still advertised AND callable, and a false->true edit
 	 * with the tool absent until restart.
 	 *
-	 * Only names this session's own startup actually admitted are rebuilt: a
-	 * `--no-tools`/whitelist session, a subagent's restricted set, and the
-	 * Code Mode partition all narrow the active set for reasons a settings read
-	 * cannot see, and re-adding a tool they excluded would widen the grant.
+	 * Enabling BUILDS a tool whose gate was off at startup, because there is no
+	 * registry entry to re-activate in that case. It is scoped by PERMISSION
+	 * rather than by presence: `#settingGatedBuiltinPermissions` records what
+	 * this session's construction allowed, so a name a restricted tool list or
+	 * `--no-tools` excluded is still never added — the two reasons a tool is
+	 * missing have to stay distinguishable.
 	 */
 	async #applyBooleanGatedBuiltins(): Promise<boolean> {
 		const active = this.getEnabledToolNames();
 		const next = new Set(active);
 		for (const name of Object.keys(BOOLEAN_GATED_TOOLS)) {
 			const setting = booleanGateFor(name);
-			// Never installed here (restricted set, or a build this session skipped):
-			// out of scope entirely, in both directions.
-			if (setting === undefined || !this.#toolRegistry.has(name)) continue;
-			if (this.#host.settings.get(setting) === true) next.add(name);
-			else next.delete(name);
+			if (setting === undefined) continue;
+			if (this.#host.settings.get(setting) !== true) {
+				next.delete(name);
+				continue;
+			}
+			// Enabled. Build it if this session never did, but only when its own
+			// construction permitted the name.
+			if (!this.#toolRegistry.has(name)) {
+				if (!this.#settingGatedBuiltinPermissions.has(name)) continue;
+				const built = await this.#createBooleanGatedTool?.(name);
+				if (built?.name !== name) continue;
+				const wrapped = this.#wrapRuntimeTool(built);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+				this.#builtInToolNames.add(wrapped.name);
+			}
+			next.add(name);
 		}
 		if (next.size === active.length && active.every(name => next.has(name))) return false;
 		await this.#applyActiveToolsByName([...next]);
 		return true;
+	}
+
+	/** Records which boolean-gated built-ins this session's construction allowed. */
+	setSettingGatedBuiltinPermissions(names: ReadonlySet<string>): void {
+		this.#settingGatedBuiltinPermissions = names;
 	}
 
 	async #applySettingGatedToolGroup(group: SettingGatedToolGroup): Promise<boolean> {
