@@ -542,7 +542,13 @@ export function renderUsageMetrics(
 	};
 
 	for (const report of reports) {
-		const provider = report.provider;
+		// Canonicalized at the boundary, once: the same value drives the
+		// subscription lookup AND every per-account label, and an SDK caller can
+		// supply a `UsageReport` whose provider never passed through the CLI
+		// parser. Raw, a padded or mis-cased id missed the lookup (so the
+		// subscription and renewal series vanished) and labelled the usage series
+		// so it could not join the canonicalized plan table.
+		const provider = canonicalizeProviderId(report.provider);
 		const account = accountLabel(report);
 		const org = orgLabel(report);
 		const email = emailLabel(report);
@@ -667,12 +673,18 @@ export function renderUsageMetrics(
 }
 
 /**
- * Canonical provider id for a metric label: trimmed and case-folded, matching
- * what a live usage report carries and what the CLI parser normalizes an
- * operator's config key to. Normalizing beats rejecting because the `org`,
- * `email`, and `plan` labels are already folded on both sides of the join.
+ * Canonical provider id for a metric label: trimmed and case-folded.
+ *
+ * Every provider that reaches a label has to pass through this — a usage
+ * report, an embedder's plan table, an operator's config key — because the
+ * documented `on(provider, plan)` join is a string match, so one unfolded
+ * source silently drops its facts out of every downstream calculation.
+ *
+ * Normalizing beats rejecting: the `org`, `email`, and `plan` labels are
+ * already folded on both sides of the join, so making `provider` the one field
+ * where casing is fatal would be the surprising rule.
  */
-function canonicalizeProviderId(provider: string): string {
+export function canonicalizeProviderId(provider: string): string {
 	return provider.trim().toLowerCase();
 }
 

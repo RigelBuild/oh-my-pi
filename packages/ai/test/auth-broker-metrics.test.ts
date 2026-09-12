@@ -474,6 +474,32 @@ describe("renderUsageMetrics", () => {
 		expect(out).toContain('llm_subscription_plan_price_usd{provider="anthropic",plan="max_20x"} 100');
 	});
 
+	test("canonicalizes a report provider for both the lookup and its labels", () => {
+		// An SDK caller can hand `renderUsageMetrics` a report whose provider never
+		// passed the CLI parser. Raw, the same value missed `subscriptions.lookup`
+		// — so the subscription and renewal series disappeared entirely — and
+		// labelled the usage series so it could not join the canonicalized plan
+		// table.
+		const report = claudeReport();
+		report.provider = "  Anthropic ";
+		const seen: string[] = [];
+		const subscriptions = {
+			lookup: (provider: string) => {
+				seen.push(provider);
+				// Keyed on the canonical id, exactly as a parsed config is.
+				return provider === "anthropic" ? { plan: "max-20x" } : undefined;
+			},
+			plans: [{ provider: "anthropic", plan: "max-20x", capacityWeight: 2, monthlyPriceUsd: 100 }],
+		};
+		const out = renderUsageMetrics([report], { subscriptions, now: () => 1_760_000_000_000 });
+
+		expect(seen).toEqual(["anthropic"]);
+		// The subscription series exists AND carries the joinable label pair.
+		expect(out).toContain('llm_subscription_info{provider="anthropic"');
+		expect(out).toContain('plan="max_20x"');
+		expect(out).not.toContain("Anthropic");
+	});
+
 	test("canonicalizes an embedded plan's provider so the info-series join matches", () => {
 		// The info series carries the canonical provider id a live usage report
 		// arrives with. An embedder supplying `plans` directly bypasses the CLI
