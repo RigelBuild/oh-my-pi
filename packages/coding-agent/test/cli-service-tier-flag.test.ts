@@ -232,4 +232,55 @@ describe("--service-tier", () => {
 			authStorage.close();
 		}
 	});
+	it("tracks a family that was unset at startup so a later config add takes effect", async () => {
+		using tempDir = TempDir.createSync("@omp-service-tier-unset-");
+		const authStorage = await AuthStorage.create(":memory:");
+		const sessionFile = path.join(tempDir.path(), "session.jsonl");
+		try {
+			// Google is `none` at startup, so it has no key in the receipt's map —
+			// which is exactly why keying provenance off that map omitted it.
+			const firstManager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session: started } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "priority" }),
+				sessionManager: firstManager,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			expect(started.serviceTierByFamily).toEqual({ openai: "priority" });
+			await started.dispose();
+
+			// Added while stopped: no refresh can detect it afterwards.
+			const resumedManager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session: resumed } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "priority", "tier.google": "priority" }),
+				sessionManager: resumedManager,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			try {
+				// Pre-fix Google had no provenance, so the restored map omitted it.
+				expect(resumed.serviceTierByFamily).toEqual({ openai: "priority", google: "priority" });
+			} finally {
+				await resumed.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
+	});
 });
