@@ -474,6 +474,26 @@ describe("renderUsageMetrics", () => {
 		expect(out).toContain('llm_subscription_plan_price_usd{provider="anthropic",plan="max_20x"} 100');
 	});
 
+	test("canonicalizes an embedded plan's provider so the info-series join matches", () => {
+		// The info series carries the canonical provider id a live usage report
+		// arrives with. An embedder supplying `plans` directly bypasses the CLI
+		// parser that folds its config keys, so a padded or mis-cased provider
+		// published capacity and price under a label the documented
+		// `on(provider, plan)` join never matched, and the facts silently
+		// disappeared from every downstream calculation.
+		const subscriptions = {
+			lookup: () => undefined,
+			plans: [{ provider: "  Anthropic ", plan: "max-20x", capacityWeight: 2, monthlyPriceUsd: 100 }],
+		};
+		const out = renderUsageMetrics([claudeReport()], { subscriptions, now: () => 1_760_000_000_000 });
+
+		expect(out).toContain('llm_subscription_plan_capacity_weight{provider="anthropic",plan="max_20x"} 2');
+		expect(out).toContain('llm_subscription_plan_price_usd{provider="anthropic",plan="max_20x"} 100');
+		// The raw form must not survive anywhere: a second series under the
+		// unfolded label would double-count as much as it fails to join.
+		expect(out).not.toContain("Anthropic");
+	});
+
 	test("skips a plan-table row whose numeric facts are not publishable", () => {
 		// Same bypass as the empty-plan case one test up: the CLI parser rejects a
 		// negative or non-finite capacityWeight/monthlyPriceUsd, but an embedder
