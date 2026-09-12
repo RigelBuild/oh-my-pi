@@ -442,8 +442,15 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 	// AuthStorage-backed key takes precedence (existing behavior); probe it once
 	// so the env-key and keyless-MCP fallbacks below stay intact, then drive the
 	// authStorage path through the central force-refresh/rotate retry policy.
+	//
+	// `excludeEnv` when the live `EXA_API_KEY` is one THIS harness injected:
+	// `getApiKey` resolves the dedicated env var itself, so without it a session
+	// picked up whichever peer injected first, took the resolver branch, and
+	// authenticated against that peer's account even holding a key of its own.
+	// An OPERATOR-exported value is not excluded — that override is deliberate.
+	const excludeEnv = isExaEnvHelperInjected();
 	const storedKey = params.authStorage
-		? await params.authStorage.getApiKey("exa", params.sessionId, { signal: params.signal })
+		? await params.authStorage.getApiKey("exa", params.sessionId, { signal: params.signal, excludeEnv })
 		: undefined;
 	// Below AuthStorage, which is an explicit per-provider credential the
 	// operator configured. Between the session's OWN MCP-discovered key and
@@ -459,10 +466,10 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 	//     FIRST and every later session would authenticate as that one; the
 	//     session's own key is the correct answer there.
 	const envKey = getEnvApiKey("exa");
-	const sessionKeyOutranksEnv = envKey === undefined || isExaEnvHelperInjected();
+	const sessionKeyOutranksEnv = envKey === undefined || excludeEnv;
 	const keyOrResolver: ApiKey | undefined =
 		storedKey && params.authStorage
-			? params.authStorage.resolver("exa", { sessionId: params.sessionId })
+			? params.authStorage.resolver("exa", { sessionId: params.sessionId, excludeEnv })
 			: sessionKeyOutranksEnv
 				? // No fallback onto `envKey` here. Both reasons this branch is taken
 					// rule it out: either there is no env key at all, or the env key is

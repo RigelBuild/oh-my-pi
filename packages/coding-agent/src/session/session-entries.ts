@@ -46,6 +46,18 @@ export interface SessionHeader {
 	 * See {@link SessionWorkspace} in `./session-workspace`.
 	 */
 	additionalDirectories?: string[];
+	/**
+	 * Which of {@link additionalDirectories} were derived from
+	 * `workspace.additionalDirectories` rather than added manually (`/add-dir`,
+	 * `--add-dir`, an inherited header).
+	 *
+	 * Without it a resume cannot tell the two apart, so a configured root
+	 * persisted into the header survived its own removal from config: the live
+	 * reconcile saw no value change and never revoked it. Absent on sessions
+	 * written before this existed, where every header root is treated as manual
+	 * — the prior behaviour.
+	 */
+	settingsOwnedDirectories?: string[];
 	parentSession?: string;
 	/** Prior absolute JSONL locations recorded by successful session moves. */
 	previousSessionFiles?: string[];

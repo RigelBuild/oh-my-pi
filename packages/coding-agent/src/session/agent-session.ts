@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { stringArrayEqual } from "../utils/string-array";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -588,15 +589,6 @@ function ruleIdentityEqual(a: Rule, b: Rule): boolean {
 }
 
 /** Order-sensitive equality of two optional string arrays. */
-function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
-	if (a === b) return true;
-	if (a === undefined || b === undefined) return false;
-	if (a.length !== b.length) return false;
-	for (let i = 0; i < a.length; i++) {
-		if (a[i] !== b[i]) return false;
-	}
-	return true;
-}
 
 /**
  * Settings the system-prompt render reads from the LIVE settings instance —
@@ -615,10 +607,10 @@ function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[]
  * swap, and `secrets.enabled` through the obfuscator rebuild, which reports its
  * own prompt-state move (the flag is not the render's input anyway: the
  * `<redacted-content>` block tracks whether the built obfuscator actually
- * reports secrets). So are `inlineToolDescriptors` and `task.eager`, which
- * `rebuildSystemPrompt` now resolves LIVE per render — the rebuild those
- * trigger is driven by whatever else moved, and the render reads the current
- * value whenever it runs.
+ * reports secrets). `inlineToolDescriptors` and `task.eager` ARE here: making
+ * `rebuildSystemPrompt` read them live fixed what a rebuild renders, but a
+ * rebuild still has to be triggered, and either one can be the only thing that
+ * moved.
  */
 const PROMPT_AFFECTING_SETTING_PATHS = [
 	// Workstation block: the model-identification line.
@@ -681,6 +673,14 @@ const PROMPT_AFFECTING_SETTING_PATHS = [
 	// the retired guidance. The threshold is NOT here — neither template renders
 	// the number, so changing it moves no prompt text.
 	"bash.autoBackground.enabled",
+	// Read live by `rebuildSystemPrompt`, so a rebuild renders the current value
+	// — but nothing else necessarily moves when one of these does.
+	// `inlineToolDescriptors` is the sharper case: it prunes provider tool
+	// descriptions immediately, so without a rebuild the model loses the
+	// descriptions in BOTH places (pruned on the wire, absent from the compact
+	// prompt). `task.eager` keeps rendering the retired delegation guidance.
+	"inlineToolDescriptors",
+	"task.eager",
 	// Both memory backends TRUNCATE their rendered developer instructions to
 	// these limits (`mnemopi/backend.ts`, `sharpshooter/backend.ts`), so the
 	// limit is prompt text, not just a budget: editing it alone left the model

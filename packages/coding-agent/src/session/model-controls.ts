@@ -923,11 +923,12 @@ export class ModelControls {
 		const next: ServiceTierByFamily = { ...this.#serviceTierByFamily };
 		if (tier) next[family] = tier;
 		else delete next[family];
-		this.#applyServiceTierByFamily(next);
+		// This family is PINNED by the operation, whatever value it lands on.
+		this.#applyServiceTierByFamily(next, family);
 	}
 
 	/** Replace the whole per-family tier map; persists + re-arms Anthropic fast mode. */
-	#applyServiceTierByFamily(next: ServiceTierByFamily): void {
+	#applyServiceTierByFamily(next: ServiceTierByFamily, pinnedFamily?: ServiceTierFamily): void {
 		// Re-arming Anthropic priority clears the per-session fast-mode auto-disable
 		// so the next request actually carries `speed: "fast"` again.
 		if (next.anthropic === "priority" && this.#serviceTierByFamily.anthropic !== "priority") {
@@ -937,12 +938,15 @@ export class ModelControls {
 		// Provenance is recorded HERE because this is where the whole-map receipt
 		// originates: a pin on one family otherwise freezes every other family at
 		// the value it happened to hold, and restoration cannot tell the two apart.
-		// Computed against the live config, so the families still equal to it are
-		// the ones restoration may safely re-derive.
-		this.#host.sessionManager.appendServiceTierChange(
-			this.serviceTierEntry(),
-			this.#settingsTrackingFamilies(this.#configuredServiceTiers()),
+		// The PINNED family comes from the operation, never from comparing values:
+		// an explicit selection that happens to equal the configured tier is still
+		// a pin, and inferring provenance by equality let a later config edit
+		// overwrite a choice that is meant to outrank config. Every other family
+		// still equal to the live config is safe for restoration to re-derive.
+		const tracking = this.#settingsTrackingFamilies(this.#configuredServiceTiers()).filter(
+			family => family !== pinnedFamily,
 		);
+		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry(), tracking);
 	}
 
 	/** The per-family tier map the live `tier.*` settings configure. */

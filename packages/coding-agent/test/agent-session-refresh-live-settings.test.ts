@@ -402,6 +402,78 @@ describe("AgentSession refresh('settings'): live workspace roots", () => {
 		}
 	});
 
+	it("revokes a settings root removed while the session was stopped", async () => {
+		// The live reconcile above only catches an edit the RUNNING session
+		// observes. Across a stop the ownership set was rebuilt from the roots
+		// current settings configure — and the removed root is, by definition,
+		// absent from that value. So the set started empty, the reconcile saw no
+		// change, and the header kept granting a directory config no longer named.
+		const tempDir = TempDir.createSync("@pi-refresh-offline-root-");
+		const cwd = tempDir.path();
+		await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
+		const settingsPath = path.join(cwd, "config.yml");
+		const added = path.join(cwd, "extra-root");
+		await fs.mkdir(added, { recursive: true });
+		const sessionFile = path.join(cwd, "sessions", "session.jsonl");
+		const api = `refresh-offline-root-${Bun.nanoseconds().toString(36)}`;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("managed-primary", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const common = {
+			cwd,
+			agentDir: cwd,
+			authStorage,
+			modelRegistry,
+			model: buildLocalModel(api),
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			skills: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		};
+		try {
+			await fs.writeFile(
+				settingsPath,
+				`compaction:\n  enabled: false\nworkspace:\n  additionalDirectories:\n    - ${added}\n`,
+			);
+			const firstManager = await SessionManager.open(sessionFile, cwd);
+			const { session: first } = await createAgentSession({
+				...common,
+				sessionManager: firstManager,
+				settings: await Settings.loadIsolated({ cwd, agentDir: cwd }),
+			});
+			expect(first.sessionManager.getAdditionalDirectories()).toEqual([added]);
+			// Durable output, so the header (and its provenance) actually persists.
+			first.sessionManager.appendMessage(makeAssistantMessage());
+			await first.sessionManager.flush();
+			await first.dispose();
+
+			// Offline edit: the root is gone from config while nothing is running.
+			await fs.writeFile(settingsPath, "compaction:\n  enabled: false\n");
+
+			const resumedManager = await SessionManager.open(sessionFile, cwd);
+			expect(resumedManager.getAdditionalDirectories()).toEqual([added]);
+			const { session: resumed } = await createAgentSession({
+				...common,
+				sessionManager: resumedManager,
+				settings: await Settings.loadIsolated({ cwd, agentDir: cwd }),
+			});
+			try {
+				// Pre-fix the header kept granting `added`, and no later refresh
+				// could ever revoke it.
+				expect(resumed.sessionManager.getAdditionalDirectories()).toEqual([]);
+			} finally {
+				await resumed.dispose();
+			}
+		} finally {
+			authStorage.close();
+			await tempDir.remove();
+		}
+	});
+
 	it("resolves a relative configured root against the session's CURRENT directory after a move", async () => {
 		// The construction-time `cwd` and `sessionManager.getCwd()` agree until the
 		// session moves, so this has to actually relocate: otherwise either cwd
