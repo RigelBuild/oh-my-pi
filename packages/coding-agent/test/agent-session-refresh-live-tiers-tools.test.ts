@@ -626,6 +626,54 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("reconciles the todo.enabled gate", async () => {
+		const h = await makeHarness("todo:\n  enabled: true\n");
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("todo");
+
+			await fs.writeFile(h.settingsPath, "todo:\n  enabled: false\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("todo");
+
+			await fs.writeFile(h.settingsPath, "todo:\n  enabled: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).toContain("todo");
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
+	it("reconciles the task.maxRecursionDepth gate for task and hub", async () => {
+		// Depth 0 cannot spawn when the max is 0, so both tools are gated off.
+		const h = await makeHarness("task:\n  maxRecursionDepth: 0\n");
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("task");
+
+			await fs.writeFile(h.settingsPath, "task:\n  maxRecursionDepth: 2\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.getEnabledToolNames()).toContain("task");
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
+	it("builds manage_skill and starts the controller when autolearn is enabled", async () => {
+		const h = await makeHarness("autolearn:\n  enabled: false\n");
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("manage_skill");
+
+			await fs.writeFile(h.settingsPath, "autolearn:\n  enabled: true\n");
+			await h.session.refresh("settings");
+
+			// Pre-fix neither the tool nor the controller could appear until restart.
+			expect(h.session.getEnabledToolNames()).toContain("manage_skill");
+			expect(h.session.getToolByName("manage_skill")).toBeDefined();
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
 	it("leaves other core built-ins alone when one boolean gate moves", async () => {
 		// Each gate is its own lever: disabling `bash` must not disturb `glob`.
 		const h = await makeHarness("bash:\n  enabled: true\nglob:\n  enabled: true\n");

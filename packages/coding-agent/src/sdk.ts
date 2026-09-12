@@ -1868,6 +1868,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		let settingGatedBuiltinPermissions: ReadonlySet<string> = new Set();
+		// Idempotent: the controller subscribes for the session's lifetime and the
+		// reference is intentionally discarded (the listener retains it), so a
+		// second construction would double every nudge.
+		let autoLearnControllerStarted = false;
+		const startAutoLearnController = (): void => {
+			// Both callsites run after construction, but the local is nullable until
+			// then; a guard rather than a cast, so a future earlier call cannot
+			// construct a controller bound to `undefined`.
+			const target = session;
+			if (autoLearnControllerStarted || !target) return;
+			autoLearnControllerStarted = true;
+			new AutoLearnController({
+				session: target,
+				settings,
+				capture: content => target.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
+			});
+		};
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
 			for (const name of names) {
@@ -4095,6 +4112,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// input (`--no-tools`, a restricted subagent set) the session cannot
 			// re-derive from settings.
 			reconcileSharedLsp: () => setSharedLspEnabled(enableLsp && settings.get("lsp.shared")),
+			// Off→on for `autolearn.enabled`. The construction-time half
+			// (`restrictToolNames`, task depth) is captured in the closure, so a
+			// settings edit cannot widen it.
+			reconcileAutoLearn: () => {
+				if (restrictToolNames || taskDepth !== 0) return;
+				if (!settings.get("autolearn.enabled")) return;
+				startAutoLearnController();
+			},
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);
@@ -4734,18 +4759,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `learn`/`manage_skill` registry ONCE at session start and no settings
 		// change rebuilds it, so installing the controller while disabled would let a
 		// mid-session enable fire a nudge pointing at tools the session never built.
-		// Activation is therefore a session-start decision for BOTH the controller
-		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
-		// mid-session DISABLE. The subscription lives for the session's lifetime; the
-		// reference is intentionally discarded (the listener retains it).
+		// The settings reconcile now BUILDS `manage_skill`/`learn` on an off→on
+		// edit (scoped to what this invocation permitted), so the controller starts
+		// then too, through `reconcileAutoLearn`. The fire-time re-check in
+		// `#onAgentEnd` handles the DISABLE direction.
 		if (!restrictToolNames) {
 			if (settings.get("autolearn.enabled") && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
-				new AutoLearnController({
-					session,
-					settings,
-					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
-				});
+				startAutoLearnController();
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}
