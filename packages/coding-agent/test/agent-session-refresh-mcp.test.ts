@@ -907,6 +907,96 @@ describe("AgentSession.refresh('mcp')", () => {
 	// `refresh` tool inherits its parent's manager, so subscribing or
 	// unsubscribing there rewrites the PARENT's live server subscriptions from the
 	// child's own settings scope.
+	// The browser listener fires from `settings.reload()` on ANY session holding
+	// the hook — including a subagent that inherited its parent's manager
+	// (`mcpManager` set, `disconnectOwnedMcpManager` unset). Reconciling there
+	// connects or disconnects the PARENT's browser transports from the child's
+	// settings scope while only the child's tool registry is rebuilt.
+	it("does not reconcile browser MCP on an inherited manager", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-browser-inherited-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "browser:\n  enabled: true\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+		const manager = new MCPManager(dir.path(), null, async () => ({ configs: {}, exaApiKeys: [], sources: {} }));
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const reconciledWith: boolean[] = [];
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			// No `disconnectOwnedMcpManager`: the manager belongs to the parent.
+			reconcileBrowserMcpFilter: async enabled => {
+				reconciledWith.push(enabled);
+				return manager.getTools();
+			},
+		});
+		sessions.push(session);
+
+		await fsp.writeFile(settingsPath, "browser:\n  enabled: false\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		expect(reconciledWith).toEqual([]);
+
+		await dir.remove();
+	});
+
+	// The filter means "a callable browser prelude replaces these servers", so it
+	// needs `eval` registered AND active — the predicate startup and the full MCP
+	// refresh both use. Forwarding the raw setting disconnects the browser servers
+	// of a session that has no prelude to replace them.
+	it("does not filter browser MCP when no callable prelude replaces it", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-browser-noprelude-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "browser:\n  enabled: false\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+		const manager = new MCPManager(dir.path(), null, async () => ({ configs: {}, exaApiKeys: [], sources: {} }));
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			// No `eval` tool: nothing can serve the browser prelude.
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const reconciledWith: boolean[] = [];
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+			reconcileBrowserMcpFilter: async enabled => {
+				reconciledWith.push(enabled);
+				return manager.getTools();
+			},
+		});
+		sessions.push(session);
+
+		// Turning the setting ON is the severe direction: pre-fix this forwarded
+		// `true` and stripped the session's only browser capability.
+		await fsp.writeFile(settingsPath, "browser:\n  enabled: true\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		expect(reconciledWith).toEqual([false]);
+
+		await dir.remove();
+	});
+
 	it("does not reconcile mcp.notifications on an inherited manager", async () => {
 		const dir = TempDir.createSync("@pi-refresh-mcp-notif-");
 		const settingsPath = `${dir.path()}/config.yml`;
