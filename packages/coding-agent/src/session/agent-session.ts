@@ -2379,8 +2379,30 @@ export class AgentSession {
 			// `#doRefresh` can await whatever is in flight.
 			const reconciliation = (async () => {
 				if (path === "browser.enabled" && this.#reconcileBrowserMcpFilter) {
-					const tools = await this.#reconcileBrowserMcpFilter(value === true);
-					await this.refreshMCPTools(tools);
+					// Two corrections the sibling MCP paths already make.
+					//
+					// Ownership: a subagent granted `refresh` inherits its parent's
+					// manager, so reconciling here would connect or disconnect the
+					// PARENT's browser transports from the child's settings scope
+					// while only the child's tool registry is rebuilt. Same predicate
+					// the project-config and full-MCP blocks gate on.
+					//
+					// Effective availability, not the raw setting: the filter means
+					// "the callable browser prelude replaces these servers", which
+					// needs `eval` registered AND active. Forwarding the bare value
+					// disconnects the browser servers of a session that has no
+					// prelude to replace them, stripping its only browser capability.
+					if (this.#disconnectOwnedMcpManager) {
+						const tools = await this.#reconcileBrowserMcpFilter(
+							shouldFilterBrowserMCPForPrelude({
+								restrictToolNames: false,
+								browserEnabled: value === true,
+								evalRegistered: this.#tools.registry.has("eval"),
+								evalActive: this.agent.state.tools.some(tool => tool.name === "eval"),
+							}),
+						);
+						await this.refreshMCPTools(tools);
+					}
 				}
 				await this.refreshBaseSystemPrompt();
 			})();
