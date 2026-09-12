@@ -474,6 +474,35 @@ describe("renderUsageMetrics", () => {
 		expect(out).toContain('llm_subscription_plan_price_usd{provider="anthropic",plan="max_20x"} 100');
 	});
 
+	test("skips a plan-table row whose numeric facts are not publishable", () => {
+		// Same bypass as the empty-plan case one test up: the CLI parser rejects a
+		// negative or non-finite capacityWeight/monthlyPriceUsd, but an embedder
+		// supplying `plans` directly never runs it. These gauges are divisors and
+		// ratio inputs downstream, so `-1`/`NaN`/`+Inf` is worse than a gap.
+		const subscriptions = {
+			lookup: () => undefined,
+			plans: [
+				{ provider: "anthropic", plan: "max-5x", capacityWeight: -1, monthlyPriceUsd: 100 },
+				{ provider: "anthropic", plan: "pro", capacityWeight: Number.NaN, monthlyPriceUsd: 20 },
+				{ provider: "anthropic", plan: "team", capacityWeight: 1, monthlyPriceUsd: Number.POSITIVE_INFINITY },
+				{ provider: "anthropic", plan: "max-20x", capacityWeight: 2, monthlyPriceUsd: 100 },
+			],
+		};
+		const out = renderUsageMetrics([claudeReport()], { subscriptions, now: () => 1_760_000_000_000 });
+
+		expect(out).not.toContain('plan="max_5x"');
+		expect(out).not.toContain('plan="pro"');
+		// The whole ROW goes, not just the bad fact: a published price with a
+		// suppressed weight would make the two families disagree about which
+		// plans exist, which breaks the `group_left` join they are built for.
+		expect(out).not.toContain('plan="team"');
+		expect(out).not.toContain("NaN");
+		expect(out).not.toContain("Inf");
+		// A skip, not a wholesale suppression of the plan table.
+		expect(out).toContain('llm_subscription_plan_capacity_weight{provider="anthropic",plan="max_20x"} 2');
+		expect(out).toContain('llm_subscription_plan_price_usd{provider="anthropic",plan="max_20x"} 100');
+	});
+
 	test("a Codex report with no config plan falls back to the parsed planType", () => {
 		// codexReport() has metadata.planType "pro"; the config entry omits plan.
 		const subscriptions = {
