@@ -501,6 +501,8 @@ export interface ExecutorOptions {
 	 * look like a policy and stay frozen.
 	 */
 	rulesInherited?: boolean;
+	/** Whether `skills` is the parent's forwarded roster rather than a caller restriction. */
+	skillsInherited?: boolean;
 	/**
 	 * Parent session's live extension-root policy. Forwarded separately from
 	 * `preloadedExtensionPaths`, which only controls extension module loading.
@@ -3504,6 +3506,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
 				rulesInherited: options.rulesInherited,
+				skillsInherited: options.skillsInherited,
 				extensionRoots: options.extensionRoots,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,

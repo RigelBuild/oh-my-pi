@@ -211,6 +211,14 @@ export interface AgentSessionConfig {
 	 */
 	rulesInherited?: boolean;
 	/**
+	 * Whether `skills` is the PARENT's discovered roster rather than a
+	 * restriction the caller chose. The structured-subagent spawn always
+	 * forwards `session.skills`, so without this every child's launch-time
+	 * roster reads as an explicit policy and a parent's refresh cannot reach it.
+	 * Mirrors {@link rulesInherited}.
+	 */
+	skillsInherited?: boolean;
+	/**
 	 * The session's initial discovered rule roster (rulebook + always-apply
 	 * buckets) snapshot at construction. A settings-only `refresh` re-buckets
 	 * this COMPLETE set against the reloaded TTSR gating, so it can only DROP a
@@ -279,6 +287,14 @@ export interface AgentSessionConfig {
 	 * running is a no-op.
 	 */
 	reconcileAutoLearn?: () => void;
+	/**
+	 * Re-resolves the Ctrl+P/`/models` cycle scope from the reloaded
+	 * `enabledModels`. Wired by the host because an explicit `--models` pin
+	 * OUTRANKS the setting for the session's lifetime, and that invocation input
+	 * is not recoverable from settings — a reconcile that read the setting alone
+	 * would let a config edit override what the command line fixed.
+	 */
+	reconcileScopedModels?: () => Promise<void>;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the built-in write transport when it is needed at runtime. */

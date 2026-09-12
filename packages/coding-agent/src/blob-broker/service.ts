@@ -134,6 +134,27 @@ export class ImageUrlService {
 		this.#savingsJournal = options?.savingsJournal;
 	}
 
+	/**
+	 * Release every backend, exposure process, and callback server this service
+	 * started. Required when a settings reload replaces the service: the
+	 * retired instance otherwise keeps a tunnel and a listening port alive.
+	 */
+	async dispose(): Promise<void> {
+		const pending = [...this.#backendPromises.values()];
+		this.#backendPromises.clear();
+		for (const backendPromise of pending) {
+			try {
+				(await backendPromise)?.stop();
+			} catch (error) {
+				logger.warn("blob-broker: backend shutdown failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		this.#callback?.server.stop(true);
+		this.#callback = undefined;
+	}
+
 	/** Kick off daemon/exposure startup in the background to hide latency. */
 	prewarm(): void {
 		const position = Math.min(this.#providerFilePosition, this.#configs.length);

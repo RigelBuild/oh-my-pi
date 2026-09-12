@@ -392,7 +392,7 @@ describe("isolated auto-learn capture", () => {
 		let captureSessionId: string | undefined;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "0193c8f2-7b1a-7c4d-9e2f-123456789abc",
 			createAgent: options => {
 				captureMessages = options.initialState?.messages ?? [];
@@ -448,7 +448,7 @@ describe("isolated auto-learn capture", () => {
 		let captureOnResponse: AgentOptions["onResponse"];
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			onPayload,
 			onResponse,
 			createAgent: options => {
@@ -486,7 +486,7 @@ describe("isolated auto-learn capture", () => {
 
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createAgent: options =>
 				new Agent({
 					...options,
@@ -509,6 +509,38 @@ describe("isolated auto-learn capture", () => {
 		expect(jsonSchemaProperties(sent?.parameters)).toHaveProperty(INTENT_FIELD);
 	});
 
+	it("captures with tools that only became available after construction", async () => {
+		// `autolearn.enabled` is reloadable, so a session can start with no capture
+		// tools at all and gain them from a refresh. Held as a snapshot the list
+		// stays empty and every later capture returns at the empty-list guard —
+		// the controller runs and silently captures nothing.
+		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [] },
+		});
+
+		// Empty at construction, exactly as a session started with auto-learn off.
+		let available: AgentTool[] = [];
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => available,
+			createAgent: options => new Agent({ ...options, convertToLlm, streamFn: captureMock.stream }),
+		});
+
+		await runCapture("Capture before the refresh");
+		expect(captureMock.calls).toHaveLength(0);
+
+		// What the settings reconcile does: builds and activates the tool.
+		available = [manageSkillTool];
+
+		await runCapture("Capture after the refresh");
+
+		expect(captureMock.calls).toHaveLength(1);
+		const names = (captureMock.calls[0]?.context.tools ?? []).map(tool => tool.name);
+		expect(names).toEqual(["manage_skill"]);
+	});
+
 	// Same shape one setting over: `inlineToolDescriptors` is reloadable too, so
 	// a capture built from the construction-time constant pruned descriptions the
 	// source prompt had just been rebuilt to include — leaving the capture model
@@ -526,7 +558,7 @@ describe("isolated auto-learn capture", () => {
 
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createAgent: options =>
 				new Agent({
 					...options,
@@ -558,7 +590,7 @@ describe("isolated auto-learn capture", () => {
 		let captureToolNames: string[] = [];
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool, learnTool],
+			captureTools: () => [manageSkillTool, learnTool],
 			createAgent: options => {
 				captureToolNames = options.initialState?.tools?.map(tool => tool.name) ?? [];
 				return new Agent({
@@ -605,7 +637,7 @@ describe("isolated auto-learn capture", () => {
 		});
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "capture-transport",
 			createAgent: options =>
 				new Agent({
@@ -641,7 +673,7 @@ describe("isolated auto-learn capture", () => {
 		let closeCalls = 0;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createAgent: options => {
 				providerState = options.providerSessionState;
 				providerState?.set("blocked", { close: () => closeCalls++ });
