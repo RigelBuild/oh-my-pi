@@ -817,6 +817,44 @@ describe("searchExa: EXA_API_KEY vs the session's MCP-discovered key", () => {
 		expect(await keyUsedForSearch("my-own-session-key")).toBe("my-own-session-key");
 	});
 
+	it("does not borrow a peer-injected EXA_API_KEY when this session discovered no key", async () => {
+		// The gap between the two tests above: helper-owned environment AND no
+		// session key. Falling back to the environment here bills the peer's
+		// account, so the keyless MCP path is the correct answer.
+		const owner = {};
+		applyMCPEnvironment({ exaApiKeys: ["peer-injected-key"] }, owner);
+		expect(env.EXA_API_KEY).toBe("peer-injected-key");
+		expect(isExaEnvHelperInjected()).toBe(true);
+
+		// Both transports have to be covered: the native path selected the key
+		// directly, and the MCP path re-reads the environment through
+		// `findApiKey()`, so a fix to one alone still leaked on the other.
+		const urls: string[] = [];
+		let nativeApiKeyHeader: string | undefined;
+		await searchExa({
+			query: "precedence probe",
+			sessionExaApiKey: undefined,
+			fetch: wrapFetch((url, init) => {
+				urls.push(String(url));
+				nativeApiKeyHeader ??= (init?.headers as Record<string, string> | undefined)?.["x-api-key"];
+				return new Response(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						id: "1",
+						result: { content: [{ type: "text", text: JSON.stringify(makeMockExaResponse()) }] },
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}),
+		});
+
+		// Pre-fix the native `?? envKey` fallback sent the peer's key as a header,
+		// and `callExaMcpSearch` put it in `exaApiKey` on the query.
+		expect(nativeApiKeyHeader).toBeUndefined();
+		expect(urls.length).toBeGreaterThan(0);
+		for (const url of urls) expect(url).not.toContain("peer-injected-key");
+	});
+
 	it("falls back to EXA_API_KEY when this session discovered no key", async () => {
 		env.EXA_API_KEY = "operator-exported-key";
 		expect(await keyUsedForSearch(undefined)).toBe("operator-exported-key");

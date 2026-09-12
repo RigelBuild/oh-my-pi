@@ -3923,8 +3923,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, AUTO_THINKING);
 			}
 			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
+				// Which families still FOLLOW `tier.*`, so a tier edited while this
+				// session is stopped is re-derived on resume instead of being
+				// overridden by the value this receipt captured. Every family here
+				// came from the config above; only `--openai-service-tier` is a real
+				// pin, and it pins openai alone — the others keep their provenance.
+				const settingsTrackingFamilies = (
+					Object.keys(configuredServiceTierByFamily) as Array<keyof ServiceTierByFamily>
+				).filter(family => !(family === "openai" && options.openAIServiceTier !== undefined));
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					settingsTrackingFamilies,
 				);
 			}
 		}

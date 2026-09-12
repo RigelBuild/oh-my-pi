@@ -129,4 +129,107 @@ describe("--service-tier", () => {
 			authStorage.close();
 		}
 	});
+	it("re-derives a startup-derived tier after the config is edited while stopped", async () => {
+		using tempDir = TempDir.createSync("@omp-service-tier-startup-");
+		const authStorage = await AuthStorage.create(":memory:");
+		const sessionFile = path.join(tempDir.path(), "session.jsonl");
+		try {
+			// A plain start with a configured tier: no flag, so every family here
+			// FOLLOWS `tier.*`. Startup wrote this receipt without provenance, and
+			// `hasServiceTierEntry` then treats it as authoritative forever.
+			const firstManager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session: started } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "priority" }),
+				sessionManager: firstManager,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			expect(started.serviceTierByFamily).toEqual({ openai: "priority" });
+			await started.dispose();
+
+			// The edit lands while the session is stopped, so no refresh can see it.
+			const resumedManager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session: resumed } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "none" }),
+				sessionManager: resumedManager,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			try {
+				// Pre-fix the provenance-less startup receipt replayed `priority`.
+				expect(resumed.serviceTierByFamily).toEqual({});
+			} finally {
+				await resumed.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("keeps a --service-tier pin while other families still track the config", async () => {
+		using tempDir = TempDir.createSync("@omp-service-tier-startup-pin-");
+		const authStorage = await AuthStorage.create(":memory:");
+		const sessionFile = path.join(tempDir.path(), "session.jsonl");
+		try {
+			// The flag pins openai ALONE, so anthropic must keep its provenance.
+			const firstManager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session: started } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "priority", "tier.anthropic": "priority" }),
+				sessionManager: firstManager,
+				openAIServiceTier: "flex",
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			expect(started.serviceTierByFamily).toEqual({ openai: "flex", anthropic: "priority" });
+			await started.dispose();
+
+			const resumedManager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session: resumed } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "priority", "tier.anthropic": "none" }),
+				sessionManager: resumedManager,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			try {
+				// The pin survives; the config-following family follows the edit.
+				expect(resumed.serviceTierByFamily).toEqual({ openai: "flex" });
+			} finally {
+				await resumed.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
+	});
 });
