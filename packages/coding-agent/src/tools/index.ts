@@ -674,7 +674,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// the sister tool so a one-sided frontmatter `tools:` entry still works.
 	// Unlike the AST/auto-learn convenience auto-includes below, this is a
 	// safety pairing — it applies to restricted sessions too.
-	if (requestedTools && session.settings.get("checkpoint.enabled")) {
+	//
+	// Deliberately NOT conditioned on `checkpoint.enabled`: the requested list is
+	// built once, while the setting is now reconciled live, and the refresh can
+	// only re-enable a name the list already carries. Reading the setting here
+	// would let a session that started with checkpointing off keep a permanently
+	// one-sided pair after it is turned on. Exposure stays gated — both names go
+	// through the same settings half as every other compound-gated tool.
+	if (requestedTools) {
 		if (requestedTools.includes("checkpoint") && !requestedTools.includes("rewind")) {
 			requestedTools.push("rewind");
 		} else if (requestedTools.includes("rewind") && !requestedTools.includes("checkpoint")) {

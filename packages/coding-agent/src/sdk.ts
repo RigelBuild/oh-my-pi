@@ -3818,7 +3818,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// slot, preventing the nested-spawn deadlock from issue #3749.
 		const settingsAwareStreamFn = wrapStreamFnWithBlobUrlFallback(
 			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
-			blobBroker,
+			// Read live, so a broker built or swapped by a settings reload is the one
+			// this request recovers through.
+			() => blobBroker,
 		);
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
