@@ -68,7 +68,7 @@ interface Harness {
  */
 async function makeHarness(
 	initialConfig: string,
-	options?: { persistSession?: boolean; customTools?: CustomTool[]; enableLsp?: boolean },
+	options?: { persistSession?: boolean; customTools?: CustomTool[]; enableLsp?: boolean; toolNames?: string[] },
 ): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-tiers-tools-");
 	const cwd = tempDir.path();
@@ -105,6 +105,7 @@ async function makeHarness(
 		enableLsp: options?.enableLsp ?? false,
 		skipPythonPreflight: true,
 		customTools: options?.customTools,
+		toolNames: options?.toolNames,
 	});
 
 	return {
@@ -312,6 +313,41 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	});
 
+	it("re-selects a settings-tracking model after a default edit made while stopped", async () => {
+		// The failure is invisible to the reload: the file has not moved since
+		// startup read it, so `changed` is false while `Settings` already holds
+		// the new default and the transcript holds the retired one.
+		const h = await makeHarness("", { persistSession: true });
+		try {
+			const startingModel = h.session.model;
+			expect(startingModel).toBeDefined();
+			const other = h.session.getAvailableModels().find(model => model.id !== startingModel?.id);
+			expect(other).toBeDefined();
+			if (!other || !startingModel) return;
+
+			const sessionFile = h.session.sessionFile;
+			if (!sessionFile) throw new Error("Expected a persisted session file");
+			await h.session.sessionManager.flush();
+
+			// The edit lands while the session is not running, so nothing
+			// reconciles it. As above, `reload()` puts the in-process session in the
+			// state a new process would start in: config already new, transcript
+			// about to restore the old model.
+			await fs.writeFile(h.settingsPath, `modelRoles:\n  default: ${other.provider}/${other.id}\n`);
+			await h.session.settings.reload();
+			expect(await h.session.switchSession(sessionFile)).toBe(true);
+			expect(h.session.model?.id).toBe(startingModel.id);
+
+			const result = await h.session.refresh("settings");
+
+			// Nothing reloaded, yet the model still has to converge on the config.
+			expect(result.settingsChanged).toBe(false);
+			expect(h.session.model?.id).toBe(other.id);
+		} finally {
+			await h.dispose();
+		}
+	}, 30_000);
+
 	it("re-derives a config-following family after a tier edit made while stopped", async () => {
 		// The boundary a refresh cannot cover. Anthropic is PINNED by `/fast`, which
 		// writes a whole-map receipt carrying google's current value too. The
@@ -413,26 +449,39 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
-	it("cannot restore a core built-in whose startup gate was off (stays absent until restart)", async () => {
+	it("builds a core built-in whose startup gate was off when it is re-enabled", async () => {
+		// No registry entry exists in this case — `createTools` never built the
+		// tool — so re-activation is not enough and the tool has to be constructed.
 		const h = await makeHarness("bash:\n  enabled: false\n");
 		try {
 			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+			expect(h.session.getToolByName("bash")).toBeUndefined();
 
 			await fs.writeFile(h.settingsPath, "bash:\n  enabled: true\n");
 			const result = await h.session.refresh("settings");
 
 			expect(result.settingsChanged).toBe(true);
-			// Boundary: a session whose STARTUP never built `bash` (the gate was
-			// off) has no registry entry to re-activate, so it stays absent until
-			// restart rather than being constructed here — re-adding a tool the
-			// startup path declined would widen a `--no-tools`/whitelist grant.
-			// Measured boundary, asserted as fact rather than as a tautology: the
-			// startup gate was off, so `createTools` never BUILT `bash` and there is
-			// no registry entry to re-activate. It stays absent until restart —
-			// re-adding a tool the startup path declined would widen a
-			// `--no-tools`/whitelist grant this reconcile cannot see.
-			expect(h.session.getToolByName("bash")).toBeUndefined();
+			// Advertised AND registered: the model has to be able to call it.
+			expect(h.session.getEnabledToolNames()).toContain("bash");
+			expect(h.session.getToolByName("bash")).toBeDefined();
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("does not add a gated built-in the session's tool list excluded", async () => {
+		// The distinction the permission set exists for: `bash` is missing here
+		// because this session was constructed WITHOUT it, not because the setting
+		// was off. Enabling the setting must not widen that grant.
+		const h = await makeHarness("bash:\n  enabled: false\n", { toolNames: ["read", "glob"] });
+		try {
 			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: true\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+			expect(h.session.getToolByName("bash")).toBeUndefined();
 		} finally {
 			await h.dispose();
 		}
