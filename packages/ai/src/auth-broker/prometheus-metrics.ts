@@ -632,6 +632,12 @@ export function renderUsageMetrics(
 		// the per-account info series above does: `plan=""` rows join nothing.
 		const canonicalPlan = canonicalizePlan(plan);
 		if (canonicalPlan.length === 0) continue;
+		// Same reasoning for the VALUES: a capacity multiplier and a list price
+		// are exported straight to `/metrics`, and the CLI parser rejects a
+		// negative or non-finite one at parse time. An embedder bypasses that
+		// parser entirely, so re-check here rather than publishing `-1`, `NaN`,
+		// or `+Inf` into a gauge every consumer divides by.
+		if (!isPublishablePlanFact(capacityWeight) || !isPublishablePlanFact(monthlyPriceUsd)) continue;
 		const planLabels: readonly Label[] = [
 			["provider", provider],
 			["plan", canonicalPlan],
@@ -651,6 +657,15 @@ export function renderUsageMetrics(
 	}
 	for (const note of notes) lines.push(`# note ${note}`);
 	return lines.length === 0 ? "" : `${lines.join("\n")}\n`;
+}
+
+/**
+ * Whether a plan fact may be published: finite and non-negative, matching the
+ * CLI parser's rejection. A whole plan is skipped when either fact fails, so
+ * `capacity_weight` and `price_usd` cannot disagree about which plans exist.
+ */
+function isPublishablePlanFact(value: number): boolean {
+	return Number.isFinite(value) && value >= 0;
 }
 
 /** Emit the per-limit families for one {@link UsageLimit} under `base` labels. */
