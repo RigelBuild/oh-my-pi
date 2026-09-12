@@ -358,7 +358,11 @@ function buildExaMcpArgs(params: ExaSearchParams): Record<string, unknown> {
 
 async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchResponse> {
 	const query = new URLSearchParams();
-	const apiKey = findApiKey();
+	// Same rule as the native path above: `findApiKey()` reads the process-global
+	// `EXA_API_KEY`, so when that value is one the injection helper installed it
+	// belongs to whichever session injected FIRST. Prefer this session's own key,
+	// and when it has none send the request keyless rather than as a peer.
+	const apiKey = params.sessionExaApiKey ?? (isExaEnvHelperInjected() ? undefined : findApiKey());
 	if (apiKey) query.set("exaApiKey", apiKey);
 	query.set("tools", "web_search_exa");
 	const fetchImpl = params.fetch ?? fetch;
@@ -460,7 +464,13 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 		storedKey && params.authStorage
 			? params.authStorage.resolver("exa", { sessionId: params.sessionId })
 			: sessionKeyOutranksEnv
-				? (params.sessionExaApiKey ?? envKey)
+				? // No fallback onto `envKey` here. Both reasons this branch is taken
+					// rule it out: either there is no env key at all, or the env key is
+					// one THIS harness injected — process-global, so falling back to it
+					// makes a session with no key of its own authenticate and bill
+					// against whichever session injected first. Without a session key the
+					// correct answer is the keyless MCP path below.
+					params.sessionExaApiKey
 				: envKey;
 	const response = keyOrResolver
 		? await withAuth(keyOrResolver, key => callExaSearch(key, params), { signal: params.signal })
