@@ -18,6 +18,7 @@ import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capabili
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
+import type { LoadMCPConfigsResult } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { applyMCPEnvironment, getSessionExaApiKey } from "@oh-my-pi/pi-coding-agent/mcp/reload";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -782,6 +783,63 @@ describe("AgentSession.refresh('mcp')", () => {
 			if (previousExaKey === undefined) delete process.env.EXA_API_KEY;
 			else process.env.EXA_API_KEY = previousExaKey;
 		}
+
+		await dir.remove();
+	});
+
+	// Beyond the same-name REPLACEMENT case: a project entry can claim a name
+	// during capability dedup and then be suppressed (its own `enabled: false`),
+	// so the new selection contains NO entry for that name while the user-level
+	// server it outranked is still connected. A fresh session would expose none.
+	it("disconnects a user server a suppressed project entry hides", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-suppressed-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: false\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		const userSource: SourceMeta = {
+			level: "user",
+			path: `${dir.path()}/user.json`,
+			provider: "mcp",
+			providerName: "MCP",
+		};
+		const manager = new MCPManager(dir.path(), null, async (_cwd, options): Promise<LoadMCPConfigsResult> =>
+			options?.enableProjectConfig === false
+				? { configs: { foo: { command: "true", args: ["user"] } }, exaApiKeys: [], sources: { foo: userSource } }
+				: // Project config ON: the project `foo` wins the name and is then
+					// suppressed, so `configs` carries no `foo` at all.
+					{ configs: {}, exaApiKeys: [], sources: {} },
+		);
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+		});
+		sessions.push(session);
+
+		await manager.discoverAndConnect({ enableProjectConfig: false });
+		expect(manager.getAllServerNames()).toContain("foo");
+
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		// Pre-fix the reconcile iterated only the newly loaded configs, so a name
+		// absent from them was never dropped and the user server stayed live.
+		expect(manager.getAllServerNames()).not.toContain("foo");
 
 		await dir.remove();
 	});
