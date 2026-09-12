@@ -311,6 +311,66 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	});
 
+	it("removes a core built-in when its boolean gate is disabled on disk", async () => {
+		// The severe direction: `createTools` reads `bash.enabled` once at
+		// construction and `BashTool.execute()` never re-checks it, so a
+		// true->false edit left shell execution both advertised and CALLABLE.
+		const h = await makeHarness("bash:\n  enabled: true\n");
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("bash");
+
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: false\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("cannot restore a core built-in whose startup gate was off (stays absent until restart)", async () => {
+		const h = await makeHarness("bash:\n  enabled: false\n");
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: true\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Boundary: a session whose STARTUP never built `bash` (the gate was
+			// off) has no registry entry to re-activate, so it stays absent until
+			// restart rather than being constructed here — re-adding a tool the
+			// startup path declined would widen a `--no-tools`/whitelist grant.
+			// Measured boundary, asserted as fact rather than as a tautology: the
+			// startup gate was off, so `createTools` never BUILT `bash` and there is
+			// no registry entry to re-activate. It stays absent until restart —
+			// re-adding a tool the startup path declined would widen a
+			// `--no-tools`/whitelist grant this reconcile cannot see.
+			expect(h.session.getToolByName("bash")).toBeUndefined();
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("leaves other core built-ins alone when one boolean gate moves", async () => {
+		// Each gate is its own lever: disabling `bash` must not disturb `glob`.
+		const h = await makeHarness("bash:\n  enabled: true\nglob:\n  enabled: true\n");
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("bash");
+			expect(h.session.getEnabledToolNames()).toContain("glob");
+
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: false\nglob:\n  enabled: true\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+			expect(h.session.getEnabledToolNames()).toContain("glob");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("reconciles each gated set independently", async () => {
 		// The two settings are separate levers, so moving one must not disturb
 		// the other's live state.
