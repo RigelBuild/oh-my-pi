@@ -247,6 +247,10 @@ export class MCPToolCache {
 	 * The claim goes in its OWN row ({@link CLAIM_PREFIX}), never on the
 	 * catalog's: see {@link MCPToolClaimPayload}.
 	 *
+	 * Returns `undefined` when the claim could not be published within
+	 * {@link CACHE_WRITE_ATTEMPTS}: an unreserved token must never order a
+	 * write, so that request skips caching rather than risking an inversion.
+	 *
 	 * Publishing is a CAS, and a lost race is re-driven rather than ignored.
 	 * Losing means a peer's claim landed between this read and this write, so
 	 * the token just computed was floored against state that no longer holds —
@@ -254,7 +258,7 @@ export class MCPToolCache {
 	 * which is the inversion this exists to prevent. Every loss is a peer
 	 * succeeding, so a contended server still terminates.
 	 */
-	observeCatalogAt(serverName: string): number {
+	observeCatalogAt(serverName: string): number | undefined {
 		const catalog = cacheKey(serverName);
 		const claim = claimKey(serverName);
 		let claimed = 0;
@@ -267,12 +271,21 @@ export class MCPToolCache {
 			const expiresAtSec = Math.floor((Date.now() + CLAIM_TTL_MS) / 1000);
 			if (this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec)) return claimed;
 		}
-		// Out of attempts, every one lost to a peer whose token is at least as
-		// high as the one we computed against the row it replaced. Returning the
-		// last floored reading keeps this request ordered above the catalog it
-		// can see; an unpublished claim only risks being outranked, never
-		// outranking something newer.
-		return claimed;
+		// Out of attempts: nothing this request computed was ever published.
+		// Returning it anyway is not safe in the direction the old comment here
+		// claimed. The token is `max(reading, nextAfter(ceiling))`, so a
+		// long-lived process still on a higher pre-correction clock can compute a
+		// token ABOVE every winner — invisible to peers, because it never
+		// reached the claim row. A newer request then reserves a SMALLER token,
+		// and when this request's delayed response lands, `#writeOrdered()` reads
+		// it as the newest and overwrites the newer catalog (or its tombstone)
+		// for the full TTL. That is the inversion the claim exists to prevent.
+		//
+		// A request whose order cannot be established does not get to write:
+		// `undefined` means "unreserved", and `set()` skips the cache entirely.
+		// The live tools are unaffected — only the persisted catalog is skipped,
+		// and the next list re-populates it.
+		return undefined;
 	}
 
 	/**
@@ -357,9 +370,15 @@ export class MCPToolCache {
 		serverName: string,
 		config: MCPServerConfig,
 		tools: MCPToolDefinition[],
-		observedAt?: number,
+		...observed: [] | [observedAt: number | undefined]
 	): Promise<void> {
-		const writeStartedAt = observedAt ?? toolCatalogObservedAt();
+		// An OMITTED token means "no request to anchor on" (an out-of-band
+		// invalidation, or a test) and samples now. An explicit `undefined` is a
+		// FAILED reservation from `observeCatalogAt()`: that write has no
+		// established order, so it must not touch the cache at all. The two cases
+		// are opposite, which is why they cannot share a `?? sampleNow()`.
+		if (observed.length === 1 && observed[0] === undefined) return;
+		const writeStartedAt = observed[0] ?? toolCatalogObservedAt();
 		const newestSeen = this.#newestObserved.get(serverName);
 		this.#newestObserved.set(serverName, Math.max(newestSeen ?? writeStartedAt, writeStartedAt));
 		// A write is still current while nothing issued LATER has entered `set()`

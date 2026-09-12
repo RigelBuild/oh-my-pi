@@ -168,6 +168,17 @@ function tokenAfter(previous: number): number {
 	return next;
 }
 
+/**
+ * A reservation that must have succeeded for the test's premise to hold.
+ * `observeCatalogAt()` returns `undefined` when it could not publish its claim,
+ * and a test asserting on ordering has nothing to say in that case.
+ */
+function reserved(cache: MCPToolCache, serverName: string): number {
+	const token = cache.observeCatalogAt(serverName);
+	if (token === undefined) throw new Error(`claim for ${serverName} was not reserved`);
+	return token;
+}
+
 describe("MCPToolCache empty-toolset guard", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -635,7 +646,7 @@ describe("MCPToolCache empty-toolset guard", () => {
 		const afterCorrection = new MCPToolCache(storage);
 
 		// The long-lived process writes first, on the pre-correction scale.
-		const highReading = beforeCorrection.observeCatalogAt("litellm");
+		const highReading = reserved(beforeCorrection, "litellm");
 		await beforeCorrection.set("litellm", CONFIG, [OLD_TOOL], highReading);
 		expect(await beforeCorrection.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
 
@@ -643,7 +654,7 @@ describe("MCPToolCache empty-toolset guard", () => {
 		// yet its request goes out later in real time. Mock the raw clock rather
 		// than the token so the floor is what has to rescue the ordering.
 		vi.spyOn(performance, "now").mockReturnValue(performance.now() - 60 * 60 * 1000);
-		const lowReading = afterCorrection.observeCatalogAt("litellm");
+		const lowReading = reserved(afterCorrection, "litellm");
 		expect(lowReading).toBeGreaterThan(highReading);
 
 		await afterCorrection.set("litellm", CONFIG, [NEW_TOOL], lowReading);
@@ -658,7 +669,7 @@ describe("MCPToolCache empty-toolset guard", () => {
 		const storage = createFakeStorage();
 		const cache = new MCPToolCache(storage);
 
-		const first = cache.observeCatalogAt("litellm");
+		const first = reserved(cache, "litellm");
 		const second = tokenAfter(first);
 		await cache.set("litellm", CONFIG, [NEW_TOOL], second);
 
@@ -666,6 +677,38 @@ describe("MCPToolCache empty-toolset guard", () => {
 		// is genuinely the earlier observation.
 		await cache.set("litellm", CONFIG, [OLD_TOOL], first);
 
+		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+	});
+
+	test("a claim that never publishes does not write the cache", async () => {
+		// The retry loop is bounded, so under sustained contention every attempt
+		// can lose. The token it computed is `max(reading, nextAfter(ceiling))` —
+		// a long-lived process still on a higher pre-correction clock can compute
+		// one ABOVE every winner, and because it never reached the claim row no
+		// peer can see it. A newer request then reserves a SMALLER token, and
+		// when this delayed response lands `#writeOrdered()` reads it as newest
+		// and overwrites the newer catalog for the full TTL. An unreserved token
+		// must therefore not order a write at all.
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+
+		// A legitimate newer catalog from a peer that DID reserve.
+		await cache.set("litellm", CONFIG, [NEW_TOOL], reserved(cache, "litellm"));
+		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+
+		// Every CAS now loses, exactly as sustained cross-process contention
+		// looks from inside one process.
+		const contended = new MCPToolCache(storage);
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValue(false);
+		const token = contended.observeCatalogAt("litellm");
+		cas.mockRestore();
+
+		// Unreserved: the reservation failed, so there is no order to write with.
+		expect(token).toBeUndefined();
+
+		// Passing it through must skip the cache rather than clobber the peer's
+		// newer catalog with this unordered one.
+		await contended.set("litellm", CONFIG, [OLD_TOOL], token);
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
 
@@ -681,19 +724,19 @@ describe("MCPToolCache empty-toolset guard", () => {
 		const afterCorrection = new MCPToolCache(storage);
 
 		// A landed write from some earlier pass, so the row carries a low token.
-		const seed = beforeCorrection.observeCatalogAt("litellm");
+		const seed = reserved(beforeCorrection, "litellm");
 		await beforeCorrection.set("litellm", CONFIG, [OLD_TOOL], seed);
 
 		// The pre-correction process issues a request on the HIGHER scale and
 		// parks: nothing of it has been written except its claim.
 		vi.spyOn(performance, "now").mockReturnValue(performance.now() + 60 * 60 * 1000);
-		const inFlight = beforeCorrection.observeCatalogAt("litellm");
+		const inFlight = reserved(beforeCorrection, "litellm");
 		vi.restoreAllMocks();
 
 		// The post-correction process claims afterwards, in real time, on the
 		// corrected scale. Without the reservation it would floor above the
 		// landed row only and sit below the parked request.
-		const later = afterCorrection.observeCatalogAt("litellm");
+		const later = reserved(afterCorrection, "litellm");
 		expect(later).toBeGreaterThan(inFlight);
 
 		// Its catalog is the newest observation, so it must survive the stale
@@ -711,7 +754,7 @@ describe("MCPToolCache empty-toolset guard", () => {
 		const storage = createFakeStorage();
 		const cache = new MCPToolCache(storage);
 
-		await cache.set("litellm", CONFIG, [OLD_TOOL], cache.observeCatalogAt("litellm"));
+		await cache.set("litellm", CONFIG, [OLD_TOOL], reserved(cache, "litellm"));
 
 		cache.observeCatalogAt("litellm");
 
@@ -729,7 +772,7 @@ describe("MCPToolCache empty-toolset guard", () => {
 		const storage = createExpiringFakeStorage();
 		const cache = new MCPToolCache(storage);
 
-		await cache.set("litellm", CONFIG, [OLD_TOOL], cache.observeCatalogAt("litellm"));
+		await cache.set("litellm", CONFIG, [OLD_TOOL], reserved(cache, "litellm"));
 		const writtenExpiry = storage.expiryOf("mcp_tools:litellm");
 		expect(writtenExpiry).toBeDefined();
 		// Later failed attempts: each claims a token, none produces a catalog.
@@ -764,7 +807,7 @@ describe("MCPToolCache empty-toolset guard", () => {
 			);
 		});
 
-		const claimed = cache.observeCatalogAt("litellm");
+		const claimed = reserved(cache, "litellm");
 
 		// Floored above the peer that won, not above the row it had read.
 		expect(claimed).toBeGreaterThan(peerToken);
