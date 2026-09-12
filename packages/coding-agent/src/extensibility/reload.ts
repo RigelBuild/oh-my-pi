@@ -22,7 +22,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { loadCapability } from "../discovery";
 import type { TtsrManager } from "../export/ttsr";
-import { loadSkills, type Skill, setActiveSkills } from "./skills";
+import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "./skills";
 
 /**
  * Config surface(s) an in-session refresh re-reads from disk. Single-sourced:
@@ -123,6 +123,13 @@ export interface ReloadSkillsAndRulesResult {
 	rules: number;
 	/** The fresh skills, so the caller can fan them into per-session snapshots. */
 	activeSkills: readonly Skill[];
+	/**
+	 * Discovery warnings from THIS pass, so the caller replaces the session's
+	 * startup diagnostics alongside the roster. `undefined` when the caller
+	 * supplied the roster and no discovery ran, which is distinct from a scan
+	 * that found nothing wrong.
+	 */
+	skillWarnings: readonly SkillWarning[] | undefined;
 	/** Fresh rulebook (described) rules, for threading into the prompt rebuild. */
 	rulebookRules: Rule[];
 	/** Fresh always-apply rules, for threading into the prompt rebuild. */
@@ -164,16 +171,18 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 	// Skills: re-run the same discovery `sdk.ts` runs at init (`discoverSkills`
 	// is a thin wrapper over `loadSkills`; called directly here to avoid a cycle
 	// back through the sdk entry point). Only cwd + the skills settings matter.
-	const skills =
-		options.skills ??
-		(
-			await loadSkills({
+	// Warnings travel WITH the roster: a skill that just became malformed adds
+	// one, and a file that was fixed or deleted must drop the stale one. Keeping
+	// the startup set leaves both directions wrong.
+	const discovered = options.skills
+		? undefined
+		: await loadSkills({
 				...options.skillsSettings,
 				disabledExtensions: options.disabledExtensions,
 				extensionRoots: options.extensionRoots,
 				cwd,
-			})
-		).skills;
+			});
+	const skills = options.skills ?? discovered?.skills ?? [];
 	if (publishGlobals) setActiveSkills(skills);
 
 	// Rules: re-bucket through the LIVE ttsr manager (preserving injected state),
@@ -219,6 +228,7 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 		skills: skills.length,
 		rules: activeRules.length,
 		activeSkills: skills,
+		skillWarnings: discovered?.warnings,
 		rulebookRules,
 		alwaysApplyRules,
 		sourceRules: ruleItems,

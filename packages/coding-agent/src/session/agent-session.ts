@@ -917,6 +917,8 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	/** Spawn depth: 0 top-level, 1+ subagent. Reads the depth-dependent tool gates.*/
+	readonly #taskDepth: number;
 	// The registry this session was created against (SDK-supplied or the global
 	// fallback). Skill fan-out iterates THIS registry and restricts to this
 	// session's own descendants — never a foreign global tree.
@@ -1963,6 +1965,7 @@ export class AgentSession {
 			extensionRunner: () => this.#extensionRunner,
 			clientBridge: () => this.#clientBridge,
 			agentKind: () => this.#agentKind,
+			taskDepth: () => this.#taskDepth,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			queuedMessageCount: () => this.queuedMessageCount,
@@ -2063,6 +2066,7 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#taskDepth = config.memoryTaskDepth ?? 0;
 		this.#agentRegistry = config.agentRegistry ?? AgentRegistry.global();
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
@@ -6338,7 +6342,11 @@ export class AgentSession {
 				// false. With `skillsChanged` also false (roster unchanged), that
 				// left command-metadata subscribers unnotified and ACP/RPC clients
 				// advertising the old `/skill:*` set.
-				const skillsChanged = this.applyReloadedSkills(reloaded.activeSkills, freshSkillsSettings);
+				const skillsChanged = this.applyReloadedSkills(
+					reloaded.activeSkills,
+					freshSkillsSettings,
+					reloaded.skillWarnings,
+				);
 				const enableSkillCommandsChanged =
 					this.#tools.skillsSettings?.enableSkillCommands !== prevEnableSkillCommands;
 				// Rebuild the available-command metadata when the skill roster changed
@@ -6664,8 +6672,12 @@ export class AgentSession {
 	 * logged rather than propagated: one child's rebuild must not fail the
 	 * parent's refresh, whose own surfaces already applied.
 	 */
-	applyReloadedSkills(skills: readonly Skill[], skillsSettings?: SkillsSettings): boolean {
-		const changed = this.#tools.applyReloadedSkills(skills, skillsSettings);
+	applyReloadedSkills(
+		skills: readonly Skill[],
+		skillsSettings?: SkillsSettings,
+		skillWarnings?: readonly SkillWarning[],
+	): boolean {
+		const changed = this.#tools.applyReloadedSkills(skills, skillsSettings, skillWarnings);
 		for (const ref of this.#runningDescendants()) {
 			const descendant = ref.session;
 			if (!descendant) continue;
@@ -6684,7 +6696,7 @@ export class AgentSession {
 			// Restrict to this session's descendants. Advisors never resolve
 			// `skill://`, but a descendant advisor is a harmless no-op either way.
 			// The snapshot swap is synchronous; the rebuild it implies is not.
-			if (!descendant.#tools.applyReloadedSkills(skills)) continue;
+			if (!descendant.#tools.applyReloadedSkills(skills, undefined, skillWarnings)) continue;
 			void descendant.refreshBaseSystemPrompt().catch((error: unknown) => {
 				logger.warn("Failed to rebuild a descendant's system prompt after a skill refresh", {
 					agentId: ref.id,

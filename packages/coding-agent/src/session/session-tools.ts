@@ -116,6 +116,8 @@ export interface SessionToolsHost {
 	extensionRunner(): ExtensionRunner | undefined;
 	clientBridge(): ClientBridge | undefined;
 	agentKind(): "main" | "sub";
+	/** The session's real spawn depth, for re-evaluating the depth-dependent gates. */
+	taskDepth(): number;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	queuedMessageCount(): number;
@@ -474,7 +476,11 @@ export class SessionTools {
 	 * advertised roster. An unchanged set returns `false` so the prompt rebuild
 	 * is skipped and Anthropic prompt caching keeps hitting.
 	 */
-	applyReloadedSkills(skills: readonly Skill[], skillsSettings?: SkillsSettings): boolean {
+	applyReloadedSkills(
+		skills: readonly Skill[],
+		skillsSettings?: SkillsSettings,
+		skillWarnings?: readonly SkillWarning[],
+	): boolean {
 		let changed = this.#skills.length !== skills.length;
 		if (!changed) {
 			for (let i = 0; i < skills.length; i++) {
@@ -490,6 +496,10 @@ export class SessionTools {
 		// construction-time snapshot would keep the old command surface after a
 		// config change. Only overwrite when the caller supplies a fresh group.
 		if (skillsSettings !== undefined) this.#skillsSettings = skillsSettings;
+		// Same rule as `refreshSkills`, which replaces both fields: warnings
+		// describe THIS roster. Absent means no discovery ran (a caller-supplied
+		// roster), so the previous diagnostics stand.
+		if (skillWarnings !== undefined) this.#skillWarnings = [...skillWarnings];
 		return changed;
 	}
 
@@ -1673,18 +1683,21 @@ export class SessionTools {
 	async #applyBooleanGatedBuiltins(): Promise<boolean> {
 		const active = this.getEnabledToolNames();
 		const next = new Set(active);
-		// Depth 0: the depth-dependent conditions are the INVOCATION half, already
-		// decided in `#settingGatedBuiltinPermissions` at construction. Re-deriving
-		// depth here would apply it twice and, for a subagent, could re-evaluate a
-		// condition whose answer must stay fixed for the session's lifetime.
-		const permissionScopedDepth = 0;
+		// The session's REAL depth. A compound gate mixes an invocation half
+		// (already decided in `#settingGatedBuiltinPermissions`) with a settings
+		// half that is still live, and the settings half reads depth: a depth-1
+		// child whose `task.maxRecursionDepth` drops to 1 can no longer spawn, so
+		// keeping `task` advertised only defers the rejection to execution.
+		// Hard-coding 0 instead is wrong in the other direction — `isIrcEnabled`
+		// deliberately returns true for EVERY subagent, which depth 0 discards.
+		const sessionDepth = this.#host.taskDepth();
 		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...Object.keys(COMPOUND_GATED_TOOLS)]) {
 			// Only what this session's construction permitted. A name absent from
 			// the set was excluded by the INVOCATION — a restricted tool list,
 			// `--no-tools`, a subagent's task depth — and no settings edit may add
 			// it. The two reasons a tool is missing have to stay distinguishable.
 			if (!this.#settingGatedBuiltinPermissions.has(name)) continue;
-			if (settingGatedToolEnabled(name, this.#host.settings, permissionScopedDepth) !== true) {
+			if (settingGatedToolEnabled(name, this.#host.settings, sessionDepth) !== true) {
 				// Filtered by PROVENANCE, exactly as the setting-gated group
 				// reconcile below does: an extension or SDK tool may register over
 				// one of these names, and that entry is marked non-built-in.
