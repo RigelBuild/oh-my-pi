@@ -549,4 +549,26 @@ describe("AgentSession refresh('settings'): a memory injection limit reaches the
 			await h.dispose();
 		}
 	});
+
+	it("rebuilds the prompt when only task.eager moves", async () => {
+		// `rebuildSystemPrompt` reads this live, which fixes what a rebuild
+		// RENDERS — but a rebuild still has to be triggered, and this setting can
+		// be the only thing on disk that moved. Nothing else sets `rosterChanged`,
+		// so the prompt kept stating the previous delegation posture.
+		const h = await makeHarness("compaction:\n  enabled: false\ntask:\n  eager: always\n");
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).toContain("Delegation default.");
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\ntask:\n  eager: preferred\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			const after = h.session.systemPrompt.join("\n");
+			expect(after).toContain("Delegation preferred.");
+			expect(after).not.toContain("Delegation default.");
+		} finally {
+			await h.dispose();
+		}
+	});
 });

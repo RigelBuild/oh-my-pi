@@ -674,6 +674,32 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 25_000);
 
+	it("moves the auto-learn guidance with the tool it describes", async () => {
+		// The tool reconcile above only built/removed the TOOL. The prompt's
+		// standing guidance came from the construction-time built-in list, which
+		// the reconcile cannot reach — so an off→on edit activated `manage_skill`
+		// with no guidance, and an on→off edit kept directing the model to a tool
+		// that no longer existed.
+		const h = await makeHarness("autolearn:\n  enabled: false\n");
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).not.toContain("## Auto-Learn");
+
+			await fs.writeFile(h.settingsPath, "autolearn:\n  enabled: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).toContain("manage_skill");
+			expect(h.session.systemPrompt.join("\n")).toContain("## Auto-Learn");
+
+			// And back off: the guidance must leave with the tool.
+			await fs.writeFile(h.settingsPath, "autolearn:\n  enabled: false\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("manage_skill");
+			expect(h.session.systemPrompt.join("\n")).not.toContain("## Auto-Learn");
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
 	it("reapplies model-derived tool policy when a swap happens on an unchanged reload", async () => {
 		// The resume path from the offline-model fix: `#applyReloadedModel` swaps
 		// with `changed === false`, which skipped the generation-settings and

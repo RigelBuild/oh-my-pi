@@ -2223,7 +2223,6 @@ export class SessionTools {
 			this.#mcpManagerToolNames = previousMcpManagerToolNames;
 		};
 
-		const getCustomToolContext = this.#getCustomToolContext;
 		const extensionRunner = this.#host.extensionRunner();
 		const managerTools = deduplicateMCPToolsByName(mcpTools).map(customTool => {
 			const wrapped = wrapToolWithMetaNotice(

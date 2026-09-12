@@ -5,6 +5,7 @@
  * the agent's output. When a match occurs, the stream is aborted, the rule is
  * injected as a system reminder, and the request is retried.
  */
+import { stringArrayEqual } from "../utils/string-array";
 import * as path from "node:path";
 import { AstMatchStrictness, astMatch } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -70,15 +71,6 @@ const DEFAULT_SCOPE: TtsrScope = {
 };
 
 /** Order-sensitive equality of two optional string arrays. */
-function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
-	if (a === b) return true;
-	if (a === undefined || b === undefined) return false;
-	if (a.length !== b.length) return false;
-	for (let i = 0; i < a.length; i++) {
-		if (a[i] !== b[i]) return false;
-	}
-	return true;
-}
 
 /**
  * Whether two same-named rules compile to the SAME TTSR registration. Compares
