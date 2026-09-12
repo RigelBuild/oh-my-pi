@@ -81,3 +81,29 @@ describe("EventController drains the compaction queue at a terminal end", () => 
 		expect(flushCompactionQueue).not.toHaveBeenCalled();
 	});
 });
+
+describe("EventController labels a requested compaction's cancellation", () => {
+	it("names the agent's own operation instead of automatic maintenance", async () => {
+		// Esc during the summary, or a `session_before_compact` hook declining,
+		// emits `action: "requested"` with `aborted: true`. With no case for it,
+		// the cancellation fell through to the automatic threshold branch and told
+		// the user "Auto context-full maintenance cancelled" for an operation the
+		// agent requested.
+		const sessionState = { isStreaming: false, isCompacting: false };
+		const { ctx, controller } = createFixture(sessionState);
+
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "requested",
+			result: undefined,
+			aborted: true,
+			willRetry: false,
+		} as unknown as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+
+		const statuses = (ctx.showStatus as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(call =>
+			String(call[0]),
+		);
+		expect(statuses).toContain("Agent-requested compaction cancelled");
+		expect(statuses.some(status => status.startsWith("Auto"))).toBe(false);
+	});
+});
