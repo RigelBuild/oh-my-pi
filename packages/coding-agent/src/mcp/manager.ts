@@ -862,7 +862,7 @@ export class MCPManager {
 				// response answers. Sampling it inside `set()` would order two
 				// sessions by response latency, so a delayed answer to THIS request
 				// could overwrite a newer catalog another session already persisted.
-				const observedAt = this.toolCache?.observeCatalogAt(name) ?? toolCatalogObservedAt();
+				const observedAt = this.#claimCatalogOrder(name);
 				try {
 					const serverTools = await listTools(connection);
 					return { connection, serverTools, observedAt };
@@ -1334,6 +1334,21 @@ export class MCPManager {
 	 *   earlier storm. Defaults to `false`; the transport `onClose` callback
 	 *   and the per-tool-call retry path in `tool-bridge` MUST NOT set it.
 	 */
+	/**
+	 * The ordering token for a `tools/list` about to be issued for `serverName`.
+	 *
+	 * With a cache, the claim's result is returned VERBATIM — including the
+	 * `undefined` that means "could not reserve". Falling back to a fresh
+	 * reading there would replace a deliberate skip sentinel with an unreserved
+	 * token, and `MCPToolCache.set()` would then persist a write whose order was
+	 * never established. Only the cache-less case samples: with nothing to
+	 * write, the token is just the caller's own bookkeeping.
+	 */
+	#claimCatalogOrder(serverName: string): number | undefined {
+		const cache = this.toolCache;
+		return cache ? cache.observeCatalogAt(serverName) : toolCatalogObservedAt();
+	}
+
 	async reconnectServer(
 		name: string,
 		options?: { manual?: boolean; authChallenge?: MCPAuthChallenge },
@@ -1535,7 +1550,7 @@ export class MCPManager {
 		try {
 			// Token claimed before the request, not after the response: see the
 			// same capture on the connect path.
-			const observedAt = this.toolCache?.observeCatalogAt(name) ?? toolCatalogObservedAt();
+			const observedAt = this.#claimCatalogOrder(name);
 			const serverTools = await listTools(connection);
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
@@ -1618,7 +1633,7 @@ export class MCPManager {
 			// Reload tools. Token claimed before the request, not after the
 			// response: a `/mcp refresh` whose `tools/list` is delayed must not
 			// outrank a newer catalog another session already persisted.
-			const observedAt = this.toolCache?.observeCatalogAt(name) ?? toolCatalogObservedAt();
+			const observedAt = this.#claimCatalogOrder(name);
 			const serverTools = await listTools(connection);
 
 			// The connection may have been replaced (disconnect+reconnect under the
