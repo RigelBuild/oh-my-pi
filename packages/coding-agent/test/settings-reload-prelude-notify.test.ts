@@ -228,6 +228,31 @@ describe("Settings.reloadFromDisk: eval-prelude enable settings notify their lis
 		}
 	});
 
+	it("notifies the image URL listeners when a persisted edit changes serving", async () => {
+		// Same shape as the snapcompact transformer: the request path closes over
+		// an `ImageUrlService` built at construction. Unnotified, an enable never
+		// started serving, and a backend or credential change kept publishing
+		// through the retired remote configuration while the refresh reported the
+		// new settings.
+		await writeSettings({ images: { urls: { enabled: false, ttlHours: 4 } } });
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const { seen, unsubscribe } = observe(settings);
+
+		try {
+			await settings.reloadFromDisk();
+			expect(seen).toEqual([]);
+
+			await writeSettings({ images: { urls: { enabled: true, ttlHours: 9 } } });
+			await settings.reloadFromDisk();
+
+			// Every key of the group feeds the service's construction, so a change
+			// to a non-enablement key has to notify too.
+			expect(seen.map(entry => entry.path).sort()).toEqual(["images.urls.enabled", "images.urls.ttlHours"]);
+		} finally {
+			unsubscribe();
+		}
+	});
+
 	it("notifies the snapcompact listeners when a persisted edit changes rendering", async () => {
 		// The request path closes over a `SnapcompactInlineTransformer` built at
 		// construction. Unnotified, a refresh updated the merged value (so

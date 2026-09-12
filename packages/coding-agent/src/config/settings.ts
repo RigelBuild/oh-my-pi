@@ -3279,6 +3279,22 @@ const EFFECTIVE_CHANGE_NOTIFIED_PATHS: readonly SettingPath[] = [
 	"snapcompact.systemPrompt",
 	"snapcompact.toolResults",
 	"snapcompact.shape",
+	// Same shape as the transformer above, one service over: the request path
+	// closes over an `ImageUrlService` built at construction, so a reload alone
+	// left the retired instance publishing through the old backends and
+	// credentials — and an enable never started serving at all. Every key here
+	// feeds its construction, so they are all listed rather than just the
+	// enablement flag.
+	"images.urls.enabled",
+	"images.urls.backends",
+	"images.urls.options",
+	"images.urls.credentials",
+	"images.urls.command",
+	"images.urls.publicBaseUrl",
+	"images.urls.ttlHours",
+	"images.urls.bindHost",
+	"images.urls.sshTarget",
+	"images.urls.sshRemotePort",
 ];
 
 /** Subscribe to Code Mode setting changes. Returns an unsubscribe function. */

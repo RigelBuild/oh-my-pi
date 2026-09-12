@@ -87,7 +87,7 @@ import { resolveDialect } from "./config/tool-dialect";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
-import { createImageUrlServiceFromSettings } from "./blob-broker/service";
+import { createImageUrlServiceFromSettings, type ImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
@@ -439,6 +439,15 @@ export interface CreateAgentSessionOptions {
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/**
+	 * Re-resolve {@link scopedModels} after a settings refresh moved
+	 * `enabledModels`. Supplied by the host, not derived here: an explicit
+	 * `--models` pin outranks the setting for the session's lifetime, and that
+	 * invocation input is not recoverable from settings. A host that omits this
+	 * keeps its launch-time scope, which is what an SDK caller supplying
+	 * `scopedModels` directly wants.
+	 */
+	reconcileScopedModels?: () => Promise<Array<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
@@ -556,6 +565,8 @@ export interface CreateAgentSessionOptions {
 	 * roster but must never widen an explicit one.
 	 */
 	rulesInherited?: boolean;
+	/** Whether {@link skills} is a forwarded parent roster rather than a caller restriction. */
+	skillsInherited?: boolean;
 	/** Context files (AGENTS.md content). Default: discovered walking up from cwd */
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-built workspace tree (skips re-scanning; passed by parents to subagents). */
@@ -1218,7 +1229,13 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 /** Dependencies used to construct an isolated auto-learn capture agent. */
 export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
-	captureTools: AgentTool[];
+	/**
+	 * Resolved per capture, not captured once: `autolearn.enabled` is reloadable,
+	 * so a session that starts with it off has no capture tools at construction
+	 * and every later capture would hit the empty-list guard below even after a
+	 * refresh built and activated them.
+	 */
+	captureTools: () => AgentTool[];
 	createAgent: (options: AgentOptions) => Agent;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
@@ -1230,7 +1247,8 @@ export function createAutoLearnCaptureRunner(
 	options: AutoLearnCaptureRunnerOptions,
 ): (content: string, signal?: AbortSignal) => Promise<void> {
 	return async (content, signal) => {
-		if (options.captureTools.length === 0 || signal?.aborted) return;
+		const captureTools = options.captureTools();
+		if (captureTools.length === 0 || signal?.aborted) return;
 		const captureModel = options.sourceAgent.state.model;
 		if (!captureModel) return;
 
@@ -1251,7 +1269,7 @@ export function createAutoLearnCaptureRunner(
 				model: captureModel,
 				thinkingLevel: options.sourceAgent.state.thinkingLevel,
 				disableReasoning: options.sourceAgent.state.disableReasoning,
-				tools: options.captureTools,
+				tools: captureTools,
 				messages: captureMessages,
 			},
 			sessionId: captureSessionId,
@@ -3645,9 +3663,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// URL-mirrored images: providers that fetch image URLs get a broker URL
 		// instead of inline base64. Decoration runs LAST among image transforms so
 		// the served bytes are exactly the bytes that would have shipped inline.
-		const blobBroker = createImageUrlServiceFromSettings(settings, sessionManager.getCwd(), model =>
-			modelRegistry.getApiKey(model, providerSessionId),
-		);
+		// Rebuildable for the same reason as the snapcompact transformer below: the
+		// whole `images.urls.*` group is reloadable, and the request path closes
+		// over this BINDING, so a reload can construct one where there was none
+		// (enabling), drop it (disabling), or replace one whose backends or
+		// credentials moved — instead of leaving the retired instance publishing
+		// through the old configuration.
+		const buildBlobBroker = (): ImageUrlService | undefined =>
+			createImageUrlServiceFromSettings(settings, sessionManager.getCwd(), model =>
+				modelRegistry.getApiKey(model, providerSessionId),
+			);
+		let blobBroker = buildBlobBroker();
 		blobBroker?.prewarm();
 		const dateCwdReminder = new DateCwdReminderInjector();
 		// Built from settings that `/refresh settings` can change, and the request
@@ -3683,6 +3709,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (snapcompactInline) snapcompactInline.reconfigure(next);
 			else snapcompactInline = buildSnapcompactInline();
 		};
+		// The frame sink is read off the broker when a transformer is BUILT, so a
+		// broker swap has to rebuild the transformer too — reconfiguring in place
+		// would leave it publishing frames through the retired instance.
+		const reloadBlobBroker = async (): Promise<void> => {
+			const retired = blobBroker;
+			blobBroker = buildBlobBroker();
+			blobBroker?.prewarm();
+			snapcompactInline = buildSnapcompactInline();
+			// Last: the replacement is already serving, so a slow tunnel teardown
+			// never leaves the session without a broker.
+			await retired?.dispose();
+		};
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
@@ -3692,7 +3730,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// cases they own (STB WebP), so this stays the backstop for everything
 			// else, and it runs before the blob broker uploads any of these bytes.
 			transformed = await dropUnreadableContextImages(transformed, transformModel);
-			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+			const activeBlobBroker = blobBroker;
+			if (activeBlobBroker) transformed = await activeBlobBroker.decorateContext(transformed, transformModel);
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).
@@ -3716,7 +3755,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const initialTools = initialToolNames
 			.map(name => toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool !== undefined);
-		const autoLearnCaptureTools = initialTools.filter(tool => tool.name === "manage_skill" || tool.name === "learn");
+		const AUTO_LEARN_CAPTURE_TOOL_NAMES = ["manage_skill", "learn"];
+		const autoLearnCaptureTools = initialTools.filter(tool => AUTO_LEARN_CAPTURE_TOOL_NAMES.includes(tool.name));
+		// Resolved per capture from the LIVE registry: `autolearn.enabled` moves
+		// mid-session, so a session that started with it off has an empty list
+		// here and would keep hitting the capture runner's empty-list guard after
+		// a refresh built the tools. Falls back to the construction-time list
+		// before the session exists.
+		const liveAutoLearnCaptureTools = (): AgentTool[] => {
+			if (!hasSession) return autoLearnCaptureTools;
+			return AUTO_LEARN_CAPTURE_TOOL_NAMES.map(name => session.getToolByName(name)).filter(
+				(tool): tool is AgentTool => tool !== undefined,
+			);
+		};
 
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
@@ -4109,6 +4160,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			ownedAsyncJobManager: asyncJobManager,
 			asyncJobManager: scopedAsyncJobManager,
 			scopedModels: options.scopedModels,
+			reconcileScopedModels: options.reconcileScopedModels
+				? async () => {
+						const next = await options.reconcileScopedModels?.();
+						// `undefined` means the host declines (an explicit `--models`
+						// pin); an empty array is a real result — the edit CLEARED the
+						// scope, and every model becomes available again.
+						if (next) session.setScopedModels(next);
+					}
+				: undefined,
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
@@ -4128,6 +4188,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// restriction. A parent refresh may replace the former in a running
 			// child; the latter it must never widen.
 			rulesInherited: options.rulesInherited,
+			skillsInherited: options.skillsInherited,
 			// The session's initial discovered roster (rulebook + always-apply), so
 			// a settings-only `refresh` re-buckets the COMPLETE set against the
 			// reloaded TTSR gating and drops only newly-gated rules — instead of
@@ -4499,6 +4560,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				reloadSnapcompactInline();
 				return;
 			}
+			if (path.startsWith("images.urls.")) {
+				// Matched by PREFIX: every key under the group feeds the service's
+				// construction — enablement, backends, credentials, TTL, the exposure
+				// options — so naming them individually would leave the next one
+				// added silently unreconciled.
+				session.registerHostReconciliation(
+					reloadBlobBroker().catch(error =>
+						logger.warn("Failed to apply refreshed image URL settings", { error: String(error) }),
+					),
+				);
+				return;
+			}
 			if (path !== "workspace.additionalDirectories") return;
 			// An explicit `--add-dir` list owns the roots for the session; a config
 			// edit must not override what the invocation pinned.
@@ -4716,7 +4789,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
-			captureTools: autoLearnCaptureTools,
+			captureTools: liveAutoLearnCaptureTools,
 			onPayload,
 			onResponse,
 			createAgent: captureOptions => {
@@ -4735,7 +4808,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						transformed = clampProviderContextImages(transformed, transformModel);
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
-						if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+						const activeBlobBroker = blobBroker;
+						if (activeBlobBroker)
+							transformed = await activeBlobBroker.decorateContext(transformed, transformModel);
 						return captureDateCwdReminder.transform(
 							transformed,
 							formatLocalCalendarDate(),
