@@ -89,6 +89,130 @@ describe("MCP tool cache request-time ordering token", () => {
 		};
 	}
 
+	it("skips the cache write when the ordering claim could not be reserved", async () => {
+		// The manager samples a fresh reading when there is NO cache to write to.
+		// Applying that same fallback to a cache's `undefined` erases the skip
+		// sentinel and hands `set()` an unreserved token — the exact write the
+		// sentinel exists to stop. Drive the real connect path with every CAS
+		// losing, and assert nothing lands on the catalog row.
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+		// Sustained cross-process contention, as seen from inside one process.
+		cache.observeCatalogAt = () => undefined;
+		const manager = new MCPManager(workDir, cache);
+		manager.setEmptyToolsetRetryScheduleForTests("0");
+
+		try {
+			void manager.connectServers({ gated: stdioConfig() }, {});
+			expect(await waitFor(() => fs.readFileSync(startedPath, "utf8").trim().length > 0)).toBe(true);
+			fs.writeFileSync(gatePath, "go");
+
+			// The tools still register: only the PERSISTED catalog is skipped.
+			expect(await waitFor(() => manager.getTools().length > 0)).toBe(true);
+
+			// Give a would-be write every chance to land before asserting absence.
+			await Bun.sleep(250);
+			expect(storage.raw.get("mcp_tools:gated")).toBeUndefined();
+		} finally {
+			if (!fs.existsSync(gatePath)) fs.writeFileSync(gatePath, "go");
+			await manager.disconnectAll();
+		}
+	}, 25_000);
+
+	it("outlasts more older writers than the attempt count", async () => {
+		// A CAS loss proves only that a peer committed — never that its catalog is
+		// newer. With a fixed bound, enough older writers committing in the
+		// read/write window exhausted the attempts and abandoned a listing that
+		// had genuinely succeeded, leaving the last OLDER toolset cached for the
+		// full TTL. Every loss here is an older writer, so the loop has to keep
+		// re-reading until it commits.
+		const raw = new Map<string, { value: string; expiresAtSec: number }>();
+		const visible = (key: string): string | null => {
+			const row = raw.get(key);
+			if (!row) return null;
+			return row.expiresAtSec > Date.now() / 1000 ? row.value : null;
+		};
+		// One older peer commits into EVERY read window, well past any fixed bound.
+		let peerWrites = 0;
+		const olderPeers = 12;
+		const base = Date.now();
+		const storage = {
+			getCache(key: string): string | null {
+				const observed = visible(key);
+				if (key === "mcp_tools:crowded" && peerWrites < olderPeers) {
+					peerWrites++;
+					raw.set(key, {
+						// Strictly older than our write, so none of them may stand.
+						value: JSON.stringify({
+							version: 1,
+							configHash: "",
+							tools: [{ name: `older_${peerWrites}`, inputSchema: { type: "object" as const } }],
+							writeStartedAt: base - 1000 - peerWrites,
+						}),
+						expiresAtSec: Math.floor(Date.now() / 1000) + 3600,
+					});
+				}
+				return observed;
+			},
+			setCache(key: string, value: string, expiresAtSec: number): void {
+				raw.set(key, { value, expiresAtSec });
+			},
+			setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
+				if (visible(key) !== expectedValue) return false;
+				raw.set(key, { value, expiresAtSec });
+				return true;
+			},
+		} as unknown as AgentStorage;
+
+		const cache = new MCPToolCache(storage);
+		await cache.set(
+			"crowded",
+			stdioConfig(),
+			[{ name: "fresh_tool", description: "", inputSchema: { type: "object" as const } }],
+			base + 5000,
+		);
+
+		const stored = raw.get("mcp_tools:crowded");
+		expect(stored).toBeDefined();
+		const payload = JSON.parse(stored?.value ?? "{}") as { tools: { name: string }[] };
+		expect(payload.tools.map(tool => tool.name)).toEqual(["fresh_tool"]);
+	});
+
+	it("suppresses an older in-flight write after a reservation failure", async () => {
+		// A reservation failure skips its own write, but the response still
+		// OBSERVED the server later than anything already in flight. Returning
+		// without recording that left an earlier request free to pass
+		// `isCurrent()` — and `#writeOrdered()` inspects the catalog row, never
+		// the claim — so it cached its superseded catalog for the full TTL.
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+		const config = stdioConfig();
+
+		// The earlier request reserves a token, then parks in `hashConfig()`.
+		const earlier = cache.observeCatalogAt("gated");
+		expect(earlier).toBeDefined();
+
+		// A NEWER request's response lands first and cannot reserve: sustained
+		// contention, the case `observeCatalogAt` answers with `undefined`.
+		await cache.set(
+			"gated",
+			config,
+			[{ name: "fresh", description: "", inputSchema: { type: "object" as const } }],
+			undefined,
+		);
+
+		// Now the earlier request's delayed response arrives.
+		await cache.set(
+			"gated",
+			config,
+			[{ name: "stale", description: "", inputSchema: { type: "object" as const } }],
+			earlier,
+		);
+
+		// Pre-fix the superseded catalog landed and stood for 30 days.
+		expect(storage.raw.get("mcp_tools:gated")).toBeUndefined();
+	}, 25_000);
+
 	it("stamps the cached row from before the tools/list, not from when its response arrived", async () => {
 		const storage = createFakeStorage();
 		const manager = new MCPManager(workDir, new MCPToolCache(storage));
