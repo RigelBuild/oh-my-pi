@@ -849,7 +849,7 @@ export class AgentSession {
 	 * would await itself.
 	 */
 	#requestedCompaction: Promise<void> | undefined = undefined;
-	/** Callers parked on the compaction barrier, each about to claim a turn. */
+	/** Parked barrier callers that will start a turn on resume (see `#settleActiveCompaction`). */
 	#compactionBarrierWaiters = 0;
 	/**
 	 * Live focus holder for the single deferred requested-compaction pass on
@@ -6451,18 +6451,27 @@ export class AgentSession {
 	 * iteration awaits whichever is live and re-checks; both clear, so this
 	 * terminates.
 	 */
-	async #settleActiveCompaction(): Promise<void> {
+	/**
+	 * Park until no compaction owns the history.
+	 *
+	 * `producesTurn` says the caller will start an agent turn as soon as it
+	 * resumes. Only those count as continuations for the deferred terminal
+	 * `agent_end`: a non-turn waiter (`fork`, `newSession`, `shake`,
+	 * `resetSessionContext`, tree navigation) emits no replacement end, so
+	 * treating it as a successor would strand an RPC/ACP subscriber forever.
+	 */
+	async #settleActiveCompaction(options?: { producesTurn?: boolean }): Promise<void> {
 		while (true) {
 			const requested = this.#requestedCompaction;
 			if (requested) {
 				// Counted while parked: this caller is a successor turn that has not
 				// reached `#beginInFlight()` yet, which is what makes it invisible to
 				// the in-flight probe in `#flushPendingAgentEnd`.
-				this.#compactionBarrierWaiters++;
+				if (options?.producesTurn) this.#compactionBarrierWaiters++;
 				try {
 					await requested;
 				} finally {
-					this.#compactionBarrierWaiters--;
+					if (options?.producesTurn) this.#compactionBarrierWaiters--;
 				}
 				continue;
 			}
@@ -6545,7 +6554,7 @@ export class AgentSession {
 		//
 		// A wait, not an `AgentBusyError`: the submission is valid, only early.
 		// `abort` still overtakes either compaction; ordinary prompts wait here.
-		await this.#settleActiveCompaction();
+		await this.#settleActiveCompaction({ producesTurn: true });
 
 		// Expand file-based prompt templates if requested
 		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
@@ -6615,7 +6624,7 @@ export class AgentSession {
 		// streaming. An image-bearing call that passed the barrier at the top and
 		// suspended in normalization would dispatch into a disconnected,
 		// being-rewritten session and lose its events to the history replacement.
-		await this.#settleActiveCompaction();
+		await this.#settleActiveCompaction({ producesTurn: true });
 
 		// A concurrent prompt() can start a turn during the awaits above: image
 		// normalization and the vision-description call suspend after the
@@ -6758,7 +6767,7 @@ export class AgentSession {
 		// `/skill:` invocation or a collab/RPC message would otherwise start a
 		// turn against history a detached requested pass is about to replace. The
 		// `queueOnly` branch above is exempt — it only enqueues, never dispatches.
-		await this.#settleActiveCompaction();
+		await this.#settleActiveCompaction({ producesTurn: true });
 		if (this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
@@ -7542,7 +7551,7 @@ export class AgentSession {
 		// between the barrier and the increment, and a new pass can only be
 		// scheduled from a turn's `onTurnEnd`, which cannot run in that
 		// synchronous gap.
-		await this.#settleActiveCompaction();
+		await this.#settleActiveCompaction({ producesTurn: true });
 		this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
