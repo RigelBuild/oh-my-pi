@@ -2182,6 +2182,67 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(order.filter(entry => entry === "terminal_end")).toHaveLength(1);
 	}, 15_000);
 
+	it("still reports idle when a non-turn operation waited out the compaction", async () => {
+		// The barrier is shared with operations that start NO turn -- `fork`,
+		// `newSession`, `shake`, `resetSessionContext`, tree navigation. Counting
+		// every waiter as a successor would emit the end nonterminally with
+		// nothing left to emit a replacement, so an RPC/ACP subscriber would wait
+		// for an idle signal that never comes.
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		const order: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") order.push(event.isTerminal !== false ? "terminal_end" : "end");
+		});
+
+		const compactStarted = Promise.withResolvers<void>();
+		const compactGate = Promise.withResolvers<void>();
+		vi.spyOn(session, "compact").mockImplementation(async () => {
+			compactStarted.resolve();
+			await compactGate.promise;
+			return fakeCompaction();
+		});
+
+		const owner = session.sessionManager.getSessionId();
+		await session.queueLaunchCompletion({
+			event: "daemon-completed",
+			completionId: "compact-non-turn-waiter",
+			owner,
+			daemon: {
+				name: "worker",
+				id: "daemon-id",
+				state: "exited",
+				createdAt: 1,
+				startedAt: 1,
+				exitedAt: 2,
+				exitCode: 0,
+				restartCount: 0,
+				outputBytes: 0,
+				owner,
+				persist: false,
+				detached: false,
+			},
+		});
+		await compactStarted.promise;
+
+		// A non-turn operation parked on the same barrier, launched the same way.
+		const shaken = session.shake().catch(() => undefined);
+		for (let i = 0; i < 5; i++) await Bun.sleep(0);
+
+		compactGate.resolve();
+		await shaken;
+		await session.waitForIdle();
+
+		// The session really did go idle, so the terminal end must have been sent.
+		expect(order).toContain("terminal_end");
+	}, 15_000);
+
 	it("holds an image-bearing prompt whose normalization suspended past the barrier", async () => {
 		// The prompt barrier runs EARLY, and image normalization plus the vision
 		// description call suspend after it. The pre-dispatch re-check tested only
