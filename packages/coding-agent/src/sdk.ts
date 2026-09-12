@@ -3211,9 +3211,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `auto` enforces the per-model policy (inline for Gemini, off otherwise);
 		// like the rest of the prune machinery this is fixed for the session, so a
 		// mid-session model switch keeps the start-time decision.
-		const inlineToolDescriptors = shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), model?.id);
-		const eagerTasks = settings.get("task.eager") !== "default";
-		const eagerTasksAlways = settings.get("task.eager") === "always";
+		// Read live, per render, for the same reason as `liveIntentField` above:
+		// `/refresh settings` can move either on disk, and a value captured here
+		// left `rebuildSystemPrompt` rendering the retired tool catalog and
+		// eager-task policy until restart. The model id comes from the live agent
+		// state so a model swap in the same refresh is reflected too.
+		const liveInlineToolDescriptors = (): boolean =>
+			shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), agent?.state.model?.id ?? model?.id);
+		const liveEagerTasks = (): boolean => settings.get("task.eager") !== "default";
+		const liveEagerTasksAlways = (): boolean => settings.get("task.eager") === "always";
+		const inlineToolDescriptors = liveInlineToolDescriptors();
 		// Read live, per render, for the same reason the workspace tree below is:
 		// `tools.intentTracing` decides whether the required intent field is
 		// injected into every tool schema, so a value captured here left both the
@@ -3336,7 +3343,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const nativeTools = resolveDialect(settings.get("tools.format"), agent?.state.model ?? model) === undefined;
 			const promptTools = projectSystemPromptToolMetadata(
 				tools,
-				nativeTools && !inlineToolDescriptors ? { mode: "compact", toolNames } : { mode: "full" },
+				nativeTools && !liveInlineToolDescriptors() ? { mode: "compact", toolNames } : { mode: "full" },
 			);
 			if (options.appendSystemPrompt) {
 				appendPrompt = appendPrompt
@@ -3360,11 +3367,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				alwaysApplyRules,
 				resolvedAppendSystemPrompt: appendPrompt,
 				skillsSettings: settings.getGroup("skills"),
-				inlineToolDescriptors,
+				inlineToolDescriptors: liveInlineToolDescriptors(),
 				nativeTools,
 				intentField: liveIntentField(),
-				eagerTasks,
-				eagerTasksAlways,
+				eagerTasks: liveEagerTasks(),
+				eagerTasksAlways: liveEagerTasksAlways(),
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isScoutSpawnable(

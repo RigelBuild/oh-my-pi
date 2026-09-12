@@ -749,10 +749,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// tool list or `--no-tools` excluded it", and only the first may be built.
 	if (session.setSettingGatedBuiltinPermissions) {
 		const permitted = new Set<string>();
-		// `lsp` rides along: its gate is compound (`enableLsp && lsp.enabled`), so
-		// recording it here is what lets the reconcile honor `lsp.enabled` while
-		// keeping `enableLsp` a construction-time capability no edit can widen.
-		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...(enableLsp ? ["lsp"] : [])]) {
+		// `lsp` and the checkpoint pair ride along. Their gates are COMPOUND —
+		// `enableLsp && lsp.enabled`, and `checkpoint.enabled` plus a task-depth
+		// condition — and the extra conditions are invocation-scoped, which is
+		// exactly what this set records. Capturing them here lets the reconcile
+		// honor the setting half while the construction-time half stays fixed.
+		const compoundGated = [
+			...(enableLsp ? ["lsp"] : []),
+			...((session.taskDepth ?? 0) === 0 || requestedTools !== undefined ? ["checkpoint", "rewind"] : []),
+		];
+		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...compoundGated]) {
 			if (!(name in allTools)) continue;
 			// `isToolAllowed` minus the boolean gate: the remaining conditions are
 			// exactly the invocation-scoped ones.
