@@ -138,6 +138,19 @@ export interface ModelChangeEntry extends SessionEntryBase {
 export interface ServiceTierChangeEntry extends SessionEntryBase {
 	type: "service_tier_change";
 	serviceTier: ServiceTierByFamily | null;
+	/**
+	 * Families in `serviceTier` that still FOLLOW `tier.*` rather than being a
+	 * session-local pin (`/fast`, the settings selector, an RPC/ACP write).
+	 *
+	 * The snapshot is whole-map, so a pin for one family used to drag every
+	 * other family's value along as if it had been pinned too: restoring the
+	 * receipt replayed a `tier.google` value the config had since changed, and
+	 * no later refresh could notice, because `Settings` had already loaded the
+	 * new value. Restoration re-derives a listed family from the live config and
+	 * replays only the rest. Absent (older receipts) means "no provenance
+	 * recorded", which restores exactly as before.
+	 */
+	settingsTrackingFamilies?: ReadonlyArray<keyof ServiceTierByFamily>;
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {

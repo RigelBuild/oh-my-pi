@@ -161,6 +161,9 @@ describe("AgentSession.refresh('mcp')", () => {
 			toolRegistry: new Map<string, AgentTool>(),
 			extensionRoots: () => roots,
 			mcpManager: manager as unknown as MCPManager,
+			// This session OWNS the manager, which is what licenses it to change
+			// subscriptions from its own settings scope.
+			disconnectOwnedMcpManager: async () => {},
 		});
 		sessions.push(session);
 
@@ -778,6 +781,52 @@ describe("AgentSession.refresh('mcp')", () => {
 			if (previousExaKey === undefined) delete process.env.EXA_API_KEY;
 			else process.env.EXA_API_KEY = previousExaKey;
 		}
+
+		await dir.remove();
+	});
+
+	// Same ownership rule as the project-config reconcile: a subagent granted the
+	// `refresh` tool inherits its parent's manager, so subscribing or
+	// unsubscribing there rewrites the PARENT's live server subscriptions from the
+	// child's own settings scope.
+	it("does not reconcile mcp.notifications on an inherited manager", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-notif-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  notifications: true\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		const manager = new MCPManager(dir.path(), null, async () => ({ configs: {}, exaApiKeys: [], sources: {} }));
+		const applied: boolean[] = [];
+		manager.setNotificationsEnabled = (enabled: boolean) => {
+			applied.push(enabled);
+		};
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			// No `disconnectOwnedMcpManager`: an inherited manager.
+		});
+		sessions.push(session);
+
+		await fsp.writeFile(settingsPath, "mcp:\n  notifications: false\n");
+		expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+		// Pre-fix this call was unconditional, so the child's scope flipped the
+		// parent's subscriptions.
+		expect(applied).toEqual([]);
 
 		await dir.remove();
 	});
