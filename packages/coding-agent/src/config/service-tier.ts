@@ -157,6 +157,38 @@ export function buildServiceTierByFamily(openai: string, anthropic: string, goog
 }
 
 /**
+ * Overlay the live `tier.*` config onto a persisted tier map, for the families
+ * the receipt recorded as still FOLLOWING that config.
+ *
+ * A `service_tier_change` is a whole-map snapshot, so a session-local pin for
+ * one family (`/fast`, the settings selector, an RPC/ACP write) used to freeze
+ * every other family at the value it held when the receipt was written. A
+ * config edit made while the session was stopped was then silently overridden
+ * on resume, and no later refresh could notice: `Settings` has already loaded
+ * the new value, so the reconcile sees no movement to act on.
+ *
+ * Families absent from `trackingFamilies` keep their persisted value — they are
+ * real pins. An undefined list means a pre-provenance receipt, which restores
+ * wholesale exactly as before.
+ */
+export function applySettingsTrackedServiceTiers(
+	persisted: ServiceTierByFamily,
+	trackingFamilies: ReadonlyArray<keyof ServiceTierByFamily> | undefined,
+	configured: ServiceTierByFamily,
+): ServiceTierByFamily {
+	if (!trackingFamilies?.length) return persisted;
+	const out: ServiceTierByFamily = { ...persisted };
+	for (const family of trackingFamilies) {
+		const tier = configured[family];
+		// An unset config value means the family has no tier now, so the stale
+		// persisted one has to go rather than survive as an implicit pin.
+		if (tier) out[family] = tier;
+		else delete out[family];
+	}
+	return out;
+}
+
+/**
  * Broadcast a single chosen tier across families, clamped to what each family
  * realizes: OpenAI takes any tier, Anthropic only `priority`, Google only
  * `flex`/`priority`. Used by the subagent/advisor single-value settings and the
