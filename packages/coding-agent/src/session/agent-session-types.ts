@@ -249,7 +249,12 @@ export interface AgentSessionConfig {
 	skillsSettings?: SkillsSettings;
 	/** Agent directory used when changing memory backends in a live session. */
 	memoryAgentDir?: string;
-	/** Recursion depth used to suppress live backend replacement in subagents. */
+	/**
+	 * The session's spawn depth: 0 for a top-level session, 1+ for a subagent.
+	 * Suppresses live memory-backend replacement in subagents, and re-evaluates
+	 * the depth-dependent halves of the compound tool gates at the session's
+	 * ACTUAL depth rather than assuming the top level.
+	 */
 	memoryTaskDepth?: number;
 	/** Creates built-in memory tools for the current backend. */
 	createMemoryTools?: () => Promise<AgentTool[]>;
