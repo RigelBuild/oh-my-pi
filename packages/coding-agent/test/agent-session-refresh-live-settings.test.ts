@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -50,7 +51,14 @@ interface Harness {
 	dispose: () => Promise<void>;
 }
 
-async function makeHarness(initialConfig: string, opts?: { persist?: boolean }): Promise<Harness> {
+async function makeHarness(
+	initialConfig: string,
+	opts?: {
+		persist?: boolean;
+		/** Host hook main.ts supplies; records the patterns each reconcile saw. */
+		reconcileScopedModels?: () => Promise<Array<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined>;
+	},
+): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-settings-");
 	const cwd = tempDir.path();
 	await fs.mkdir(path.join(cwd, ".git"), { recursive: true });
@@ -83,6 +91,7 @@ async function makeHarness(initialConfig: string, opts?: { persist?: boolean }):
 		enableMCP: false,
 		enableLsp: false,
 		skipPythonPreflight: true,
+		reconcileScopedModels: opts?.reconcileScopedModels,
 	});
 
 	return {
@@ -336,6 +345,78 @@ describe("AgentSession refresh('settings'): live intent tracing", () => {
 
 			expect(result.settingsChanged).toBe(true);
 			expect(h.session.agent.intentTracing).toBe(false);
+		} finally {
+			await h.dispose();
+		}
+	});
+});
+
+describe("AgentSession refresh('settings'): live model scope", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("re-resolves the Ctrl+P cycle scope when enabledModels moves", async () => {
+		// The scope is copied OUT of settings into `ModelControls` at
+		// construction, and the only later write is the one-time post-discovery
+		// rebuild — so Ctrl+P and `/models` kept offering the launch-time
+		// allowlist indefinitely after an edit, including a clear.
+		//
+		// Resolution itself is the HOST's job (an explicit `--models` pin outranks
+		// the setting, and the SDK cannot see that flag), so the hook here stands
+		// in for main.ts and reports what the reload actually exposed.
+		const seen: string[][] = [];
+		const h = await makeHarness("compaction:\n  enabled: false\n", {
+			reconcileScopedModels: async () => {
+				const patterns = [...h.session.settings.get("enabledModels")];
+				seen.push(patterns);
+				// An empty edit is a real answer: the scope was CLEARED.
+				if (patterns.length === 0) return [];
+				// The session's own model stands in for a resolved scope entry; the
+				// harness registry has no discoverable models of its own.
+				const model = h.session.model;
+				return model ? [{ model }] : [];
+			},
+		});
+		try {
+			expect(h.session.scopedModels).toEqual([]);
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\nenabledModels:\n  - '*'\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			// Pre-fix nothing re-read the setting, so this never ran at all.
+			expect(seen).toEqual([["*"]]);
+			expect(h.session.scopedModels.length).toBe(1);
+
+			// And the clear direction, which a naive "only widen" reconcile misses.
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+			expect(seen).toHaveLength(2);
+			expect(h.session.scopedModels).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("leaves the scope alone when enabledModels did not move", async () => {
+		// The no-op guard: the resolver can hit the model registry, so an
+		// unrelated settings edit must not re-run it on every refresh.
+		let calls = 0;
+		const h = await makeHarness("compaction:\n  enabled: false\nenabledModels:\n  - '*'\n", {
+			reconcileScopedModels: async () => {
+				calls++;
+				return [];
+			},
+		});
+		try {
+			// An unrelated edit: the scope value itself is untouched.
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  enabled: false\nenabledModels:\n  - '*'\ntools:\n  intentTracing: true\n",
+			);
+			await h.session.refresh("settings");
+
+			expect(calls).toBe(0);
 		} finally {
 			await h.dispose();
 		}

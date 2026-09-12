@@ -970,6 +970,7 @@ export class AgentSession {
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#reconcileSharedLsp: AgentSessionConfig["reconcileSharedLsp"];
 	#reconcileAutoLearn: AgentSessionConfig["reconcileAutoLearn"];
+	#reconcileScopedModels: AgentSessionConfig["reconcileScopedModels"];
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -1065,6 +1066,7 @@ export class AgentSession {
 	 * latter.
 	 */
 	readonly #rulesPolicyInherited: boolean;
+	readonly #skillsPolicyInherited: boolean;
 	/**
 	 * Resolved agent name for rule `agents` scoping, mirroring the value init
 	 * bucketed with. Both refresh re-bucket paths pass it so a reload keeps the
@@ -1776,6 +1778,7 @@ export class AgentSession {
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
 		this.#reconcileSharedLsp = config.reconcileSharedLsp;
 		this.#reconcileAutoLearn = config.reconcileAutoLearn;
+		this.#reconcileScopedModels = config.reconcileScopedModels;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -1998,6 +2001,7 @@ export class AgentSession {
 		this.#onBeforeRefresh = config.onBeforeRefresh;
 		this.#rulesPolicy = config.rules;
 		this.#rulesPolicyInherited = config.rulesInherited === true;
+		this.#skillsPolicyInherited = config.skillsInherited === true;
 		this.#rosterRules = config.initialRosterRules ?? [];
 		// Falls back to the gated roster when no ungated source was supplied, so a
 		// session constructed without it keeps the prior drop-only behavior rather
@@ -6060,6 +6064,9 @@ export class AgentSession {
 			const previousSubsystems = {
 				memoryBackend: this.settings.get("memory.backend"),
 				autoLearnEnabled: this.settings.get("autolearn.enabled"),
+				// Copied into `ModelControls` at construction and read from there by
+				// Ctrl+P and `/models`; a reload alone never revisits it.
+				enabledModels: this.settings.get("enabledModels"),
 				advisorEnabled: this.settings.get("advisor.enabled"),
 				externalThinking: this.settings.get("externalThinking"),
 				browserEnabled: this.settings.get("browser.enabled"),
@@ -6361,6 +6368,15 @@ export class AgentSession {
 				// the controller re-checks the setting when it fires.
 				if (this.settings.get("autolearn.enabled") !== previousSubsystems.autoLearnEnabled) {
 					this.#reconcileAutoLearn?.();
+				}
+				// `enabledModels` is copied OUT of settings into `ModelControls` at
+				// construction, and the only later write is the one-time
+				// post-discovery rebuild — so Ctrl+P and `/models` kept offering the
+				// launch-time allowlist indefinitely after an edit, including a clear.
+				// Awaited: the resolver may hit the registry, and the selector must
+				// not open against the old scope.
+				if (!stringArrayEqual(this.settings.get("enabledModels"), previousSubsystems.enabledModels)) {
+					await this.#reconcileScopedModels?.();
 				}
 				// The Code Mode signal DOES reach a listener, but that listener
 				// launches `reconcileCodeMode()` fire-and-forget, so the refresh
@@ -6826,6 +6842,18 @@ export class AgentSession {
 		for (const ref of this.#runningDescendants()) {
 			const descendant = ref.session;
 			if (!descendant) continue;
+			// An EXPLICIT caller policy (SDK `skills`, including `skills: []`) is
+			// the child's authoritative roster, exactly as in the adjacent rule
+			// fan-out and in the child's own refresh, which read the same marker.
+			// Bypassing it handed the child `skill://` access and a rebuilt prompt
+			// advertising skills the caller deliberately excluded.
+			//
+			// The provenance test is required, not the marker alone: the
+			// structured-subagent spawn ALWAYS forwards `session.skills`, so every
+			// structured child is non-reloadable even though nobody restricted it.
+			// Skipping on the marker alone would exclude exactly the children this
+			// fan-out exists to keep fresh.
+			if (!descendant.#tools.skillsReloadable && !descendant.#skillsPolicyInherited) continue;
 			// Restrict to this session's descendants. Advisors never resolve
 			// `skill://`, but a descendant advisor is a harmless no-op either way.
 			// The snapshot swap is synchronous; the rebuild it implies is not.

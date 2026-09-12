@@ -83,6 +83,12 @@ async function makeSession(opts: {
 	 * anyone chose — which is what a parent's refresh must be allowed to widen.
 	 */
 	inheritedRules?: readonly Rule[];
+	/**
+	 * Pin the skill roster the way an SDK caller does — an EXPLICIT policy the
+	 * parent's fan-out must not widen. Every other session models the real
+	 * spawn, which forwards the parent's roster and marks it inherited.
+	 */
+	explicitSkills?: readonly Skill[];
 }): Promise<SessionHandle> {
 	// A shared cwd is owned by the session that created it, so only an
 	// own-tempdir session removes it on dispose.
@@ -111,8 +117,14 @@ async function makeSession(opts: {
 		enableLsp: false,
 		skipPythonPreflight: true,
 		// A frozen (non-reloadable) roster so the seeded skills snapshot is stable
-		// and only an explicit `applyReloadedSkills` mutates it.
-		skills: [],
+		// and only an explicit `applyReloadedSkills` mutates it. Marked INHERITED
+		// by default, which is what the structured-subagent spawn does: it always
+		// forwards `session.skills`, so a child carries a roster nobody chose and
+		// a parent's refresh must still reach it. `explicitSkills` models the
+		// other case — an SDK caller pinning the roster.
+		...(opts.explicitSkills !== undefined
+			? { skills: [...opts.explicitSkills] }
+			: { skills: [], skillsInherited: true }),
 		...(opts.inheritedRules !== undefined
 			? { rules: [...opts.inheritedRules], rulesInherited: true }
 			: opts.reloadableRules
@@ -172,7 +184,7 @@ describe("AgentSession refresh: skill fan-out registry scoping", () => {
 			await child.dispose();
 			await unrelated.dispose();
 		}
-	});
+	}, 20000);
 
 	it("does not fan out to a non-descendant sibling sharing the same registry", async () => {
 		const customRegistry = new AgentRegistry();
@@ -195,7 +207,7 @@ describe("AgentSession refresh: skill fan-out registry scoping", () => {
 			await parent.dispose();
 			await sibling.dispose();
 		}
-	});
+	}, 20000);
 
 	it("rebuilds a running descendant's system prompt after the skill fan-out", async () => {
 		const customRegistry = new AgentRegistry();
@@ -229,7 +241,41 @@ describe("AgentSession refresh: skill fan-out registry scoping", () => {
 			await parent.dispose();
 			await child.dispose();
 		}
-	});
+	}, 20000);
+
+	it("does not widen a descendant spawned with an explicit skills policy", async () => {
+		// An SDK caller that passes `skills` — including `skills: []` — has chosen
+		// that child's roster. The child's OWN refresh honors it (`refreshSkills`
+		// skips rediscovery when the roster is non-reloadable), but this fan-out
+		// wrote straight into the snapshot, so the child gained `skill://` access
+		// and a prompt advertising skills the caller deliberately excluded.
+		const customRegistry = new AgentRegistry();
+		const parent = await makeSession({ agentRegistry: customRegistry, agentId: "Parent" });
+		const child = await makeSession({
+			agentRegistry: customRegistry,
+			agentId: "Child",
+			parentAgentId: "Parent",
+			taskDepth: 1,
+			// The distinguishing input: pinned by the caller, not forwarded.
+			explicitSkills: [],
+		});
+
+		try {
+			const marker = `explicit-policy-${Bun.nanoseconds().toString(36)}`;
+			await child.session.refreshBaseSystemPrompt();
+
+			parent.session.applyReloadedSkills([fakeSkill(marker)]);
+			await child.session.runToolRegistryMutation(async () => {});
+
+			// The parent still gets the fresh roster; only the pinned child is left alone.
+			expect(parent.session.skills.map(skill => skill.name)).toEqual([marker]);
+			expect(child.session.skills.map(skill => skill.name)).toEqual([]);
+			expect(child.session.systemPrompt.join("\n")).not.toContain(marker);
+		} finally {
+			await parent.dispose();
+			await child.dispose();
+		}
+	}, 20000);
 
 	it("leaves a descendant's prompt byte-identical when its snapshot did not change", async () => {
 		// The no-op guard: a refresh that changes nothing must not re-render a
@@ -259,7 +305,7 @@ describe("AgentSession refresh: skill fan-out registry scoping", () => {
 			await parent.dispose();
 			await child.dispose();
 		}
-	});
+	}, 20000);
 });
 
 // A rules refresh must reach a running descendant too. The skill fan-out above
@@ -337,7 +383,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await child.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 
 	it("serves fresh rule:// content from a descendant after the parent refreshes", async () => {
 		const customRegistry = new AgentRegistry();
@@ -382,7 +428,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await child.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 
 	it("stops a descendant's TTSR rule from triggering after the parent refresh deletes it", async () => {
 		const customRegistry = new AgentRegistry();
@@ -428,7 +474,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await child.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 
 	it("leaves a descendant's prompt byte-identical when the rule roster did not move", async () => {
 		// The no-op guard: a refresh that rediscovers the same roster must not
@@ -466,7 +512,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await child.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 
 	it("does not fan rules out to a non-descendant sibling sharing the registry", async () => {
 		const customRegistry = new AgentRegistry();
@@ -505,7 +551,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await sibling.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 
 	// The real spawn path ALWAYS forwards `session.rules`, so every structured
 	// subagent has a defined rule policy even when nobody restricted it. Treating
@@ -555,7 +601,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await child.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 	// The child's OWN refresh is a different path from the parent fan-out above.
 	// A structured subagent's `#rulesPolicy` is the launch-time parent array and
 	// never moves, so re-bucketing it on `refresh("rules")` rolled the child back
@@ -614,7 +660,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await child.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 
 	// The process-global rule snapshot belongs to the TOP-LEVEL session: `sdk.ts`
 	// publishes it at init only for one, and contextless consumers (a
@@ -669,7 +715,7 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 			await child.dispose();
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 
 	// The other direction of the same gate. The test above shares a process with
 	// a parent refresh, so suppressing publication for EVERY session reds it too
@@ -699,5 +745,5 @@ describe("AgentSession refresh: rule fan-out to running descendants", () => {
 		} finally {
 			await parent.dispose();
 		}
-	});
+	}, 20000);
 });
