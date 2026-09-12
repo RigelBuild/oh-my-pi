@@ -509,6 +509,44 @@ describe("isolated auto-learn capture", () => {
 		expect(jsonSchemaProperties(sent?.parameters)).toHaveProperty(INTENT_FIELD);
 	});
 
+	// Same shape one setting over: `inlineToolDescriptors` is reloadable too, so
+	// a capture built from the construction-time constant pruned descriptions the
+	// source prompt had just been rebuilt to include — leaving the capture model
+	// without them in either place. Asserted on the wire schema, not the option.
+	it("builds the capture from the source agent's live descriptor policy", async () => {
+		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [manageSkillTool] },
+			// Launch-time policy: pruning ON, as a session started before the edit.
+			pruneToolDescriptions: true,
+		});
+		// The mid-session flip `/refresh settings` performs.
+		sourceAgent.pruneToolDescriptions = false;
+
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: [manageSkillTool],
+			createAgent: options =>
+				new Agent({
+					...options,
+					convertToLlm,
+					streamFn: captureMock.stream,
+					// What sdk.ts passes: the live agent value, not the constant.
+					pruneToolDescriptions: sourceAgent.pruneToolDescriptions,
+				}),
+		});
+
+		await runCapture("Capture after a descriptor-policy flip");
+
+		expect(captureMock.calls).toHaveLength(1);
+		const sentTools = captureMock.calls[0]?.context.tools ?? [];
+		const sent = sentTools.find(tool => tool.name === "manage_skill");
+		// Pre-fix the capture stayed pinned to the launch-time constant and sent a
+		// pruned description.
+		expect(sent?.description).toBe("Manage reusable skills");
+	});
+
 	it("adds learn alongside manage_skill when a memory backend provides it", async () => {
 		const model = googleInteractionsModel();
 		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");

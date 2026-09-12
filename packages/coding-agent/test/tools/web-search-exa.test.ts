@@ -817,6 +817,38 @@ describe("searchExa: EXA_API_KEY vs the session's MCP-discovered key", () => {
 		expect(await keyUsedForSearch("my-own-session-key")).toBe("my-own-session-key");
 	});
 
+	it("is unavailable to the auto chain when only a peer-injected key exists", async () => {
+		// Admission has to agree with `searchExa`: it refuses a helper-owned key,
+		// so admitting on one sent the session into the keyless MCP fallback —
+		// documented as explicit-selection-only — instead of its next provider.
+		const owner = {};
+		applyMCPEnvironment({ exaApiKeys: ["peer-injected-key"] }, owner);
+		expect(env.EXA_API_KEY).toBe("peer-injected-key");
+
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			expect(new ExaProvider().isAvailable(authStorage, { sessionExaApiKey: undefined })).toBe(false);
+			// Its own key still admits, and so does an operator export.
+			expect(new ExaProvider().isAvailable(authStorage, { sessionExaApiKey: "my-own-key" })).toBe(true);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("stays available to the auto chain on an operator-exported key", async () => {
+		// The distinction the fix turns on: a foreign export is a deliberate
+		// process-wide credential, so it must keep admitting.
+		env.EXA_API_KEY = "operator-exported-key";
+		expect(isExaEnvHelperInjected()).toBe(false);
+
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			expect(new ExaProvider().isAvailable(authStorage, { sessionExaApiKey: undefined })).toBe(true);
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it("does not borrow a peer-injected EXA_API_KEY when this session discovered no key", async () => {
 		// The gap between the two tests above: helper-owned environment AND no
 		// session key. Falling back to the environment here bills the peer's
