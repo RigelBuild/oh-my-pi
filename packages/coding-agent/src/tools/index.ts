@@ -749,7 +749,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// tool list or `--no-tools` excluded it", and only the first may be built.
 	if (session.setSettingGatedBuiltinPermissions) {
 		const permitted = new Set<string>();
-		for (const name of Object.keys(BOOLEAN_GATED_TOOLS)) {
+		// `lsp` rides along: its gate is compound (`enableLsp && lsp.enabled`), so
+		// recording it here is what lets the reconcile honor `lsp.enabled` while
+		// keeping `enableLsp` a construction-time capability no edit can widen.
+		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...(enableLsp ? ["lsp"] : [])]) {
 			if (!(name in allTools)) continue;
 			// `isToolAllowed` minus the boolean gate: the remaining conditions are
 			// exactly the invocation-scoped ones.

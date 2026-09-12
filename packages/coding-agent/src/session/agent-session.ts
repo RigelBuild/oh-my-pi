@@ -5883,7 +5883,11 @@ export class AgentSession {
 				// Same shape for the CORE built-ins gated on a plain boolean
 				// (`bash.enabled`, `glob`, `grep`, …): `createTools` reads each gate
 				// once at construction and the tools never re-check it.
-				booleanGatedTools: Object.values(BOOLEAN_GATED_TOOLS).map(setting => this.settings.get(setting)),
+				// `lsp.enabled` rides with the table: its tool gate is reconciled
+				// alongside them, so an edit to it alone still has to trigger.
+				booleanGatedTools: [...Object.values(BOOLEAN_GATED_TOOLS), "lsp.enabled" as const].map(setting =>
+					this.settings.get(setting),
+				),
 				// Module-level state in `lsp/client.ts`, consulted on every client
 				// COLD-START, so a reload alone left servers started after the
 				// refresh on the launch-time shared/private choice.
@@ -6102,7 +6106,9 @@ export class AgentSession {
 					this.settings.get("speechgen.enabled") !== previousSubsystems.speechGenEnabled ||
 					!Bun.deepEquals(
 						previousSubsystems.booleanGatedTools,
-						Object.values(BOOLEAN_GATED_TOOLS).map(setting => this.settings.get(setting)),
+						[...Object.values(BOOLEAN_GATED_TOOLS), "lsp.enabled" as const].map(setting =>
+							this.settings.get(setting),
+						),
 					)
 				) {
 					await this.#tools.reconcileSettingGatedTools();

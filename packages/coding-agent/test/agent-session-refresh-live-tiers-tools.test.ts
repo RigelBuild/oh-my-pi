@@ -487,6 +487,71 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("keeps a custom tool registered over a core built-in when its gate is disabled", async () => {
+		// Provenance, not just the name: a custom `bash` replaces the registry
+		// entry and is marked non-built-in, and a freshly started session with
+		// `bash.enabled: false` omits only the NATIVE tool while still offering
+		// the custom one.
+		const h = await makeHarness("bash:\n  enabled: true\n", {
+			customTools: [
+				{
+					name: "bash",
+					label: "Custom Bash",
+					description: "custom bash replacement",
+					parameters: { type: "object", properties: {} },
+					execute: async () => ({ content: [{ type: "text", text: "custom" }] }),
+				},
+			],
+		});
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("bash");
+
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: false\n");
+			await h.session.refresh("settings");
+
+			// Pre-fix the reconcile dropped the name regardless of who owns it.
+			expect(h.session.getEnabledToolNames()).toContain("bash");
+			expect(h.session.getToolByName("bash")?.description).toBe("custom bash replacement");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("reconciles the lsp.enabled gate on a session built with LSP", async () => {
+		// `lsp`'s gate is compound, so it is not in the plain table; it still has
+		// to reconcile, because `LspTool.execute()` never re-checks the setting.
+		const h = await makeHarness("lsp:\n  enabled: true\n", { enableLsp: true });
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("lsp");
+
+			await fs.writeFile(h.settingsPath, "lsp:\n  enabled: false\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("lsp");
+
+			await fs.writeFile(h.settingsPath, "lsp:\n  enabled: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).toContain("lsp");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("does not add lsp from a settings edit when the session was built without it", async () => {
+		// `enableLsp` is a construction-time capability (`--no-tools`, a
+		// restricted list), so no settings edit may grant it.
+		const h = await makeHarness("lsp:\n  enabled: false\n", { enableLsp: false });
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("lsp");
+
+			await fs.writeFile(h.settingsPath, "lsp:\n  enabled: true\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.getEnabledToolNames()).not.toContain("lsp");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("leaves other core built-ins alone when one boolean gate moves", async () => {
 		// Each gate is its own lever: disabling `bash` must not disturb `glob`.
 		const h = await makeHarness("bash:\n  enabled: true\nglob:\n  enabled: true\n");
