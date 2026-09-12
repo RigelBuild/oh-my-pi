@@ -689,6 +689,50 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 25_000);
 
+	it("reconciles the eval backend gates", async () => {
+		// `createTools` omits `eval` entirely when both backends are off, so the
+		// Code Mode repartition had nothing to re-activate: enabling a backend
+		// left JavaScript eval unavailable until restart, and disabling both left
+		// the tool advertised while every invocation failed.
+		const h = await makeHarness("eval:\n  py: false\n  js: false\n");
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("eval");
+
+			await fs.writeFile(h.settingsPath, "eval:\n  py: false\n  js: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).toContain("eval");
+
+			await fs.writeFile(h.settingsPath, "eval:\n  py: false\n  js: false\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("eval");
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
+	it("reconciles the experimental context-management tools", async () => {
+		// Both `createIf`s return null while the setting is false, so the live
+		// session could not gain `context_notes`/`new_context` until restart —
+		// and disabling left them advertised though execution rejects.
+		const h = await makeHarness("compaction:\n  experimentalContextManagement: false\n");
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("context_notes");
+			expect(h.session.getEnabledToolNames()).not.toContain("new_context");
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  experimentalContextManagement: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).toContain("context_notes");
+			expect(h.session.getEnabledToolNames()).toContain("new_context");
+
+			await fs.writeFile(h.settingsPath, "compaction:\n  experimentalContextManagement: false\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("context_notes");
+			expect(h.session.getEnabledToolNames()).not.toContain("new_context");
+		} finally {
+			await h.dispose();
+		}
+	}, 25_000);
+
 	it("builds manage_skill and starts the controller when autolearn is enabled", async () => {
 		const h = await makeHarness("autolearn:\n  enabled: false\n");
 		try {
