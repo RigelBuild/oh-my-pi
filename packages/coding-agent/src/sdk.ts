@@ -71,6 +71,7 @@ import {
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	isDefaultModelRoleSelfAlias,
+	normalizeModelPatternList,
 	parseDefaultModelRoleSelfAlias,
 	parseModelPattern,
 	parseModelString,
@@ -1592,16 +1593,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// from `isDefaultModelRoleSelfAlias`, never a second list here: a copy that
 	// drifts is how `*` once counted as a configured model.
 	const normalizedDefaultRole = defaultRoleValue?.trim();
-	const hasConfigDefaultRole = normalizedDefaultRole ? !isDefaultModelRoleSelfAlias(normalizedDefaultRole) : false;
+	// Classified PER PATTERN, never as one string: `Settings.getModelRole()`
+	// flattens a YAML/comma list into `"*,@default"`, which matches no alias
+	// spelling, so an all-self-alias fallback list read as a real configured
+	// default. Startup then skipped the session restore and reported a broken
+	// config default instead of retaining the session model. `*` counting as a
+	// configured model is the same bug this code already carries a note about;
+	// the list shape is the second instance. Reuses the resolver's own
+	// normalizer so the split cannot drift from how the value is parsed.
+	const defaultRolePatterns = normalizeModelPatternList(normalizedDefaultRole);
+	const hasConfigDefaultRole = defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern));
 	// A self alias sets no model but a suffixed one (`*:xhigh`) still names the
 	// THINKING knob. `resolveModelRoleValue` cannot report it — the circular
 	// selector resolves to no model, hence `explicitThinkingLevel: false` — so
 	// read the suffix off the raw role value. Without this the per-knob thinking
 	// path sees "config names no thinking knob" and restores the session's baked
 	// level, dropping the tier the user asked `--reapply-config` to apply.
-	const selfAliasThinkingLevel = normalizedDefaultRole
-		? parseDefaultModelRoleSelfAlias(normalizedDefaultRole)?.level
-		: undefined;
+	// Same reason a list has to be split: a suffixed self alias inside one
+	// (`["*:xhigh", "@default"]`) still names the thinking knob, and the
+	// flattened string parses as neither.
+	//
+	const selfAliasThinkingLevel = defaultRolePatterns
+		.map(pattern => parseDefaultModelRoleSelfAlias(pattern)?.level)
+		.find(level => level !== undefined);
 	const adoptConfigModel = Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigDefaultRole;
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;

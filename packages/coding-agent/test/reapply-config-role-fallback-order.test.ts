@@ -186,6 +186,41 @@ describe("--reapply-config configured default fallback order", () => {
 		expect(resumed.model?.id).toBe(firstCandidate.id);
 	});
 
+	it("retains the session model when every fallback candidate is a self alias", async () => {
+		// `Settings.getModelRole()` flattens a list into `"*,@default"`, which
+		// matches no alias spelling — so the whole string read as a real
+		// configured default even though every pattern resolves to no model.
+		// Startup then skipped the session restore and reported a broken config
+		// default instead of retaining the session's own model.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay("*,@default");
+
+		const resumed = await resume(sessionFile, settings, true);
+
+		expect(resumed.model?.provider).toBe(bakedModel.provider);
+		expect(resumed.model?.id).toBe(bakedModel.id);
+	});
+
+	it("still adopts a list that mixes a self alias with a real candidate", async () => {
+		// The other direction: one non-alias pattern makes it a genuine configured
+		// default, so classifying per pattern must not turn every list into "no
+		// config default". The alias sits LAST because a LEADING `*` is resolved
+		// as a real candidate by the role resolver and stalls on its own
+		// circularity — existing behaviour, independent of this classification.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const realCandidate = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay(`${modelValue(realCandidate)},*`);
+
+		const resumed = await resume(sessionFile, settings, true);
+
+		expect(resumed.model?.provider).toBe(realCandidate.provider);
+		expect(resumed.model?.id).toBe(realCandidate.id);
+	});
+
 	it("keeps the baked session model on a bare resume even when a later candidate matched first", async () => {
 		// Without the flag the session's own model wins regardless of how the
 		// configured role resolved, so the re-resolution must not reach this path.
