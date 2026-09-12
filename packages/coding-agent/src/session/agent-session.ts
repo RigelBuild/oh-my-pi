@@ -170,7 +170,7 @@ import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import type { MCPManager } from "../mcp/manager";
 import { shouldFilterBrowserMCPForPrelude } from "../mcp/config";
-import { reloadMcpServers } from "../mcp/reload";
+import { applyMCPEnvironment, reloadMcpServers } from "../mcp/reload";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
@@ -924,6 +924,7 @@ export class AgentSession {
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
+	#reconcileSharedLsp: AgentSessionConfig["reconcileSharedLsp"];
 	/**
 	 * Backs `ctx.setInterval`/`setTimeout`/`clearTimer` for the runner-less
 	 * command-context fallback (SDK embeddings with no extension runner). Lazily
@@ -1709,6 +1710,7 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#getEvalPreludes = config.getEvalPreludes;
 		this.#reconcileBrowserMcpFilter = config.reconcileBrowserMcpFilter;
+		this.#reconcileSharedLsp = config.reconcileSharedLsp;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
 			agent: this.agent,
@@ -5881,6 +5883,10 @@ export class AgentSession {
 				// (`bash.enabled`, `glob`, `grep`, …): `createTools` reads each gate
 				// once at construction and the tools never re-check it.
 				booleanGatedTools: Object.values(BOOLEAN_GATED_TOOLS).map(setting => this.settings.get(setting)),
+				// Module-level state in `lsp/client.ts`, consulted on every client
+				// COLD-START, so a reload alone left servers started after the
+				// refresh on the launch-time shared/private choice.
+				sharedLsp: this.settings.get("lsp.shared"),
 				computerEnabled: this.settings.get("computer.enabled"),
 				// Gates whether an obfuscator exists at all. The instance itself is
 				// built from `secrets.yml`, which this refresh also re-reads, so the
@@ -6005,7 +6011,18 @@ export class AgentSession {
 				this.registerHostReconciliation(
 					(async () => {
 						if (ownsManager) {
-							await manager.reconcileProjectConfigFilter(this.settings.get("mcp.enableProjectConfig") ?? true);
+							const reconciled = await manager.reconcileProjectConfigFilter(
+								this.settings.get("mcp.enableProjectConfig") ?? true,
+							);
+							// Exa MCP entries are filtered out in favour of the native
+							// integration, so the credential discovery extracted never
+							// rides a connection. Applied through the same helper startup
+							// and the full MCP reload use, keyed on this session's own
+							// manager so one session can neither replace nor delete a
+							// PEER session's injected key. Without this, revealing a
+							// project Exa entry left the native integration
+							// unauthenticated and hiding one kept the stale key live.
+							applyMCPEnvironment(reconciled, manager);
 						}
 						await this.refreshMCPTools(manager.getTools());
 					})(),
@@ -6109,6 +6126,16 @@ export class AgentSession {
 					])
 				) {
 					applyProviderGlobalsFromSettings(this.settings);
+				}
+				// Same class as the provider globals above: `lsp.shared` is copied
+				// into module state that `getOrCreateClient` reads when it cold-starts
+				// a server, never re-read from settings, so language servers started
+				// after `/refresh settings` stayed shared (or private) against the
+				// refreshed value. Delegated to the host because the effective flag is
+				// `enableLsp && lsp.shared`, and `enableLsp` is a construction input a
+				// settings read cannot recover.
+				if (this.settings.get("lsp.shared") !== previousSubsystems.sharedLsp) {
+					this.#reconcileSharedLsp?.();
 				}
 				// The Code Mode signal DOES reach a listener, but that listener
 				// launches `reconcileCodeMode()` fire-and-forget, so the refresh

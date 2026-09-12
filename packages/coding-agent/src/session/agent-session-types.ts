@@ -261,6 +261,14 @@ export interface AgentSessionConfig {
 	mcpManagerToolNames?: Iterable<string>;
 	/** Reconcile browser MCP connections after browser prelude availability changes. */
 	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
+	/**
+	 * Reapplies the module-level shared-LSP flag from the reloaded settings.
+	 *
+	 * Wired by the host because the flag is `enableLsp && lsp.shared`, and
+	 * `enableLsp` is a session-construction input (`--no-tools`, a restricted
+	 * subagent set) that a settings read cannot recover.
+	 */
+	reconcileSharedLsp?: () => void;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the built-in write transport when it is needed at runtime. */

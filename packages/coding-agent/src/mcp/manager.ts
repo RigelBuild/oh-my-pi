@@ -197,6 +197,12 @@ export type MCPAuthHandler = (serverName: string, challenge: MCPAuthChallenge) =
  *
  * Manages connections to MCP servers and provides tools to the agent.
  */
+/** What a project-config reconcile discovered, for the caller to apply. */
+export interface MCPReconcileResult {
+	/** Exa keys discovery extracted, applied by the caller via `applyMCPEnvironment`. */
+	exaApiKeys: string[];
+}
+
 export class MCPManager {
 	static #instance: MCPManager | undefined;
 
@@ -556,15 +562,18 @@ export class MCPManager {
 	 * `#discoverOptions`, so interleaving them would let the loser's cached
 	 * options overwrite the winner's.
 	 */
-	reconcileProjectConfigFilter(enableProjectConfig: boolean): Promise<void> {
+	reconcileProjectConfigFilter(enableProjectConfig: boolean): Promise<MCPReconcileResult> {
 		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyProjectConfigFilter(enableProjectConfig));
-		this.#browserFilterMutationTail = reconcile.catch(() => undefined);
+		this.#browserFilterMutationTail = reconcile.then(
+			() => undefined,
+			() => undefined,
+		);
 		return reconcile;
 	}
 
-	async #applyProjectConfigFilter(enableProjectConfig: boolean): Promise<void> {
+	async #applyProjectConfigFilter(enableProjectConfig: boolean): Promise<MCPReconcileResult> {
 		const options = this.#discoverOptions;
-		if ((options?.enableProjectConfig ?? true) === enableProjectConfig) return;
+		if ((options?.enableProjectConfig ?? true) === enableProjectConfig) return { exaApiKeys: [] };
 		// Record the new value first: a later browser reconcile reads these
 		// options, and `loadConfigs` must not be asked to honor the stale one.
 		this.#discoverOptions = { ...options, enableProjectConfig };
@@ -580,7 +589,12 @@ export class MCPManager {
 		// user-level `foo` was keeping that user server from ever connecting —
 		// disconnecting the project one alone left no `foo` at all, where a fresh
 		// session with the setting off would have run the user's.
-		await this.#connectNewlyDiscovered(enableProjectConfig, options);
+		//
+		// The extracted Exa credentials come back to the caller: an Exa MCP entry
+		// is filtered out in favour of the native integration, so revealing one
+		// must still authenticate that integration, and hiding one must let the
+		// caller drop the key it recorded.
+		return { exaApiKeys: await this.#connectNewlyDiscovered(enableProjectConfig, options) };
 	}
 
 	/**
@@ -593,7 +607,10 @@ export class MCPManager {
 	 * a freshly started session would not. Names whose selection did not move
 	 * are left strictly alone, so nothing healthy restarts.
 	 */
-	async #connectNewlyDiscovered(enableProjectConfig: boolean, options: MCPDiscoverOptions | undefined): Promise<void> {
+	async #connectNewlyDiscovered(
+		enableProjectConfig: boolean,
+		options: MCPDiscoverOptions | undefined,
+	): Promise<string[]> {
 		const loaded = await this.loadConfigs(this.cwd, {
 			enableProjectConfig,
 			filterExa: options?.filterExa,
@@ -623,11 +640,16 @@ export class MCPManager {
 			const source = loaded.sources[name];
 			if (source) sources[name] = source;
 		}
-		if (Object.keys(configs).length === 0) return;
+		// Returned even when no connection moved: an Exa entry is FILTERED out of
+		// `configs` in favour of the native integration, so "nothing to connect"
+		// is exactly the case where the extracted credential still has to reach
+		// the caller.
+		if (Object.keys(configs).length === 0) return loaded.exaApiKeys;
 		// Drop superseded connections first: `connectServers` is incremental and
 		// would otherwise see the name as already live and leave the loser running.
 		await Promise.all(superseded.map(name => this.disconnectServer(name)));
 		await this.connectServers(configs, sources, options?.onStatus);
+		return loaded.exaApiKeys;
 	}
 
 	/**
