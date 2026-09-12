@@ -6592,6 +6592,14 @@ export class AgentSession {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 
+		// The compaction barrier has to be re-run for the same reason, and
+		// `isStreaming` below does not cover it: a requested compaction calls
+		// `abort()`, so while the rewrite is in flight the session reads NOT
+		// streaming. An image-bearing call that passed the barrier at the top and
+		// suspended in normalization would dispatch into a disconnected,
+		// being-rewritten session and lose its events to the history replacement.
+		await this.#settleActiveCompaction();
+
 		// A concurrent prompt() can start a turn during the awaits above: image
 		// normalization and the vision-description call suspend after the
 		// isStreaming check at the top, so two callers — the CLI initial message
@@ -8700,8 +8708,15 @@ export class AgentSession {
 	 * @param options Handoff execution options
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
-	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
-		return this.#maintenance.handoff(customInstructions, options);
+	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		// Same barrier `shake` and the fork/branch routes take. A requested
+		// compaction driven by a yield-queue idle injection drops the in-flight
+		// count to zero before it installs its controller, so for that window the
+		// caller's `isStreaming` and `isCompacting` checks both read false and a
+		// `/handoff` could start — where the rewrite's own `abort()` then cancels
+		// it, or the two maintenance passes race over which compaction commits.
+		await this.#settleActiveCompaction();
+		return await this.#maintenance.handoff(customInstructions, options);
 	}
 
 	#isTerminalYieldToolResult(event: { toolName: string; isError?: boolean; result?: { details?: unknown } }): boolean {

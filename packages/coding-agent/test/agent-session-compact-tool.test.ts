@@ -6,6 +6,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -2109,6 +2110,149 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(forked).toBe(true);
 		expect(session.sessionManager.getSessionId()).not.toBe(sessionIdBefore);
 		expect(order.indexOf("fork:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
+	}, 15_000);
+
+	it("holds an image-bearing prompt whose normalization suspended past the barrier", async () => {
+		// The prompt barrier runs EARLY, and image normalization plus the vision
+		// description call suspend after it. The pre-dispatch re-check tested only
+		// `isStreaming`, which a requested compaction never raises — its own
+		// `abort()` makes it false — so a prompt that cleared the barrier before
+		// the pass began, then suspended in normalization, dispatched into a
+		// disconnected session whose history was being replaced.
+		//
+		// Reproduced by gating normalization itself: the prompt is released into
+		// that window only after the rewrite is confirmed in flight.
+		const order: string[] = [];
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		const normalizeEntered = Promise.withResolvers<void>();
+		const normalizeGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("rewrite:summary");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+		// Gated only for a call that actually carries images: the compaction-
+		// requesting prompt below has none, and parking it too would deadlock the
+		// test rather than exercise the window.
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			if (!images?.length) return images;
+			normalizeEntered.resolve();
+			await normalizeGate.promise;
+			return images;
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		let starts = 0;
+		session.subscribe(event => {
+			if (event.type === "agent_start") starts++;
+		});
+		const image = {
+			type: "image" as const,
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+			mimeType: "image/png" as const,
+		};
+		// Cleared the barrier and parked INSIDE normalization, before any
+		// compaction exists.
+		const queued = session.prompt("describe this", { images: [image] }).then(() => {
+			order.push("prompt:done");
+		});
+		await normalizeEntered.promise;
+
+		// Now run the turn that requests compaction, and let the rewrite start.
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+		// Idle on the predicate the re-check reads, mid-rewrite.
+		expect(session.isStreaming).toBe(false);
+
+		// Observed at DISPATCH, not at the prompt's resolution: the promise settles
+		// only when the whole turn ends, which is late either way. A new
+		// `agent_start` during the rewrite is the actual defect.
+		const startsBeforeRelease = starts;
+
+		// Release normalization: pre-fix this walks straight into dispatch.
+		normalizeGate.resolve();
+		for (let i = 0; i < 20; i++) await Bun.sleep(0);
+
+		expect(starts).toBe(startsBeforeRelease);
+		expect(order).not.toContain("rewrite:summary");
+
+		summaryGate.resolve();
+		await queued;
+		await primary;
+		await session.waitForIdle();
+
+		// It ran, and only after the rewrite landed.
+		expect(starts).toBeGreaterThan(startsBeforeRelease);
+		expect(order.indexOf("prompt:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
+	}, 15_000);
+
+	it("holds a handoff until the rewrite finishes", async () => {
+		// `handoff()` delegated straight to maintenance, unlike the fork/branch/
+		// shake routes beside it. A requested compaction driven by a yield-queue
+		// idle injection drops the in-flight count to zero before installing its
+		// controller, so for that window `isStreaming` and `isCompacting` both
+		// read false — the caller's only two checks — and a `/handoff` starts
+		// where the rewrite's own `abort()` cancels it, or the two maintenance
+		// passes race over which compaction commits.
+		const order: string[] = [];
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			order.push("rewrite:start");
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("rewrite:summary");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction({ persist: true });
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+		// Mid-rewrite, and idle on the predicate every caller gates on.
+		expect(session.isStreaming).toBe(false);
+
+		let handoffEntered = false;
+		const handoff = session
+			.handoff()
+			.then(() => {
+				order.push("handoff:done");
+			})
+			.catch(() => {
+				// A cancellation is still an outcome: the assertion below is about
+				// WHEN it was allowed to start, not whether it succeeded.
+				order.push("handoff:done");
+			});
+		// Observe at the generation flag, not after the call resolves: a handoff
+		// that starts and is then cancelled by the rewrite's abort would resolve
+		// late either way.
+		for (let i = 0; i < 20; i++) {
+			await Bun.sleep(0);
+			if (session.isGeneratingHandoff) handoffEntered = true;
+		}
+
+		expect(handoffEntered).toBe(false);
+		expect(order).not.toContain("rewrite:summary");
+
+		summaryGate.resolve();
+		await handoff;
+		await primary;
+		await session.waitForIdle();
+
+		expect(order.indexOf("handoff:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
 	}, 15_000);
 
 	it("holds a tree navigation until the rewrite finishes", async () => {
