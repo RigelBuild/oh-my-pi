@@ -719,4 +719,66 @@ describe("AgentSession.refresh('mcp')", () => {
 
 		await dir.remove();
 	});
+
+	// Exa MCP entries are filtered out in favour of the native integration, so the
+	// key discovery extracts never rides a connection. The reconcile discarded it,
+	// which left the native integration unauthenticated when project config
+	// revealed a project Exa entry.
+	it("applies the Exa credentials a project config flip reveals", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-exa-");
+		const settingsPath = `${dir.path()}/config.yml`;
+		await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: false\n");
+		const settings = await Settings.loadIsolated({ cwd: dir.path(), agentDir: dir.path() });
+
+		// Discovery returns the key only with project config ON, and — as the real
+		// loader does for Exa — filters the server itself out of `configs`.
+		const manager = new MCPManager(dir.path(), null, async (_cwd, options) => ({
+			configs: {},
+			exaApiKeys: options?.enableProjectConfig === false ? [] : ["project-exa-key"],
+			sources: {},
+		}));
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(dir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map<string, AgentTool>(),
+			extensionRoots: () => roots,
+			mcpManager: manager,
+			disconnectOwnedMcpManager: async () => {},
+		});
+		sessions.push(session);
+
+		await manager.discoverAndConnect({ enableProjectConfig: false });
+
+		// `applyMCPEnvironment` writes the live environment, so restore it: a
+		// leaked `EXA_API_KEY` would change how every later test in the run sees
+		// the native integration.
+		const previousExaKey = process.env.EXA_API_KEY;
+		try {
+			await fsp.writeFile(settingsPath, "mcp:\n  enableProjectConfig: true\n");
+			// `refresh` joins the registered host reconciliation internally before
+			// returning, so the credential is applied by the time this resolves.
+			expect((await session.refresh("settings")).settingsChanged).toBe(true);
+
+			// Pre-fix `#connectNewlyDiscovered` dropped `exaApiKeys` on the floor, so
+			// the revealed credential never reached the native integration. Asserted
+			// on the live environment, which is what the integration actually reads.
+			expect(process.env.EXA_API_KEY).toBe("project-exa-key");
+		} finally {
+			if (previousExaKey === undefined) delete process.env.EXA_API_KEY;
+			else process.env.EXA_API_KEY = previousExaKey;
+		}
+
+		await dir.remove();
+	});
 });

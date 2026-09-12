@@ -26,6 +26,7 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { isSharedLspEnabled } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -67,7 +68,7 @@ interface Harness {
  */
 async function makeHarness(
 	initialConfig: string,
-	options?: { persistSession?: boolean; customTools?: CustomTool[] },
+	options?: { persistSession?: boolean; customTools?: CustomTool[]; enableLsp?: boolean },
 ): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-tiers-tools-");
 	const cwd = tempDir.path();
@@ -101,7 +102,7 @@ async function makeHarness(
 		promptTemplates: [],
 		slashCommands: [],
 		enableMCP: false,
-		enableLsp: false,
+		enableLsp: options?.enableLsp ?? false,
 		skipPythonPreflight: true,
 		customTools: options?.customTools,
 	});
@@ -310,6 +311,33 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 			await h.dispose();
 		}
 	});
+
+	it("reapplies the shared-LSP flag when lsp.shared moves on disk", async () => {
+		// `lsp.shared` is copied into module state in `lsp/client.ts` that
+		// `getOrCreateClient` consults when it COLD-STARTS a server, never re-read
+		// from settings — so a server started after `/refresh settings` stayed
+		// shared (or private) against the refreshed value.
+		const h = await makeHarness("lsp:\n  enabled: true\n  shared: false\n", { enableLsp: true });
+		try {
+			expect(isSharedLspEnabled()).toBe(false);
+
+			await fs.writeFile(h.settingsPath, "lsp:\n  enabled: true\n  shared: true\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Pre-fix this stayed false: `setSharedLspEnabled` ran only at SDK
+			// construction, so the reload moved the merged view and nothing else.
+			expect(isSharedLspEnabled()).toBe(true);
+
+			// And back, since the false direction is what stops a session from
+			// attaching to a broker it should no longer share.
+			await fs.writeFile(h.settingsPath, "lsp:\n  enabled: true\n  shared: false\n");
+			await h.session.refresh("settings");
+			expect(isSharedLspEnabled()).toBe(false);
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
 
 	it("removes a core built-in when its boolean gate is disabled on disk", async () => {
 		// The severe direction: `createTools` reads `bash.enabled` once at
