@@ -24,6 +24,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -495,6 +497,54 @@ describe("AgentSession refresh('settings'): bash.autoBackground.enabled reaches 
 			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
 
 			expect(h.session.systemPrompt.join("\n")).not.toContain(GUIDANCE);
+		} finally {
+			await h.dispose();
+		}
+	});
+});
+
+describe("AgentSession refresh('settings'): a memory injection limit reaches the prompt", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("rebuilds the prompt when only mnemopi.injectionTokenLimit moves", async () => {
+		// Both memory backends TRUNCATE their rendered instructions to the limit,
+		// so the limit is prompt TEXT. The backend here renders the live value for
+		// the same reason: a stub returning a constant could not distinguish a
+		// rebuild that re-read settings from one that did not.
+		const backend: MemoryBackend = {
+			id: "mnemopi",
+			async start() {},
+			async buildDeveloperInstructions(_agentDir, settings) {
+				return `memory budget ${settings.get("mnemopi.injectionTokenLimit")}`;
+			},
+			async clear() {},
+			async enqueue() {},
+			async beforeAgentStartPrompt() {
+				return undefined;
+			},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+
+		const h = await makeHarness(
+			"compaction:\n  enabled: false\nmemory:\n  backend: mnemopi\nmnemopi:\n  injectionTokenLimit: 5000\n",
+		);
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			const before = h.session.systemPrompt.join("\n");
+			expect(before).toContain("memory budget 5000");
+
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  enabled: false\nmemory:\n  backend: mnemopi\nmnemopi:\n  injectionTokenLimit: 9000\n",
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Pre-fix the snapshot omitted the limit, so it compared equal and the
+			// final rebuild was skipped — leaving the old-sized memory block.
+			expect(h.session.systemPrompt.join("\n")).toContain("memory budget 9000");
 		} finally {
 			await h.dispose();
 		}
