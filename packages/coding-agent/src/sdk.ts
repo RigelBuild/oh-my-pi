@@ -77,7 +77,11 @@ import {
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
-import { applySettingsTrackedServiceTiers, buildServiceTierByFamily } from "./config/service-tier";
+import {
+	applySettingsTrackedServiceTiers,
+	buildServiceTierByFamily,
+	SERVICE_TIER_FAMILIES,
+} from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { resolveDialect } from "./config/tool-dialect";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
@@ -3928,9 +3932,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// overridden by the value this receipt captured. Every family here
 				// came from the config above; only `--openai-service-tier` is a real
 				// pin, and it pins openai alone — the others keep their provenance.
-				const settingsTrackingFamilies = (
-					Object.keys(configuredServiceTierByFamily) as Array<keyof ServiceTierByFamily>
-				).filter(family => !(family === "openai" && options.openAIServiceTier !== undefined));
+				// EVERY family, not just the ones currently set. A family configured
+				// as `none` has no key in the map, so keying off the map omitted it —
+				// and then adding `tier.google` while the session was stopped could
+				// never be picked up, since restoration replays a map with no Google
+				// provenance and `Settings` already holds the new value. Only the
+				// flag is a real pin, and it pins openai alone.
+				const settingsTrackingFamilies = SERVICE_TIER_FAMILIES.filter(
+					family => !(family === "openai" && options.openAIServiceTier !== undefined),
+				);
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
 					settingsTrackingFamilies,

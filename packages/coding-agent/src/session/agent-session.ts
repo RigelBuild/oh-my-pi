@@ -679,6 +679,14 @@ const PROMPT_AFFECTING_SETTING_PATHS = [
 	// the retired guidance. The threshold is NOT here — neither template renders
 	// the number, so changing it moves no prompt text.
 	"bash.autoBackground.enabled",
+	// Both memory backends TRUNCATE their rendered developer instructions to
+	// these limits (`mnemopi/backend.ts`, `sharpshooter/backend.ts`), so the
+	// limit is prompt text, not just a budget: editing it alone left the model
+	// with the old-sized memory block until some unrelated rebuild happened.
+	// Listed for both backends rather than the active one, since `memory.backend`
+	// above can move in the same reload.
+	"mnemopi.injectionTokenLimit",
+	"sharpshooter.injectionTokenLimit",
 ] as const satisfies readonly SettingPath[];
 
 /**
