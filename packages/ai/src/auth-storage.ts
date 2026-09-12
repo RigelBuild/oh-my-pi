@@ -2913,23 +2913,6 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Like {@link hasAuth} but ignores a credential whose only source is the
-	 * provider's dedicated environment variable.
-	 *
-	 * For a provider whose env var can be written by one session and read by
-	 * another (Exa's `EXA_API_KEY`), the env term answers "some session has a
-	 * key", not "this session may use one" — so a caller that has already
-	 * decided the live env value is foreign needs the rest of `hasAuth` without
-	 * it.
-	 */
-	hasAuthExcludingEnv(provider: string): boolean {
-		if (this.#runtimeOverrides.has(provider)) return true;
-		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
-		return this.#fallbackResolver?.(provider) !== undefined;
-	}
-
-	/**
 	 * Like {@link hasAuth} but excludes providers whose only credential is the
 	 * self-resolving {@link AUTHENTICATED_SENTINEL} — the marker AWS/Vertex
 	 * transports return when a credential *source* merely exists (a stray
@@ -2979,6 +2962,11 @@ export class AuthStorage {
 	 * fallback map" (see e.g. `xai-oauth → XAI_OAUTH_TOKEN || XAI_API_KEY` in
 	 * `stream.ts`). Without that distinction, an `XAI_API_KEY`-only setup
 	 * silently satisfies xai-oauth and routes around `providers.xai.baseUrl`.
+	 *
+	 * Also the right predicate when the env term answers the wrong question: for
+	 * a provider whose env var one session writes and another reads (Exa's
+	 * `EXA_API_KEY`), it reports "some session has a key", not "this session may
+	 * use one".
 	 */
 	hasNonEnvCredential(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;

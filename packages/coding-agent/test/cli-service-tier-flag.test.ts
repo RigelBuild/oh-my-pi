@@ -129,6 +129,71 @@ describe("--service-tier", () => {
 			authStorage.close();
 		}
 	});
+	it("keeps an earlier pin when a different family is set afterwards", async () => {
+		// Each whole-map receipt recomputed tracking purely from value equality,
+		// so a write about family B re-marked an already-pinned family A as
+		// config-following. Pin OpenAI to the value config happens to hold, then
+		// set Google: the Google operation excludes only Google, and OpenAI's pin
+		// was silently handed back to `tier.openai`.
+		using tempDir = TempDir.createSync("@omp-service-tier-carry-");
+		const authStorage = await AuthStorage.create(":memory:");
+		const sessionFile = path.join(tempDir.path(), "session.jsonl");
+		try {
+			const manager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "priority" }),
+				sessionManager: manager,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			// Pin OpenAI away and back, so the pin is real but its value equals
+			// `tier.openai` — the only state equality inference cannot recover.
+			session.setServiceTierFamily("openai", "flex");
+			session.setServiceTierFamily("openai", "priority");
+			// Now an unrelated family's operation writes a fresh whole-map receipt.
+			session.setServiceTierFamily("google", "priority");
+			await session.dispose();
+			await manager.flush();
+			await manager.close();
+
+			const resumedManager = await SessionManager.open(sessionFile, tempDir.path());
+			const { session: resumed } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({ "tier.openai": "none" }),
+				sessionManager: resumedManager,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			try {
+				// Pre-fix the Google write erased OpenAI's provenance, so the edit
+				// to `none` took effect.
+				expect(resumed.serviceTierByFamily.openai).toBe("priority");
+				// The family that was actually set is unaffected either way.
+				expect(resumed.serviceTierByFamily.google).toBe("priority");
+			} finally {
+				await resumed.dispose();
+				await resumedManager.close();
+			}
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it("keeps an explicit selection pinned when it equals the configured tier", async () => {
 		// Provenance was inferred by comparing values, so an explicit selection
 		// that HAPPENS to equal the configured tier was recorded as
