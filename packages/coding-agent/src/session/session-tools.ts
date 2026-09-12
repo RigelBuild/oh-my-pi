@@ -5,6 +5,7 @@ import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { isRecord, logger, prompt, stringProperty, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import type { SettingPath } from "../config/settings-schema";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -20,7 +21,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
-import { BOOLEAN_GATED_TOOLS, booleanGateFor } from "../tools";
+import { BOOLEAN_GATED_TOOLS } from "../tools";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
@@ -1673,11 +1674,17 @@ export class SessionTools {
 	async #applyBooleanGatedBuiltins(): Promise<boolean> {
 		const active = this.getEnabledToolNames();
 		const next = new Set(active);
-		for (const name of Object.keys(BOOLEAN_GATED_TOOLS)) {
-			const setting = booleanGateFor(name);
-			if (setting === undefined) continue;
+		for (const [name, setting] of this.#booleanGatedToolGates()) {
 			if (this.#host.settings.get(setting) !== true) {
-				next.delete(name);
+				// Filtered by PROVENANCE, exactly as the setting-gated group
+				// reconcile below does: an extension or SDK tool may register over
+				// `bash` under the same name, and that entry is marked non-built-in.
+				// Disabling the BUILT-IN's gate must leave it active — a freshly
+				// started session with the same config omits only the native tool and
+				// still offers the custom one. A name with no entry at all is treated
+				// as owned, matching the behaviour before this reconcile existed.
+				const entry = this.#toolRegistry.get(name);
+				if (entry === undefined || this.#builtInToolNames.has(name)) next.delete(name);
 				continue;
 			}
 			// Enabled. Build it if this session never did, but only when its own
@@ -1695,6 +1702,22 @@ export class SessionTools {
 		if (next.size === active.length && active.every(name => next.has(name))) return false;
 		await this.#applyActiveToolsByName([...next]);
 		return true;
+	}
+
+	/**
+	 * The gated core built-ins to reconcile, as `[name, setting]`.
+	 *
+	 * `lsp` is not in {@link BOOLEAN_GATED_TOOLS} because its gate is compound —
+	 * `createTools` requires `enableLsp && lsp.enabled`, and `enableLsp` is a
+	 * construction-time capability a settings edit must never widen. Scoping it
+	 * by permission keeps that restriction: `createTools` records `lsp` only for
+	 * a session it built with the capability, so the gate reconciles there and a
+	 * `--no-tools`/restricted session can never gain it from a settings edit.
+	 */
+	#booleanGatedToolGates(): Array<[string, SettingPath]> {
+		const gates = Object.entries(BOOLEAN_GATED_TOOLS) as Array<[string, SettingPath]>;
+		if (this.#settingGatedBuiltinPermissions.has("lsp")) gates.push(["lsp", "lsp.enabled"]);
+		return gates;
 	}
 
 	/** Records which boolean-gated built-ins this session's construction allowed. */
