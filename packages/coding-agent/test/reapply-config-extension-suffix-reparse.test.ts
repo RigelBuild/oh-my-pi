@@ -14,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ModelSpec } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -218,4 +220,97 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			await session.dispose();
 		}
 	});
+
+	// The third cell, and the one both fixes above miss: the config/CLI model is
+	// STATICALLY visible, so `model` is resolved before the reparse — while the
+	// saved id lives only in the cold dynamic catalog, so only the reparse can
+	// learn it is a literal. Correcting `restoredSessionThinkingLevel` alone left
+	// the misread `low` in `thinkingLevel`/`effectiveThinkingLevel`, because the
+	// later recomputation is gated on `!model` and never ran.
+	test("recomputes the thinking level when the reparse corrects an already-resolved model", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		// `config-pick` is STATIC so the config default resolves immediately and
+		// `model` is set before the reparse; `router:low` lives only in the cold
+		// dynamic catalog, so only the reparse can learn it is a literal id.
+		const mixedExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "config-pick",
+						name: "Config Pick",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+				fetchDynamicModels: async () => [
+					{
+						id: "router:low",
+						name: "Router Low",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "runtime-provider/config-pick");
+		const sessionFile = await writeBakedSession();
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-mixed"));
+		// An explicit `--model` pin: it fixes the identity, so the restored
+		// suffix is what supplies the level — exactly where a misread bites.
+		const mixedModelPin = buildModel({
+			provider: "runtime-provider",
+			id: "config-pick",
+			name: "Config Pick",
+			api: "openai-completions",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		} as ModelSpec);
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [mixedExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+			model: mixedModelPin,
+		});
+
+		try {
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
+	}, 20000);
 });
