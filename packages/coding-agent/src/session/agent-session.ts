@@ -849,6 +849,8 @@ export class AgentSession {
 	 * would await itself.
 	 */
 	#requestedCompaction: Promise<void> | undefined = undefined;
+	/** Callers parked on the compaction barrier, each about to claim a turn. */
+	#compactionBarrierWaiters = 0;
 	/**
 	 * Live focus holder for the single deferred requested-compaction pass on
 	 * `#requestedCompaction`. The detached run reads `.instructions` at apply
@@ -1306,7 +1308,14 @@ export class AgentSession {
 		// subscriber treating it as idle (rpc-mode, ACP, Cursor) could submit into
 		// the live continuation. An in-flight prompt is authoritative: the turn
 		// that owns it emits its own end.
-		const inFlightContinuation = this.#promptInFlightCount > 0;
+		// A caller parked on the compaction barrier is the same kind of successor,
+		// one step earlier: `flushCompactionQueue` delivers input typed during the
+		// pass by launching `prompt()` FIRE-AND-FORGET, so it suspends in
+		// `#settleActiveCompaction()` before `#beginInFlight()` and the count above
+		// is still zero when the pass's finalizer runs. Terminal here would hand an
+		// RPC/ACP subscriber an idle signal immediately before that turn starts —
+		// the same race, and the turn emits its own end once it claims the slot.
+		const inFlightContinuation = this.#promptInFlightCount > 0 || this.#compactionBarrierWaiters > 0;
 		// A yield entry still awaiting its idle flush is a continuation too, and it
 		// is not covered by any probe above: the flush is SCHEDULED (a post-prompt
 		// task), so at this point nothing is queued on the agent, nothing is on the
@@ -6446,7 +6455,15 @@ export class AgentSession {
 		while (true) {
 			const requested = this.#requestedCompaction;
 			if (requested) {
-				await requested;
+				// Counted while parked: this caller is a successor turn that has not
+				// reached `#beginInFlight()` yet, which is what makes it invisible to
+				// the in-flight probe in `#flushPendingAgentEnd`.
+				this.#compactionBarrierWaiters++;
+				try {
+					await requested;
+				} finally {
+					this.#compactionBarrierWaiters--;
+				}
 				continue;
 			}
 			const manualCleanup = this.#maintenance.manualCompactionCleanup;

@@ -2112,6 +2112,76 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(order.indexOf("fork:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
 	}, 15_000);
 
+	it("keeps the terminal end non-terminal while a queued turn is parked on the barrier", async () => {
+		// `flushCompactionQueue` delivers input typed during the pass by launching
+		// `prompt()` FIRE-AND-FORGET, so that turn suspends in the compaction
+		// barrier BEFORE `#beginInFlight()` — invisible to the in-flight probe.
+		// Driven from a yield-queue idle injection, whose `#endInFlight` already
+		// ran, the pass's finalizer was the only flush left and it emitted the end
+		// as terminal immediately before the queued turn's `agent_start`. An
+		// rpc-mode/ACP/Cursor subscriber reads that as idle and can submit a
+		// competing prompt into the live continuation.
+		const { session } = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "call_compact", name: "compact", arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+			{ content: ["queued answer"], stopReason: "stop" },
+		]);
+
+		const order: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") order.push(event.isTerminal !== false ? "terminal_end" : "end");
+			if (event.type === "agent_start") order.push("agent_start");
+		});
+
+		const compactStarted = Promise.withResolvers<void>();
+		const compactGate = Promise.withResolvers<void>();
+		vi.spyOn(session, "compact").mockImplementation(async () => {
+			compactStarted.resolve();
+			await compactGate.promise;
+			return fakeCompaction();
+		});
+
+		const owner = session.sessionManager.getSessionId();
+		await session.queueLaunchCompletion({
+			event: "daemon-completed",
+			completionId: "compact-barrier-continuation",
+			owner,
+			daemon: {
+				name: "worker",
+				id: "daemon-id",
+				state: "exited",
+				createdAt: 1,
+				startedAt: 1,
+				exitedAt: 2,
+				exitCode: 0,
+				restartCount: 0,
+				outputBytes: 0,
+				owner,
+				persist: false,
+				detached: false,
+			},
+		});
+		await compactStarted.promise;
+
+		// Launched exactly as the queue flush launches it: not awaited, so it parks
+		// in the barrier and has claimed nothing when the pass finishes.
+		const queued = session.prompt("typed during compaction").catch(() => undefined);
+		for (let i = 0; i < 5; i++) await Bun.sleep(0);
+
+		compactGate.resolve();
+		await queued;
+		await session.waitForIdle();
+
+		// No terminal end before the queued turn starts, and exactly one after.
+		const firstTerminal = order.indexOf("terminal_end");
+		expect(firstTerminal).toBeGreaterThan(-1);
+		expect(order.lastIndexOf("agent_start")).toBeLessThan(firstTerminal);
+		expect(order.filter(entry => entry === "terminal_end")).toHaveLength(1);
+	}, 15_000);
+
 	it("holds an image-bearing prompt whose normalization suspended past the barrier", async () => {
 		// The prompt barrier runs EARLY, and image normalization plus the vision
 		// description call suspend after it. The pre-dispatch re-check tested only
