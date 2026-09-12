@@ -544,7 +544,7 @@ export class ExaProvider extends SearchProvider {
 		// it ALSO reads the environment (`#hasDedicatedEnvAuth`), so testing the
 		// env term alone left the same key admitting one line over. An operator's
 		// own export still counts: that is a deliberate process-wide credential.
-		if (isExaEnvHelperInjected()) return authStorage.hasAuthExcludingEnv("exa");
+		if (isExaEnvHelperInjected()) return authStorage.hasNonEnvCredential("exa");
 		return getEnvApiKey("exa") !== undefined || authStorage.hasAuth("exa");
 	}
 
