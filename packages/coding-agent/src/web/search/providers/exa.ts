@@ -521,7 +521,24 @@ export class ExaProvider extends SearchProvider {
 		// session holding one can service the request even when the process-global
 		// env key (another session's, possibly since removed) and the broker
 		// credential are both absent.
-		return !!getEnvApiKey("exa") || authStorage.hasAuth("exa") || !!context?.sessionExaApiKey;
+		//
+		// A HELPER-OWNED env key does not count on its own, for the same reason
+		// `search()` refuses it: it belongs to whichever session injected first.
+		// Admitting on it sent this session down the keyless MCP fallback — which
+		// is documented as explicit-selection-only — instead of moving on to its
+		// next configured provider. An operator's own export still counts, since
+		// that is a deliberate process-wide credential.
+		if (context?.sessionExaApiKey) return true;
+		// A HELPER-OWNED `EXA_API_KEY` does not admit on its own. It belongs to
+		// whichever session injected first, and `search()` refuses it, so
+		// admitting here sent this session into the keyless MCP fallback —
+		// documented as explicit-selection-only — instead of moving on to its next
+		// configured provider. `hasAuth` is checked through the same lens because
+		// it ALSO reads the environment (`#hasDedicatedEnvAuth`), so testing the
+		// env term alone left the same key admitting one line over. An operator's
+		// own export still counts: that is a deliberate process-wide credential.
+		if (isExaEnvHelperInjected()) return authStorage.hasAuthExcludingEnv("exa");
+		return getEnvApiKey("exa") !== undefined || authStorage.hasAuth("exa");
 	}
 
 	/**

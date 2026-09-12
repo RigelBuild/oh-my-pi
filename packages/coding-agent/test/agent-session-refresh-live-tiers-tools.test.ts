@@ -674,6 +674,55 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 25_000);
 
+	it("reapplies model-derived tool policy when a swap happens on an unchanged reload", async () => {
+		// The resume path from the offline-model fix: `#applyReloadedModel` swaps
+		// with `changed === false`, which skipped the generation-settings and
+		// prompt reconciles — leaving a new model paired with the old policy.
+		//
+		// Observed through `pruneToolDescriptions`, whose reconcile re-resolves
+		// `inlineToolDescriptors` against the LIVE model. The fixture's models all
+		// resolve `auto` the same way (measured), so the live value is staged to
+		// differ from the agent's field: only a reconcile that actually ran can
+		// close that gap, and it is the same code path a genuinely
+		// policy-divergent model pair would take.
+		const h = await makeHarness("inlineToolDescriptors: true\n", { persistSession: true });
+		try {
+			const startingModel = h.session.model;
+			const other = h.session.getAvailableModels().find(model => model.id !== startingModel?.id);
+			expect(other).toBeDefined();
+			if (!other || !startingModel) return;
+			expect(h.session.agent.pruneToolDescriptions).toBe(true);
+
+			const sessionFile = h.session.sessionFile;
+			if (!sessionFile) throw new Error("Expected a persisted session file");
+			await h.session.sessionManager.flush();
+
+			// The offline edit moves the default model AND the descriptor policy.
+			// Reloading before the restore is what puts this in-process session in
+			// the state a new process starts in.
+			await fs.writeFile(
+				h.settingsPath,
+				`inlineToolDescriptors: false\nmodelRoles:\n  default: ${other.provider}/${other.id}\n`,
+			);
+			await h.session.settings.reload();
+			expect(await h.session.switchSession(sessionFile)).toBe(true);
+			expect(h.session.model?.id).toBe(startingModel.id);
+			// The restore left the agent on the OLD policy while settings hold the new.
+			expect(h.session.agent.pruneToolDescriptions).toBe(true);
+
+			const result = await h.session.refresh("settings");
+
+			// Nothing reloaded — the file has not moved since `reload()` above.
+			expect(result.settingsChanged).toBe(false);
+			expect(result.modelSwapped).toBe(true);
+			// Pre-fix both of these were gated on `changed` and never ran.
+			expect(h.session.model?.id).toBe(other.id);
+			expect(h.session.agent.pruneToolDescriptions).toBe(false);
+		} finally {
+			await h.dispose();
+		}
+	}, 30_000);
+
 	it("leaves other core built-ins alone when one boolean gate moves", async () => {
 		// Each gate is its own lever: disabling `bash` must not disturb `glob`.
 		const h = await makeHarness("bash:\n  enabled: true\nglob:\n  enabled: true\n");

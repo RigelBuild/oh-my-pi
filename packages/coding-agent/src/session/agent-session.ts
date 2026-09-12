@@ -5966,7 +5966,15 @@ export class AgentSession {
 			// staleness as the queue modes above: sdk.ts copies these into mutable
 			// `Agent` fields at construction and request building reads the fields,
 			// so a settings reload alone never reaches a model call.
-			if (changed) this.#applyReloadedGenerationSettings(previousGenerationSettings);
+			// Also on a model swap with an UNCHANGED reload: `tools.format` and
+			// `inlineToolDescriptors` resolve `auto` against the model, so two models
+			// can disagree while the settings do not move. On the offline-edit resume
+			// path `#applyReloadedModel` swaps with `changed === false`, which left
+			// the agent pairing a new model with the old dialect/pruning policy. The
+			// method is per-field gated, so this reconciles only what actually moved.
+			if (changed || result.modelSwapped) {
+				this.#applyReloadedGenerationSettings(previousGenerationSettings);
+			}
 			// Same staleness one layer deeper: the per-family SERVICE TIER lives in
 			// `ModelControls`'s private map rather than an `Agent` field, and
 			// `agent.serviceTierResolver` consults it per request, so a `tier.*`
@@ -6512,9 +6520,15 @@ export class AgentSession {
 			// `PI_INTENT_TRACING`-pinned session is not silently un-pinned by a
 			// settings edit.
 			intentTracing: $flag("PI_INTENT_TRACING", this.settings.get("tools.intentTracing")),
-			// The model id matters: `shouldInlineToolDescriptors` resolves `auto`
-			// against it, so the effective value can move with a model swap as well
-			// as with the setting.
+			// Resolved against the model id, since `shouldInlineToolDescriptors`
+			// reads `auto` against it — so the effective value moves with a model
+			// swap as well as with the setting.
+			//
+			// Compared downstream against the AGENT's live field, not a
+			// settings-derived "previous": this runs after `settings.reload()`, so a
+			// settings-derived previous already equals the new value and the
+			// per-field gate would no-op on the swap-only path. The agent's field is
+			// what request assembly reads, and is the thing that must converge.
 			pruneToolDescriptions: shouldInlineToolDescriptors(
 				this.settings.get("inlineToolDescriptors"),
 				this.agent.state.model?.id,
@@ -6577,7 +6591,7 @@ export class AgentSession {
 		// `inlineToolDescriptors` decides whether the wire carries full tool
 		// descriptions. `#pruneToolDescriptions` moves with it so the session's
 		// own dump reports what the loop is actually sending.
-		if (next.pruneToolDescriptions !== previous.pruneToolDescriptions) {
+		if (next.pruneToolDescriptions !== this.agent.pruneToolDescriptions) {
 			this.agent.pruneToolDescriptions = next.pruneToolDescriptions;
 			this.#pruneToolDescriptions = next.pruneToolDescriptions;
 		}

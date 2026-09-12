@@ -652,14 +652,35 @@ export class MCPManager {
 			const source = loaded.sources[name];
 			if (source) sources[name] = source;
 		}
+		// Running servers the NEW selection does not contain at all. Iterating
+		// `loaded.configs` alone misses them, and they are not hypothetical: a
+		// project entry carrying `enabled: false` can claim a name during
+		// capability dedup and then be suppressed, so the name is absent from
+		// `loaded.configs` while the user-level server it outranked is still
+		// connected — where a fresh session would expose no such server. Only
+		// servers this reconcile's own discovery governs are considered, so an
+		// Exa/browser entry filtered out by policy is never mistaken for a
+		// removal.
+		for (const name of this.#serverConfigs.keys()) {
+			if (loaded.configs[name] !== undefined) continue;
+			// Only names DISCOVERY governs: `#sources` records `user`/`project` for
+			// a config-file server, and anything else (a `native` entry, or a
+			// server registered outside this path) is not this reconcile's to drop.
+			const level = this.#sources.get(name)?.level;
+			if (level !== "user" && level !== "project") continue;
+			superseded.push(name);
+		}
+		// Drop superseded connections FIRST, and before the early return below:
+		// `connectServers` is incremental and would otherwise see a name as already
+		// live and leave the loser running — and the suppressed-winner case has a
+		// server to drop with nothing to connect, so returning early would skip
+		// the disconnect entirely.
+		await Promise.all(superseded.map(name => this.disconnectServer(name)));
 		// Returned even when no connection moved: an Exa entry is FILTERED out of
 		// `configs` in favour of the native integration, so "nothing to connect"
 		// is exactly the case where the extracted credential still has to reach
 		// the caller.
 		if (Object.keys(configs).length === 0) return loaded.exaApiKeys;
-		// Drop superseded connections first: `connectServers` is incremental and
-		// would otherwise see the name as already live and leave the loser running.
-		await Promise.all(superseded.map(name => this.disconnectServer(name)));
 		await this.connectServers(configs, sources, options?.onStatus);
 		return loaded.exaApiKeys;
 	}

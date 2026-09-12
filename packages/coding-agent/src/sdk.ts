@@ -4731,12 +4731,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// cannot call would only mislead it.
 					//
 					// Live too, for the same reason as `kimiApiFormat` and
-					// `preferWebsockets` above: a `tools.intentTracing` change
-					// reconciles onto `agent.intentTracing`, and the construction-time
-					// constant would pin every later capture to the launch-time
-					// tool-schema policy.
+					// `preferWebsockets` above: an `inlineToolDescriptors` or
+					// `tools.intentTracing` change reconciles onto the primary agent,
+					// and the construction-time constant would pin every later capture
+					// to the launch-time tool-schema policy.
 					intentTracing: agent.intentTracing,
-					pruneToolDescriptions: inlineToolDescriptors,
+					pruneToolDescriptions: agent.pruneToolDescriptions,
 					dialect: resolveDialect(settings.get("tools.format"), captureModel),
 					abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
 					appendOnlyContext: shouldEnableAppendOnlyContext(
