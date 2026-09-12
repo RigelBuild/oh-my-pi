@@ -264,6 +264,25 @@ export class ModelControls {
 	#settingsTrackingFamilies(configured: ServiceTierByFamily): ReadonlyArray<keyof ServiceTierByFamily> {
 		return SERVICE_TIER_FAMILIES.filter(family => this.#serviceTierByFamily[family] === configured[family]);
 	}
+
+	/**
+	 * Families an earlier operation already pinned, read off the most recent
+	 * receipt: any family absent from its tracking list was pinned then, and that
+	 * provenance has to survive a later write about a different family.
+	 *
+	 * No receipt at all means nothing is pinned yet — restoration re-derives
+	 * every family from `tier.*` in that state.
+	 */
+	#pinnedServiceTierFamilies(): ReadonlySet<keyof ServiceTierByFamily> {
+		const branch = this.#host.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type !== "service_tier_change") continue;
+			const tracking = new Set(entry.settingsTrackingFamilies ?? SERVICE_TIER_FAMILIES);
+			return new Set(SERVICE_TIER_FAMILIES.filter(family => !tracking.has(family)));
+		}
+		return new Set();
+	}
 	resolveRoleModel(role: string): Model | undefined {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
 			.model;
@@ -943,8 +962,16 @@ export class ModelControls {
 		// a pin, and inferring provenance by equality let a later config edit
 		// overwrite a choice that is meant to outrank config. Every other family
 		// still equal to the live config is safe for restoration to re-derive.
+		// Carried forward, not recomputed from scratch: a family pinned by an
+		// EARLIER operation is absent from that receipt's tracking list, and
+		// re-inferring by equality hands it back to config the moment any other
+		// family is set. Pin OpenAI to a value that equals `tier.openai`, then
+		// select a Google tier, and the Google operation would re-mark OpenAI as
+		// config-following — so a later `tier.openai` edit overwrote a selection
+		// meant to outrank config.
+		const previouslyPinned = this.#pinnedServiceTierFamilies();
 		const tracking = this.#settingsTrackingFamilies(this.#configuredServiceTiers()).filter(
-			family => family !== pinnedFamily,
+			family => family !== pinnedFamily && !previouslyPinned.has(family),
 		);
 		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry(), tracking);
 	}
