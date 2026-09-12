@@ -2541,6 +2541,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				savedParse = reparseSavedSuffix();
 			}
 			restoredSessionThinkingLevel = savedParse?.thinkingLevel;
+			// The early parse already fed a WRONG level into `thinkingLevel` and
+			// `effectiveThinkingLevel`. Correcting only the restored value leaves
+			// the session running the misread one whenever `model` is already
+			// resolved here, since the later fallback recomputation is gated on
+			// `!model`. Re-pick from the corrected restored value.
+			thinkingLevel = pickInitialThinkingLevel(model);
+			autoThinking = thinkingLevel === AUTO_THINKING;
+			effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+			if (model) {
+				const reparsedModel = model;
+				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+					autoThinking
+						? resolveProvisionalAutoLevel(reparsedModel)
+						: resolveThinkingLevelForModel(reparsedModel, effectiveThinkingLevel),
+				);
+			}
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role
