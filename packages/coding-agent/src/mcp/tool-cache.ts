@@ -60,7 +60,17 @@ const CACHE_TOMBSTONE_TTL_MS = CACHE_TTL_MS;
  * by many processes at once, where giving up simply leaves the peer's newer
  * row in place.
  */
-const CACHE_WRITE_ATTEMPTS = 4;
+const CACHE_CLAIM_ATTEMPTS = 4;
+
+/**
+ * Backstop for {@link MCPToolCache.#writeOrdered}, which exits on the row's
+ * ordering token rather than on this count. Every CAS loss there is a peer
+ * commit, and a peer at or above our token takes the early return, so the
+ * losses that keep the loop running are older writers — one per request already
+ * in flight against this server. The bound only has to outlast that, and exists
+ * for a storage layer that never reports success.
+ */
+const CACHE_WRITE_ATTEMPTS = 64;
 
 type MCPToolCachePayload = {
 	version: number;
@@ -248,7 +258,7 @@ export class MCPToolCache {
 	 * catalog's: see {@link MCPToolClaimPayload}.
 	 *
 	 * Returns `undefined` when the claim could not be published within
-	 * {@link CACHE_WRITE_ATTEMPTS}: an unreserved token must never order a
+	 * {@link CACHE_CLAIM_ATTEMPTS}: an unreserved token must never order a
 	 * write, so that request skips caching rather than risking an inversion.
 	 *
 	 * Publishing is a CAS, and a lost race is re-driven rather than ignored.
@@ -262,7 +272,7 @@ export class MCPToolCache {
 		const catalog = cacheKey(serverName);
 		const claim = claimKey(serverName);
 		let claimed = 0;
-		for (let attempt = 0; attempt < CACHE_WRITE_ATTEMPTS; attempt++) {
+		for (let attempt = 0; attempt < CACHE_CLAIM_ATTEMPTS; attempt++) {
 			const claimRaw = this.storage.getCache(claim);
 			const ceiling = orderingCeiling(this.storage.getCache(catalog), claimRaw);
 			const reading = toolCatalogObservedAt();
@@ -377,7 +387,20 @@ export class MCPToolCache {
 		// FAILED reservation from `observeCatalogAt()`: that write has no
 		// established order, so it must not touch the cache at all. The two cases
 		// are opposite, which is why they cannot share a `?? sampleNow()`.
-		if (observed.length === 1 && observed[0] === undefined) return;
+		if (observed.length === 1 && observed[0] === undefined) {
+			// Unreserved, so this response must not be cached — but it still
+			// OBSERVED the server, and later than anything already in flight here.
+			// Returning without marking that left an earlier request free to pass
+			// `isCurrent()` and `#writeOrdered()` (which inspects the catalog row,
+			// never the claim) and persist its superseded catalog for 30 days.
+			// Sampling now is sound because every earlier request's token was read
+			// before this one entered, so the mark is above all of them and below
+			// anything that enters next.
+			const unreservedAt = toolCatalogObservedAt();
+			const seen = this.#newestObserved.get(serverName);
+			this.#newestObserved.set(serverName, Math.max(seen ?? unreservedAt, unreservedAt));
+			return;
+		}
 		const writeStartedAt = observed[0] ?? toolCatalogObservedAt();
 		const newestSeen = this.#newestObserved.get(serverName);
 		this.#newestObserved.set(serverName, Math.max(newestSeen ?? writeStartedAt, writeStartedAt));
@@ -536,6 +559,14 @@ export class MCPToolCache {
 		unorderable: "drop" | "replace";
 	}): void {
 		const key = cacheKey(args.serverName);
+		// Bounded by the SEMANTIC exit below, not by the attempt count. A CAS loss
+		// proves only that a peer committed — not that its catalog is newer — so
+		// stopping after a fixed number of losses leaves an older toolset cached
+		// for the full TTL despite this newer listing having succeeded. Every loss
+		// is a peer commit, and a peer whose token is at or above ours takes the
+		// early return, so the losses that keep us here are all older writers:
+		// finite, one per request already in flight. The count remains only as a
+		// backstop against a storage layer that never reports success.
 		for (let attempt = 0; attempt < CACHE_WRITE_ATTEMPTS; attempt++) {
 			const persistedNow = this.storage.getCache(key);
 			const persistedStartedAt = readWriteStartedAt(persistedNow);
