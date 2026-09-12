@@ -887,6 +887,63 @@ describe("searchExa: EXA_API_KEY vs the session's MCP-discovered key", () => {
 		for (const url of urls) expect(url).not.toContain("peer-injected-key");
 	});
 
+	it("does not authenticate through AuthStorage with a peer-injected EXA_API_KEY", async () => {
+		// One layer under the fallback above: `AuthStorage.getApiKey` resolves the
+		// dedicated env var ITSELF, so a session holding its own key still had the
+		// peer's key returned as `storedKey`, took the resolver branch, and billed
+		// the peer's account — the session key never got a say.
+		const owner = {};
+		applyMCPEnvironment({ exaApiKeys: ["peer-injected-key"] }, owner);
+		expect(isExaEnvHelperInjected()).toBe(true);
+
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			let sent: string | undefined;
+			await searchExa({
+				query: "precedence probe",
+				sessionExaApiKey: "my-own-session-key",
+				authStorage,
+				fetch: wrapFetch((_url, init) => {
+					sent = (init?.headers as Record<string, string> | undefined)?.["x-api-key"];
+					return new Response(JSON.stringify(makeMockExaResponse()), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}),
+			});
+			expect(sent).toBe("my-own-session-key");
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("still authenticates through AuthStorage with an operator-exported key", async () => {
+		// Positive control for the exclusion: a deliberate process-wide export
+		// must keep resolving, or the fix would simply disable the env path.
+		env.EXA_API_KEY = "operator-exported-key";
+		expect(isExaEnvHelperInjected()).toBe(false);
+
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			let sent: string | undefined;
+			await searchExa({
+				query: "precedence probe",
+				sessionExaApiKey: "my-own-session-key",
+				authStorage,
+				fetch: wrapFetch((_url, init) => {
+					sent = (init?.headers as Record<string, string> | undefined)?.["x-api-key"];
+					return new Response(JSON.stringify(makeMockExaResponse()), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}),
+			});
+			expect(sent).toBe("operator-exported-key");
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it("falls back to EXA_API_KEY when this session discovered no key", async () => {
 		env.EXA_API_KEY = "operator-exported-key";
 		expect(await keyUsedForSearch(undefined)).toBe("operator-exported-key");

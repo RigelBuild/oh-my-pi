@@ -860,6 +860,13 @@ type AuthApiKeyOptions = {
 	 * that a peer/broker rotated out from under us is replaced before retrying.
 	 */
 	forceRefresh?: boolean;
+	/**
+	 * Skip the dedicated `<PROVIDER>_API_KEY` environment variable when
+	 * resolving. For callers that have already established the live env value is
+	 * foreign to them — a process-global variable another session injected — and
+	 * so must not authenticate with it. Every other source is unaffected.
+	 */
+	excludeEnv?: boolean;
 };
 type OAuthResolutionResult = {
 	apiKey: string;
@@ -5994,7 +6001,7 @@ export class AuthStorage {
 		// suppresses account_uuid for this session.
 		if (sessionId) this.#sessionLastCredential.get(provider)?.delete(sessionId);
 
-		const envKey = getEnvApiKey(provider);
+		const envKey = options?.excludeEnv ? undefined : getEnvApiKey(provider);
 		if (envKey) return envKey;
 		const apiKeySelection = await this.#selectApiKeyCredential(
 			provider,
@@ -7002,14 +7009,21 @@ export class AuthStorage {
 	 * Used by web-search providers and other consumers that hold an AuthStorage
 	 * directly (no ModelRegistry in scope).
 	 */
-	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
-		const { sessionId, baseUrl, modelId } = options ?? {};
+	resolver(
+		provider: string,
+		options?: { sessionId?: string; baseUrl?: string; modelId?: string; excludeEnv?: boolean },
+	): ApiKeyResolver {
+		// `excludeEnv` has to travel with the resolver, not just the first lookup:
+		// every branch below re-enters `getApiKey`, so a retry would otherwise
+		// re-admit the very environment key the caller excluded.
+		const { sessionId, baseUrl, modelId, excludeEnv } = options ?? {};
 		return async ({ lastChance, error, signal, previousKey }) => {
 			if (error === undefined) {
 				return this.getApiKey(provider, sessionId, {
 					baseUrl,
 					modelId,
 					signal,
+					excludeEnv,
 				});
 			}
 			if (lastChance) {
@@ -7031,6 +7045,7 @@ export class AuthStorage {
 					baseUrl,
 					modelId,
 					signal,
+					excludeEnv,
 				});
 			}
 			return this.getApiKey(provider, sessionId, {
@@ -7038,6 +7053,7 @@ export class AuthStorage {
 				modelId,
 				forceRefresh: true,
 				signal,
+				excludeEnv,
 			});
 		};
 	}

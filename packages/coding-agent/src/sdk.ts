@@ -186,11 +186,7 @@ import {
 } from "./session/retry-fallback-chains";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
-import {
-	additionalWorkspaceDirectories,
-	normalizeSessionWorkspace,
-	reconcileSettingsWorkspaceRoots,
-} from "./session/session-workspace";
+import { reconcileSettingsWorkspaceRoots } from "./session/session-workspace";
 import {
 	collectMountedMCPToolRoutes,
 	isSettingGatedTool,
@@ -1475,24 +1471,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// removing a directory from settings actually revokes it while header and
 	// `/add-dir` roots stay. Empty when `--add-dir` pinned the list: the
 	// listener returns early in that case, so nothing is settings-owned.
-	let settingsOwnedRoots = new Set(
-		options.additionalDirectories
-			? []
-			: additionalWorkspaceDirectories(
-					normalizeSessionWorkspace({
-						// `sessionManager.getCwd()` for the same reason the live
-						// reconcile uses it: it is the directory the roots are actually
-						// resolved against.
-						cwd: sessionManager.getCwd(),
-						directories: settings.get("workspace.additionalDirectories"),
-					}),
-				),
-	);
-	if (configuredDirs.length > 0) {
-		// Merge with any roots restored from the session header (resume/fork), not replace.
-		const existing = sessionManager.getAdditionalDirectories();
-		const merged = [...new Set([...existing, ...configuredDirs])];
-		await sessionManager.setAdditionalDirectories(merged);
+	// Seeded from the roots the HEADER records as settings-derived, not from the
+	// roots current settings configure. On a resume those differ precisely in
+	// the case that matters: a root persisted into the header and then removed
+	// from config while the session was stopped is absent from the live value,
+	// so a settings-derived seed starts empty, the reconcile sees no change, and
+	// the revoked directory stays granted forever. Sessions written before the
+	// header carried provenance report nothing, which keeps their roots manual —
+	// the prior behaviour, and the safe direction.
+	let settingsOwnedRoots = new Set(options.additionalDirectories ? [] : sessionManager.getSettingsOwnedDirectories());
+	if (options.additionalDirectories) {
+		// `--add-dir` pins the list for the session, so nothing is settings-owned
+		// and the reconcile below is skipped entirely. Merge with header roots
+		// (resume/fork) rather than replacing them.
+		if (configuredDirs.length > 0) {
+			const merged = [...new Set([...sessionManager.getAdditionalDirectories(), ...configuredDirs])];
+			await sessionManager.setAdditionalDirectories(merged);
+		}
+	} else {
+		// Through the SAME reconcile the live listener uses, so a config edit made
+		// while the session was stopped lands exactly as one made while it ran.
+		// A merge alone could only ever ADD: with the root removed the live value
+		// is empty, `configuredDirs.length > 0` is false, and the header kept
+		// granting a directory the config no longer names.
+		const { roots, owned } = reconcileSettingsWorkspaceRoots({
+			cwd: sessionManager.getCwd(),
+			live: sessionManager.getAdditionalDirectories(),
+			previouslyOwned: settingsOwnedRoots,
+			configured: configuredDirs,
+		});
+		settingsOwnedRoots = owned;
+		await sessionManager.setAdditionalDirectories(roots);
+		await sessionManager.setSettingsOwnedDirectories([...owned]);
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	const forkCacheShapeChanged =
@@ -3311,17 +3321,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// completes; the rebuild that `refreshMCPTools` triggers post-discovery
 			// then picks up the mounted routes and any connected-server instructions.
 			const serverInstructions = mcpManager?.getServerInstructions();
-			// Drive guidance off the auto-learn BUILTINS that createTools actually built
-			// (provenance, not just an active name): `builtInToolNames` excludes a
-			// custom/extension tool that merely shares the name, and reflects the
-			// session-start build — so a subagent that filtered them out, a mid-session
-			// enable that never built them, or a same-named custom tool while auto-learn
-			// is off all get no guidance.
+			// Drive guidance off the auto-learn BUILTINS this session currently has
+			// (provenance, not just an active name): a custom/extension tool that
+			// merely shares the name must not earn guidance.
+			//
+			// Read through the session's LIVE provenance rather than the
+			// construction-time `builtInToolNames`, which cannot see the settings
+			// reconcile: an off→on edit builds `manage_skill` and would otherwise
+			// activate it with no standing guidance, and an on→off edit would keep
+			// rendering guidance for tools that are gone. Before the session exists
+			// the array is all there is, and it is accurate then.
+			// Provenance AND activation: `hasBuiltInTool` keeps reporting a name the
+			// disable path removed from the registry (it records what the session
+			// BUILT, which is what keeps a re-enable from being mistaken for a
+			// custom tool), so guidance for a gated-off tool would survive on that
+			// alone.
+			const enabledToolNames = hasSession ? session.getEnabledToolNames() : undefined;
+			const hasAutoLearnBuiltin = (name: string): boolean =>
+				enabledToolNames
+					? session.hasBuiltInTool(name) && enabledToolNames.includes(name)
+					: builtInToolNames.includes(name);
 			const autoLearnInstructions = restrictToolNames
 				? undefined
 				: buildAutoLearnInstructions({
-						manageSkill: builtInToolNames.includes("manage_skill"),
-						learn: builtInToolNames.includes("learn"),
+						manageSkill: hasAutoLearnBuiltin("manage_skill"),
+						learn: hasAutoLearnBuiltin("learn"),
 					});
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
@@ -3916,8 +3940,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 			if (persistInitialServiceTier) {
+				// Provenance travels with this receipt too. Being the LATEST receipt,
+				// it decides what a later resume restores — so omitting the list here
+				// cleared the provenance a prior receipt carried and froze the other
+				// families alongside the intentional OpenAI pin, where no subsequent
+				// refresh could detect an offline `tier.*` edit.
+				//
+				// CARRIED from the restored receipt rather than re-derived: only the
+				// flag's own family changes provenance here, and re-deriving would
+				// hand tracking back to a family an earlier `/fast` or selector had
+				// deliberately pinned.
+				const carriedTrackingFamilies = (existingSession.serviceTierSettingsTrackingFamilies ?? []).filter(
+					family => family !== "openai",
+				);
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					carriedTrackingFamilies,
 				);
 			}
 		} else {
@@ -4487,10 +4525,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// refresh reports completion while the prompt still advertises the
 			// pre-refresh roots.
 			session.registerHostReconciliation(
-				sessionManager.setAdditionalDirectories(roots).then(
-					() => session.refreshBaseSystemPrompt(),
-					error => logger.warn("Failed to apply refreshed workspace directories", { error: String(error) }),
-				),
+				sessionManager
+					.setAdditionalDirectories(roots)
+					// Persisted with the roots themselves, so the next resume
+					// reconciles against what this edit granted rather than the
+					// provenance the session started with.
+					.then(() => sessionManager.setSettingsOwnedDirectories([...owned]))
+					.then(
+						() => session.refreshBaseSystemPrompt(),
+						error => logger.warn("Failed to apply refreshed workspace directories", { error: String(error) }),
+					),
 			);
 		});
 		disposeCallbacks.add(unsubscribeLiveWorkspaceSettings);
