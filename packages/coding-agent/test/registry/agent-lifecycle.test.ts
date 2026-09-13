@@ -1032,6 +1032,70 @@ describe("AgentLifecycleManager", () => {
 		await revival.catch(() => {});
 	});
 
+	// Third face of the same finding, on the CALLER side. `parkAll()` waits out a
+	// pre-barrier revival and then parks the session it registered — but awaiting
+	// that promise also resolves the original `ensureLive()` caller, in the gap
+	// before the parking snapshot runs. A concurrent hub send can start work on
+	// the session in that gap, after which the barrier detaches and disposes it
+	// mid-request: exactly the live child the barrier promises to exclude.
+	//
+	// So a successful pre-barrier revival must not reach its waiter until the
+	// handoff releases. The gate sits on the OUTER return path, not inside the
+	// revival: `parkAll()`'s pre-pass awaits the revival promise itself, so
+	// withholding that promise would make the barrier wait on work waiting on the
+	// barrier.
+	//
+	// RED (pre-fix): the waiter received the session while the barrier was still
+	// parking it, so the resolved session was disposed underneath it.
+	it("does not hand a pre-barrier revival to its caller until the handoff releases", async () => {
+		const gate = deferred();
+		const revived = makeSessionStub();
+		registry.register({
+			id: "Barrier-Handoff",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/Barrier-Handoff.jsonl",
+			status: "parked",
+		});
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => async () => {
+				await gate.promise;
+				return revived.session;
+			},
+			0,
+		);
+
+		const revival = lifecycle.ensureLive("Barrier-Handoff");
+		await flushAsync();
+
+		const parking = lifecycle.parkAll();
+		// Settle the revival while the barrier waits on it: the session is built
+		// and registered, and the barrier is about to park it.
+		gate.resolve();
+		const release = await parking;
+
+		// The waiter must still be pending here. Resolving it now would hand out a
+		// session the barrier is in the middle of disposing.
+		let settledEarly = false;
+		void revival.then(
+			() => {
+				settledEarly = true;
+			},
+			() => {
+				settledEarly = true;
+			},
+		);
+		await flushAsync();
+		expect(settledEarly).toBe(false);
+
+		release();
+		// Once the handoff releases, the session it built has been parked and
+		// disposed, so the waiter is failed rather than handed a dead session.
+		await expect(revival).rejects.toThrow(/recycled/);
+		expect(registry.get("Barrier-Handoff")?.session).toBeNull();
+	});
+
 	// The pre-pass that settles in-flight revivals has to be bounded by the SAME
 	// deadline as the parking phase below it. The recycle wrapper calls
 	// session.beginDispose() BEFORE awaiting parkAll(), so a revival wedged in its
