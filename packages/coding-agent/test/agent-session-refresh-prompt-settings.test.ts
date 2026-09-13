@@ -503,6 +503,39 @@ describe("AgentSession refresh('settings'): bash.autoBackground.enabled reaches 
 	});
 });
 
+describe("AgentSession refresh('settings'): eval's own description settings reach the prompt", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	// `EvalTool.description` passes `eval.autoBackground.enabled` — its OWN key,
+	// never the bash one — so tracking only `bash.autoBackground.enabled` left
+	// the embedded eval description advertising the retired contract.
+	const GUIDANCE = "auto-background by the configured threshold";
+
+	it("withdraws eval's auto-background guidance after a refresh turns it off", async () => {
+		const h = await makeHarness(
+			"compaction:\n  enabled: false\ninlineToolDescriptors: true\nbash:\n  autoBackground:\n    enabled: false\neval:\n  autoBackground:\n    enabled: true\n",
+		);
+		try {
+			await h.session.refreshBaseSystemPrompt();
+			expect(h.session.systemPrompt.join("\n")).toContain(GUIDANCE);
+
+			// Only the EVAL key moves; the bash one is already off and stays off,
+			// so a snapshot tracking just the bash key compares equal here.
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  enabled: false\ninlineToolDescriptors: true\nbash:\n  autoBackground:\n    enabled: false\neval:\n  autoBackground:\n    enabled: false\n",
+			);
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			expect(h.session.systemPrompt.join("\n")).not.toContain(GUIDANCE);
+		} finally {
+			await h.dispose();
+		}
+	});
+});
+
 describe("AgentSession refresh('settings'): a memory injection limit reaches the prompt", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
