@@ -537,6 +537,12 @@ function clampContent(
 function clampUserMessage(message: UserMessage, state: ImageClampState): UserMessage {
 	const payload = clampReplayedInputImages(message, state);
 	if (!Array.isArray(message.content) || !clampWanted(state)) return payload ? { ...message, ...payload } : message;
+	// This turn's generic content never travels — the accounting skipped it for
+	// the same reason. Descending into it spent the allowance on bytes the
+	// converter drops, and the `providerPayload: undefined` below would then
+	// discard the replay items that ARE the request.
+	if (supersedesContentWithReplay(message, state.model, state.replaysNativeHistory))
+		return payload ? { ...message, ...payload } : message;
 	const content = clampContent(message.content, state);
 	if (!content) return payload ? { ...message, ...payload } : message;
 	// Dropping a generic image already discards the payload, which is where the
@@ -547,6 +553,8 @@ function clampUserMessage(message: UserMessage, state: ImageClampState): UserMes
 function clampDeveloperMessage(message: DeveloperMessage, state: ImageClampState): DeveloperMessage {
 	const payload = clampReplayedInputImages(message, state);
 	if (!Array.isArray(message.content) || !clampWanted(state)) return payload ? { ...message, ...payload } : message;
+	if (supersedesContentWithReplay(message, state.model, state.replaysNativeHistory))
+		return payload ? { ...message, ...payload } : message;
 	const content = clampContent(message.content, state);
 	if (!content) return payload ? { ...message, ...payload } : message;
 	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE], providerPayload: undefined };

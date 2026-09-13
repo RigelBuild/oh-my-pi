@@ -1106,6 +1106,51 @@ describe("provider context image budgets", () => {
 		expect(imageData(clamped).length).toBe(liveImages);
 	});
 
+	it("leaves replay-superseded content alone and keeps the payload that travels", async () => {
+		// `convertConversationMessages()` pushes the replay items and skips
+		// `msg.content` entirely, so a superseded turn's generic images never
+		// travel — which is why the accounting skips them too. The clamp still
+		// descended into them, spending the allowance on bytes the converter drops
+		// and then setting `providerPayload: undefined`, discarding the replay
+		// items that ARE the request.
+		//
+		// The superseded turn's own replay image is REFERENCE-backed, so it carries
+		// no bytes to give back: that leaves the byte allowance still owed when the
+		// clamp reaches its generic content, which is the case the fix covers.
+		const generic = "g".repeat(4096);
+		const live = "l".repeat(providerImageByteBudget(OPENAI_MODEL.provider) + 1024);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("summary"), image(generic)],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "compaction", id: "cmp_1" },
+							{
+								type: "message",
+								role: "user",
+								content: [{ type: "input_image", image_url: "https://example.test/shot.png" }],
+							},
+						],
+					},
+				},
+				{ role: "user", timestamp: 2, content: [image(live)] },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+		const first = clamped.messages[0];
+
+		// RED (pre-fix): the generic image was dropped and the payload cleared, so
+		// the replayed history the request actually carries went with it.
+		expect(first.role === "user" && first.providerPayload).toBeDefined();
+		expect(imageData(clamped).some(data => data === generic)).toBe(true);
+	});
+
 	it("drops the content mirror when it redacts a demoted screenshot", async () => {
 		// Clearing `providerMetadata` takes the result OFF the demotion branch:
 		// `appendResponsesToolResultMessages()` only demotes a `type: "computer"`
