@@ -9816,7 +9816,14 @@ export class AgentSession {
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel(), {
 				settingsTracking: carriedThinkingFollowsSettings,
 			});
-			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
+			// Provenance restated, like the thinking receipt above: `/new` starts a
+			// fresh transcript, and a service-tier receipt with no tracking list
+			// reads as a legacy fully-pinned snapshot — freezing every family at the
+			// value `/new` captured, where a later `tier.*` edit could not reach it.
+			this.sessionManager.appendServiceTierChange(
+				this.#models.serviceTierEntry(),
+				this.#models.serviceTierTrackingFamilies(),
+			);
 
 			this.#todo.resetCycle();
 			this.#planReferenceSent = false;

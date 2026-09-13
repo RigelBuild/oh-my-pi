@@ -414,6 +414,50 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("carries service-tier provenance into a /new receipt", async () => {
+		// `/new` starts a fresh transcript and writes a service-tier receipt. With
+		// no tracking list that receipt reads as a LEGACY fully-pinned snapshot, so
+		// the value `/new` captured froze every family and a later `tier.*` edit
+		// could never reach it.
+		const h = await makeHarness("tier:\n  openai: priority\n", { persistSession: true });
+		try {
+			expect(h.session.serviceTierByFamily.openai).toBe("priority");
+
+			await h.session.newSession();
+			const sessionFile = h.session.sessionFile;
+			if (!sessionFile) throw new Error("Expected a persisted session file");
+			h.session.sessionManager.appendMessage({
+				role: "assistant",
+				provider: "anthropic",
+				model: h.modelA.id,
+				content: [{ type: "text", text: "reply" }],
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				api: "anthropic-messages",
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			await h.session.sessionManager.flush();
+
+			// Edited while stopped, exactly as in the resume case above.
+			await fs.writeFile(h.settingsPath, "tier:\n  openai: flex\n");
+			await h.session.settings.reload();
+
+			expect(await h.session.switchSession(sessionFile)).toBe(true);
+
+			// Pre-fix this was the frozen `priority` from the /new receipt.
+			expect(h.session.serviceTierByFamily.openai).toBe("flex");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("keeps a pin a legacy service-tier receipt recorded", async () => {
 		// A legacy `service_tier_change` omits the tracking list, and restoration
 		// reads that as FULLY PINNED. The pinned-family reader disagreed, treating

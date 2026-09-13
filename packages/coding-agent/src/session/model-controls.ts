@@ -985,6 +985,22 @@ export class ModelControls {
 		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry(), tracking);
 	}
 
+	/**
+	 * The tracking list a receipt written RIGHT NOW should carry: families whose
+	 * live tier still equals `tier.*`, minus any an earlier operation pinned.
+	 *
+	 * Exposed for the `/new` receipt, which starts a fresh transcript and so
+	 * must restate this session's provenance rather than omit it — an omitted
+	 * list reads as a legacy fully-pinned snapshot, freezing every family at the
+	 * value `/new` happened to capture.
+	 */
+	serviceTierTrackingFamilies(): ReadonlyArray<keyof ServiceTierByFamily> {
+		const previouslyPinned = this.#pinnedServiceTierFamilies();
+		return this.#settingsTrackingFamilies(this.#configuredServiceTiers()).filter(
+			family => !previouslyPinned.has(family),
+		);
+	}
+
 	/** The per-family tier map the live `tier.*` settings configure. */
 	#configuredServiceTiers(): ServiceTierByFamily {
 		return buildServiceTierByFamily(
