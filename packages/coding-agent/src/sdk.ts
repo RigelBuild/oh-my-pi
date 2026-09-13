@@ -3065,8 +3065,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// deliberately has no pass running yet, and starting one here would
 			// undo the deferral that keeps discovery off the first frame.
 			let discoveryRefreshed = false;
+			// Whether discovery could still make an UNRESOLVED candidate selectable.
+			//
+			// `hasRefreshableProviders()` answers only "is anything refreshable
+			// anywhere", so an ordered default whose first entry simply lacks
+			// credentials forced a synchronous online catalog request — potentially
+			// the full discovery timeout — on behalf of a provider discovery cannot
+			// help. Only the candidates AHEAD of the match are still wanted, and only
+			// those naming a provider a scoped refresh could populate.
+			const unresolvedCandidateCanDiscover = (): boolean => {
+				const matchedIndex = defaultRoleSpec.model
+					? (defaultRoleSpec.matchedPatternIndex ?? 0)
+					: defaultRolePatterns.length;
+				for (const [index, pattern] of defaultRolePatterns.entries()) {
+					if (index >= matchedIndex) break;
+					// A self alias can become a real model when a late provider registers
+					// one matching its spelling (`default,@default` against Cursor), so
+					// discovery is genuinely wanted for it.
+					if (isDefaultModelRoleSelfAlias(pattern)) return true;
+					const provider = pattern.split("/")[0];
+					// A wildcard or bare-id pattern names no provider, so any refresh
+					// could supply it — keep the old behaviour there.
+					if (!provider || provider === pattern || provider.includes("*")) return true;
+					if (modelRegistry.canRefreshProvider(provider)) return true;
+				}
+				return false;
+			};
 			const refreshDiscoveryOnce = async (): Promise<boolean> => {
 				if (discoveryRefreshed || !modelRegistry.hasRefreshableProviders()) return false;
+				if (!unresolvedCandidateCanDiscover()) return false;
 				discoveryRefreshed = true;
 				await runtimeDiscoveryPromise;
 				// And the background refresh startup kicked off for a registry the SDK

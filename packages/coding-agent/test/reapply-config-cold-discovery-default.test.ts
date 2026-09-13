@@ -119,7 +119,11 @@ describe("--reapply-config cold-discovery configured default", () => {
 	 * discovery fetch: models.yml declares the provider with no static models and
 	 * the cache starts cold, so nothing resolves until a refresh runs.
 	 */
-	async function resume(sessionFile: string, settings: Settings): Promise<AgentSession> {
+	async function resume(
+		sessionFile: string,
+		settings: Settings,
+		extraProviders: Record<string, unknown> = {},
+	): Promise<AgentSession> {
 		const modelsPath = path.join(tempDir.path(), "models.yml");
 		await Bun.write(
 			modelsPath,
@@ -131,6 +135,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 						auth: "none",
 						discovery: { type: "ollama" },
 					},
+					...extraProviders,
 				},
 			}),
 		);
@@ -182,6 +187,32 @@ describe("--reapply-config cold-discovery configured default", () => {
 		});
 		return state;
 	}
+
+	it("skips the discovery retry when no unresolved candidate could become available", async () => {
+		// `static-only/missing,anthropic/<real-id>`: the first entry is unresolvable
+		// and its provider is declared in models.yml with static rows and no
+		// `discovery:` entry, so no refresh can ever produce that ID. The old guard
+		// asked only `hasRefreshableProviders()` — true here, since the ollama
+		// provider IS refreshable — so a match at index 1 still forced a
+		// synchronous online catalog request on behalf of a candidate discovery
+		// cannot help, charging startup up to the discovery timeout.
+		const later = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(later));
+
+		const settings = await loadOverlay(`static-only/missing,${modelValue(later)}`);
+		const resumed = await resume(sessionFile, settings, {
+			"static-only": {
+				baseUrl: "https://static.example.invalid/v1",
+				api: "openai-completions",
+				auth: "none",
+				models: [{ id: "present", name: "Present" }],
+			},
+		});
+
+		expect(resumed.model?.id).toBe(later.id);
+		// RED (pre-fix): the fallback ran its `refresh`, so this was defined.
+		expect(observed?.fallbackSawJoin).toBeUndefined();
+	});
 
 	it("discovers the configured default instead of falling back to the session's baked model", async () => {
 		const bakedModel = anthropicModel("claude-sonnet-4-5");
