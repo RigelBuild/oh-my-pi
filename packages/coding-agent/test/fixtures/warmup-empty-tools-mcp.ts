@@ -14,6 +14,12 @@
  *
  * Each `tools/list` call appends `<ts> <count>` to `$OMP_TEST_LIST_LOG` (when
  * set) so a test can assert how many times tools were (re-)listed.
+ *
+ * `$OMP_TEST_LIST_DELAY_MS` optionally delays each response by a scripted number
+ * of milliseconds (same comma-separated, last-value-repeats form). A test that
+ * needs two concurrent listings to answer in a CHOSEN order sets it so the
+ * earlier request replies last — otherwise responses follow request order and
+ * the interleaving cannot be reproduced.
  */
 import * as fs from "node:fs";
 import * as readline from "node:readline";
@@ -23,6 +29,10 @@ const countsPerList = (Bun.env.OMP_TEST_TOOLS_PER_LIST ?? "0,1")
 	.map(part => Number(part.trim()))
 	.map(value => (Number.isFinite(value) && value >= 0 ? value : 0));
 const listLog = Bun.env.OMP_TEST_LIST_LOG;
+const delaysPerList = (Bun.env.OMP_TEST_LIST_DELAY_MS ?? "0")
+	.split(",")
+	.map(part => Number(part.trim()))
+	.map(value => (Number.isFinite(value) && value >= 0 ? value : 0));
 
 /** Deterministic tool name for index `i`: tool_a, tool_b, … (digit-free so MCP
  *  name sanitization can't collapse distinct tools together). */
@@ -72,7 +82,10 @@ rl.on("line", line => {
 			description: `Fixture tool #${i}.`,
 			inputSchema: { type: "object", properties: {}, additionalProperties: false },
 		}));
-		send({ jsonrpc: "2.0", id: message.id, result: { tools } });
+		const delay = delaysPerList[Math.min(listIndex - 1, delaysPerList.length - 1)] ?? 0;
+		const id = message.id;
+		if (delay > 0) setTimeout(() => send({ jsonrpc: "2.0", id, result: { tools } }), delay);
+		else send({ jsonrpc: "2.0", id, result: { tools } });
 		return;
 	}
 });
