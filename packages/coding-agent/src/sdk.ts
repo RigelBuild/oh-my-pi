@@ -1626,12 +1626,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Read lazily — `defaultRoleSpec` is re-resolved once late-registering
 	// extension providers appear, which can turn an unresolved candidate into a
 	// resolved one.
-	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined =>
-		spec.model
-			? undefined
-			: defaultRolePatterns
-					.map(pattern => parseDefaultModelRoleSelfAlias(pattern)?.level)
-					.find(level => level !== undefined);
+	//
+	// The FIRST alias in the list, not the first one carrying a suffix. A bare
+	// `*` is itself a reached fallback that names no thinking knob, so in
+	// `missing/model,*,*:low` the bare `*` wins and the session keeps its own
+	// level; skipping to the later `*:low` applied a suffix from a fallback
+	// resolution never reached.
+	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined => {
+		if (spec.model) return undefined;
+		for (const pattern of defaultRolePatterns) {
+			const alias = parseDefaultModelRoleSelfAlias(pattern);
+			if (alias) return alias.level;
+		}
+		return undefined;
+	};
 	const adoptConfigModel = Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigDefaultRole;
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
