@@ -549,11 +549,28 @@ export const PROVIDER_IMAGE_BYTE_BUDGETS: Record<string, number> = {
 /** Safe byte floor for unknown providers, mirroring the strict image-count floor. */
 export const DEFAULT_PROVIDER_IMAGE_BYTE_BUDGET = 4_000_000;
 
-/** Per-request image-byte budget for `provider`; unknown providers get the floor. */
-export function providerImageByteBudget(provider: string | undefined): number {
-	return (
-		(provider !== undefined ? PROVIDER_IMAGE_BYTE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BYTE_BUDGET
-	);
+/**
+ * Per-request image-byte budgets by API ROUTE, for a provider id the table above
+ * does not name. A user-configured proxy picks its own slug — `anthropic-proxy`
+ * in `docs/models.md` — but declares the route it speaks, and the request-size
+ * limit is the route's, not the slug's. Without this a proxy fell to the unknown
+ * floor and evicted 2 MB of valid history the real endpoint would have accepted.
+ */
+const API_IMAGE_BYTE_BUDGETS: Record<string, number> = {
+	"anthropic-messages": 6_000_000,
+	"openai-responses": 16_000_000,
+	"openai-codex-responses": 16_000_000,
+	"google-generative-ai": 16_000_000,
+};
+
+/**
+ * Per-request image-byte budget: the provider's own value, else its API route's,
+ * else the floor.
+ */
+export function providerImageByteBudget(provider: string | undefined, api?: string): number {
+	const byProvider = provider !== undefined ? PROVIDER_IMAGE_BYTE_BUDGETS[provider] : undefined;
+	if (byProvider !== undefined) return byProvider;
+	return (api !== undefined ? API_IMAGE_BYTE_BUDGETS[api] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BYTE_BUDGET;
 }
 
 /** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */

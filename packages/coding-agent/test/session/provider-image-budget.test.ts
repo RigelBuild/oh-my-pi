@@ -960,6 +960,40 @@ describe("provider context image budgets", () => {
 		expect(imageData(clamped).length).toBe(liveImages);
 	});
 
+	it("counts a metadata-only computer screenshot with no content mirror", async () => {
+		// A history parsed back from `computer_call_output` has `content: []`, so
+		// nothing in the generic view stands for the screenshot. Leaving the count
+		// to the content loop left a replay of these entirely uncounted.
+		const overCount = providerImageBudget(COMPUTER_MODEL.provider) + 2;
+		const context: Context = {
+			messages: Array.from({ length: overCount }, (_, index) => ({
+				...computerResultMessage(`call-${index}`, "t".repeat(32)),
+				content: [],
+			})),
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
+
+		const surviving = clamped.messages.filter(
+			message => "providerMetadata" in message && message.providerMetadata !== undefined,
+		);
+		expect(surviving.length).toBe(providerImageBudget(COMPUTER_MODEL.provider));
+	});
+
+	it("gives an Anthropic-compatible proxy the Anthropic byte allowance", async () => {
+		// A configured proxy picks its own slug but declares the route it speaks,
+		// and the request-size limit belongs to the route. Falling to the unknown
+		// floor evicted history the real endpoint accepts.
+		const proxyModel = { ...ANTHROPIC_MODEL, provider: "anthropic-proxy" } as Model<"anthropic-messages">;
+		// 5 MB: over the 4 MB unknown floor, under Anthropic's 6 MB.
+		const payload = "p".repeat(5 * 1000 * 1000);
+		const context: Context = { messages: [{ role: "user", timestamp: 1, content: [image(payload)] }] };
+
+		const clamped = clampProviderContextImages(context, proxyModel);
+
+		expect(imageData(clamped).length).toBe(1);
+	});
+
 	it("treats a managed session with no provider state yet as unwarmed", async () => {
 		// The provider-context transform runs BEFORE `streamOpenAIResponses` creates
 		// the session state, so on the first request the map exists and is EMPTY.
