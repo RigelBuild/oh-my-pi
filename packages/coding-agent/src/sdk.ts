@@ -721,6 +721,15 @@ export interface CreateAgentSessionOptions {
 	 *   `AGENTS.md`, skills, templates, and commands. Omit them so
 	 *   `createAgentSession` re-runs discovery and picks up the on-disk changes
 	 *   restart promises.
+	 * - Do NOT re-pass {@link preloadedPreparedExtensions},
+	 *   {@link preloadedCustomToolPaths}, or {@link workspaceTree} when they are
+	 *   snapshots of the outgoing session. Each short-circuits the discovery it
+	 *   stands in for: the prepared list binds exactly those extensions instead of
+	 *   re-preparing what is now on disk, `preloadedCustomToolPaths` skips
+	 *   `discoverCustomToolPaths()`, and a supplied `workspaceTree` bypasses
+	 *   `buildWorkspaceTree()` — so an extension or custom tool added or removed
+	 *   since launch stays wrong and the tree's nested `AGENTS.md` index stays
+	 *   stale. Omit all three so the replacement rediscovers them.
 	 * - Do NOT re-pass the `model` you LAUNCHED with. Any supplied `model` is
 	 *   treated as an explicit selection, so `sessionModelStrings` stays empty and
 	 *   the transcript's last `model_change` is never restored — resetting the
