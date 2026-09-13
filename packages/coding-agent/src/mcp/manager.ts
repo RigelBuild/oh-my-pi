@@ -518,9 +518,15 @@ export class MCPManager {
 		const sink = this.openToolsChangedReconcile();
 		try {
 			await this.#fireToolsChanged();
-			await sink.drain();
+			// Drain until a close actually succeeds. `drain()` can return with the
+			// sink empty and still have a queued listing callback fire before the
+			// close runs, so one drain/close pair leaves exactly the window this
+			// reconcile exists to remove. Terminates on the same argument as the
+			// drain loop itself: every firing is a completed registry mutation, and
+			// a settled roster produces none.
+			while (!sink.close()) await sink.drain();
 		} finally {
-			sink.close();
+			sink.close(true);
 		}
 	}
 
@@ -537,7 +543,7 @@ export class MCPManager {
 	 * a first prompt cannot go out against a roster a completed listing has
 	 * already superseded.
 	 */
-	openToolsChangedReconcile(): { drain: () => Promise<void>; close: () => void } {
+	openToolsChangedReconcile(): { drain: () => Promise<void>; close: (force?: boolean) => boolean } {
 		const sink: Promise<void>[] = [];
 		this.#toolsChangedReconcileSinks.add(sink);
 		return {
@@ -558,8 +564,18 @@ export class MCPManager {
 					await Promise.all(pending);
 				}
 			},
-			close: () => {
+			// Closing is CONDITIONAL, because `drain()` returning is not the same as
+			// the window being finished: its final emptiness check is followed by a
+			// microtask boundary, and a connection-time `tools/list` callback already
+			// queued behind it runs in that gap, appending its rebind to this sink.
+			// Deleting the sink regardless would drop that firing's promise, so the
+			// caller resumes while `refreshMCPTools()` is still pending and the first
+			// prompt can use the stale roster. Refusing to close tells the caller to
+			// drain again; `force` is the leak-proof exit for the `finally`.
+			close: (force = false) => {
+				if (!force && sink.length > 0) return false;
 				this.#toolsChangedReconcileSinks.delete(sink);
+				return true;
 			},
 		};
 	}

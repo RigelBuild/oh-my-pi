@@ -4384,11 +4384,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		} finally {
 			try {
-				await codeModeReconcile?.drain();
+				// Loop: a queued listing callback can fire between `drain()`'s final
+				// emptiness check and the close, so a single pair leaves the window
+				// open. `close()` refuses while anything is pending and the forced
+				// close below is the leak-proof exit.
+				while (codeModeReconcile && !codeModeReconcile.close()) await codeModeReconcile.drain();
 			} catch (error) {
 				logger.warn("MCP tool reconcile during Code Mode startup failed", { error: String(error) });
 			} finally {
-				codeModeReconcile?.close();
+				codeModeReconcile?.close(true);
 			}
 		}
 
