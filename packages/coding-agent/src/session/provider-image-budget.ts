@@ -13,7 +13,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { prepareAnthropicManyImageContext } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { getOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import { getOpenAIResponsesHistoryPayload, normalizeResponsesToolCallId } from "@oh-my-pi/pi-ai/utils";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -62,6 +62,7 @@ function collectImageStats(
 ): { total: number; inlineSizes: number[] } {
 	let total = 0;
 	const inlineSizes: number[] = [];
+	const pairedComputerCallIds = collectPairedComputerCallIds(context);
 	for (const message of context.messages) {
 		if (message.role === "assistant") {
 			// An assistant's generic `content` images are display-only, but its
@@ -76,7 +77,8 @@ function collectImageStats(
 		// as the `computer_call_output.output` and never looks at the content. So
 		// the mirrored content image must not be charged a second time, or one
 		// 9 MB screenshot measures 18 MB and evicts the only copy that travels.
-		const sendsScreenshot = message.role === "toolResult" && sendsComputerScreenshot(message, countModel);
+		const sendsScreenshot =
+			message.role === "toolResult" && sendsComputerScreenshot(message, countModel, pairedComputerCallIds);
 		if (sendsScreenshot) {
 			// One image part, whether or not a content mirror exists: a history
 			// parsed back from `computer_call_output` produces `content: []`, and a
@@ -228,12 +230,47 @@ function nativeInputImageParts(item: Record<string, unknown> | undefined): Array
  * the content entirely. On any other model the metadata is inert and the
  * content image is what travels, so the two are never both charged.
  */
-function sendsComputerScreenshot(message: ToolResultMessage, model: Model | undefined): boolean {
+function sendsComputerScreenshot(
+	message: ToolResultMessage,
+	model: Model | undefined,
+	pairedComputerCallIds: ReadonlySet<string>,
+): boolean {
 	if (model?.supportsComputerUse !== true) return false;
 	// The metadata's presence, not its inline bytes: a file- or URL-backed
 	// screenshot is still sent as the `computer_call_output.output` and still
 	// consumes an image part, it simply contributes no bytes.
-	return message.providerMetadata?.type === "computer";
+	if (message.providerMetadata?.type !== "computer") return false;
+	// And only while its `computer_call` survives into the request.
+	// `appendResponsesToolResultMessages()` takes the screenshot branch behind
+	// `computerCallIds.has(callId)`; an orphan — the call compacted or truncated
+	// away — falls through to generic output instead, so charging its metadata
+	// would evict a live image for bytes that never travel.
+	return pairedComputerCallIds.has(normalizeComputerCallId(message.toolCallId));
+}
+
+/**
+ * The call ids of every computer tool call still present in this context.
+ *
+ * Mirrors `collectComputerCallIds` over the generic view: a `computer_call` item
+ * is emitted for an assistant tool call whose `providerMetadata.type` is
+ * `"computer"`, so that is what pairs a later result's screenshot.
+ */
+function collectPairedComputerCallIds(context: Context): Set<string> {
+	const ids = new Set<string>();
+	for (const message of context.messages) {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			if (block.providerMetadata?.type !== "computer") continue;
+			ids.add(normalizeComputerCallId(block.id));
+		}
+	}
+	return ids;
+}
+
+/** The same call id the Responses converter pairs on. */
+function normalizeComputerCallId(toolCallId: string): string {
+	return normalizeResponsesToolCallId(toolCallId, "ctc").callId;
 }
 
 /**
@@ -272,6 +309,8 @@ interface ImageClampState {
 	model: Model;
 	/** Whether this request will replay native `providerPayload` history at all. */
 	replaysNativeHistory: boolean;
+	/** Call ids of the computer calls still present, which pair a result's screenshot. */
+	pairedComputerCallIds: ReadonlySet<string>;
 }
 
 /**
@@ -334,7 +373,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 	// Dropping the metadata screenshot already removes this result's only wire
 	// image, so the mirrored content block must not also pay down a budget — it
 	// was never charged one.
-	if (sendsComputerScreenshot(message, state.model)) {
+	if (sendsComputerScreenshot(message, state.model, state.pairedComputerCallIds)) {
 		if (!clampComputerScreenshot(state)) return message;
 
 		const clampedContent = clampContent(message.content, { ...state, remainingInlineDrops: 0 });
@@ -538,6 +577,7 @@ export function clampProviderContextImageCount(context: Context, model: Model, r
 		remainingInlineDrops: 0,
 		model,
 		replaysNativeHistory,
+		pairedComputerCallIds: collectPairedComputerCallIds(context),
 	});
 }
 
@@ -568,6 +608,7 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 		remainingInlineDrops: inlineDrops,
 		model,
 		replaysNativeHistory,
+		pairedComputerCallIds: collectPairedComputerCallIds(context),
 	});
 }
 
