@@ -3939,13 +3939,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			return merged;
 		};
+		// On a RESUME, a missing tier entry is the empty map, not "consult config".
+		// A session that baked no tier writes an explicit `null` entry now, but one
+		// written before that did — or before tiers existed — has nothing, and
+		// reading that absence as "adopt whatever config says at resume time" let a
+		// `tier.*` set AFTER the session take effect on a bare resume, which is the
+		// one thing omitting `--reapply-config` guarantees. A NEW session has no
+		// baked state to preserve, so config is its source as before.
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
-			(options.reapplyConfig && hasServiceTierEntry
+			(options.reapplyConfig
 				? mergeConfigServiceTier()
 				: hasServiceTierEntry
 					? (existingSession.serviceTier ?? {})
-					: configServiceTierByFamily);
+					: hasExistingSession
+						? {}
+						: configServiceTierByFamily);
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
@@ -4106,11 +4115,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
-				sessionManager.appendServiceTierChange(
-					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
-				);
-			}
+			// Recorded even when the map is EMPTY, as an explicit `null` meaning "this
+			// session baked no tier". Skipping it made absence ambiguous: a resume
+			// could not tell a session that baked nothing from a pre-tier session, so
+			// the empty case fell through to whatever `tier.*` config said at resume
+			// time — adopting a tier the user set AFTER the session, which is exactly
+			// what resuming without `--reapply-config` promises not to do.
+			sessionManager.appendServiceTierChange(
+				Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+			);
 		}
 
 		// Full toolset for the advisor, built unconditionally so it can be toggled at
