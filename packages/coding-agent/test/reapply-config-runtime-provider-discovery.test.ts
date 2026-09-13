@@ -28,6 +28,9 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 const RUNTIME_PROVIDER = "reapply-runtime-gw";
 const RUNTIME_MODEL = "reapply-runtime-model";
+// A bare id that an all-self-alias list spells: `default` is BOTH the sentinel
+// spelling and a real model id a provider may register.
+const LATE_DEFAULT_MODEL = "default";
 
 /** The implicit discovery providers the registry always adds; disabled so the
  * config-declared discoverable list is genuinely empty. */
@@ -38,6 +41,7 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
+	let dynamicModelId = RUNTIME_MODEL;
 
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@omp-reapply-runtime-shared-");
@@ -139,6 +143,7 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 			apiKey: "literal-test-key",
 			api: "openai-completions",
 			fetchDynamicModels: async () => {
+				const modelId = dynamicModelId;
 				const isEagerFetch = dynamicFetches === 0;
 				dynamicFetches += 1;
 				// The eager fetch parks until the resume reaches its fallback guard,
@@ -147,7 +152,7 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 				if (isEagerFetch) eagerFetchSettled = true;
 				return [
 					{
-						id: RUNTIME_MODEL,
+						id: modelId,
 						name: "Reapply Runtime Model",
 						reasoning: false,
 						input: ["text"],
@@ -201,8 +206,9 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 	async function resume(
 		sessionFile: string,
 		settings: Settings,
-		options?: { hasUI?: boolean; observeOverlap?: boolean },
+		options?: { hasUI?: boolean; observeOverlap?: boolean; dynamicModelId?: string },
 	): Promise<AgentSession> {
+		dynamicModelId = options?.dynamicModelId ?? RUNTIME_MODEL;
 		// A registry private to this resume, with a cache DB under the per-test
 		// temp dir so the runtime catalog genuinely starts cold. `settings` is
 		// passed so the disabled implicit providers actually take effect.
@@ -253,6 +259,25 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 		expect(dynamicFetches).toBeGreaterThan(0);
 		expect(resumed.model?.provider).toBe(RUNTIME_PROVIDER);
 		expect(resumed.model?.id).toBe(RUNTIME_MODEL);
+	});
+
+	it("adopts an all-self-alias default a late provider registration resolves", async () => {
+		// `"default,@default"` is every-pattern-a-self-alias, so before extensions
+		// register it names no model and classifies as "no config default". An
+		// extension can then register a provider whose bare id IS `default`, which
+		// makes the same list resolve — so the classification has to be re-asked
+		// after registration rather than captured at startup. Captured, the baked
+		// model was restored and the retry skipped for having a model already.
+		dynamicFetches = 0;
+		const bakedModel = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay(`default,@default`);
+
+		const resumed = await resume(sessionFile, settings, { dynamicModelId: LATE_DEFAULT_MODEL });
+
+		expect(resumed.model?.provider).toBe(RUNTIME_PROVIDER);
+		expect(resumed.model?.id).toBe(LATE_DEFAULT_MODEL);
 	});
 
 	it("keeps the baked session model when the configured default is unresolvable", async () => {

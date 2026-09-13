@@ -12,7 +12,7 @@
  * discovery) lists the configured default.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -32,7 +32,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
-	const savedOllamaEnv: Record<string, string | undefined> = {};
+	let observed: { fallbackSawJoin: boolean | undefined } | undefined;
 
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@omp-reapply-cold-shared-");
@@ -46,21 +46,13 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	beforeEach(() => {
-		// A stray ollama endpoint in the ambient environment would repoint
-		// discovery away from the mocked one and make the fetch mock throw.
-		for (const key of ["OLLAMA_BASE_URL", "OLLAMA_HOST", "OLLAMA_CONTEXT_LENGTH"] as const) {
-			savedOllamaEnv[key] = Bun.env[key];
-			delete Bun.env[key];
-		}
+		// No ambient-ollama guard is needed: the env endpoint only feeds the
+		// IMPLICIT ollama provider, and `models.yml` here configures ollama
+		// explicitly, so `#addImplicitDiscoverableProviders` never adds one.
 		tempDir = TempDir.createSync("@omp-reapply-cold-");
 	});
 
 	afterEach(async () => {
-		for (const key of ["OLLAMA_BASE_URL", "OLLAMA_HOST", "OLLAMA_CONTEXT_LENGTH"] as const) {
-			const original = savedOllamaEnv[key];
-			if (original === undefined) delete Bun.env[key];
-			else Bun.env[key] = original;
-		}
 		if (session) {
 			await session.dispose();
 			session = undefined;
@@ -143,6 +135,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 			}),
 		);
 		const modelRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: mockOllamaDiscovery });
+		observed = observeRefreshOrder(modelRegistry);
 		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "startup"));
 		const result = await createAgentSession({
 			cwd: tempDir.path(),
@@ -166,6 +159,30 @@ describe("--reapply-config cold-discovery configured default", () => {
 		return result.session;
 	}
 
+	/**
+	 * Records whether the startup background refresh had been JOINED by the time
+	 * the cold-cache fallback started its own `refresh`. Both fetch the same
+	 * built-in dynamic catalogs, so a fallback that runs while the background
+	 * pass is still in flight duplicates the remote call and races its cache
+	 * write. Instance spies only — never the prototype — so the suite stays
+	 * parallel-safe.
+	 */
+	function observeRefreshOrder(registry: ModelRegistry): { fallbackSawJoin: boolean | undefined } {
+		const state: { fallbackSawJoin: boolean | undefined } = { fallbackSawJoin: undefined };
+		let joined = false;
+		const realAwait = registry.awaitBackgroundRefresh.bind(registry);
+		const realRefresh = registry.refresh.bind(registry);
+		spyOn(registry, "awaitBackgroundRefresh").mockImplementation(async () => {
+			await realAwait();
+			joined = true;
+		});
+		spyOn(registry, "refresh").mockImplementation(async strategy => {
+			state.fallbackSawJoin ??= joined;
+			return await realRefresh(strategy);
+		});
+		return state;
+	}
+
 	it("discovers the configured default instead of falling back to the session's baked model", async () => {
 		const bakedModel = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
@@ -179,6 +196,9 @@ describe("--reapply-config cold-discovery configured default", () => {
 
 		expect(resumed.model?.provider).toBe("ollama");
 		expect(resumed.model?.id).toBe(DISCOVERED_MODEL);
+		// The cold-cache fallback must join the startup background refresh before
+		// launching its own, or both fetch the same catalog at once.
+		expect(observed?.fallbackSawJoin).toBe(true);
 	});
 
 	it("discovers the first configured candidate instead of keeping the later one it matched early", async () => {

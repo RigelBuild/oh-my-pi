@@ -1614,7 +1614,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Keyed on what the resolver REACHED, the same rule the thinking suffix
 	// takes above: a spec carrying a model is a configured default whatever its
 	// patterns are spelled like.
-	const hasConfigDefaultRole =
+	//
+	// Evaluated on every read, not captured once: `defaultRoleSpec` is
+	// re-resolved after late-registering extension providers appear, and one of
+	// those can be the model an all-self-alias list names — so the answer changes
+	// mid-startup. A captured `false` outlived the registration that disproved it
+	// and handed the resume to the baked-model fallback, which then made the
+	// post-registration retry unreachable because a model was already set.
+	const hasConfigDefaultRole = (): boolean =>
 		defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern)) || defaultRoleSpec.model !== undefined;
 	// A self alias sets no model but a suffixed one (`*:xhigh`) still names the
 	// THINKING knob. `resolveModelRoleValue` cannot report it — the circular
@@ -1657,7 +1664,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		return undefined;
 	};
-	const adoptConfigModel = Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigDefaultRole;
+	const adoptConfigModel = (): boolean =>
+		Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigDefaultRole();
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
@@ -1691,14 +1699,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// cannot (it named none), and `--model` pins identity only. Index 0 is the
 	// last-active selector, which is the session's current choice; the identity
 	// walk has no chosen index here.
-	if ((adoptConfigModel || hasExplicitModel) && savedSessionModelStrings.length > 0) {
+	if ((adoptConfigModel() || hasExplicitModel) && savedSessionModelStrings.length > 0) {
 		restoredSessionThinkingLevel = parseModelString(savedSessionModelStrings[0], {
 			allowMaxSuffix: true,
 			allowAutoAlias: true,
 			isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
 		})?.thinkingLevel;
 	}
-	if (!hasExplicitModel && !adoptConfigModel && !model && sessionModelStrings.length > 0) {
+	if (!hasExplicitModel && !adoptConfigModel() && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
@@ -1747,8 +1755,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// the lower-priority configured fallback instead of the first configured
 	// model. Remember that the early match was not the first candidate so the
 	// retry runs anyway once providers are registered.
-	const reResolveConfigDefault =
-		adoptConfigModel && model !== undefined && (defaultRoleSpec.matchedPatternIndex ?? 0) > 0;
+	//
+	// And the mirror case: an all-self-alias list that has not resolved YET
+	// classifies as "no config default", so the baked model is restored and
+	// `model` is non-null for the same reason — but here the retry is what would
+	// have proved the classification wrong, since the model the list names can be
+	// registered by an extension later. Retry whenever `--reapply-config` names a
+	// default that has not been adopted, and let the re-resolution decide.
+	const reResolveConfigDefault = (): boolean => {
+		if (hasExplicitModel || !options.reapplyConfig) return false;
+		if (!settings.getModelRole("default")) return false;
+		if (!adoptConfigModel()) return true;
+		return model !== undefined && (defaultRoleSpec.matchedPatternIndex ?? 0) > 0;
+	};
 
 	const taskDepth = options.taskDepth ?? 0;
 
@@ -2500,7 +2519,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// downstream fallback filling `model`). Reclaim it here so resume
 		// honors the last active role in either case.
 		const sessionRetryLimit = restoredSessionModelIndex >= 0 ? restoredSessionModelIndex : sessionModelStrings.length;
-		if (!hasExplicitModel && !adoptConfigModel && sessionRetryLimit > 0) {
+		if (!hasExplicitModel && !adoptConfigModel() && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
 					const sessionModelStr = sessionModelStrings[i];
@@ -2574,7 +2593,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// its trailing segment is misread as the session's thinking choice, then
 		// carried onto the config- or CLI-selected model. Re-parse now that the
 		// providers are registered; the predicate can finally see those ids.
-		if ((adoptConfigModel || hasExplicitModel) && savedSessionModelStrings.length > 0) {
+		if ((adoptConfigModel() || hasExplicitModel) && savedSessionModelStrings.length > 0) {
 			const savedSessionModelString = savedSessionModelStrings[0];
 			const reparseSavedSuffix = () =>
 				parseModelString(savedSessionModelString, {
@@ -2940,7 +2959,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Fall back to first available model with a valid API key, honoring the
 		// path-scoped `enabledModels` allow-list when configured. Skip when the
 		// user explicitly requested a model via --model that wasn't found.
-		if ((!model || reResolveConfigDefault) && deferredModelPatterns.length === 0) {
+		if ((!model || reResolveConfigDefault()) && deferredModelPatterns.length === 0) {
 			// Retry the configured default role against the current catalog,
 			// setting `model` (+ thinking level) when it resolves. Extension
 			// factories register providers AFTER the early `defaultRoleSpec`
@@ -3013,6 +3032,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (discoveryRefreshed || !modelRegistry.hasRefreshableProviders()) return false;
 				discoveryRefreshed = true;
 				await runtimeDiscoveryPromise;
+				// And the background refresh startup kicked off for a registry the SDK
+				// built itself, which fetches the same built-in dynamic catalogs. It is
+				// a separate promise from the runtime pass, so awaiting only the latter
+				// left it in flight and the `refresh` below raced it — two concurrent
+				// requests for one catalog, both writing the cache. A no-op once it has
+				// settled, which is the common case by the time startup reaches here.
+				await modelRegistry.awaitBackgroundRefresh();
 				await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
 				return true;
 			};
@@ -3030,7 +3056,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				!hasExplicitModel &&
 				Boolean(settings.getModelRole("default")) &&
-				(!model || (defaultRoleSpec.matchedPatternIndex ?? 0) > 0) &&
+				// `reResolveConfigDefault()` also covers a `--reapply-config` default
+				// that has not been adopted at all, which includes an all-self-alias
+				// list still waiting on the provider that gives it a model. Without it
+				// the baked restore left `model` set at index 0 and this guard
+				// concluded there was nothing left to discover.
+				(!model || (defaultRoleSpec.matchedPatternIndex ?? 0) > 0 || reResolveConfigDefault()) &&
 				(await refreshDiscoveryOnce())
 			) {
 				await tryResolveDefaultRole();
@@ -3040,7 +3071,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// config default could win. It didn't resolve (even post-extension), so
 			// fall back to the session's own baked model rather than an arbitrary
 			// pick — a resume must never be silently yanked onto an unrelated model.
-			if (!model && adoptConfigModel && sessionModelStrings.length > 0) {
+			if (!model && adoptConfigModel() && sessionModelStrings.length > 0) {
 				logger.time("restoreSessionModelReapplyFallback", () => {
 					for (let i = 0; i < sessionModelStrings.length; i++) {
 						const parsedModel = parseModelString(sessionModelStrings[i], {
@@ -3110,7 +3141,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// happened. Only under `adoptConfigModel`, so the bare-resume path keeps
 		// its exact prior message flow.
 		const bakedSessionModel = sessionModelStrings[0];
-		if (adoptConfigModel && model && bakedSessionModel) {
+		if (adoptConfigModel() && model && bakedSessionModel) {
 			const configDefaultResolved =
 				defaultRoleSpec.model !== undefined &&
 				defaultRoleSpec.model.provider === model.provider &&
