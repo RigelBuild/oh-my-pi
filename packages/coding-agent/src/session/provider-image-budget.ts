@@ -213,10 +213,19 @@ function hasCompactionMarker(items: ReadonlyArray<Record<string, unknown> | unde
 	return items.some(item => item?.type === "compaction" || item?.type === "compaction_summary");
 }
 
-/** The `input_image` parts of a replayed item, whether nested in `content` or not. */
+/**
+ * The replayed image parts of an item: `input_image` at the top level or nested
+ * in `content`, plus a `computer_call_output`'s screenshot `output`, which
+ * `buildResponsesInput()` replays unchanged and which carries its `image_url` in
+ * its own position rather than inside an `input_image`.
+ */
 function nativeInputImageParts(item: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
 	if (!item) return [];
 	if (item.type === "input_image") return [item];
+	if (item.type === "computer_call_output") {
+		const output = item.output;
+		return isRecord(output) && typeof output.image_url === "string" ? [output] : [];
+	}
 	if (!Array.isArray(item.content)) return [];
 	return item.content.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "input_image");
 }
@@ -416,6 +425,13 @@ function clampReplayedInputImages(
 	return items ? { providerPayload: { ...payload, items } } : undefined;
 }
 
+/**
+ * Stands in for an evicted replayed screenshot. `computer_call_output.output`
+ * accepts only a `computer_screenshot` ref, so a cleared one keeps that shape
+ * with a file id the provider will not resolve rather than inline bytes.
+ */
+const OMITTED_SCREENSHOT_FILE_ID = "omitted-for-image-budget";
+
 /** `undefined` when the item carries no inline image worth dropping. */
 function dropNativeInputImages(
 	item: Record<string, unknown> | undefined,
@@ -427,6 +443,16 @@ function dropNativeInputImages(
 		if (!dropsNativeInputImage(item, state)) return undefined;
 		payNativeInputImageDrop(item, state);
 		return omitted;
+	}
+	if (item.type === "computer_call_output") {
+		// Its `output` must stay a `computer_screenshot` ref — the schema accepts
+		// nothing else there, and degrading the ITEM would orphan the paired
+		// `computer_call`. Swap the inline data uri for a file-backed ref shape so
+		// the item survives carrying no bytes.
+		const [screenshot] = nativeInputImageParts(item);
+		if (!screenshot || !dropsNativeInputImage(screenshot, state)) return undefined;
+		payNativeInputImageDrop(screenshot, state);
+		return { ...item, output: { type: "computer_screenshot", file_id: OMITTED_SCREENSHOT_FILE_ID } };
 	}
 	if (!Array.isArray(item.content)) return undefined;
 	let content: unknown[] | undefined;
