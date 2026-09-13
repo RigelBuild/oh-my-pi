@@ -157,26 +157,42 @@ describe("MCP tools-changed install-time reconcile", () => {
 		// One step past the install-time window. `setOnToolsChanged` closes its
 		// collection window when its own firing settles, but `createAgentSession`
 		// then awaits `session.initializeCodeMode()` — and a connection-time
-		// `tools/list` completing in THAT window fires the handler from a callsite
-		// that discards the promise. Its `refreshMCPTools` queues behind Code
-		// Mode's registry mutation, so the session could be handed back, and a
-		// first prompt admitted, while the newer roster was still waiting.
+		// `tools/list` that ANSWERS in that window fires the handler from a
+		// callsite that discards the promise (`void this.#fireToolsChanged()`).
+		// The session could then be handed back, and a first prompt admitted,
+		// while that rebind was still running.
 		//
-		// Driven from inside `initializeCodeMode` itself, so the heal lands in
-		// that exact window every run, with no sleeps.
-		let healedDuringCodeMode = false;
-		let healed: Promise<void> | undefined;
+		// A listing still IN FLIGHT is deliberately not waited on — that would
+		// re-gate startup on the slowest server (issue #2100) — so the fixture
+		// drives the answered-but-unsettled state, which is what the window closes.
+		const rebindStarted = Promise.withResolvers<void>();
+		const releaseRebind = Promise.withResolvers<void>();
+		let rebindSettled = false;
+		const refreshMCPTools = AgentSession.prototype.refreshMCPTools;
+		const refreshSpy = spyOn(AgentSession.prototype, "refreshMCPTools").mockImplementation(async function (
+			this: AgentSession,
+			tools: Parameters<typeof refreshMCPTools>[0],
+		) {
+			const healing = tools.some(tool => tool.name === HEALED_TOOL_NAME);
+			if (!healing) return refreshMCPTools.call(this, tools);
+			// Held open so "the drain awaited this" and "the drain raced it" are
+			// distinguishable without any sleep.
+			rebindStarted.resolve();
+			await releaseRebind.promise;
+			await refreshMCPTools.call(this, tools);
+			rebindSettled = true;
+		});
+
 		const initializeCodeMode = AgentSession.prototype.initializeCodeMode;
-		const restore = spyOn(AgentSession.prototype, "initializeCodeMode").mockImplementation(
+		const codeModeSpy = spyOn(AgentSession.prototype, "initializeCodeMode").mockImplementation(
 			async function (this: AgentSession) {
 				await initializeCodeMode.call(this);
 				const manager = MCPManager.instance();
 				if (!manager) throw new Error("expected the process-global MCP manager");
-				// Started, NOT awaited — the shape of `void this.#fireToolsChanged()`
-				// on the background connect path. Only the reconcile window reopened
-				// around this await can carry its roster into the session.
-				healed = manager.refreshServerTools(SERVER_NAME);
-				healedDuringCodeMode = true;
+				void manager.refreshServerTools(SERVER_NAME);
+				// The listing has answered and its handler is running; nothing awaits it.
+				await rebindStarted.promise;
+				releaseRebind.resolve();
 			},
 		);
 
@@ -200,17 +216,18 @@ describe("MCP tools-changed install-time reconcile", () => {
 				hasUI: false,
 			});
 			try {
-				expect(healedDuringCodeMode).toBe(true);
-				// The contract, with no intervening await: a listing that completed
-				// during Code Mode startup is already carried into the session.
+				// The contract, with no intervening await: the discarded rebind has
+				// already settled by the time the session is exposed.
+				expect(rebindSettled).toBe(true);
 				expect(session.getToolByName(HEALED_TOOL_NAME)).toBeDefined();
 			} finally {
-				await healed?.catch(() => {});
 				await session.dispose();
 				await mcpManager?.disconnectAll();
 			}
 		} finally {
-			restore.mockRestore();
+			releaseRebind.resolve();
+			codeModeSpy.mockRestore();
+			refreshSpy.mockRestore();
 		}
 	}, 30_000);
 
