@@ -30,6 +30,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
@@ -149,6 +150,67 @@ describe("MCP tools-changed install-time reconcile", () => {
 		} finally {
 			await session.dispose();
 			await mcpManager?.disconnectAll();
+		}
+	}, 30_000);
+
+	it("stays reconciled when a listing completes during Code Mode startup", async () => {
+		// One step past the install-time window. `setOnToolsChanged` closes its
+		// collection window when its own firing settles, but `createAgentSession`
+		// then awaits `session.initializeCodeMode()` — and a connection-time
+		// `tools/list` completing in THAT window fires the handler from a callsite
+		// that discards the promise. Its `refreshMCPTools` queues behind Code
+		// Mode's registry mutation, so the session could be handed back, and a
+		// first prompt admitted, while the newer roster was still waiting.
+		//
+		// Driven from inside `initializeCodeMode` itself, so the heal lands in
+		// that exact window every run, with no sleeps.
+		let healedDuringCodeMode = false;
+		let healed: Promise<void> | undefined;
+		const initializeCodeMode = AgentSession.prototype.initializeCodeMode;
+		const restore = spyOn(AgentSession.prototype, "initializeCodeMode").mockImplementation(
+			async function (this: AgentSession) {
+				await initializeCodeMode.call(this);
+				const manager = MCPManager.instance();
+				if (!manager) throw new Error("expected the process-global MCP manager");
+				// Started, NOT awaited — the shape of `void this.#fireToolsChanged()`
+				// on the background connect path. Only the reconcile window reopened
+				// around this await can carry its roster into the session.
+				healed = manager.refreshServerTools(SERVER_NAME);
+				healedDuringCodeMode = true;
+			},
+		);
+
+		try {
+			const { session, mcpManager } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({}),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableLsp: false,
+				skipPythonPreflight: true,
+				preloadedCustomToolPaths: [],
+				enableMCP: true,
+				hasUI: false,
+			});
+			try {
+				expect(healedDuringCodeMode).toBe(true);
+				// The contract, with no intervening await: a listing that completed
+				// during Code Mode startup is already carried into the session.
+				expect(session.getToolByName(HEALED_TOOL_NAME)).toBeDefined();
+			} finally {
+				await healed?.catch(() => {});
+				await session.dispose();
+				await mcpManager?.disconnectAll();
+			}
+		} finally {
+			restore.mockRestore();
 		}
 	}, 30_000);
 

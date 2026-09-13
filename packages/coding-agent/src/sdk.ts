@@ -4370,10 +4370,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// subsequent turns would expose the full direct tool surface and omit
 		// `tool_namespaces_info` until an unrelated model/setting/tool-selection
 		// change reconciled.
+		//
+		// Held open across the await: a connection-time `tools/list` can complete
+		// after `setOnToolsChanged`'s own window closed, and that firing's promise
+		// is discarded at its callsite. Its `refreshMCPTools` then queues behind
+		// Code Mode's registry mutation, so returning here could release the
+		// session — and admit a first prompt — while a completed listing's roster
+		// was still waiting its turn. Draining before release closes that window.
+		const codeModeReconcile = mcpManager?.openToolsChangedReconcile();
 		try {
 			await session.initializeCodeMode();
 		} catch (error) {
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
+		} finally {
+			try {
+				await codeModeReconcile?.drain();
+			} catch (error) {
+				logger.warn("MCP tool reconcile during Code Mode startup failed", { error: String(error) });
+			} finally {
+				codeModeReconcile?.close();
+			}
 		}
 
 		return {
