@@ -100,6 +100,11 @@ function collectImageStats(
 			for (const size of replayed) if (size > 0) inlineSizes.push(size);
 		}
 		if (!Array.isArray(message.content)) continue;
+		// A replayed turn's generic content NEVER travels: `convertConversationMessages()`
+		// pushes the replay items and `continue`s past `msg.content` entirely. Charging
+		// both representations let attached frames on a compaction summary evict the
+		// native history that was the only thing going onto the wire.
+		if (supersedesContentWithReplay(message, byteModel ?? countModel, replaysNativeHistory)) continue;
 		for (const part of message.content) {
 			if (part.type !== "image") continue;
 			// The mirror is neither counted nor charged: the metadata copy above
@@ -215,7 +220,25 @@ function replayedInputImages(message: Message, model: Model, replaysNativeHistor
 
 /** The API routes whose converters replay an `openaiResponsesHistory` payload. */
 function replaysOpenAIResponsesNativeHistory(model: Model): boolean {
-	return model.api === "openai-responses" || model.api === "openai-codex-responses";
+	return (
+		model.api === "openai-responses" ||
+		model.api === "openai-codex-responses" ||
+		model.api === "azure-openai-responses"
+	);
+}
+
+/**
+ * Whether a replayed payload REPLACES this turn's generic content on the wire.
+ *
+ * `convertConversationMessages()` pushes the sanitized replay items and
+ * `continue`s, so `msg.content` is never converted for such a turn.
+ */
+function supersedesContentWithReplay(message: Message, model: Model, replaysNativeHistory: boolean): boolean {
+	if (message.role !== "user" && message.role !== "developer") return false;
+	if (!replaysOpenAIResponsesNativeHistory(model)) return false;
+	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
+	if (!payload) return false;
+	return replaysNativeHistory || hasCompactionMarker(payload.items);
 }
 
 /** Whether these items replay regardless of the session's warmed replay state. */
@@ -393,7 +416,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 	// image, so the mirrored content block must not also pay down a budget — it
 	// was never charged one.
 	if (sendsComputerScreenshot(message, state.model, state.pairedComputerCallIds)) {
-		if (!clampComputerScreenshot(state)) return message;
+		if (!clampComputerScreenshot(message, state)) return message;
 
 		const clampedContent = clampContent(message.content, { ...state, remainingInlineDrops: 0 });
 		return {
@@ -516,15 +539,28 @@ function isInlineNativeImage(part: Record<string, unknown>): boolean {
  * only a `computer_screenshot` ref with no text alternative, so the metadata is
  * cleared outright rather than degraded in place.
  */
-function clampComputerScreenshot(state: ImageClampState): boolean {
+function clampComputerScreenshot(message: ToolResultMessage, state: ImageClampState): boolean {
 	// EITHER constraint, not just bytes: a screenshot is an image part under the
 	// count cap too, so more than the cap of small ones leaves `remainingDrops`
 	// positive with no bytes owed — and gating on bytes alone returned every
 	// result unchanged while the request stayed over the count.
 	if (!clampWanted(state)) return false;
-	if (state.remainingInlineDrops > 0) state.remainingInlineDrops--;
-	if (state.remainingDrops > 0) state.remainingDrops--;
-	return true;
+	// A reference-backed screenshot contributed nothing to `inlineSizes`, so it
+	// can only relieve the COUNT cap. Paying the byte allowance down with it would
+	// retire a debt it never incurred and leave a later oversized inline image in
+	// place — and dropping it while the byte cap is the only thing that binds
+	// loses the screenshot for nothing at all.
+	const inline = inlineComputerScreenshot(message.providerMetadata) !== undefined;
+	let relieved = false;
+	if (inline && state.remainingInlineDrops > 0) {
+		state.remainingInlineDrops--;
+		relieved = true;
+	}
+	if (state.remainingDrops > 0) {
+		state.remainingDrops--;
+		relieved = true;
+	}
+	return relieved;
 }
 
 /**
