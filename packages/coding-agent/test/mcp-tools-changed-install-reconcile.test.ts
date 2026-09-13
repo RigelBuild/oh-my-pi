@@ -231,6 +231,77 @@ describe("MCP tools-changed install-time reconcile", () => {
 		}
 	}, 30_000);
 
+	// `drain()` returning is NOT the window being finished. Its final emptiness
+	// check is followed by a microtask boundary, and a listing callback already
+	// queued behind it runs in that gap — appending its asynchronous rebind to
+	// the sink that an unconditional `close()` then discarded. The caller
+	// resumed with that rebind still pending, so `createAgentSession` could hand
+	// back a session whose roster was still being rewritten.
+	//
+	// The contract that closes it: a close must REFUSE while the sink still
+	// holds a firing, so the caller drains again instead of dropping it. Driven
+	// with a real firing through the public API — the handler parks, so the
+	// firing is provably unsettled at the moment the close is attempted.
+	//
+	// RED (pre-fix): `close()` returned void and deleted the sink unconditionally,
+	// so a pending firing was discarded.
+	it("refuses to close a reconcile window that still holds a pending firing", async () => {
+		const manager = new MCPManager(tempDir);
+		try {
+			await manager.connectServers(
+				{
+					[SERVER_NAME]: {
+						type: "stdio",
+						command: process.execPath,
+						args: [FIXTURE_PATH],
+						env: { OMP_TEST_TOOLS_PER_LIST: "0,1", OMP_TEST_LIST_LOG: listLog },
+					},
+				},
+				{},
+			);
+
+			// Parks every firing raised after installation, so one can be observed
+			// mid-flight rather than inferred from timing.
+			const gate = Promise.withResolvers<void>();
+			const secondFiring = Promise.withResolvers<void>();
+			let fired = 0;
+			await manager.setOnToolsChanged(async () => {
+				fired++;
+				if (fired > 1) {
+					secondFiring.resolve();
+					await gate.promise;
+				}
+			});
+
+			const sink = manager.openToolsChangedReconcile();
+			const refresh = manager.refreshServerTools(SERVER_NAME);
+			// Event-gated on the firing itself: a real stdio `tools/list` round trip
+			// takes more than a microtask, so waiting a fixed number of turns would
+			// be a race. Once this resolves the handler is parked on the gate, so
+			// the firing is provably unsettled.
+			await secondFiring.promise;
+			await Bun.sleep(0);
+
+			// The pending firing blocks the close instead of being discarded.
+			expect(sink.close()).toBe(false);
+
+			gate.resolve();
+			await sink.drain();
+			// Drained, so the close now succeeds — this is what ends the caller's
+			// drain/close loop.
+			expect(sink.close()).toBe(true);
+			await refresh;
+		} finally {
+			// A stdio fixture shutting down mid-teardown surfaces a retryable
+			// transport close; it says nothing about the contract under test.
+			try {
+				await manager.disconnectAll();
+			} catch {
+				// ignored: teardown noise, not a contract failure
+			}
+		}
+	}, 30_000);
+
 	it("does not stall a mid-session toolset change on the install-time reconcile", async () => {
 		// The install-time reconcile is the only firing the SDK awaits. The
 		// ongoing notifications must stay exactly as they were, so a server that
