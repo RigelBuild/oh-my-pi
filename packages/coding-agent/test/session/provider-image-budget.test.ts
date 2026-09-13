@@ -210,6 +210,45 @@ function replayedItems(message: Message | undefined): Array<Record<string, unkno
 	return payload.items;
 }
 
+/** The `computer_call` that pairs a screenshot result — without it the converter sends generic output. */
+function computerCallMessage(toolCallId: string): AssistantMessage {
+	return {
+		role: "assistant",
+		timestamp: 1,
+		content: [
+			{
+				type: "toolCall",
+				id: toolCallId,
+				name: "computer",
+				arguments: {},
+				providerMetadata: {
+					type: "computer",
+					providerItemId: `ctc_${toolCallId}`,
+					actions: [],
+					pendingSafetyChecks: [],
+				},
+			},
+		],
+		api: OPENAI_MODEL.api,
+		model: OPENAI_MODEL.id,
+		provider: OPENAI_MODEL.provider,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+	};
+}
+
+/** A paired call + result, the shape the Responses converter actually sends. */
+function computerTurn(toolCallId: string, data: string): Message[] {
+	return [computerCallMessage(toolCallId), computerResultMessage(toolCallId, data)];
+}
+
 function computerResultMessage(toolCallId: string, data: string): ToolResultMessage {
 	return {
 		role: "toolResult",
@@ -775,17 +814,16 @@ describe("provider context image budgets", () => {
 		// no wire bytes at all.
 		const big = "z".repeat(9 * 1024 * 1024);
 		const context: Context = {
-			messages: [computerResultMessage("call-1", big), computerResultMessage("call-2", big)],
+			messages: [...computerTurn("call-1", big), ...computerTurn("call-2", big)],
 		};
 
-		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
 
-		const first = clamped.messages[0];
-		expect(first?.role).toBe("toolResult");
+		const results = clamped.messages.filter(message => message.role === "toolResult");
+		expect(results.length).toBe(2);
 		// The oldest screenshot is cleared; the newer one still travels.
-		expect(first && "providerMetadata" in first ? first.providerMetadata : undefined).toBeUndefined();
-		const second = clamped.messages[1];
-		expect(second && "providerMetadata" in second ? second.providerMetadata : undefined).toBeDefined();
+		expect(results[0]?.providerMetadata).toBeUndefined();
+		expect(results[1]?.providerMetadata).toBeDefined();
 	});
 
 	it("charges one computer screenshot once, not twice", async () => {
@@ -794,12 +832,13 @@ describe("provider context image budgets", () => {
 		// measure 9 MB, not 18 — otherwise the only copy that travels is evicted
 		// for busting a budget it fits inside.
 		const big = "w".repeat(9 * 1024 * 1024);
-		const context: Context = { messages: [computerResultMessage("call-1", big)] };
+		const context: Context = { messages: computerTurn("call-1", big) };
 
 		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
 
-		const first = clamped.messages[0];
-		expect(first && "providerMetadata" in first ? first.providerMetadata : undefined).toBeDefined();
+		const results = clamped.messages.filter(message => message.role === "toolResult");
+		expect(results.length).toBe(1);
+		expect(results[0]?.providerMetadata).toBeDefined();
 	});
 
 	it("counts replayed input images against the per-request image cap", async () => {
@@ -882,13 +921,13 @@ describe("provider context image budgets", () => {
 		const small = "s".repeat(64);
 		const overCount = providerImageBudget(COMPUTER_MODEL.provider) + 2;
 		const context: Context = {
-			messages: Array.from({ length: overCount }, (_, index) => computerResultMessage(`call-${index}`, small)),
+			messages: Array.from({ length: overCount }, (_, index) => computerTurn(`call-${index}`, small)).flat(),
 		};
 
 		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
 
 		const surviving = clamped.messages.filter(
-			message => "providerMetadata" in message && message.providerMetadata !== undefined,
+			message => message.role === "toolResult" && message.providerMetadata !== undefined,
 		);
 		expect(surviving.length).toBe(providerImageBudget(COMPUTER_MODEL.provider));
 	});
@@ -966,16 +1005,16 @@ describe("provider context image budgets", () => {
 		// to the content loop left a replay of these entirely uncounted.
 		const overCount = providerImageBudget(COMPUTER_MODEL.provider) + 2;
 		const context: Context = {
-			messages: Array.from({ length: overCount }, (_, index) => ({
-				...computerResultMessage(`call-${index}`, "t".repeat(32)),
-				content: [],
-			})),
+			messages: Array.from({ length: overCount }, (_, index) => [
+				computerCallMessage(`call-${index}`),
+				{ ...computerResultMessage(`call-${index}`, "t".repeat(32)), content: [] },
+			]).flat(),
 		};
 
 		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
 
 		const surviving = clamped.messages.filter(
-			message => "providerMetadata" in message && message.providerMetadata !== undefined,
+			message => message.role === "toolResult" && message.providerMetadata !== undefined,
 		);
 		expect(surviving.length).toBe(providerImageBudget(COMPUTER_MODEL.provider));
 	});
@@ -992,6 +1031,34 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImages(context, proxyModel);
 
 		expect(imageData(clamped).length).toBe(1);
+	});
+
+	it("ignores an orphan screenshot whose computer call was compacted away", async () => {
+		// With no surviving `computer_call`, `appendResponsesToolResultMessages()`
+		// falls through to generic output and never sends the metadata screenshot.
+		// Charging it would evict a live user image for bytes that never travel.
+		// Orphan bytes alone bust the 16 MB budget; the live images alone do not.
+		const orphan = "o".repeat(15 * 1000 * 1000);
+		const liveImage = "L".repeat(3 * 1000 * 1000);
+		const context: Context = {
+			messages: [
+				// The result alone, its `computer_call` gone. Its generic content — the
+				// only thing that now travels — is tiny; the metadata copy is not.
+				{ ...computerResultMessage("call-gone", orphan), content: [text("screenshot"), image("tiny")] },
+				{ role: "user", timestamp: 2, content: [image(liveImage)] },
+				{ role: "user", timestamp: 3, content: [image(liveImage)] },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
+
+		// Untouched: the orphan's metadata never travels, so it neither entered the
+		// byte budget nor was evicted to satisfy one. Charging it would have put the
+		// request 5 MB over and cleared this very field.
+		const orphanResult = clamped.messages.find(message => message.role === "toolResult");
+		expect(orphanResult?.providerMetadata).toBeDefined();
+		// And both live images survive, since nothing owed a drop.
+		expect(imageData(clamped).filter(data => data.length > 16).length).toBe(2);
 	});
 
 	it("treats a managed session with no provider state yet as unwarmed", async () => {
