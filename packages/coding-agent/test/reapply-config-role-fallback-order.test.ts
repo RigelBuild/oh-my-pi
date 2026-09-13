@@ -222,6 +222,30 @@ describe("--reapply-config configured default fallback order", () => {
 		expect(resumed.model?.id).toBe(realCandidate.id);
 	});
 
+	it("adopts a self-alias-only list that still resolved to a model", async () => {
+		// The `default` sentinel is applied to the WHOLE unsplit role value, so a
+		// `default` inside a list is matched like any other selector — and the
+		// bundled `cursor/default` is a real model once Cursor credentials exist.
+		// Measured: `"default,@default"` classifies as all-self-alias yet resolves
+		// to `cursor/default`. Classifying by spelling alone restored the session
+		// model over a model config genuinely resolved.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay("default,@default");
+
+		// Cursor credentials make the BUNDLED `cursor/default` available, which is
+		// the collision the sentinel exists for. Scoped to this test.
+		authStorage.setRuntimeApiKey("cursor", "test-cursor-key");
+		try {
+			const resumed = await resume(sessionFile, settings, true);
+			expect(resumed.model?.provider).toBe("cursor");
+			expect(resumed.model?.id).toBe("default");
+		} finally {
+			authStorage.setRuntimeApiKey("cursor", "");
+		}
+	});
+
 	it("stops at a bare self alias ahead of a later suffixed one", async () => {
 		// `missing/model,*,*:low`: the concrete candidate does not resolve, so the
 		// BARE `*` is the fallback reached — and it names no thinking knob, so the
