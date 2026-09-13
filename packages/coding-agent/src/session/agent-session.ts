@@ -6526,8 +6526,24 @@ export class AgentSession {
 		const downgraded = this.#barrierDowngradedAgentEnd;
 		this.#barrierDowngradedAgentEnd = undefined;
 		if (dispatched || !downgraded) return;
-		if (this.#isDisposed || this.#promptInFlightCount > 0 || this.#compactionBarrierWaiters > 0) return;
-		this.#emit(downgraded);
+		if (this.#isDisposed) return;
+		// Restore through the CLASSIFIER, not a direct `#emit()`. The parked caller
+		// bailing does not mean the session is idle: an async-job result, queued
+		// steer, or IRC wake can have arrived during its setup, and `#endInFlight()`
+		// schedules that continuation before this release runs. Re-checking only
+		// the in-flight and barrier counts here would miss the agent queues, a
+		// pending IRC wake, and `yieldQueue.hasIdleDeliverable()` — so a terminal
+		// end would go out immediately before the queued turn starts, and an
+		// RPC/ACP client could submit a competing prompt into it. Re-deferring
+		// hands the event back to `#flushPendingAgentEnd()`, which owns every
+		// probe, re-downgrades under whichever continuation is now live (recording
+		// the yield or barrier ownership again so the restore path still exists),
+		// and emits terminal only when nothing is pending.
+		// A pending end already parked here outranks the restore: it is the newer
+		// event, and the classifier will emit it on its own gate.
+		if (this.#pendingAgentEndEmit) return;
+		this.#pendingAgentEndEmit = downgraded;
+		this.#flushPendingAgentEnd();
 	}
 
 	async #settleActiveCompaction(options?: { producesTurn?: boolean }): Promise<boolean> {
