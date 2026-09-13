@@ -47,6 +47,20 @@ const OPENAI_MODEL = buildModel({
 	maxTokens: 8192,
 });
 
+const VISION_ONLY_MODEL = buildModel({
+	id: "gpt-6-vision",
+	name: "gpt-6-vision",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+	supportsComputerUse: false,
+});
+
 const COMPUTER_MODEL = buildModel({
 	id: "gpt-6-computer",
 	name: "gpt-6-computer",
@@ -1275,6 +1289,44 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
 
 		// The live image survives: the orphan's 10 MB never reach the wire.
+		expect(imageData(clamped).some(data => data.startsWith("v"))).toBe(true);
+	});
+
+	it("charges and redacts a screenshot a non-computer model demotes to a note", async () => {
+		// `appendResponsesToolResultMessages()` stringifies the whole metadata
+		// screenshot — data uri included — into an assistant note for a model with
+		// `supportsComputerUse !== true`, and never sends the content mirror. This
+		// result has no mirror at all (a history parsed back from a
+		// `computer_call_output` has `content: []`), so the metadata is the only
+		// representation there is to charge.
+		const shot = "d".repeat(10 * 1000 * 1000);
+		const live = "v".repeat(10 * 1000 * 1000);
+		const context: Context = {
+			messages: [
+				computerCallMessage("call-demoted"),
+				{
+					role: "toolResult",
+					timestamp: 1,
+					toolCallId: "call-demoted",
+					toolName: "computer",
+					content: [text("screenshot")],
+					isError: false,
+					providerMetadata: {
+						type: "computer",
+						acknowledgedSafetyChecks: [],
+						screenshot: { type: "computer_screenshot", image_url: dataUri(shot) },
+					},
+				},
+				{ role: "user", timestamp: 9, content: [image(live)] },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, VISION_ONLY_MODEL);
+
+		// 20 MB against a 16 MB budget: the metadata is what travels, so it is what
+		// gets redacted, and the later live image survives.
+		const result = clamped.messages.find(message => message.role === "toolResult") as ToolResultMessage;
+		expect(result.providerMetadata).toBeUndefined();
 		expect(imageData(clamped).some(data => data.startsWith("v"))).toBe(true);
 	});
 

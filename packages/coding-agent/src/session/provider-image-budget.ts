@@ -79,6 +79,14 @@ function collectImageStats(
 		// 9 MB screenshot measures 18 MB and evicts the only copy that travels.
 		const sendsScreenshot =
 			message.role === "toolResult" && sendsComputerScreenshot(message, countModel, pairedComputerCallIds);
+		// A demoted screenshot's bytes travel inside an assistant note while the
+		// content mirror is dropped — so it owes bytes but no image part, and the
+		// mirror must not be charged in its place.
+		const demotesScreenshot = message.role === "toolResult" && demotesComputerScreenshot(message, countModel);
+		if (demotesScreenshot && byteModel !== undefined) {
+			const screenshot = inlineComputerScreenshot(message.providerMetadata);
+			if (screenshot !== undefined) inlineSizes.push(screenshot.length);
+		}
 		if (sendsScreenshot) {
 			// One image part, whether or not a content mirror exists: a history
 			// parsed back from `computer_call_output` produces `content: []`, and a
@@ -109,7 +117,7 @@ function collectImageStats(
 			if (part.type !== "image") continue;
 			// The mirror is neither counted nor charged: the metadata copy above
 			// already stands for this screenshot on both budgets.
-			if (sendsScreenshot) continue;
+			if (sendsScreenshot || demotesScreenshot) continue;
 			total++;
 			if (byteModel !== undefined && sendsInlineImageBytes(part, byteModel)) inlineSizes.push(part.data.length);
 		}
@@ -318,6 +326,27 @@ function sendsComputerScreenshot(
 }
 
 /**
+ * Whether this result's screenshot travels inside a demoted assistant note.
+ *
+ * `appendResponsesToolResultMessages()` takes an earlier branch for a computer
+ * result on a model with `supportsComputerUse !== true`: it stringifies the
+ * whole `providerMetadata.screenshot` — data uri included, untruncated — into an
+ * assistant note and returns, so the generic content image is never sent. The
+ * bytes therefore travel while the count does not: the note is text, not an
+ * image part.
+ */
+function demotesComputerScreenshot(message: ToolResultMessage, model: Model | undefined): boolean {
+	if (model === undefined || model.supportsComputerUse === true) return false;
+	if (!usesResponsesToolResultConverter(model)) return false;
+	return message.providerMetadata?.type === "computer";
+}
+
+/** The API routes whose tool results go through `appendResponsesToolResultMessages()`. */
+function usesResponsesToolResultConverter(model: Model): boolean {
+	return replaysOpenAIResponsesNativeHistory(model);
+}
+
+/**
  * The call ids of every computer tool call still present in this context.
  *
  * Mirrors `collectComputerCallIds` over the generic view: a `computer_call` item
@@ -439,6 +468,15 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageClampState
 
 function clampToolResultMessage(message: ToolResultMessage, state: ImageClampState): ToolResultMessage {
 	if (!clampWanted(state)) return message;
+	// A demoted screenshot's bytes leave through the assistant note, so only the
+	// metadata can be redacted — and only while bytes are what is owed, since the
+	// note is text and consumes no image part.
+	if (demotesComputerScreenshot(message, state.model)) {
+		if (state.remainingInlineDrops <= 0) return message;
+		if (inlineComputerScreenshot(message.providerMetadata) === undefined) return message;
+		state.remainingInlineDrops--;
+		return { ...message, providerMetadata: undefined };
+	}
 	// Dropping the metadata screenshot already removes this result's only wire
 	// image, so the mirrored content block must not also pay down a budget — it
 	// was never charged one.
