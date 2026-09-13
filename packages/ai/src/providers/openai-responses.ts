@@ -265,6 +265,11 @@ export function willReplayOpenAIResponsesNativeHistory(
 	model: Model,
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
 ): boolean {
+	// Only the Responses transport gates replay on warmed session state. The Codex
+	// transport replays every matching payload unconditionally
+	// (`openai-codex-responses.ts` `convertCodexMessages()`), so its history always
+	// travels and must always be charged.
+	if (model.api !== "openai-responses") return true;
 	// No MAP at all is an unmanaged session, which always replays — the default
 	// `buildParams` takes. A managed map with no entry is the opposite: the state
 	// has simply not been created yet, and `createOpenAIResponsesProviderSessionState`

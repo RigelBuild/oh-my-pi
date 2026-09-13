@@ -7,6 +7,7 @@ import type {
 	Model,
 	ProviderSessionState,
 	TextContent,
+	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -44,6 +45,20 @@ const OPENAI_MODEL = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 200000,
 	maxTokens: 8192,
+});
+
+const COMPUTER_MODEL = buildModel({
+	id: "gpt-6-computer",
+	name: "gpt-6-computer",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+	supportsComputerUse: true,
 });
 
 const ANTHROPIC_MODEL = buildModel({
@@ -193,6 +208,22 @@ function replayedItems(message: Message | undefined): Array<Record<string, unkno
 	const payload = message && "providerPayload" in message ? message.providerPayload : undefined;
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return [];
 	return payload.items;
+}
+
+function computerResultMessage(toolCallId: string, data: string): ToolResultMessage {
+	return {
+		role: "toolResult",
+		timestamp: 1,
+		toolCallId,
+		toolName: "computer",
+		content: [text("screenshot"), image(data)],
+		isError: false,
+		providerMetadata: {
+			type: "computer",
+			acknowledgedSafetyChecks: [],
+			screenshot: { type: "computer_screenshot", image_url: dataUri(data) },
+		},
+	};
 }
 
 describe("provider context image budgets", () => {
@@ -736,6 +767,112 @@ describe("provider context image budgets", () => {
 		expect(remaining.length).toBe(1);
 		// The item keeps its shape and position rather than being removed.
 		expect(items.length).toBe(2);
+	});
+
+	it("clears the screenshot metadata a computer result actually sends", async () => {
+		// `computer_call_output.output` carries `providerMetadata.screenshot`, not
+		// the mirrored content image, so dropping only the content block gives back
+		// no wire bytes at all.
+		const big = "z".repeat(9 * 1024 * 1024);
+		const context: Context = {
+			messages: [computerResultMessage("call-1", big), computerResultMessage("call-2", big)],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		const first = clamped.messages[0];
+		expect(first?.role).toBe("toolResult");
+		// The oldest screenshot is cleared; the newer one still travels.
+		expect(first && "providerMetadata" in first ? first.providerMetadata : undefined).toBeUndefined();
+		const second = clamped.messages[1];
+		expect(second && "providerMetadata" in second ? second.providerMetadata : undefined).toBeDefined();
+	});
+
+	it("charges one computer screenshot once, not twice", async () => {
+		// The metadata screenshot REPLACES the content image on the wire, so a
+		// single 9 MB screenshot with the normal mirrored content block must
+		// measure 9 MB, not 18 — otherwise the only copy that travels is evicted
+		// for busting a budget it fits inside.
+		const big = "w".repeat(9 * 1024 * 1024);
+		const context: Context = { messages: [computerResultMessage("call-1", big)] };
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
+
+		const first = clamped.messages[0];
+		expect(first && "providerMetadata" in first ? first.providerMetadata : undefined).toBeDefined();
+	});
+
+	it("counts replayed input images against the per-request image cap", async () => {
+		// Small enough that bytes never bind: the cap that must bite is the count.
+		const small = "q".repeat(64);
+		const overCount = providerImageBudget(OPENAI_MODEL.provider) + 3;
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "compaction summary" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: Array.from({ length: overCount }, () => ({
+							type: "message",
+							role: "user",
+							content: [{ type: "input_image", image_url: dataUri(small) }],
+						})),
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		const surviving = replayedItems(clamped.messages[0]).filter(
+			item =>
+				Array.isArray(item.content) && item.content.some(part => isRecord(part) && part.type === "input_image"),
+		);
+		expect(surviving.length).toBe(providerImageBudget(OPENAI_MODEL.provider));
+	});
+
+	it("charges a cold payload that a compaction marker replays anyway", async () => {
+		// `convertConversationMessages()` replays on the marker alone, independently
+		// of the session's warmed replay state, so a cold resume's very first
+		// request still carries these bytes.
+		const big = "v".repeat(9 * 1024 * 1024);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "compaction summary" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "compaction_summary" },
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(big) }] },
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(big) }] },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, false);
+
+		const remaining = replayedItems(clamped.messages[0]).flatMap(item =>
+			Array.isArray(item.content) ? item.content.filter(part => isRecord(part) && part.type === "input_image") : [],
+		);
+		expect(remaining.length).toBe(1);
+	});
+
+	it("treats Codex native history as always replayed", async () => {
+		// The Codex transport replays every matching payload unconditionally, so
+		// warmed replay state is a Responses-only gate.
+		const codexModel = { ...OPENAI_MODEL, api: "openai-codex-responses" } as Model;
+
+		expect(willReplayOpenAIResponsesNativeHistory(codexModel, new Map<string, ProviderSessionState>())).toBe(true);
+		expect(willReplayOpenAIResponsesNativeHistory(OPENAI_MODEL, new Map<string, ProviderSessionState>())).toBe(false);
 	});
 
 	it("treats a managed session with no provider state yet as unwarmed", async () => {

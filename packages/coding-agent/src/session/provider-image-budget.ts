@@ -58,6 +58,7 @@ function collectImageStats(
 	context: Context,
 	byteModel: Model | undefined,
 	replaysNativeHistory: boolean,
+	countModel: Model,
 ): { total: number; inlineSizes: number[] } {
 	let total = 0;
 	const inlineSizes: number[] = [];
@@ -70,14 +71,28 @@ function collectImageStats(
 				inlineSizes.push(...replayedImageResultSizes(message, byteModel, replaysNativeHistory));
 			continue;
 		}
-		if (byteModel !== undefined) {
-			const replayed = replayedInputImageSizes(message, byteModel, replaysNativeHistory);
-			if (replayed.length > 0) inlineSizes.push(...replayed);
+		// A computer result's metadata screenshot REPLACES its generic content on
+		// the wire — `appendResponsesToolResultMessages()` sends the metadata copy
+		// as the `computer_call_output.output` and never looks at the content. So
+		// the mirrored content image must not be charged a second time, or one
+		// 9 MB screenshot measures 18 MB and evicts the only copy that travels.
+		const mirrorsMetadataScreenshot = message.role === "toolResult" && sendsComputerScreenshot(message, countModel);
+		if (mirrorsMetadataScreenshot && byteModel !== undefined) {
+			const screenshot = inlineComputerScreenshot(message.providerMetadata);
+			if (screenshot !== undefined) inlineSizes.push(screenshot.length);
 		}
+		// A replayed `input_image` is sent as an ordinary Responses image input, so
+		// it consumes the provider's per-request image COUNT as well as bytes —
+		// unlike a replayed `image_generation_call` result, which is an assistant
+		// output item rather than an input part.
+		const replayed = replayedInputImageSizes(message, byteModel ?? countModel, replaysNativeHistory);
+		total += replayed.length;
+		if (byteModel !== undefined && replayed.length > 0) inlineSizes.push(...replayed);
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type !== "image") continue;
 			total++;
+			if (mirrorsMetadataScreenshot) continue;
 			if (byteModel !== undefined && sendsInlineImageBytes(part, byteModel)) inlineSizes.push(part.data.length);
 		}
 	}
@@ -159,9 +174,14 @@ function replayedImageResult(item: Record<string, unknown>): string | undefined 
  */
 function replayedInputImageSizes(message: Message, model: Model, replaysNativeHistory: boolean): number[] {
 	if (message.role !== "user" && message.role !== "developer") return [];
-	if (!replaysNativeHistory) return [];
 	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
 	if (!payload) return [];
+	// A cold session still replays a payload that carries a `compaction` or
+	// `compaction_summary` marker: `convertConversationMessages()` takes that
+	// branch on the marker alone, independently of `nativeHistory.replay`. That
+	// is exactly the oversized remote-compaction replacement this accounts for,
+	// so skipping it on a cold resume let the very first request bust the cap.
+	if (!replaysNativeHistory && !hasCompactionMarker(payload.items)) return [];
 	const sizes: number[] = [];
 	for (const item of payload.items) {
 		for (const part of nativeInputImageParts(item)) {
@@ -172,12 +192,47 @@ function replayedInputImageSizes(message: Message, model: Model, replaysNativeHi
 	return sizes;
 }
 
+/** Whether these items replay regardless of the session's warmed replay state. */
+function hasCompactionMarker(items: ReadonlyArray<Record<string, unknown> | undefined>): boolean {
+	return items.some(item => item?.type === "compaction" || item?.type === "compaction_summary");
+}
+
 /** The `input_image` parts of a replayed item, whether nested in `content` or not. */
 function nativeInputImageParts(item: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
 	if (!item) return [];
 	if (item.type === "input_image") return [item];
 	if (!Array.isArray(item.content)) return [];
 	return item.content.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "input_image");
+}
+
+/**
+ * Whether this result's screenshot travels as `computer_call_output.output`
+ * rather than as its generic content image.
+ *
+ * `appendResponsesToolResultMessages()` takes that branch for a Responses
+ * model's computer result, sending `providerMetadata.screenshot` and ignoring
+ * the content entirely. On any other model the metadata is inert and the
+ * content image is what travels, so the two are never both charged.
+ */
+function sendsComputerScreenshot(message: ToolResultMessage, model: Model | undefined): boolean {
+	if (model?.supportsComputerUse !== true) return false;
+	return inlineComputerScreenshot(message.providerMetadata) !== undefined;
+}
+
+/**
+ * The inline base64 of a computer result's replayed screenshot, or `undefined`
+ * when it carries none.
+ *
+ * `openai-shared.ts` `appendResponsesToolResultMessages()` sends
+ * `providerMetadata.screenshot` as the `computer_call_output.output`, so the
+ * metadata copy is what travels — the mirrored generic content image is dropped
+ * on the floor. Clamping only the content block therefore removed no wire bytes
+ * at all, and a result with no mirrored copy went uncounted entirely.
+ */
+function inlineComputerScreenshot(metadata: ToolResultProviderMetadata | undefined): string | undefined {
+	if (metadata?.type !== "computer") return undefined;
+	const image = inlineImageFromDataUri(metadata.screenshot.image_url);
+	return image && image.data.length > 0 ? image.data : undefined;
 }
 
 /** Count of oldest images to drop so the surviving image payload fits `byteLimit`. */
@@ -259,6 +314,18 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageClampState
 
 function clampToolResultMessage(message: ToolResultMessage, state: ImageClampState): ToolResultMessage {
 	if (!clampWanted(state)) return message;
+	// Dropping the metadata screenshot already removes this result's only wire
+	// image, so the mirrored content block must not also pay down a budget — it
+	// was never charged one.
+	if (sendsComputerScreenshot(message, state.model)) {
+		if (!clampComputerScreenshot(message, state)) return message;
+		const clampedContent = clampContent(message.content, { ...state, remainingInlineDrops: 0 });
+		return {
+			...message,
+			content: clampedContent && clampedContent.length > 0 ? clampedContent : [IMAGE_OMISSION_NOTICE],
+			providerMetadata: undefined,
+		};
+	}
 	const content = clampContent(message.content, state);
 	if (!content) return message;
 	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] };
@@ -275,12 +342,14 @@ function clampReplayedInputImages(
 	message: UserMessage | DeveloperMessage,
 	state: ImageClampState,
 ): { providerPayload: ProviderPayload } | undefined {
-	if (state.remainingInlineDrops <= 0 || !state.replaysNativeHistory) return undefined;
+	if (!clampWanted(state)) return undefined;
 	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, state.model.provider);
 	if (!payload) return undefined;
+	// Same eligibility as the accounting, marker exception included.
+	if (!state.replaysNativeHistory && !hasCompactionMarker(payload.items)) return undefined;
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
-		if (state.remainingInlineDrops <= 0) break;
+		if (!clampWanted(state)) break;
 		const item = payload.items[index];
 		const rewritten = dropNativeInputImages(item, state);
 		if (!rewritten) continue;
@@ -299,26 +368,46 @@ function dropNativeInputImages(
 	const omitted = { type: "input_text", text: IMAGE_OMISSION_NOTICE.text };
 	if (item.type === "input_image") {
 		if (!inlineNativeImageSize(item)) return undefined;
-		state.remainingInlineDrops--;
+		payNativeInputImageDrop(state);
 		return omitted;
 	}
 	if (!Array.isArray(item.content)) return undefined;
 	let content: unknown[] | undefined;
 	for (let index = 0; index < item.content.length; index++) {
-		if (state.remainingInlineDrops <= 0) break;
+		if (!clampWanted(state)) break;
 		const part = item.content[index];
 		if (!isRecord(part) || part.type !== "input_image" || !inlineNativeImageSize(part)) continue;
-		state.remainingInlineDrops--;
+		payNativeInputImageDrop(state);
 		content ??= [...item.content];
 		content[index] = omitted;
 	}
 	return content ? { ...item, content } : undefined;
 }
 
+/** A replayed input image is an image part AND inline bytes, so it pays both. */
+function payNativeInputImageDrop(state: ImageClampState): void {
+	if (state.remainingInlineDrops > 0) state.remainingInlineDrops--;
+	if (state.remainingDrops > 0) state.remainingDrops--;
+}
+
 /** Whether this native part carries inline bytes at all. */
 function inlineNativeImageSize(part: Record<string, unknown>): boolean {
 	const image = inlineImageFromDataUri(part.image_url);
 	return image !== undefined && image.data.length > 0;
+}
+
+/**
+ * Clears a computer result's replayed screenshot while byte pressure remains.
+ * That metadata copy is what `computer_call_output.output` sends, so it is the
+ * only way this result gives back wire bytes. `computer_call_output` accepts
+ * only a `computer_screenshot` ref with no text alternative, so the metadata is
+ * cleared outright rather than degraded in place.
+ */
+function clampComputerScreenshot(message: ToolResultMessage, state: ImageClampState): boolean {
+	if (state.remainingInlineDrops <= 0) return false;
+	state.remainingInlineDrops--;
+	if (state.remainingDrops > 0) state.remainingDrops--;
+	return true;
 }
 
 /**
@@ -407,9 +496,9 @@ export const PROVIDER_IMAGE_COUNT_DECODE_SLACK = 1;
 export function clampProviderContextImageCount(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const admissible = providerImageBudget(model.provider) * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK);
-	// The count cap never reads a replayed payload (a generation result is not an
-	// image part), so the flag cannot change this tally.
-	const countDrops = collectImageStats(context, undefined, true).total - admissible;
+	// A replayed generation result is not an image part, so the byte flag cannot
+	// change this tally — but a replayed `input_image` IS one, and is counted.
+	const countDrops = collectImageStats(context, undefined, true, model).total - admissible;
 	if (countDrops <= 0) return context;
 	return applyImageClamp(context, {
 		remainingDrops: countDrops,
@@ -425,7 +514,7 @@ export function clampProviderContextImageCount(context: Context, model: Model): 
  *  cap yet bust the request-size limit on summed frame bytes). */
 export function clampProviderContextImages(context: Context, model: Model, replaysNativeHistory = true): Context {
 	if (!model.input.includes("image")) return context;
-	const { total, inlineSizes } = collectImageStats(context, model, replaysNativeHistory);
+	const { total, inlineSizes } = collectImageStats(context, model, replaysNativeHistory, model);
 	// Not `total === 0`: a replayed native image result contributes bytes but no
 	// image part, so a context whose only images are generated ones has
 	// `total === 0` and a payload that can still bust the byte budget.
