@@ -713,6 +713,52 @@ describe("MCPToolCache empty-toolset guard", () => {
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
 
+	// A tombstone's ordering must outlive the CATALOG TTL, because an MCP request
+	// does not have a bounded lifetime — `timeout: 0` disables the timeout
+	// outright. When an older `tools/list` is in flight for longer than the
+	// tombstone's 30 days, that tombstone expires first; the response then sampled
+	// an ABSENT catalog row and `#writeOrdered()` accepted it, restoring retired
+	// tools for another 30 days. The claim row is retained for 100 years for
+	// exactly this case, so it is the ordering state that survives — but the write
+	// comparison consulted only the catalog row.
+	//
+	// The expiry is driven by writing the tombstone with a past expiry rather than
+	// by waiting, so nothing here depends on elapsed time.
+	//
+	// RED (pre-fix): the retired catalog was restored and served.
+	test("refuses a response that outlived the tombstone it was superseded by", async () => {
+		const storage = createExpiringFakeStorage();
+		const cache = new MCPToolCache(storage);
+
+		// The old, slow request reserves first — on its own instance, since it
+		// belongs to a process that will not outlive the request.
+		const staleToken = reserved(new MCPToolCache(storage), "litellm");
+
+		// A newer listing retires the toolset: an empty result writes the
+		// tombstone, whose claim row is the durable ordering state.
+		const newerToken = reserved(cache, "litellm");
+		await cache.set("litellm", CONFIG, [], newerToken);
+
+		// Simulate the tombstone outliving its TTL while the old request is still
+		// in flight: re-write the catalog row with an already-past expiry, so
+		// `getCache` reports it absent exactly as it would after 30 days.
+		const tombstone = storage.getCache("mcp_tools:litellm");
+		if (tombstone !== null) {
+			storage.setCache("mcp_tools:litellm", tombstone, Math.floor(Date.now() / 1000) - 1);
+		}
+		expect(storage.getCache("mcp_tools:litellm")).toBeNull();
+
+		// The delayed older response lands through a SEPARATE instance: the
+		// in-process `#newestObserved` map would otherwise suppress it on its own,
+		// which is not the state under test. Cross-process is also the real case —
+		// a request outliving 30 days outlives the process that issued it, so the
+		// persisted rows are the only ordering left.
+		const late = new MCPToolCache(storage);
+		await late.set("litellm", CONFIG, [OLD_TOOL], staleToken);
+
+		expect((await cache.get("litellm", CONFIG)) ?? []).not.toContainEqual(OLD_TOOL);
+	});
+
 	// The barrier a FAILED reservation records must dominate every request this
 	// instance already issued — not merely read the clock. After a backward step
 	// the current reading is BELOW a token an earlier in-flight request already
