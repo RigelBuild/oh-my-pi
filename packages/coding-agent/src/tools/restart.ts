@@ -27,17 +27,16 @@
  * caller to inform; recovery is via the durable session file. Never left
  * unhandled, never silently swallowed.
  */
-import * as os from "node:os";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import restartDescription from "../prompts/tools/restart.md" with { type: "text" };
 import restartFailedNotice from "../prompts/tools/restart-failed.md" with { type: "text" };
 import restartRefusedNotice from "../prompts/tools/restart-refused.md" with { type: "text" };
 import restartScheduledAck from "../prompts/tools/restart-scheduled.md" with { type: "text" };
 import restartUnavailableNotice from "../prompts/tools/restart-unavailable.md" with { type: "text" };
 import { createCustomMessage } from "../session/messages";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "./render-utils";
+import { sanitizeDisplayWarning, TRUNCATE_LENGTHS, truncateToWidth } from "./render-utils";
 import type { ToolSession } from "./index";
 import type { OutputMeta } from "./output-meta";
 import { toolResult } from "./tool-result";
@@ -131,24 +130,18 @@ export class RestartTool implements AgentTool<typeof restartSchema, RestartToolD
 				// an absolute home path, which repaint or break the TUI and leak the
 				// home directory (AGENTS.md § TUI Sanitization).
 				//
-				// `sanitizeText()` FIRST and on the whole string: it is the only step
-				// that removes ANSI/C0 controls (`\x1b[2J`, `\x07`, `\r`), and neither
-				// `replaceTabs()` (which rewrites `\t` only) nor `truncateToWidth()`
-				// (which returns a short string unchanged) would drop them. It strips
-				// rather than escapes, so nothing downstream double-escapes; it also
-				// deliberately preserves `\t` and `\n`, which is why the collapse and
-				// `replaceTabs()` still run after it. Running it before the home-path
-				// replace matters too — a control sequence embedded in the path would
-				// otherwise break the match. Truncation stays LAST so the width clamp
-				// measures the text actually rendered.
-				const rawMessage = sanitizeText(err instanceof Error ? err.message : String(err));
-				// `shortenPath()` only rewrites a string that *starts* with the home dir,
-				// so replace every embedded occurrence instead.
-				const homeDir = os.homedir();
+				// `sanitizeDisplayWarning()` is the central path: it runs
+				// `sanitizeText()` (the only step that removes ANSI/C0 controls like
+				// `\x1b[2J`, `\x07`, `\r`), then `replaceTabs()`, then collapses
+				// newlines, then shortens embedded home paths — in that order, so a
+				// control sequence inside a path cannot break the match. A local
+				// `replaceAll(homeDir, "~")` was wrong here: a plain substring replace
+				// rewrites an unrelated path that merely shares a prefix with the home
+				// dir (home `/home/al` turns `/home/alice/file` into `~ice/file`) and
+				// misses the helper's path-boundary and Windows cases. Truncation stays
+				// LAST so the width clamp measures the text actually rendered.
 				const message = truncateToWidth(
-					replaceTabs(
-						(homeDir ? rawMessage.replaceAll(homeDir, "~") : rawMessage).replace(/\s*\n+\s*/g, " "),
-					).trim(),
+					sanitizeDisplayWarning(err instanceof Error ? err.message : String(err)),
 					TRUNCATE_LENGTHS.LONG,
 				);
 				// Split on dispose ordering, the same seam requestRestart() latches

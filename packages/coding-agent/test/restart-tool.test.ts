@@ -206,6 +206,44 @@ describe("RestartTool prompt assets back the delivered text", () => {
 		// And it is the FAILED asset carrying it, not a refusal variant.
 		expect(text).toBe(prompt.render(failedTemplate, { message: rawMessage }));
 	});
+
+	// Home-path shortening has to go through the central sanitizer, not a local
+	// `replaceAll(homeDir, "~")`. A plain substring replace has no path boundary,
+	// so an unrelated path that merely SHARES A PREFIX with the home dir is
+	// corrupted mid-word: with home `/home/al`, `/home/alice/session.jsonl`
+	// renders as `~ice/session.jsonl`, which names a file that does not exist and
+	// points the model at the wrong path while it is trying to recover a failed
+	// restart.
+	//
+	// RED (pre-fix): the message came back containing `~ice/session.jsonl`.
+	it("shortens the home dir on a path boundary, leaving a prefix-sharing path intact", async () => {
+		vi.spyOn(logger, "error").mockImplementation(() => {});
+		vi.spyOn(os, "homedir").mockReturnValue("/home/al");
+		const queued: CustomMessage[] = [];
+		const rawMessage = "ensureOnDisk failed for /home/alice/session.jsonl (home is /home/al/x)";
+		const tool = new RestartTool(
+			toolSession({
+				requestRestart: async (): Promise<RequestRestartResult> => {
+					throw new Error(rawMessage);
+				},
+				isDisposed: () => false,
+				queueDeferredMessage: (message: CustomMessage) => void queued.push(message),
+			}),
+		);
+
+		await tool.execute("call-1", {});
+		await waitFor(() => queued.length > 0);
+
+		const text =
+			typeof queued[0]!.content === "string"
+				? queued[0]!.content
+				: queued[0]!.content.map(b => (b.type === "text" ? b.text : "")).join("");
+		// The prefix-sharing path survives whole.
+		expect(text).toContain("/home/alice/session.jsonl");
+		expect(text).not.toContain("~ice");
+		// A real home-rooted path still shortens, so this is not just "sanitizer off".
+		expect(text).toContain("~/x");
+	});
 });
 
 describe("RestartTool approval tier", () => {
