@@ -2740,6 +2740,57 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		unregister();
 	}, 15_000);
 
+	it("still delivers a terminal agent_end when a parked prompt resumes but never dispatches", async () => {
+		// The barrier analogue of the stale-yield-entry window. A prompt parked on
+		// the compaction barrier counts as a continuation, so the pass's deferred
+		// `agent_end` goes out non-terminal on its behalf. But the claim is
+		// released AT the barrier, before dispatch is known — and the resumed
+		// prompt can still exit before invoking the agent (API-key or model
+		// validation throws, a usage preflight denies, the generation moved on).
+		// Nothing then emits the replacement end, so an RPC/ACP client waits
+		// forever.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const terminalEnds: boolean[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") terminalEnds.push(event.isTerminal !== false);
+		});
+
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		// API-key validation runs after the barrier and throws, so this parked
+		// prompt resumes and exits without ever invoking the agent.
+		vi.spyOn(session.modelRegistry, "getApiKey").mockResolvedValue(undefined);
+		const parked = session.prompt("a second prompt, typed during the rewrite");
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+
+		summaryGate.resolve();
+		await expect(parked).rejects.toThrow();
+		await primary;
+		await session.waitForIdle();
+		for (let i = 0; i < 50; i++) await Bun.sleep(0);
+
+		// Nothing owes a turn now. Withholding the terminal end indefinitely is the
+		// failure this guards.
+		expect(terminalEnds.length).toBeGreaterThan(0);
+		expect(terminalEnds[terminalEnds.length - 1]).toBe(true);
+	}, 15_000);
+
 	it("does not report a turn in flight while it waits out the rewrite", async () => {
 		// CONTRACT (the barrier's POSITION, not merely its presence): the wait has
 		// to happen BEFORE the in-flight increment. The pass's `abort()` calls
