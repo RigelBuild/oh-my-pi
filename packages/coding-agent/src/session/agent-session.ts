@@ -666,13 +666,26 @@ const PROMPT_AFFECTING_SETTING_PATHS = [
 	// instructing the model about a field the schemas no longer carry (or omits
 	// guidance for one they now require).
 	"tools.intentTracing",
-	// Gates the auto-background guidance line in BOTH the `bash` and `eval`
-	// rendered descriptions, which `inlineToolDescriptors` embeds in the system
-	// prompt. Same shape as `async.enabled` above: execution and the tool
-	// property follow the setting live, so without a rebuild only the model kept
-	// the retired guidance. The threshold is NOT here — neither template renders
-	// the number, so changing it moves no prompt text.
+	// Gates the auto-background guidance line in the `bash` and `eval` rendered
+	// descriptions, which `inlineToolDescriptors` embeds in the system prompt.
+	// Same shape as `async.enabled` above: execution and the tool property
+	// follow the setting live, so without a rebuild only the model kept the
+	// retired guidance. The two tools read SEPARATE keys — `EvalTool.description`
+	// passes `eval.autoBackground.enabled`, never the bash one — so both are
+	// listed. The thresholds are NOT here: no template renders the number, so
+	// changing one moves no prompt text.
 	"bash.autoBackground.enabled",
+	"eval.autoBackground.enabled",
+	// Whether `EvalTool.description` advertises `@tool`/`tool(fn)` and the
+	// `tools` spawn option. Read live at render, so the embedded catalog kept
+	// offering (or withholding) kernel-defined subagent tools after a refresh.
+	"eval.tools.enabled",
+	// The backends `EvalTool.description` renders its language schema from. A
+	// session keeps `eval` registered when only ONE of these moves, so the
+	// gated-tool reconcile sees no transition and nothing else rebuilds — while
+	// the embedded description still documents the retired language.
+	"eval.py",
+	"eval.js",
 	// Read live by `rebuildSystemPrompt`, so a rebuild renders the current value
 	// — but nothing else necessarily moves when one of these does.
 	// `inlineToolDescriptors` is the sharper case: it prunes provider tool
