@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { modelCatalogForClassification, resolveAgentModelSelection } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -104,6 +104,12 @@ export interface VibeParentSession {
 	 * worker; a caller that spawns or rehydrates one must supply it.
 	 */
 	modelRegistry?: ToolSession["modelRegistry"];
+	/**
+	 * The parent's ACTIVE model, which the catalog above can omit: a session that
+	 * pinned a model directly and authenticates it itself is absent from the
+	 * registry's available projection. Needed for the same classification.
+	 */
+	getActiveModel?: ToolSession["getActiveModel"];
 }
 
 interface VibeRestoreCandidate {
@@ -416,8 +422,13 @@ export class VibeSessionRegistry {
 			fallbackModelPattern: session.getModelString?.(),
 			// So a suffixed self alias (`*:xhigh`) re-tiers an inherited SELECTOR but
 			// leaves an inherited literal id (`nanogpt/coding-router:low`) alone —
-			// rewriting that suffix names a different model, not a new tier.
-			availableModels: session.modelRegistry?.getAvailable() ?? [],
+			// rewriting that suffix names a different model, not a new tier. The
+			// active model joins the projection because a pinned, caller-authenticated
+			// model is absent from it — see `modelCatalogForClassification`.
+			availableModels: modelCatalogForClassification(
+				session.modelRegistry?.getAvailable(),
+				session.getActiveModel?.(),
+			),
 		});
 		return { agent, modelOverride: patterns, modelRole: role };
 	}

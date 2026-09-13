@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { modelCatalogForClassification, resolveAgentModelSelection } from "../config/model-resolver";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -322,7 +322,17 @@ export async function resolveEffectiveSubagentPolicy(
 		// rewriting that suffix names a different model, not a new tier. A session
 		// with no registry has no catalog to check the inherited pattern against,
 		// so every pattern reads as a selector.
-		availableModels: request.session.modelRegistry?.getAvailable() ?? [],
+		//
+		// The ACTIVE model is added to that projection. `getAvailable()` answers
+		// from the registry's own auth storage, so an SDK session that pinned a
+		// model through `options.model` and supplies its key through
+		// `options.getApiKey` need not appear there — and an active id ending in
+		// an effort name would then be misread as a selector and rewritten,
+		// naming a different model for a child the parent's key is forwarded to.
+		availableModels: modelCatalogForClassification(
+			request.session.modelRegistry?.getAvailable(),
+			request.session.getActiveModel?.(),
+		),
 	};
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the

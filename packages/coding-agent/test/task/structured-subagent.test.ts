@@ -353,6 +353,35 @@ describe("structured subagent primitive", () => {
 				"nanogpt/coding-router:xhigh",
 			]);
 		});
+
+		it("classifies the active id even when the registry projection omits it", async () => {
+			// `getAvailable()` answers from the REGISTRY's auth storage, so an SDK
+			// session that pinned a model through `options.model` and supplies its
+			// key through `options.getApiKey` need not appear in it. The catalog is
+			// the only discriminator, so an absent active model made its literal id
+			// read as a selector — and `*:xhigh` rewrote it to a DIFFERENT model
+			// the parent's forwarded key was never meant for.
+			mockDiscovery({ ...AGENT, model: ["*:xhigh"] });
+			const parent = session();
+			const pinned = {
+				...parent,
+				getActiveModelString: () => "nanogpt/coding-router:low",
+				getActiveModel: () => routerLow,
+				// Empty projection: the pinned model is authenticated by the caller,
+				// not by the registry.
+				modelRegistry: { getAvailable: () => [] },
+			} as unknown as ToolSession;
+			const dispatched: executorModule.ExecutorOptions[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				dispatched.push(options);
+				return result();
+			});
+
+			const settled = await runStructuredSubagent(request({ session: pinned, retainArtifacts: true }));
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+
+			expect(dispatched[0]?.modelOverride).toEqual(["nanogpt/coding-router:low:xhigh"]);
+		});
 	});
 	it("does not treat a spawn handle as the HUD description", async () => {
 		mockDiscovery();

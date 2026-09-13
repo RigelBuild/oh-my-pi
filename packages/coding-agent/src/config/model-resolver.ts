@@ -1499,6 +1499,26 @@ export interface AgentModelSelection {
  * inherited retry-fallback chain is keyed off the role, which the expansion
  * discards, and deriving the two halves separately is how they drift apart.
  */
+/**
+ * The catalog an inherited model pattern is classified against: the registry's
+ * available projection, plus the session's ACTIVE model when that projection
+ * omits it.
+ *
+ * `ModelRegistry.getAvailable()` answers from the registry's own auth storage,
+ * so a session that pinned a model directly and supplies its credentials
+ * separately (the SDK's `options.model` + `options.getApiKey`) need not appear
+ * in it. Classification is the only thing this catalog decides, and a model the
+ * session is demonstrably RUNNING is a literal id however its key arrived — so
+ * an active id ending in an effort name (`nanogpt/coding-router:low`) must not
+ * read as a selector and be rewritten into a different model.
+ */
+export function modelCatalogForClassification(available: Model<Api>[] | undefined, active: Model | undefined): Model[] {
+	const catalog = available ?? [];
+	if (!active) return catalog;
+	if (catalog.some(model => model.provider === active.provider && model.id === active.id)) return catalog;
+	return [...catalog, active];
+}
+
 export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
 	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
 	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
