@@ -70,6 +70,13 @@ function collectImageStats(
 			// `replayedImageResultSizes`.
 			if (byteModel !== undefined)
 				inlineSizes.push(...replayedImageResultSizes(message, byteModel, replaysNativeHistory));
+			// A replayed snapshot's retained `input_image` items ARE image parts on
+			// the wire, so unlike a generation result they consume the count cap too.
+			const replayedInputs = replayedAssistantInputImages(message, byteModel ?? countModel, replaysNativeHistory);
+			total += replayedInputs.length;
+			if (byteModel !== undefined) {
+				for (const size of replayedInputs) if (size > 0) inlineSizes.push(size);
+			}
 			continue;
 		}
 		// A computer result's metadata screenshot REPLACES its generic content on
@@ -145,6 +152,41 @@ function replayedImageResultSizes(message: AssistantMessage, model: Model, repla
 	for (const item of payload.items) {
 		const result = replayedImageResult(item);
 		if (result !== undefined) sizes.push(result.length);
+	}
+	return sizes;
+}
+
+/**
+ * Image PARTS a replayed assistant payload puts on the wire as image inputs.
+ *
+ * Separate from {@link replayedImageResultSizes}, which covers
+ * `image_generation_call` results — assistant OUTPUT items that carry bytes but
+ * consume no image-part slot. A legacy same-model snapshot (`dt` absent or
+ * false) is spliced onto the wire WHOLE by `buildResponsesInput()`, so any
+ * `input_image` items it retained are sent as ordinary image inputs and consume
+ * both budgets. Recording only the generation results left those in neither
+ * tally, so an oversized restored session kept failing with 413 and no drop was
+ * ever owed.
+ *
+ * One entry per part, 0 for a reference-backed one — same convention as
+ * {@link replayedInputImages}.
+ */
+function replayedAssistantInputImages(
+	message: AssistantMessage,
+	model: Model,
+	replaysNativeHistory: boolean,
+): number[] {
+	const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
+	if (!payload) return [];
+	const sizes: number[] = [];
+	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
+	for (const item of payload.items) {
+		// Demoted to assistant text by the converter, so it holds no image part —
+		// the same exclusion the user/developer replay path applies.
+		if (demotesNativeComputerItems && isReplayedComputerItem(item)) continue;
+		for (const part of nativeInputImageParts(item)) {
+			sizes.push(inlineImageFromDataUri(part.image_url)?.data.length ?? 0);
+		}
 	}
 	return sizes;
 }
@@ -685,19 +727,34 @@ function clampComputerScreenshot(message: ToolResultMessage, state: ImageClampSt
  * byte allowance is paid down; these are not image parts under the count cap.
  */
 function clampAssistantMessage(message: AssistantMessage, state: ImageClampState): AssistantMessage {
-	if (state.remainingInlineDrops <= 0) return message;
+	if (!clampWanted(state)) return message;
 	// Same eligibility gate as the accounting: never rewrite a payload this
 	// request was not going to replay anyway.
 	const payload = replayableHistoryPayload(message, state.model, state.replaysNativeHistory);
 	if (!payload) return message;
+	const demotesNativeComputerItems = demotesReplayedComputerItems(state.model);
 	let items: Array<Record<string, unknown>> | undefined;
 	for (let index = 0; index < payload.items.length; index++) {
-		if (state.remainingInlineDrops <= 0) break;
+		if (!clampWanted(state)) break;
 		const item = payload.items[index];
-		if (!item || replayedImageResult(item) === undefined) continue;
-		state.remainingInlineDrops--;
+		if (!item) continue;
+		// A generation result carries bytes but no image part, so it answers only
+		// a byte drop.
+		if (replayedImageResult(item) !== undefined) {
+			if (state.remainingInlineDrops <= 0) continue;
+			state.remainingInlineDrops--;
+			items ??= [...payload.items];
+			items[index] = { ...item, result: "" };
+			continue;
+		}
+		// A retained `input_image` in a spliced snapshot IS an image part, so it
+		// answers a count drop as well — and must be evictable, or the count pass
+		// charges an image nothing can reclaim.
+		if (demotesNativeComputerItems && isReplayedComputerItem(item)) continue;
+		const dropped = dropNativeInputImages(item, state);
+		if (!dropped) continue;
 		items ??= [...payload.items];
-		items[index] = { ...item, result: "" };
+		items[index] = dropped;
 	}
 	return items ? { ...message, providerPayload: { ...payload, items } } : message;
 }

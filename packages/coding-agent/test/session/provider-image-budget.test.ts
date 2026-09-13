@@ -1106,6 +1106,52 @@ describe("provider context image budgets", () => {
 		expect(imageData(clamped).length).toBe(liveImages);
 	});
 
+	it("counts input images a replayed assistant snapshot splices onto the wire", async () => {
+		// A legacy same-model assistant payload with `dt` absent/false is a full
+		// SNAPSHOT: `buildResponsesInput()` splices it over the whole message list,
+		// so any `input_image` items it retained go out as ordinary image inputs.
+		// The assistant branch recorded only `image_generation_call.result` values,
+		// so those parts counted toward neither budget and an oversized restored
+		// session kept failing with 413 with no drop ever owed.
+		//
+		// RED (pre-fix): nothing was evicted — the snapshot's images were invisible.
+		const small = "s".repeat(64);
+		// The count pass admits `cap * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK)`, so
+		// the fixture has to exceed THAT to owe a drop at all.
+		const admissible = providerImageBudget(OPENAI_MODEL.provider) * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK);
+		const snapshotImages = admissible + 3;
+		const context: Context = {
+			messages: [
+				{
+					...assistantTurn([], 1),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						// No `dt`: a full snapshot, spliced over the message list.
+						items: Array.from({ length: snapshotImages }, () => ({
+							type: "message",
+							role: "user",
+							content: [{ type: "input_image", image_url: dataUri(small) }],
+						})),
+					},
+				},
+				{ role: "user", timestamp: 2, content: [image(small)] },
+			],
+		};
+
+		const clamped = clampProviderContextImageCount(context, OPENAI_MODEL, true);
+
+		// The snapshot is over the cap on its own, so the clamp has to act; before
+		// the fix it saw nothing to drop and left every image in place.
+		const remaining = replayedItems(clamped.messages[0]).filter(item =>
+			Array.isArray(item.content) ? item.content.some(part => isRecord(part) && part.type === "input_image") : false,
+		).length;
+		expect(remaining + imageData(clamped).length).toBeLessThanOrEqual(admissible);
+	});
+
 	it("counts a metadata-only computer screenshot with no content mirror", async () => {
 		// A history parsed back from `computer_call_output` has `content: []`, so
 		// nothing in the generic view stands for the screenshot. Leaving the count
