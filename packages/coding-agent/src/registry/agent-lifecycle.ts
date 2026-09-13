@@ -544,7 +544,7 @@ export class AgentLifecycleManager {
 			);
 		}
 		const inflight = this.#revivals.get(id);
-		if (inflight?.ref === ref) return inflight.promise;
+		if (inflight?.ref === ref) return await this.#handOffRevival(id, inflight.promise);
 		// The fence is a separate object so it exists BEFORE the revive starts:
 		// `parkAll()`'s pre-pass sets it through the `#revivals` entry, and
 		// `#revive` reads the same object, so the two never race over which
@@ -553,10 +553,44 @@ export class AgentLifecycleManager {
 		const pending: RevivingAgent = { ref, promise: this.#resolveAndRevive(id, ref, fence), fence };
 		this.#revivals.set(id, pending);
 		try {
-			return await pending.promise;
+			return await this.#handOffRevival(id, pending.promise);
 		} finally {
 			if (this.#revivals.get(id) === pending) this.#revivals.delete(id);
 		}
+	}
+
+	/**
+	 * Hand a completed revival back to its caller, but never across a live
+	 * parking handoff.
+	 *
+	 * A revival that started before the barrier is not blocked by it: `parkAll()`
+	 * waits it out, then parks the session it registered. Resolving the caller as
+	 * soon as the revival completes exposes that session in the gap before the
+	 * parking snapshot runs, so a concurrent hub send can start work on it and
+	 * then have it detached and disposed mid-request — exactly the live child the
+	 * barrier promises to exclude.
+	 *
+	 * Gating HERE rather than inside the revival is what keeps it deadlock-free:
+	 * `parkAll()`'s pre-pass awaits the revival promise itself, so withholding
+	 * that promise would make the barrier wait on work that is waiting on the
+	 * barrier. This wait is on the already-settled promise, one level out.
+	 *
+	 * Once the handoff releases, the session this revival built has been parked
+	 * and disposed, so the waiter is failed rather than handed a dead session —
+	 * the same outcome as a fenced revival, and an `ensureLive()` retry revives
+	 * cleanly against the replacement parent's manager.
+	 */
+	async #handOffRevival(id: string, revival: Promise<AgentSession>): Promise<AgentSession> {
+		const session = await revival;
+		if (this.#parkingBarriers.size === 0) return session;
+		await this.#awaitParkingBarriers();
+		const live = this.#registry.get(id);
+		// The handoff may have cancelled its park and kept this session live
+		// (`park.cancel()`), in which case there is nothing to fail over.
+		if (live?.session === session && live.status !== "parked") return session;
+		throw new Error(
+			`Agent "${id}" revival aborted: its parent session recycled while its persisted session was reviving.`,
+		);
 	}
 
 	/**
