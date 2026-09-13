@@ -76,10 +76,17 @@ function collectImageStats(
 		// as the `computer_call_output.output` and never looks at the content. So
 		// the mirrored content image must not be charged a second time, or one
 		// 9 MB screenshot measures 18 MB and evicts the only copy that travels.
-		const mirrorsMetadataScreenshot = message.role === "toolResult" && sendsComputerScreenshot(message, countModel);
-		if (mirrorsMetadataScreenshot && byteModel !== undefined) {
-			const screenshot = inlineComputerScreenshot(message.providerMetadata);
-			if (screenshot !== undefined) inlineSizes.push(screenshot.length);
+		const sendsScreenshot = message.role === "toolResult" && sendsComputerScreenshot(message, countModel);
+		if (sendsScreenshot) {
+			// One image part, whether or not a content mirror exists: a history
+			// parsed back from `computer_call_output` produces `content: []`, and a
+			// file-backed screenshot carries no inline bytes — so leaving the count
+			// to the content loop left a long replay uncounted and un-evictable.
+			total++;
+			if (byteModel !== undefined) {
+				const screenshot = inlineComputerScreenshot(message.providerMetadata);
+				if (screenshot !== undefined) inlineSizes.push(screenshot.length);
+			}
 		}
 		// A replayed `input_image` is sent as an ordinary Responses image input, so
 		// it consumes the provider's per-request image COUNT as well as bytes —
@@ -93,8 +100,10 @@ function collectImageStats(
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type !== "image") continue;
+			// The mirror is neither counted nor charged: the metadata copy above
+			// already stands for this screenshot on both budgets.
+			if (sendsScreenshot) continue;
 			total++;
-			if (mirrorsMetadataScreenshot) continue;
 			if (byteModel !== undefined && sendsInlineImageBytes(part, byteModel)) inlineSizes.push(part.data.length);
 		}
 	}
@@ -221,7 +230,10 @@ function nativeInputImageParts(item: Record<string, unknown> | undefined): Array
  */
 function sendsComputerScreenshot(message: ToolResultMessage, model: Model | undefined): boolean {
 	if (model?.supportsComputerUse !== true) return false;
-	return inlineComputerScreenshot(message.providerMetadata) !== undefined;
+	// The metadata's presence, not its inline bytes: a file- or URL-backed
+	// screenshot is still sent as the `computer_call_output.output` and still
+	// consumes an image part, it simply contributes no bytes.
+	return message.providerMetadata?.type === "computer";
 }
 
 /**
@@ -541,7 +553,7 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 	// `total === 0` and a payload that can still bust the byte budget.
 	if (total === 0 && inlineSizes.length === 0) return context;
 	const countDrops = Math.max(0, total - providerImageBudget(model.provider));
-	const inlineDrops = imageDropCountForBytes(inlineSizes, providerImageByteBudget(model.provider));
+	const inlineDrops = imageDropCountForBytes(inlineSizes, providerImageByteBudget(model.provider, model.api));
 	if (countDrops === 0 && inlineDrops === 0) return context;
 
 	// The two budgets are tracked as SEPARATE remaining constraints rather than
