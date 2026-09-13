@@ -575,6 +575,137 @@ describe("restart reconstruction reattach", () => {
 		expect(modelRegistry.getAll().some(candidate => candidate.id === "newly-available")).toBe(true);
 	});
 
+	// The discovery pass above has to survive a refresh that is ALREADY running.
+	// `refreshInBackground()` returns immediately while `#backgroundRefresh` is
+	// set, so a plain call during a slow in-flight pass is silently dropped — and
+	// that earlier pass chose its discovery providers BEFORE the recycle's offline
+	// reload re-read models.yml, so it cannot cover a provider the restart was
+	// requested for, and nothing runs after it settles. The replacement then comes
+	// back missing exactly the change that prompted the restart.
+	//
+	// Event-gated: the first pass is held open by a deferred, and the second can
+	// only happen after it settles.
+	//
+	// RED (pre-fix): the restart's call landed while the first pass held the slot,
+	// was dropped, and the provider configured mid-flight was never discovered.
+	it("chains the restart's discovery behind a refresh that was already in flight", async () => {
+		using tempDir = TempDir.createSync("@pi-restart-discovery-chain-");
+		const modelsPath = tempDir.join("models.yml");
+		// Only the SLOW provider exists when the first pass picks its targets.
+		await fs.writeFile(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"restart-slow": {
+						api: "openai-completions",
+						baseUrl: "http://127.0.0.1:1/v1",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+
+		const slowRequest = Promise.withResolvers<void>();
+		const slowGate = Promise.withResolvers<void>();
+		const lateRequest = Promise.withResolvers<void>();
+		let lateRequests = 0;
+		const discoveryFetch = mockFetch(async input => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (!url.endsWith("/models")) throw new Error(`unexpected request to ${url}`);
+			if (url.includes("127.0.0.1:1")) {
+				slowRequest.resolve();
+				await slowGate.promise;
+				return new Response(JSON.stringify({ data: [{ id: "slow-model", context_length: 32000 }] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			lateRequests++;
+			lateRequest.resolve();
+			return new Response(JSON.stringify({ data: [{ id: "late-model", context_length: 32000 }] }), {
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model");
+		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.create(tempDir.path());
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, {
+			cacheDbPath: tempDir.join("models.db"),
+			fetch: discoveryFetch,
+		});
+		// The caller's own slow pass, in flight before the restart begins.
+		modelRegistry.refreshInBackground("online");
+		await slowRequest.promise;
+
+		// The host stages the provider the restart is FOR while that pass runs, so
+		// the in-flight pass cannot have included it.
+		await fs.writeFile(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"restart-slow": {
+						api: "openai-completions",
+						baseUrl: "http://127.0.0.1:1/v1",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+					},
+					"restart-late": {
+						api: "openai-completions",
+						baseUrl: "http://127.0.0.2:1/v1",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			onRestartRequested: () => {},
+		});
+
+		// The restart's refresh runs on a macrotask AFTER requestRestart() settles,
+		// so releasing the first pass from the test body would free the slot before
+		// that call is made, and the bug would not be exercised at all. Gate the
+		// release on the recycle actually asking: `awaitBackgroundRefresh()` is the
+		// first thing the chained path calls, so observing that call means the
+		// recycle reached its refresh while the slow pass still held the slot —
+		// which is the whole hazard.
+		const restartAskedForRefresh = Promise.withResolvers<void>();
+		const realAwait = modelRegistry.awaitBackgroundRefresh.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockImplementation(async () => {
+			restartAskedForRefresh.resolve();
+			await realAwait();
+		});
+
+		const result = await session.requestRestart();
+		expect(result.ok).toBe(true);
+		// The recycle has now reached its refresh, with the slot still occupied.
+		await restartAskedForRefresh.promise;
+		slowGate.resolve();
+
+		// Event-gated on the request itself: the chained pass is the only thing
+		// that can ever reach the provider staged mid-flight.
+		await lateRequest.promise;
+		expect(lateRequests).toBeGreaterThan(0);
+		await modelRegistry.awaitBackgroundRefresh();
+		expect(modelRegistry.getAll().some(candidate => candidate.id === "late-model")).toBe(true);
+	}, 20_000);
+
 	// One layer past the registry reload above: that case asserts a REGISTRY
 	// LOOKUP is fresh, which the reload alone satisfies. But the reconstruction
 	// contract also tells the host to preserve `model`, and the replacement runs
