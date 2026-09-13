@@ -80,9 +80,18 @@ export function reconcileSettingsWorkspaceRoots(args: {
 	/** The new settings value, unnormalized. */
 	configured: readonly string[];
 }): { roots: string[]; owned: Set<string> } {
-	const owned = new Set(
-		additionalWorkspaceDirectories(normalizeSessionWorkspace({ cwd: args.cwd, directories: [...args.configured] })),
+	const configuredRoots = additionalWorkspaceDirectories(
+		normalizeSessionWorkspace({ cwd: args.cwd, directories: [...args.configured] }),
 	);
+	// A root the setting names is settings-owned only when the setting is where
+	// it came from. One already live on an INDEPENDENT grant — the session
+	// header, or `/add-dir` — keeps that grant when the setting happens to name
+	// the same path: claiming it would let a later removal from the setting
+	// revoke a directory the operator named separately and never withdrew.
+	// A root granted by the previous value is ours already, so naming it again
+	// is a renewal, not an independent grant.
+	const independentlyLive = new Set(args.live.filter(dir => !args.previouslyOwned.has(dir)));
+	const owned = new Set(configuredRoots.filter(dir => !independentlyLive.has(dir)));
 	const retained = args.live.filter(dir => !args.previouslyOwned.has(dir) || owned.has(dir));
-	return { roots: [...new Set([...retained, ...owned])], owned };
+	return { roots: [...new Set([...retained, ...configuredRoots])], owned };
 }
