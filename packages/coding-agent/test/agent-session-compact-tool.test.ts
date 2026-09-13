@@ -2791,6 +2791,78 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(terminalEnds[terminalEnds.length - 1]).toBe(true);
 	}, 15_000);
 
+	it("re-defers rather than emitting terminal when the parked prompt's bail races a yield delivery", async () => {
+		// The restore is not "the session is idle". The parked prompt bailing says
+		// only that IT will not emit the replacement end — an async-job result,
+		// queued steer, or IRC wake can have arrived during its setup, and
+		// `#endInFlight()` schedules that continuation before the release runs.
+		// Re-checking just the in-flight and barrier counts would miss the agent
+		// queues, pending IRC, and `yieldQueue.hasIdleDeliverable()`, so a terminal
+		// end would go out immediately before the queued turn starts and an
+		// RPC/ACP client could submit a competing prompt into it.
+		//
+		// RED (pre-fix): a terminal end was emitted while a yield entry was still
+		// undelivered, i.e. before the turn that delivers it started.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const unregister = session.yieldQueue.register<string>("compact-toctou-probe", {
+			isStale: () => false,
+			build: survivors =>
+				survivors.length === 0
+					? null
+					: {
+							role: "user",
+							content: [{ type: "text", text: survivors.join(" ") }],
+							timestamp: Date.now(),
+						},
+		});
+		// Every end, in order, with the queue state observed AT emit time: a
+		// terminal end must never coincide with an undelivered yield entry.
+		const terminalWithPendingYield: boolean[] = [];
+		session.subscribe(event => {
+			if (event.type !== "agent_end") return;
+			terminalWithPendingYield.push(event.isTerminal !== false && session.yieldQueue.hasIdleDeliverable());
+		});
+
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		// Parked prompt that will bail after the barrier, exactly as above.
+		vi.spyOn(session.modelRegistry, "getApiKey").mockResolvedValue(undefined);
+		const parked = session.prompt("a second prompt, typed during the rewrite");
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+		// A result lands while that prompt is in its setup — the continuation the
+		// restore must not emit terminal over.
+		const receipt = session.yieldQueue.enqueueWithReceipt("compact-toctou-probe", "result during setup");
+
+		summaryGate.resolve();
+		await expect(parked).rejects.toThrow();
+		await primary;
+		await session.waitForIdle();
+		for (let i = 0; i < 50; i++) await Bun.sleep(0);
+
+		// No end claimed terminal while the yield entry was still undelivered.
+		expect(terminalWithPendingYield).not.toContain(true);
+		// And the session still ends up terminal, so this is not "withheld forever".
+		await receipt.catch(() => {});
+		expect(session.yieldQueue.hasIdleDeliverable()).toBe(false);
+		unregister();
+	}, 15_000);
+
 	it("does not report a turn in flight while it waits out the rewrite", async () => {
 		// CONTRACT (the barrier's POSITION, not merely its presence): the wait has
 		// to happen BEFORE the in-flight increment. The pass's `abort()` calls
