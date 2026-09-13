@@ -192,6 +192,29 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it("does not remind when a trailing HTML comment follows a user-facing question", async () => {
+		// The renderer drops the comment, so the question is the last line the user
+		// sees; reading the raw tail reminded over a genuine ask.
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("I need your call here. Which trade-off should I optimize for?\n\n<!-- machine marker -->");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([]);
+		expect(todoReminderTranscriptEntry()).toBeUndefined();
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("still reminds when the visible tail after a comment is not a question", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("Which configuration should this use?\nUsing the default; work remains.\n\n<!-- marker -->");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([1]);
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("still reminds when the assistant answers its own prompt-shaped question", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 

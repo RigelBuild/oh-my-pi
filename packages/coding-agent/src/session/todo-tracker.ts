@@ -2,6 +2,7 @@ import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { stripProseHtmlComments } from "../modes/markdown-prose";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
@@ -394,6 +395,14 @@ function isResponseCueLine(line: string): boolean {
 function isAwaitingUserAnswer(message: AssistantMessage): boolean {
 	const text = assistantText(message);
 	if (!text) return false;
-	const lastLine = text.split(/\r?\n/).at(-1)?.trim();
+	// The last line the USER sees, which is not always the last line of the
+	// message: the renderer drops prose HTML comments, so a message ending in one
+	// showed its question as the final line while this read the comment and
+	// reminded over a genuine ask.
+	const visible = stripProseHtmlComments(text);
+	const lastLine = visible
+		.split(/\r?\n/)
+		.map(line => line.trim())
+		.findLast(line => line.length > 0);
 	return lastLine !== undefined && (isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine));
 }

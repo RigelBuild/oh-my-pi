@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- The stop-time todo reminder no longer fires over a question whose message ends with an HTML comment: the comment is invisible in the terminal, so the question is the last line the user actually sees.
 - HTML comments no longer reach `--print` stdout or the HTML export's tree sidebar; both now hide the comments the interactive renderer already drops, while a comment shown inside a fenced block or code span survives.
 
 ## [18.1.19] - 2026-09-12
