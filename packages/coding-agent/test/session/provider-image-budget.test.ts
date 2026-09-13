@@ -875,6 +875,91 @@ describe("provider context image budgets", () => {
 		expect(willReplayOpenAIResponsesNativeHistory(OPENAI_MODEL, new Map<string, ProviderSessionState>())).toBe(false);
 	});
 
+	it("clears computer screenshots the count cap alone requires dropping", async () => {
+		// Small screenshots: bytes never bind, so only the count can evict. Gating
+		// eviction on the byte allowance returned every result unchanged and left
+		// the request over the per-request image cap.
+		const small = "s".repeat(64);
+		const overCount = providerImageBudget(COMPUTER_MODEL.provider) + 2;
+		const context: Context = {
+			messages: Array.from({ length: overCount }, (_, index) => computerResultMessage(`call-${index}`, small)),
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
+
+		const surviving = clamped.messages.filter(
+			message => "providerMetadata" in message && message.providerMetadata !== undefined,
+		);
+		expect(surviving.length).toBe(providerImageBudget(COMPUTER_MODEL.provider));
+	});
+
+	it("counts reference-backed replayed input images against the cap", async () => {
+		// An HTTPS-backed `input_image` carries no inline bytes but is still sent
+		// as an image input, so it consumes the count cap.
+		const overCount = providerImageBudget(OPENAI_MODEL.provider) + 3;
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "compaction summary" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: Array.from({ length: overCount }, (_, index) => ({
+							type: "message",
+							role: "user",
+							content: [{ type: "input_image", image_url: `https://blobs.example/${index}.png` }],
+						})),
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		const surviving = replayedItems(clamped.messages[0]).filter(
+			item =>
+				Array.isArray(item.content) && item.content.some(part => isRecord(part) && part.type === "input_image"),
+		);
+		expect(surviving.length).toBe(providerImageBudget(OPENAI_MODEL.provider));
+	});
+
+	it("does not count a native payload the early pass will not send", async () => {
+		// The count pass runs first and must take the same replay decision as the
+		// byte pass: a cold payload with no compaction marker never travels, so it
+		// must not justify dropping generic images that WILL.
+		const small = "n".repeat(64);
+		const liveImages = 3;
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: Array.from({ length: liveImages }, () => image(small)),
+				},
+				{
+					role: "user",
+					timestamp: 2,
+					content: [{ type: "text", text: "restored turn" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: Array.from({ length: providerImageBudget(OPENAI_MODEL.provider) * 2 }, () => ({
+							type: "message",
+							role: "user",
+							content: [{ type: "input_image", image_url: dataUri(small) }],
+						})),
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImageCount(context, OPENAI_MODEL, false);
+
+		expect(imageData(clamped).length).toBe(liveImages);
+	});
+
 	it("treats a managed session with no provider state yet as unwarmed", async () => {
 		// The provider-context transform runs BEFORE `streamOpenAIResponses` creates
 		// the session state, so on the first request the map exists and is EMPTY.
