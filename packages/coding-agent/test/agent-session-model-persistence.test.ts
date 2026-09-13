@@ -739,6 +739,37 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.serviceTierByFamily.openai).toBe("priority");
 	});
 
+	it("does not adopt a tier configured after a session that baked none", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		// A session with every tier at `none` when it started, so it recorded no
+		// tier of its own — the state a pre-tier session is also in.
+		const targetSessionFile = await writeRoleModelSession(modelValue(model), modelValue(model), "default");
+
+		// The user set `tier.openai` AFTER that session existed.
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: ${modelValue(model)}\ntier:\n  openai: priority\n`,
+		);
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		// Without `--reapply-config`, a resume must run the session as it was baked.
+		// Adopting the newer config here would silently move it onto a paid tier.
+		expect(result.session.serviceTierByFamily.openai).toBeUndefined();
+	});
+
+	it("still adopts that later tier when reapplyConfig is supplied", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeRoleModelSession(modelValue(model), modelValue(model), "default");
+
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: ${modelValue(model)}\ntier:\n  openai: priority\n`,
+		);
+
+		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
+
+		expect(result.session.serviceTierByFamily.openai).toBe("priority");
+	});
+
 	it("does not persist the adopted config values back as session entries on a reapplyConfig resume", async () => {
 		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const overlayModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
