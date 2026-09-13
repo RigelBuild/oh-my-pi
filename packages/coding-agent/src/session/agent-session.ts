@@ -875,6 +875,13 @@ export class AgentSession {
 	 * can re-emit it as terminal — see `onIdleFlushUnclaimed`.
 	 */
 	#yieldDowngradedAgentEnd: AgentSessionEvent | undefined;
+	/**
+	 * The terminal `agent_end` most recently downgraded ONLY because a caller was
+	 * parked on the compaction barrier. Kept so a resumed prompt that exits before
+	 * invoking the agent can re-emit it as terminal — see
+	 * `#releaseCompactionBarrierClaim`.
+	 */
+	#barrierDowngradedAgentEnd: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
@@ -1391,8 +1398,18 @@ export class AgentSession {
 		// queued. What the downgrade needs is a way BACK: remember that this end
 		// was downgraded only for the yield term, so `onIdleFlushUnclaimed` can
 		// restore it when the pass reports it claimed nothing.
+		// The same evaporation applies to a barrier waiter: `#compactionBarrierWaiters`
+		// is released at the barrier, but the resumed prompt can still exit before
+		// invoking the agent (usage preflight denies, model/API-key validation
+		// throws, the generation moved on), and then no successor emits the
+		// replacement end. Remember a downgrade owed solely to a parked waiter so
+		// `#releaseCompactionBarrierClaim` can restore it.
 		this.#yieldDowngradedAgentEnd =
 			yieldContinuation && !(queuedContinuation || ircContinuation || inFlightContinuation) ? pending : undefined;
+		this.#barrierDowngradedAgentEnd =
+			inFlightContinuation && this.#promptInFlightCount === 0 && !(queuedContinuation || ircContinuation)
+				? pending
+				: undefined;
 		this.#emit(
 			queuedContinuation || ircContinuation || inFlightContinuation || yieldContinuation
 				? { ...pending, isTerminal: false }
@@ -6634,14 +6651,36 @@ export class AgentSession {
 	 * `resetSessionContext`, tree navigation) emits no replacement end, so
 	 * treating it as a successor would strand an RPC/ACP subscriber forever.
 	 */
-	async #settleActiveCompaction(options?: { producesTurn?: boolean }): Promise<void> {
+	/**
+	 * Hand back a barrier claim once the resumed caller knows whether it started a
+	 * turn. `dispatched` false means nothing will emit the replacement end the
+	 * downgrade in `#flushPendingAgentEnd` promised, so restore it.
+	 */
+	#releaseCompactionBarrierClaim(parked: boolean, dispatched: boolean): void {
+		// Only the caller that actually parked owns the downgrade taken on its
+		// behalf. A turn that never waited must not consume the record: the parked
+		// caller is still to come, and swallowing it here would leave the real bail
+		// with nothing to restore.
+		if (!parked) return;
+		const downgraded = this.#barrierDowngradedAgentEnd;
+		this.#barrierDowngradedAgentEnd = undefined;
+		if (dispatched || !downgraded) return;
+		if (this.#isDisposed || this.#promptInFlightCount > 0 || this.#compactionBarrierWaiters > 0) return;
+		this.#emit(downgraded);
+	}
+
+	async #settleActiveCompaction(options?: { producesTurn?: boolean }): Promise<boolean> {
+		let parked = false;
 		while (true) {
 			const requested = this.#requestedCompaction;
 			if (requested) {
 				// Counted while parked: this caller is a successor turn that has not
 				// reached `#beginInFlight()` yet, which is what makes it invisible to
 				// the in-flight probe in `#flushPendingAgentEnd`.
-				if (options?.producesTurn) this.#compactionBarrierWaiters++;
+				if (options?.producesTurn) {
+					this.#compactionBarrierWaiters++;
+					parked = true;
+				}
 				try {
 					await requested;
 				} finally {
@@ -6654,7 +6693,7 @@ export class AgentSession {
 				await manualCleanup;
 				continue;
 			}
-			return;
+			return parked;
 		}
 	}
 
@@ -6757,7 +6796,7 @@ export class AgentSession {
 		//
 		// A wait, not an `AgentBusyError`: the submission is valid, only early.
 		// `abort` still overtakes either compaction; ordinary prompts wait here.
-		await this.#settleActiveCompaction({ producesTurn: true });
+		let parkedOnBarrier = await this.#settleActiveCompaction({ producesTurn: true });
 
 		// Expand file-based prompt templates if requested
 		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
@@ -6839,7 +6878,10 @@ export class AgentSession {
 		// streaming. An image-bearing call that passed the barrier at the top and
 		// suspended in normalization would dispatch into a disconnected,
 		// being-rewritten session and lose its events to the history replacement.
-		await this.#settleActiveCompaction({ producesTurn: true });
+		// Re-taken after the awaits above (image normalization, the vision
+		// description call) — a pass can be scheduled in that window. Either park
+		// makes this caller the owner of the downgrade taken on its behalf.
+		parkedOnBarrier = (await this.#settleActiveCompaction({ producesTurn: true })) || parkedOnBarrier;
 
 		// A concurrent prompt() can start a turn during the awaits above: image
 		// normalization and the vision-description call suspend after the
@@ -6904,6 +6946,7 @@ export class AgentSession {
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
+				parkedOnBarrier,
 				images: normalizedImages,
 				prependMessages:
 					preludeMessages.length > 0 ||
@@ -7030,7 +7073,7 @@ export class AgentSession {
 		// `/skill:` invocation or a collab/RPC message would otherwise start a
 		// turn against history a detached requested pass is about to replace. The
 		// `queueOnly` branch above is exempt — it only enqueues, never dispatches.
-		await this.#settleActiveCompaction({ producesTurn: true });
+		const parkedOnBarrier = await this.#settleActiveCompaction({ producesTurn: true });
 		if (this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) {
@@ -7060,6 +7103,7 @@ export class AgentSession {
 
 		outcome.sessionClaimed = await this.#promptWithMessage(customMessage, textContent, {
 			...options,
+			parkedOnBarrier,
 			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
 		});
 		return outcome.sessionClaimed;
@@ -7193,6 +7237,8 @@ export class AgentSession {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
+			/** This caller parked on the compaction barrier; see `#releaseCompactionBarrierClaim`. */
+			parkedOnBarrier?: boolean;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -7202,6 +7248,7 @@ export class AgentSession {
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
+		let dispatched = false;
 		try {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
@@ -7395,6 +7442,7 @@ export class AgentSession {
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
 			}
+			dispatched = true;
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
 			}
@@ -7404,6 +7452,11 @@ export class AgentSession {
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#endInFlight();
+			// After `#endInFlight()`, so the count this claim stood in for is already
+			// back to zero: a bail above (preflight denial, model/API-key validation
+			// throw, generation bump) emits no end of its own, and the barrier
+			// released its waiter before dispatch was known.
+			this.#releaseCompactionBarrierClaim(options?.parkedOnBarrier === true, dispatched);
 		}
 	}
 
@@ -7926,8 +7979,9 @@ export class AgentSession {
 		// between the barrier and the increment, and a new pass can only be
 		// scheduled from a turn's `onTurnEnd`, which cannot run in that
 		// synchronous gap.
-		await this.#settleActiveCompaction({ producesTurn: true });
+		const parkedOnBarrier = await this.#settleActiveCompaction({ producesTurn: true });
 		this.#beginInFlight();
+		let dispatched = false;
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			// Consume any compact request left un-applied by a prior run before this
@@ -7948,12 +8002,17 @@ export class AgentSession {
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
 			await this.agent.prompt(message);
+			dispatched = true;
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight();
+			// After `#endInFlight()`: a bail above (preflight denial, a throw from
+			// the agent call) emits no end of its own, and the barrier released this
+			// caller's waiter before dispatch was known.
+			this.#releaseCompactionBarrierClaim(parkedOnBarrier, dispatched);
 		}
 	}
 
