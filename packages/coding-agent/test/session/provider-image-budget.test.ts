@@ -1061,6 +1061,49 @@ describe("provider context image budgets", () => {
 		expect(imageData(clamped).filter(data => data.length > 16).length).toBe(2);
 	});
 
+	it("clamps a screenshot replayed inside a computer_call_output", async () => {
+		// `buildResponsesInput()` replays this item unchanged, and its image_url
+		// sits in `output` rather than an `input_image` — so a payload of these was
+		// invisible to both budgets.
+		const big = "c".repeat(9 * 1024 * 1024);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "compaction summary" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{
+								type: "computer_call_output",
+								call_id: "c1",
+								output: { type: "computer_screenshot", image_url: dataUri(big) },
+							},
+							{
+								type: "computer_call_output",
+								call_id: "c2",
+								output: { type: "computer_screenshot", image_url: dataUri(big) },
+							},
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		const items = replayedItems(clamped.messages[0]);
+		// Both items survive — degrading one would orphan its paired call — but the
+		// oldest no longer carries inline bytes.
+		expect(items.length).toBe(2);
+		const outputs = items.map(item => (isRecord(item.output) ? item.output : undefined));
+		expect(outputs[0]?.image_url).toBeUndefined();
+		expect(outputs[0]?.type).toBe("computer_screenshot");
+		expect(outputs[1]?.image_url).toBeDefined();
+	});
+
 	it("treats a managed session with no provider state yet as unwarmed", async () => {
 		// The provider-context transform runs BEFORE `streamOpenAIResponses` creates
 		// the session state, so on the first request the map exists and is EMPTY.
