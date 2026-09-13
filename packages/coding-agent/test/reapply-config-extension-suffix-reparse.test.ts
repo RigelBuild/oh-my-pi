@@ -249,6 +249,37 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		expect(modelRegistry.canRefreshProvider("vllm")).toBe(true);
 	});
 
+	test("does not await discovery for a static-only provider that cannot discover anything", async () => {
+		// `custom/base:low` legitimately means model `base` at low effort. `custom`
+		// is declared in models.yml with static rows and NO `discovery:` entry, so
+		// a scoped refresh cannot produce an id the registry lacks — but
+		// `hasProvider` said yes purely because `base` is registered, and the
+		// saved-suffix path then awaited every in-flight discovery pass before a
+		// refresh that was a guaranteed no-op.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, `static-models-${Bun.nanoseconds()}.yml`);
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					custom: {
+						baseUrl: "https://custom.example.invalid/v1",
+						api: "openai-completions",
+						auth: "none",
+						models: [{ id: "base", name: "Base" }],
+					},
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+
+		// The premise, measured: the provider IS known — its static row is right
+		// there — yet nothing about it is discoverable.
+		expect(modelRegistry.hasProvider("custom")).toBe(true);
+		expect(modelRegistry.canRefreshProvider("custom")).toBe(false);
+	});
+
 	test("does not block startup on a cold catalog a persisted thinking entry outranks", async () => {
 		// The reparse exists to correct `restoredSessionThinkingLevel`, and
 		// `pickInitialThinkingLevel` reads that at ONE precedence step, behind

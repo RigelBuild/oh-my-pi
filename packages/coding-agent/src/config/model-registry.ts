@@ -2452,10 +2452,29 @@ export class ModelRegistry {
 	 * unscoped {@link hasRefreshableProviders} takes, narrowed to one provider.
 	 */
 	canRefreshProvider(providerId: string): boolean {
-		if (this.hasProvider(providerId)) return true;
+		if (this.#hasDiscoveryManager(providerId)) return true;
 		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
 		return (
 			REFRESHABLE_BUILT_IN_PROVIDER_IDS[providerId] === true && this.#createProviderAvailabilityCheck()(providerId)
+		);
+	}
+
+	/**
+	 * Whether a scoped refresh of `providerId` could discover an ID it does not
+	 * already hold.
+	 *
+	 * Deliberately NOT `hasProvider`, which answers yes for a STATIC-ONLY
+	 * provider purely because one of its models is registered — a `custom/base`
+	 * declared in models.yml with no `discovery:` entry. A caller gating a fetch
+	 * on that awaited every in-flight discovery pass to perform a refresh that
+	 * cannot add anything, so an unrelated cold catalog delayed startup by its
+	 * full discovery timeout.
+	 */
+	#hasDiscoveryManager(providerId: string): boolean {
+		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
+		return (
+			this.#discoverableProviders.some(provider => provider.provider === providerId) ||
+			this.#runtimeModelManagers.has(providerId)
 		);
 	}
 
