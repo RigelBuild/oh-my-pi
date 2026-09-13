@@ -1603,7 +1603,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// the list shape is the second instance. Reuses the resolver's own
 	// normalizer so the split cannot drift from how the value is parsed.
 	const defaultRolePatterns = normalizeModelPatternList(normalizedDefaultRole);
-	const hasConfigDefaultRole = defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern));
+	// Or a self-alias-only list that nonetheless RESOLVED. The sentinel that
+	// makes `default` name no model is applied to the whole unsplit role value,
+	// so a `default` sitting inside a list is matched like any other selector —
+	// and with Cursor credentials the bundled `cursor/default` is a real
+	// available model, so `"default,@default"` resolves to it. Classifying by
+	// spelling alone then called that "no config default" and restored the
+	// session model over a model config genuinely resolved.
+	//
+	// Keyed on what the resolver REACHED, the same rule the thinking suffix
+	// takes above: a spec carrying a model is a configured default whatever its
+	// patterns are spelled like.
+	const hasConfigDefaultRole =
+		defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern)) || defaultRoleSpec.model !== undefined;
 	// A self alias sets no model but a suffixed one (`*:xhigh`) still names the
 	// THINKING knob. `resolveModelRoleValue` cannot report it — the circular
 	// selector resolves to no model, hence `explicitThinkingLevel: false` — so
@@ -2572,7 +2584,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// is the predicate that covers BOTH halves — `getDiscoverableProviders`
 			// reports only the config-declared one, which would skip exactly the
 			// extension-registered provider this reparse exists for.
-			if (savedParse?.thinkingLevel !== undefined && modelRegistry.hasProvider(savedParse.provider)) {
+			// Only when the reparsed suffix can still be READ. `pickInitialThinkingLevel`
+			// consults `restoredSessionThinkingLevel` at exactly one precedence step,
+			// itself gated on an unset `options.thinkingLevel` and no persisted
+			// `thinking_level_change` — both settled before this point and neither
+			// re-derived later. A resumed branch that already recorded its level, or
+			// a `--thinking` pin, therefore discards whatever this fetch would
+			// correct, and a cold dynamic provider charges the startup its full
+			// discovery timeout for a value nothing reads.
+			const savedSuffixIsReadable = options.thinkingLevel === undefined && !hasThinkingEntry;
+			if (
+				savedSuffixIsReadable &&
+				savedParse?.thinkingLevel !== undefined &&
+				modelRegistry.hasProvider(savedParse.provider)
+			) {
 				const savedProvider = savedParse.provider;
 				// Coalescing covers configured `discovery:` providers only
 				// (`#discoverProviderModelsCoalesced`); the runtime and built-in
