@@ -515,19 +515,57 @@ export class MCPManager {
 		if (!this.#toolsRegistered) return;
 		// Registered before the first firing so a callback triggered synchronously
 		// inside it is already collected rather than escaping the window.
-		const sink: Promise<void>[] = [];
-		this.#toolsChangedReconcileSinks.add(sink);
+		const sink = this.openToolsChangedReconcile();
 		try {
 			await this.#fireToolsChanged();
+			await sink.drain();
+		} finally {
+			sink.close();
+		}
+	}
+
+	/**
+	 * Open a collection window for tools-changed firings and hand back its
+	 * controls.
+	 *
+	 * Startup's reconcile does not end when the install-time firing settles: a
+	 * connection-time `tools/list` still in flight fires this handler afterwards,
+	 * and that firing's promise is discarded at its own callsite. A caller with
+	 * further asynchronous startup left to do — Code Mode's initial tool-surface
+	 * routing, whose registry mutation the late refresh then queues behind — can
+	 * hold the window across it and drain again before releasing the session, so
+	 * a first prompt cannot go out against a roster a completed listing has
+	 * already superseded.
+	 */
+	openToolsChangedReconcile(): { drain: () => Promise<void>; close: () => void } {
+		const sink: Promise<void>[] = [];
+		this.#toolsChangedReconcileSinks.add(sink);
+		return {
 			// Draining rather than a single pass: awaiting one collected firing can
 			// admit the next, and the roster is only settled when a drain adds none.
-			while (sink.length > 0) {
-				const pending = sink.splice(0);
-				await Promise.all(pending);
-			}
-		} finally {
-			this.#toolsChangedReconcileSinks.delete(sink);
-		}
+			//
+			// In-flight LISTINGS count as pending too. A `tools/list` that has not
+			// answered yet has fired nothing, so a sink-only drain reports settled
+			// and the firing lands afterwards — exactly the window this exists to
+			// close. Their rejections are already handled at their own callsites;
+			// swallowing here only orders the wait.
+			drain: async () => {
+				for (;;) {
+					const loads = [...this.#pendingToolLoads.values(), ...this.#pendingToolRefresh.values()].map(pending =>
+						("promise" in pending ? pending.promise : pending).then(
+							() => {},
+							() => {},
+						),
+					);
+					const fired = sink.splice(0);
+					if (loads.length === 0 && fired.length === 0) return;
+					await Promise.all([...loads, ...fired]);
+				}
+			},
+			close: () => {
+				this.#toolsChangedReconcileSinks.delete(sink);
+			},
+		};
 	}
 
 	/**
