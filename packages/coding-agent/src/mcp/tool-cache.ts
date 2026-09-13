@@ -28,13 +28,20 @@ const CLAIM_PREFIX = "mcp_tools_claim:";
 /**
  * How long a claim row lives.
  *
- * It only has to outlast an in-flight `tools/list`, which has no bounded
- * lifetime (the timeout is configurable and `timeout: 0` disables it), so this
- * matches the catalog TTL rather than guessing a request duration. A stale
- * claim is harmless: it can only push the next claim slightly higher, never
- * suppress a write.
+ * A claim is an ordering high-water mark, and it must not expire while a
+ * request it orders can still land. A `tools/list` has no bounded lifetime —
+ * the timeout is configurable and `timeout: 0` disables it — so no span tied to
+ * a request duration is safe, and matching the catalog TTL was not either: a
+ * listing outstanding past that window loses its mark, and a process starting
+ * afterwards (across a backward clock correction) reserves a SMALLER token,
+ * persists the current catalog, and is then overwritten when the delayed
+ * response lands carrying its larger pre-correction token.
+ *
+ * The mark is cheap — one number per server — and only ever pushes the next
+ * claim higher, never suppresses a write, so it is kept effectively forever
+ * rather than sized against a request that has no maximum duration.
  */
-const CLAIM_TTL_MS = CACHE_TTL_MS;
+const CLAIM_TTL_MS = 100 * 365 * 24 * 60 * 60 * 1000;
 /**
  * How long an invalidation marker stays readable — the same TTL a populated
  * row gets.

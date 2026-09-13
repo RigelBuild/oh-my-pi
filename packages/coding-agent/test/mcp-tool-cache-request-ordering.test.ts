@@ -119,6 +119,37 @@ describe("MCP tool cache request-time ordering token", () => {
 		}
 	}, 25_000);
 
+	it("keeps the ordering mark past the catalog TTL for an unbounded request", async () => {
+		// A `tools/list` has no maximum duration (`timeout: 0` disables it), so a
+		// claim sized to the catalog TTL could expire while the request it orders
+		// was still outstanding. The mark then vanished, and a process starting
+		// afterwards floored BELOW the outstanding token.
+		const expiries = new Map<string, number>();
+		const rows = new Map<string, string>();
+		const storage = {
+			getCache: (key: string): string | null => rows.get(key) ?? null,
+			setCache: (key: string, value: string, expiresAtSec: number): void => {
+				rows.set(key, value);
+				expiries.set(key, expiresAtSec);
+			},
+			setCacheIfMatches: (key: string, expected: string | null, value: string, expiresAtSec: number): boolean => {
+				if ((rows.get(key) ?? null) !== expected) return false;
+				rows.set(key, value);
+				expiries.set(key, expiresAtSec);
+				return true;
+			},
+		} as unknown as AgentStorage;
+		const cache = new MCPToolCache(storage);
+
+		expect(cache.observeCatalogAt("slow")).toBeDefined();
+
+		const claimExpiry = expiries.get("mcp_tools_claim:slow");
+		if (claimExpiry === undefined) throw new Error("expected the claim row to be written");
+		// Still readable a year out, where the catalog's own 30-day TTL is not.
+		const oneYearOut = Math.floor((Date.now() + 365 * 24 * 60 * 60 * 1000) / 1000);
+		expect(claimExpiry).toBeGreaterThan(oneYearOut);
+	});
+
 	it("outlasts more older writers than the attempt count", async () => {
 		// A CAS loss proves only that a peer committed — never that its catalog is
 		// newer. With a fixed bound, enough older writers committing in the
