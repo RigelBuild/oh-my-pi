@@ -2624,7 +2624,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				savedSuffixIsReadable &&
 				savedParse?.thinkingLevel !== undefined &&
-				modelRegistry.hasProvider(savedParse.provider)
+				// `canRefreshProvider`, not `hasProvider`: a cold BUILT-IN manager
+				// provider (a configured vLLM endpoint) has neither live models nor a
+				// `discovery:` entry nor a runtime manager, so `hasProvider` says no
+				// while a scoped refresh would have fetched exactly the catalog that
+				// proves the id literal — and the split parse handed the chosen model
+				// the loser's `:low`.
+				modelRegistry.canRefreshProvider(savedParse.provider)
 			) {
 				const savedProvider = savedParse.provider;
 				// Coalescing covers configured `discovery:` providers only
@@ -2636,6 +2642,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// fallback does — never `startRuntimeDiscovery()`, which would
 				// undo a UI session's deliberate deferral.
 				await runtimeDiscoveryPromise;
+				// And the SDK-built registry's own background refresh, which fetches
+				// these same built-in catalogs on a separate promise — the join the
+				// later discovery fallback already makes, for the same reason.
+				await modelRegistry.awaitBackgroundRefresh();
 				await logger.time("restoreSessionSuffixDiscoveryFallback", () =>
 					modelRegistry.refreshDiscoverableProviders(new Set([savedProvider]), "online-if-uncached"),
 				);

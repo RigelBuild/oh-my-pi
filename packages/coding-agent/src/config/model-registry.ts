@@ -2441,6 +2441,24 @@ export class ModelRegistry {
 		);
 	}
 
+	/**
+	 * Whether a refresh scoped to `providerId` would actually fetch a catalog.
+	 *
+	 * Wider than {@link hasProvider}, which answers "is this provider known" and
+	 * so omits a BUILT-IN manager provider with no static rows and no live models
+	 * — a configured vLLM endpoint, say. `#collectBuiltInModelManagerOptions`
+	 * builds a manager for those, so a caller gating a provider-scoped refresh on
+	 * `hasProvider` skips the very fetch that would populate them. Same union the
+	 * unscoped {@link hasRefreshableProviders} takes, narrowed to one provider.
+	 */
+	canRefreshProvider(providerId: string): boolean {
+		if (this.hasProvider(providerId)) return true;
+		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
+		return (
+			REFRESHABLE_BUILT_IN_PROVIDER_IDS[providerId] === true && this.#createProviderAvailabilityCheck()(providerId)
+		);
+	}
+
 	getProviderDiscoveryState(provider: string): ProviderDiscoveryState | undefined {
 		return this.#providerDiscoveryStates.get(provider);
 	}

@@ -222,6 +222,33 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	});
 
+	test("discovers a cold built-in provider before reparsing its saved suffix", async () => {
+		// The third shape of the same bug. A BUILT-IN manager provider — a
+		// configured vLLM endpoint — has no live models, no `discovery:` entry, and
+		// no runtime manager, so `hasProvider` reports false while
+		// `#collectBuiltInModelManagerOptions` would happily build it a manager.
+		// Gating the scoped refresh on `hasProvider` therefore skipped the fetch
+		// that proves `router:low` is a literal id, and its `:low` was transferred
+		// to the config-selected model as a thinking level.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, `builtin-models-${Bun.nanoseconds()}.yml`);
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					vllm: { baseUrl: "https://vllm.example.invalid/v1", api: "openai-completions", auth: "none" },
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+
+		// The premise, measured rather than assumed: the provider is invisible to
+		// the old predicate and refreshable under the new one.
+		expect(modelRegistry.hasProvider("vllm")).toBe(false);
+		expect(modelRegistry.canRefreshProvider("vllm")).toBe(true);
+	});
+
 	test("does not block startup on a cold catalog a persisted thinking entry outranks", async () => {
 		// The reparse exists to correct `restoredSessionThinkingLevel`, and
 		// `pickInitialThinkingLevel` reads that at ONE precedence step, behind
