@@ -919,6 +919,24 @@ export class AgentSession {
 	#agentKind: "main" | "sub" = "main";
 	/** Spawn depth: 0 top-level, 1+ subagent. Reads the depth-dependent tool gates.*/
 	readonly #taskDepth: number;
+
+	/**
+	 * Whether this session may MUTATE its MCP manager's connections.
+	 *
+	 * True unless this is a subagent: `structured-subagent.ts` hands a child
+	 * `session.mcpManager ?? MCPManager.instance()`, so a child shares a manager
+	 * with its parent and reconciling there rewrites the PARENT's live servers
+	 * from the child's settings scope.
+	 *
+	 * Deliberately NOT keyed on owning the manager. A top-level embedder that
+	 * passes its own `mcpManager` owns it no less for having built it outside
+	 * the session, and an ownership gate silently turns every MCP reconcile
+	 * into a no-op for those callers. Depth names the hazard; ownership
+	 * only correlates with it.
+	 */
+	get #mayMutateMcpConnections(): boolean {
+		return this.#taskDepth === 0;
+	}
 	// The registry this session was created against (SDK-supplied or the global
 	// fallback). Skill fan-out iterates THIS registry and restricts to this
 	// session's own descendants — never a foreign global tree.
@@ -2400,7 +2418,7 @@ export class AgentSession {
 					// needs `eval` registered AND active. Forwarding the bare value
 					// disconnects the browser servers of a session that has no
 					// prelude to replace them, stripping its only browser capability.
-					if (this.#taskDepth === 0) {
+					if (this.#mayMutateMcpConnections) {
 						const tools = await this.#reconcileBrowserMcpFilter(
 							shouldFilterBrowserMCPForPrelude({
 								restrictToolNames: false,
@@ -5896,7 +5914,7 @@ export class AgentSession {
 		// Gated on OWNERSHIP, the same predicate the reconnect block uses: a
 		// subagent that merely inherits its parent's manager must not repoint the
 		// shared manager's discovery at the child's directory.
-		if (this.#disconnectOwnedMcpManager) this.#mcpManager?.setCwd(this.sessionManager.getCwd());
+		if (this.#mayMutateMcpConnections) this.#mcpManager?.setCwd(this.sessionManager.getCwd());
 
 		// Re-read settings BEFORE the roster scan so a changed `skills.*` config
 		// (enabled/customDirectories/ignoredSkills) or `disabledExtensions` from
@@ -6066,11 +6084,11 @@ export class AgentSession {
 			// live connections directly; the `all` reconnect below then re-subscribes
 			// the freshly reconnected servers under the now-current flag.
 			//
-			// Gated on OWNERSHIP, like the project-config reconcile below: a subagent
-			// granted the `refresh` tool inherits its parent's manager, and
-			// subscribing/unsubscribing there would rewrite the PARENT's live server
-			// subscriptions from the child's settings scope.
-			if (changed && this.#disconnectOwnedMcpManager !== undefined) {
+			// Gated on subagent depth, like the project-config reconcile below: a
+			// child shares its parent's manager, and subscribing/unsubscribing there
+			// would rewrite the PARENT's live server subscriptions from the child's
+			// settings scope.
+			if (changed && this.#mayMutateMcpConnections) {
 				this.#mcpManager?.setNotificationsEnabled(this.settings.get("mcp.notifications") ?? false);
 			}
 			// Same shape for `mcp.enableProjectConfig`: `MCPManager` consumes it only
@@ -6082,18 +6100,17 @@ export class AgentSession {
 			// success while servers are still being torn down. Self-guards on
 			// no-change, so an unrelated settings edit touches no connection.
 			//
-			// Gated on OWNERSHIP, the same predicate the `doMcp` block below uses: a
-			// subagent granted the `refresh` tool inherits its parent's manager, and
-			// reconciling there would disconnect the PARENT's project servers and
-			// rewrite its discovery policy from the child's settings scope. The
-			// child still refreshes its own tool view from the shared manager, which
-			// mutates nothing.
+			// Gated on subagent depth, the same predicate the `doMcp` block below
+			// uses: a child shares its parent's manager, and reconciling there would
+			// disconnect the PARENT's project servers and rewrite its discovery policy
+			// from the child's settings scope. The child still refreshes its own tool
+			// view from the shared manager, which mutates nothing.
 			if (changed && !doMcp && this.#mcpManager) {
 				const manager = this.#mcpManager;
-				const ownsManager = this.#disconnectOwnedMcpManager !== undefined;
+				const mayMutate = this.#mayMutateMcpConnections;
 				this.registerHostReconciliation(
 					(async () => {
-						if (ownsManager) {
+						if (mayMutate) {
 							const reconciled = await manager.reconcileProjectConfigFilter(
 								this.settings.get("mcp.enableProjectConfig") ?? true,
 							);
@@ -6186,7 +6203,7 @@ export class AgentSession {
 					// Depth, not ownership — same reason as the `browser.enabled`
 					// listener: a top-level embedder supplying its own manager must
 					// still reconcile; only a subagent shares one with a parent.
-					if (evalWasActive !== evalIsActive && this.#reconcileBrowserMcpFilter && this.#taskDepth === 0) {
+					if (evalWasActive !== evalIsActive && this.#reconcileBrowserMcpFilter && this.#mayMutateMcpConnections) {
 						const tools = await this.#reconcileBrowserMcpFilter(
 							shouldFilterBrowserMCPForPrelude({
 								restrictToolNames: false,
@@ -6470,16 +6487,14 @@ export class AgentSession {
 			// `instance()` may be a different session's manager — refreshing session
 			// A would disconnect session B's servers.
 			//
-			// Gate on ownership: a subagent granted the `refresh` tool inherits its
-			// PARENT's manager (`config.mcpManager` set, so `#disconnectOwnedMcpManager`
-			// is undefined). An inherited-manager session MUST NOT disconnect and
-			// rediscover the shared manager — that would interrupt concurrent parent
-			// calls and replace the parent's MCP configuration with the child's
-			// settings/extension scope. Only a session that CREATED its manager (the
-			// same predicate `#disconnectOwnedMcpManager` uses at dispose) reconnects
-			// it; an inherited-manager `refresh('mcp')` is a no-op (result.mcp unset).
+			// Gated on subagent depth: a child granted the `refresh` tool shares its
+			// PARENT's manager, and disconnecting/rediscovering it would interrupt
+			// concurrent parent calls and replace the parent's MCP configuration with
+			// the child's settings/extension scope. A subagent `refresh('mcp')` is a
+			// no-op (result.mcp unset); a TOP-LEVEL embedder that supplied its own
+			// manager still refreshes.
 			const mcpManager = this.#mcpManager;
-			if (mcpManager && this.#disconnectOwnedMcpManager) {
+			if (mcpManager && this.#mayMutateMcpConnections) {
 				// Reuse the shared reconnect-and-rebind sequence the /mcp reload and
 				// /reload-plugins surfaces use, so this path cannot drift from them.
 				// It clears the MCP prompt commands (no stale /server:prompt after a

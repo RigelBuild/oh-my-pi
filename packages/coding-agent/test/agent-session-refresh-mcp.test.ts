@@ -62,7 +62,7 @@ describe("AgentSession.refresh('mcp')", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function makeSession(mcpManager?: MCPManager, options: { owned?: boolean } = {}): Promise<AgentSession> {
+	async function makeSession(mcpManager?: MCPManager, options: { subagent?: boolean } = {}): Promise<AgentSession> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -71,11 +71,10 @@ describe("AgentSession.refresh('mcp')", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		// A top-level session OWNS its manager: the SDK wires
-		// `disconnectOwnedMcpManager` only for a manager this session created, and
-		// the MCP refresh branch gates on that ownership signal. A subagent that
-		// merely inherits its parent's manager leaves it undefined.
-		const owned = options.owned ?? true;
+		// The MCP refresh branches gate on subagent DEPTH: only a child shares a
+		// manager with a parent. A top-level session refreshes whether or not it
+		// built the manager itself.
+		const subagent = options.subagent ?? false;
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -84,7 +83,8 @@ describe("AgentSession.refresh('mcp')", () => {
 			toolRegistry: new Map<string, AgentTool>(),
 			extensionRoots: () => roots,
 			mcpManager,
-			disconnectOwnedMcpManager: owned && mcpManager ? async () => {} : undefined,
+			disconnectOwnedMcpManager: mcpManager ? async () => {} : undefined,
+			memoryTaskDepth: subagent ? 1 : 0,
 		});
 		sessions.push(session);
 		return session;
@@ -225,13 +225,13 @@ describe("AgentSession.refresh('mcp')", () => {
 	});
 
 	it("does not disconnect or rediscover an inherited (parent's) manager", async () => {
-		// A subagent granted the `refresh` tool inherits its parent's live
-		// manager (SDK passes `mcpManager` but no `disconnectOwnedMcpManager`).
+		// A subagent granted the `refresh` tool shares its parent's live manager
+		// (`structured-subagent.ts` forwards `session.mcpManager`).
 		// `refresh('mcp')` on that child must NOT touch the shared manager: it
 		// would interrupt concurrent parent calls and replace the parent's MCP
 		// configuration with the child's settings/extension scope.
 		const inherited = fakeManager();
-		const child = await makeSession(inherited as unknown as MCPManager, { owned: false });
+		const child = await makeSession(inherited as unknown as MCPManager, { subagent: true });
 
 		const result = await child.refresh("mcp");
 
@@ -242,12 +242,12 @@ describe("AgentSession.refresh('mcp')", () => {
 		expect(result.mcp).toBeUndefined();
 		// Nor may the child REPOINT the shared manager's discovery cwd. The
 		// repoint runs on every scope, ahead of `settings.reload()`, so without
-		// the ownership gate a subagent whose cwd differs from its parent's would
+		// the depth gate a subagent whose cwd differs from its parent's would
 		// silently aim the parent's MCP discovery — and its browser-filter
 		// reconcile — at the child's directory.
 		expect(inherited.setCwd).not.toHaveBeenCalled();
 
-		// A session that OWNS its manager still refreshes it.
+		// A top-level session still refreshes its manager.
 		const owned = fakeManager();
 		const top = await makeSession(owned as unknown as MCPManager);
 		expect((await top.refresh("mcp")).mcp).toBe(true);
@@ -574,8 +574,8 @@ describe("AgentSession.refresh('mcp')", () => {
 			toolRegistry: new Map<string, AgentTool>(),
 			extensionRoots: () => roots,
 			mcpManager: manager,
-			// No `disconnectOwnedMcpManager`: this session did NOT create the
-			// manager, which is exactly how a subagent receives its parent's.
+			// A subagent: it shares the manager its parent handed it.
+			memoryTaskDepth: 1,
 		});
 		sessions.push(session);
 
@@ -1029,7 +1029,8 @@ describe("AgentSession.refresh('mcp')", () => {
 			toolRegistry: new Map<string, AgentTool>(),
 			extensionRoots: () => roots,
 			mcpManager: manager,
-			// No `disconnectOwnedMcpManager`: an inherited manager.
+			// A subagent: it shares the manager its parent handed it.
+			memoryTaskDepth: 1,
 		});
 		sessions.push(session);
 
