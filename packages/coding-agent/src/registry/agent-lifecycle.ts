@@ -594,6 +594,45 @@ export class AgentLifecycleManager {
 	}
 
 	/**
+	 * Wait for every adopted child that is mid-turn to reach `idle`.
+	 *
+	 * Bounded by the caller's deadline; a child still running when it expires is
+	 * left to be parked, because the parent is already refusing new work and a
+	 * permanent wedge is worse than one aborted turn.
+	 */
+	async #drainRunningAdoptions(deadlineAt: number): Promise<void> {
+		const running = [...this.#adopted.keys()].filter(id => this.#registry.get(id)?.status === "running");
+		if (running.length === 0) return;
+		const remaining = new Set(running);
+		const settled = Promise.withResolvers<void>();
+		const unsubscribe = this.#registry.onChange(event => {
+			if (!remaining.has(event.ref.id)) return;
+			// Anything that is no longer `running` has ended its turn — including a
+			// removal or an `aborted` tombstone, which will never reach `idle`.
+			if (event.type === "removed" || event.ref.status !== "running") {
+				remaining.delete(event.ref.id);
+				if (remaining.size === 0) settled.resolve();
+			}
+		});
+		try {
+			// Re-read after subscribing: a turn that ended between the snapshot and
+			// the subscription emitted its event to nobody.
+			for (const id of Array.from(remaining)) {
+				if (this.#registry.get(id)?.status !== "running") remaining.delete(id);
+			}
+			if (remaining.size === 0) return;
+			await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => settled.promise);
+		} catch (error) {
+			logger.warn("Adopted agent was still running at the parking deadline", {
+				ids: [...remaining],
+				error: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			unsubscribe();
+		}
+	}
+
+	/**
 	 * Block until no all-agent parking handoff is live.
 	 *
 	 * Loops rather than awaiting one snapshot: a release removes only its own
@@ -902,6 +941,25 @@ export class AgentLifecycleManager {
 					});
 				}
 			}
+
+			// A child that was ALREADY mid-turn when the recycle began is not
+			// covered by anything above: the barrier only excludes work entering
+			// through `ensureLive()` after it was raised, and `park()` detaches and
+			// disposes whatever is attached without consulting the session's state.
+			// So a follow-up, IRC wake, or collaboration chat running on an adopted
+			// child was aborted mid-request by an otherwise-idle parent's restart.
+			//
+			// Let those turns finish first, bounded by the same deadline as the
+			// phases around it and for the same reason: the parent has already
+			// called `beginDispose()` (sdk.ts), so blocking here forever would wedge
+			// the restart rather than merely slow it. A child still running at the
+			// deadline is parked anyway — a bounded abort beats a permanent wedge —
+			// and the warning names it.
+			//
+			// The wait is event-driven off the registry's own `status_changed`, not
+			// polled: `running` → `idle` is exactly the transition that ends a turn,
+			// and the same event the TTL timer re-arms on.
+			await this.#drainRunningAdoptions(deadlineAt);
 
 			// `#revivals` is intentionally NOT consulted here: `ensureLive()` deletes
 			// each entry in its own `finally`, and the pre-pass above settled every
