@@ -296,6 +296,25 @@ export interface InteractiveModeNotify {
  * model that "did not resolve", which is a genuine fallback and stays a warning,
  * as does every non-`--reapply-config` restore failure.
  */
+/**
+ * The stderr line a NONINTERACTIVE run owes the user about its model, or
+ * `undefined` when there is nothing to say or the interactive notice queue will
+ * carry it. Split out so the routing is testable without launching a session.
+ *
+ * Only the resolved-model case: with no model at all the caller prints a longer
+ * diagnostic with setup instructions.
+ */
+export function renderStartupModelNotice(input: {
+	isInteractive: boolean;
+	hasModel: boolean;
+	modelFallbackMessage: string | undefined;
+}): string | undefined {
+	if (input.isInteractive || !input.hasModel || !input.modelFallbackMessage) return undefined;
+	const { kind } = buildModelFallbackNotification(input.modelFallbackMessage);
+	const paint = kind === "info" ? chalk.cyan : chalk.yellow;
+	return `${paint(input.modelFallbackMessage)}\n`;
+}
+
 export function buildModelFallbackNotification(modelFallbackMessage: string): InteractiveModeNotify {
 	const configAdoption = modelFallbackMessage.startsWith("--reapply-config: resumed on ");
 	return { kind: configAdoption ? "info" : "warn", message: modelFallbackMessage };
@@ -2068,6 +2087,18 @@ export async function runRootCommand(
 			if (modelRegistryError) {
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
+
+			// A resolved model skips the no-model block below, but `notifs` is
+			// consumed only by `runInteractiveMode` — so under `-p` an adopted
+			// config model, or a config default that failed while the session
+			// model still restored, was reported nowhere. stderr keeps structured
+			// stdout clean.
+			const startupNotice = renderStartupModelNotice({
+				isInteractive,
+				hasModel: Boolean(session.model),
+				modelFallbackMessage,
+			});
+			if (startupNotice) process.stderr.write(startupNotice);
 
 			if (!isInteractive && !session.model) {
 				if (modelRegistryError) {
