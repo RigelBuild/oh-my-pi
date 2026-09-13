@@ -219,13 +219,39 @@ function replayedInputImages(message: Message, model: Model, replaysNativeHistor
 	// uncounted and un-evictable; its size is 0 and the byte tally skips it.
 	const sizes: number[] = [];
 	const repairedOrphans = repairedOrphanItemIndices(payload.items, model);
+	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
 	for (let index = 0; index < payload.items.length; index++) {
 		if (repairedOrphans.has(index)) continue;
+		// `adaptResponsesReplayItemsForModel()` rewrites a replayed
+		// `computer_call`/`computer_call_output` into a short assistant TEXT
+		// message when the model does not support computer use, so its screenshot
+		// reaches the wire as text and occupies no image part at all. Exposing it
+		// here incremented the count, and with more than the cap's worth of
+		// URL/file-backed screenshots the count-only clamp evicted real
+		// call/output pairs for a request that carries zero image parts.
+		if (demotesNativeComputerItems && isReplayedComputerItem(payload.items[index])) continue;
 		for (const part of nativeInputImageParts(payload.items[index])) {
 			sizes.push(inlineImageFromDataUri(part.image_url)?.data.length ?? 0);
 		}
 	}
 	return sizes;
+}
+
+/**
+ * Whether this model's converter rewrites REPLAYED native computer items into
+ * assistant text.
+ *
+ * `adaptResponsesReplayItemsForModel()` does this for every Responses route
+ * whenever `supportsComputerUse` is not true, so the item's screenshot travels
+ * as text and consumes no image slot on either budget.
+ */
+function demotesReplayedComputerItems(model: Model): boolean {
+	return replaysOpenAIResponsesNativeHistory(model) && model.supportsComputerUse !== true;
+}
+
+/** A replayed native computer call or its output. */
+function isReplayedComputerItem(item: Record<string, unknown> | undefined): boolean {
+	return item?.type === "computer_call" || item?.type === "computer_call_output";
 }
 
 /**

@@ -1053,6 +1053,59 @@ describe("provider context image budgets", () => {
 		expect(imageData(clamped).length).toBe(liveImages);
 	});
 
+	it("does not count replayed computer items the model demotes to text", async () => {
+		// `adaptResponsesReplayItemsForModel()` rewrites a replayed
+		// `computer_call_output` into a short assistant TEXT message whenever the
+		// model does not support computer use, so its screenshot reaches the wire
+		// as text and occupies no image part. Counting it meant that with more than
+		// the cap's worth of such items, the count-only clamp evicted live generic
+		// images for a request that carries zero image parts from the replay.
+		//
+		// RED (pre-fix): the live images were dropped to make room for screenshots
+		// that never become image parts.
+		const small = "d".repeat(64);
+		const liveImages = 3;
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: Array.from({ length: liveImages }, () => image(small)),
+				},
+				{
+					role: "user",
+					timestamp: 2,
+					content: [{ type: "text", text: "restored turn" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: VISION_ONLY_MODEL.provider,
+						items: [
+							// A compaction marker makes the payload replay on a cold resume,
+							// matching the warm/compaction case.
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "compaction" }] },
+							// Each output is PAIRED with its call: an unpaired one is already
+							// excluded as a repaired orphan, which would make this vacuous.
+							...Array.from({ length: providerImageBudget(VISION_ONLY_MODEL.provider) * 2 }, (_, index) => [
+								{ type: "computer_call", call_id: `call-${index}`, action: { type: "screenshot" } },
+								{
+									type: "computer_call_output",
+									call_id: `call-${index}`,
+									output: { type: "computer_screenshot", image_url: dataUri(small) },
+								},
+							]).flat(),
+						],
+					},
+				},
+			],
+		};
+
+		// `supportsComputerUse: false`, so every replayed computer item above is
+		// demoted to assistant text by the converter.
+		const clamped = clampProviderContextImageCount(context, VISION_ONLY_MODEL, true);
+
+		expect(imageData(clamped).length).toBe(liveImages);
+	});
+
 	it("counts a metadata-only computer screenshot with no content mirror", async () => {
 		// A history parsed back from `computer_call_output` has `content: []`, so
 		// nothing in the generic view stands for the screenshot. Leaving the count
