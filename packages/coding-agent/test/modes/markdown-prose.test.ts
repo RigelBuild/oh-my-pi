@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { keywordInProse, maskNonProse } from "@oh-my-pi/pi-coding-agent/modes/markdown-prose";
+import { keywordInProse, maskNonProse, stripProseHtmlComments } from "@oh-my-pi/pi-coding-agent/modes/markdown-prose";
 
 const ORCHESTRATE = /\borchestrate\b/i;
 
@@ -76,5 +76,41 @@ describe("keywordInProse", () => {
 
 	it("respects word boundaries regardless of region", () => {
 		expect(keywordInProse("reorchestrate the orchestration", ORCHESTRATE)).toBe(false);
+	});
+});
+
+describe("stripProseHtmlComments", () => {
+	it("removes a comment the terminal renderer would not display", () => {
+		expect(stripProseHtmlComments("before <!-- hidden --> after")).toBe("before  after");
+	});
+
+	it("returns the input unchanged when it holds no comment", () => {
+		const text = "plain prose with <br> and `code`";
+		expect(stripProseHtmlComments(text)).toBe(text);
+	});
+
+	it("keeps a comment a fenced block displays deliberately", () => {
+		const text = "```html\n<!-- kept -->\n```";
+		expect(stripProseHtmlComments(text)).toBe(text);
+	});
+
+	it("keeps a comment quoted in an inline code span", () => {
+		const text = "the token is `<!-- HALT: done -->` exactly";
+		expect(stripProseHtmlComments(text)).toBe(text);
+	});
+
+	it("strips a prose comment while keeping a fenced one in the same message", () => {
+		const text = "intro <!-- gone -->\n\n```html\n<!-- kept -->\n```\n\ntail";
+		expect(stripProseHtmlComments(text)).toBe("intro \n\n```html\n<!-- kept -->\n```\n\ntail");
+	});
+
+	it("drops an unterminated comment through the end of the text", () => {
+		// The renderer's own comment regex is equally unbounded, so a half-written
+		// comment must not print the rest of the message as markup.
+		expect(stripProseHtmlComments("visible <!-- never closed")).toBe("visible ");
+	});
+
+	it("removes every prose comment, not just the first", () => {
+		expect(stripProseHtmlComments("a <!-- one --> b <!-- two --> c")).toBe("a  b  c");
 	});
 });

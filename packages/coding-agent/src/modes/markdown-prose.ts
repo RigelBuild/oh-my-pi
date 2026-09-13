@@ -235,6 +235,49 @@ export function maskNonProse(text: string): string {
 	return arr.join("");
 }
 
+/** Spans of each HTML comment in `text`, in order. */
+function htmlCommentSpans(text: string): Array<{ start: number; end: number }> {
+	const spans: Array<{ start: number; end: number }> = [];
+	for (let i = text.indexOf("<!--"); i >= 0; i = text.indexOf("<!--", i + 4)) {
+		const close = text.indexOf("-->", i + 4);
+		const end = close < 0 ? text.length : close + 3;
+		spans.push({ start: i, end });
+		if (close < 0) break;
+		i = end - 4;
+	}
+	return spans;
+}
+
+/**
+ * Remove HTML comments that render as prose, keeping any a fenced block or
+ * inline code span shows deliberately.
+ *
+ * The terminal renderer already drops the former and keeps the latter, so text
+ * surfaces that bypass it — print mode's stdout, the exporter's tree rows —
+ * showed comments the TUI never displays.
+ *
+ * `maskNonProse` masks a prose comment and a quoted one alike, so the comments
+ * are neutralized to same-length filler first: what it masks after that is code,
+ * and the index map stays 1:1.
+ */
+export function stripProseHtmlComments(text: string): string {
+	const spans = htmlCommentSpans(text);
+	if (spans.length === 0) return text;
+	let neutralized = text;
+	for (const span of spans) {
+		neutralized = neutralized.slice(0, span.start) + "-".repeat(span.end - span.start) + neutralized.slice(span.end);
+	}
+	const masked = maskNonProse(neutralized);
+	let out = "";
+	let lastIndex = 0;
+	for (const span of spans) {
+		if (masked[span.start] !== "-") continue;
+		out += text.slice(lastIndex, span.start);
+		lastIndex = span.end;
+	}
+	return lastIndex === 0 ? text : out + text.slice(lastIndex);
+}
+
 /**
  * Whether `text` contains a standalone keyword match (per the non-global,
  * word-bounded `word` regex) that lives in prose rather than inside a code

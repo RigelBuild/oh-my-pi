@@ -497,8 +497,14 @@
         return s.slice(0, maxLen) + '...';
       }
 
+      /**
+       * Tree rows are escaped into visible text, so an HTML comment the message
+       * body hides would read as `&lt;!-- … --&gt;` here. Kept simple: the row is
+       * a truncated one-line preview, so a comment quoted inside code loses
+       * nothing a reader of the sidebar needed.
+       */
       function normalizeTreeText(s) {
-        return s.replace(/[\n\t]/g, ' ').trim();
+        return s.replace(/<!--[\s\S]*?(?:-->|$)/g, '').replace(/[\n\t]/g, ' ').trim();
       }
 
       /**

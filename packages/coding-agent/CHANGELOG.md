@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- HTML comments no longer reach `--print` stdout or the HTML export's tree sidebar; both now hide the comments the interactive renderer already drops, while a comment shown inside a fenced block or code span survives.
+
 ## [18.1.19] - 2026-09-12
 
 - Fixed `--mode json` returning exit 0 on a turn-fatal provider/auth/network error ([#11498](https://github.com/can1357/oh-my-pi/issues/11498)).

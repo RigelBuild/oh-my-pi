@@ -300,6 +300,14 @@ describe("HTML export assistant content ordering", () => {
 		expect(renderedSidebarOrder(rendered)[0]).toBe("assistant: first line");
 	});
 
+	test("keeps an HTML comment out of the sidebar row", () => {
+		// Rows are escaped into visible text, so a comment the message body hides
+		// would read as `<!-- … -->` in the tree.
+		const rendered = renderAssistant([{ type: "text", text: "the answer <!-- machine marker --> here" }]);
+
+		expect(renderedSidebarOrder(rendered)[0]).toBe("assistant: the answer  here");
+	});
+
 	test("clicking a pi-style tool result row locates its assistant tool card", () => {
 		const rendered = renderAssistant(
 			[

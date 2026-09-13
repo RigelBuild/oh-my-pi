@@ -10,6 +10,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
+import { stripProseHtmlComments } from "./markdown-prose";
 import { flushTelemetryExport } from "../telemetry-export";
 import { initializeExtensions } from "./runtime-init";
 
@@ -216,7 +217,9 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			// Output text content
 			for (const content of assistantMsg.content) {
 				if (content.type === "text") {
-					writeStdoutLine(`${sanitizeText(content.text)}\n`);
+					// Comments the interactive renderer drops must not reach stdout, where
+					// they land in whatever consumes the pipe.
+					writeStdoutLine(`${sanitizeText(stripProseHtmlComments(content.text))}\n`);
 				} else if (printThoughts && content.type === "thinking" && content.thinking.trim().length > 0) {
 					writeStdoutLine(`${sanitizeText(content.thinking)}\n`);
 				}
