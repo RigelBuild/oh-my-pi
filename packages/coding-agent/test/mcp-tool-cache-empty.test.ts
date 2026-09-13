@@ -713,6 +713,47 @@ describe("MCPToolCache empty-toolset guard", () => {
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
 
+	// The barrier a FAILED reservation records must dominate every request this
+	// instance already issued — not merely read the clock. After a backward step
+	// the current reading is BELOW a token an earlier in-flight request already
+	// holds; that request has not entered `set()` yet, so a clock-sampled mark
+	// does not suppress it. Its delayed response then passes `isCurrent()`, raises
+	// `#newestObserved` to its own larger value, and caches the obsolete catalog
+	// for the full 30-day TTL.
+	//
+	// RED (pre-fix): the earlier, larger token's catalog was persisted and served.
+	test("an exhausted reservation still dominates a larger token issued before the clock stepped back", async () => {
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+
+		// An earlier request reserves on the HIGH pre-correction clock. The token
+		// clock is `performance.timeOrigin + performance.now()`, not `Date.now()`.
+		const baseNow = performance.now();
+		const clock = vi.spyOn(performance, "now").mockReturnValue(baseNow + 10_000);
+		const earlyToken = reserved(cache, "litellm");
+		clock.mockRestore();
+		// The correction really is backward: the token is above the clock now.
+		expect(earlyToken).toBeGreaterThan(toolCatalogObservedAt());
+
+		// The clock is corrected DOWN, and a newer request exhausts its claim CAS
+		// (sustained contention), so it goes unreserved.
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValue("mismatch");
+		const failed = cache.observeCatalogAt("litellm");
+		cas.mockRestore();
+		expect(failed).toBeUndefined();
+		// The failure records the barrier.
+		await cache.set("litellm", CONFIG, [NEW_TOOL], failed);
+
+		// The earlier request's delayed response now lands, carrying the larger
+		// pre-correction token. It must NOT be able to write.
+		await cache.set("litellm", CONFIG, [OLD_TOOL], earlyToken);
+
+		// Nothing obsolete was persisted: either the entry is absent, or it is not
+		// the superseded catalog.
+		const cached = await cache.get("litellm", CONFIG);
+		expect(cached ?? []).not.toContainEqual(OLD_TOOL);
+	});
+
 	// A CAS that could not COMPARE is not a CAS that lost. `SQLITE_BUSY` from a
 	// peer holding the write lock past `busy_timeout` used to return the same
 	// `false` as a genuine mismatch, so both loops retried it synchronously: 4

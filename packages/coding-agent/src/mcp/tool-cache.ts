@@ -284,6 +284,11 @@ export class MCPToolCache {
 			const ceiling = orderingCeiling(this.storage.getCache(catalog), claimRaw);
 			const reading = toolCatalogObservedAt();
 			claimed = ceiling === undefined ? reading : Math.max(reading, nextAfter(ceiling));
+			// Recorded for EVERY attempt, before the CAS: a token that never
+			// published still has to be dominated by a later barrier, which is
+			// exactly the request this loop may be about to fail to reserve.
+			const issued = this.#issuedHighWater.get(serverName);
+			this.#issuedHighWater.set(serverName, Math.max(issued ?? claimed, claimed));
 			const serialized = JSON.stringify({ claimedAt: claimed } satisfies MCPToolClaimPayload);
 			const expiresAtSec = Math.floor((Date.now() + CLAIM_TTL_MS) / 1000);
 			const outcome = this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec);
@@ -339,6 +344,21 @@ export class MCPToolCache {
 	 * cross-instance half.
 	 */
 	#newestObserved = new Map<string, number>();
+	/**
+	 * Highest token this instance has ever ISSUED for a server, whether or not
+	 * the request that got it ever reached `set()`.
+	 *
+	 * The barrier a failed reservation needs. Sampling the clock cannot serve:
+	 * after a backward step the reading is BELOW a token an earlier in-flight
+	 * request already holds, so marking `#newestObserved` with it fails to
+	 * suppress that request — its delayed response then passes `isCurrent()`,
+	 * raises the map to its own larger value, and caches an obsolete catalog for
+	 * the full TTL. Every in-process request's token came from here, so the
+	 * high-water mark dominates all of them by construction, independent of what
+	 * the clock now reads. Cross-instance requests remain ordered by the claim
+	 * and catalog rows.
+	 */
+	#issuedHighWater = new Map<string, number>();
 
 	async get(serverName: string, config: MCPServerConfig): Promise<MCPToolDefinition[] | null> {
 		const key = cacheKey(serverName);
@@ -411,12 +431,30 @@ export class MCPToolCache {
 			// Sampling now is sound because every earlier request's token was read
 			// before this one entered, so the mark is above all of them and below
 			// anything that enters next.
-			const unreservedAt = toolCatalogObservedAt();
+			// The barrier must DOMINATE every already-issued request, not merely
+			// read the clock. A backward step puts the current reading below a
+			// token an earlier in-flight request already holds, and that request
+			// has not entered `set()` yet — so a clock-sampled mark leaves it free
+			// to pass `isCurrent()` and persist its superseded catalog. Every
+			// in-process token came from `observeCatalogAt`, which records its
+			// high-water mark, so stepping past that dominates all of them
+			// regardless of the clock; the reading is still folded in so the mark
+			// is never below now.
+			const issuedHighWater = this.#issuedHighWater.get(serverName);
+			const unreservedAt = Math.max(
+				toolCatalogObservedAt(),
+				issuedHighWater === undefined ? Number.NEGATIVE_INFINITY : nextAfter(issuedHighWater),
+			);
 			const seen = this.#newestObserved.get(serverName);
 			this.#newestObserved.set(serverName, Math.max(seen ?? unreservedAt, unreservedAt));
 			return;
 		}
 		const writeStartedAt = observed[0] ?? toolCatalogObservedAt();
+		// An omitted token samples now rather than coming from
+		// `observeCatalogAt()`, so fold it into the high-water mark too — a later
+		// failed reservation has to dominate it as well.
+		const issuedSeen = this.#issuedHighWater.get(serverName);
+		this.#issuedHighWater.set(serverName, Math.max(issuedSeen ?? writeStartedAt, writeStartedAt));
 		const newestSeen = this.#newestObserved.get(serverName);
 		this.#newestObserved.set(serverName, Math.max(newestSeen ?? writeStartedAt, writeStartedAt));
 		// A write is still current while nothing issued LATER has entered `set()`
