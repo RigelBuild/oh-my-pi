@@ -249,6 +249,32 @@ describe("reconcileSettingsWorkspaceRoots", () => {
 		expect([...owned]).toEqual([A, B]);
 	});
 
+	it("keeps a manual root the settings value named and then dropped", () => {
+		// HEADER is live on an independent grant (session header or `/add-dir`).
+		// The setting then names the same path, and later drops it. Claiming it as
+		// settings-owned on the overlap made the next reconcile revoke a directory
+		// the operator granted separately and never withdrew.
+		const overlap = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: [HEADER],
+			previouslyOwned: new Set(),
+			configured: [HEADER, B],
+		});
+		expect(overlap.roots).toEqual([HEADER, B]);
+		// The overlapping path is NOT claimed; the genuinely new root is.
+		expect([...overlap.owned]).toEqual([B]);
+
+		const removal = reconcileSettingsWorkspaceRoots({
+			cwd,
+			live: overlap.roots,
+			previouslyOwned: overlap.owned,
+			configured: [],
+		});
+		// B was granted by the setting and is gone; HEADER's own grant survives.
+		expect(removal.roots).toEqual([HEADER]);
+		expect([...removal.owned]).toEqual([]);
+	});
+
 	it("normalizes the incoming value so a relative entry compares equal", () => {
 		// The live list is normalized by SessionManager, so an unnormalized
 		// settings entry would otherwise look like a different root and both
