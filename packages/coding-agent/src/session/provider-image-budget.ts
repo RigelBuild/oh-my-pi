@@ -187,6 +187,11 @@ function replayedImageResult(item: Record<string, unknown>): string | undefined 
  */
 function replayedInputImages(message: Message, model: Model, replaysNativeHistory: boolean): number[] {
 	if (message.role !== "user" && message.role !== "developer") return [];
+	// Only a Responses-family route consumes native history at all. Switching to a
+	// same-provider `openai-completions` model leaves the payload attached and
+	// unread, so charging it would let a stale payload evict a live image for
+	// bytes the completions converter never sends.
+	if (!replaysOpenAIResponsesNativeHistory(model)) return [];
 	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
 	if (!payload) return [];
 	// A cold session still replays a payload that carries a `compaction` or
@@ -206,6 +211,11 @@ function replayedInputImages(message: Message, model: Model, replaysNativeHistor
 		}
 	}
 	return sizes;
+}
+
+/** The API routes whose converters replay an `openaiResponsesHistory` payload. */
+function replaysOpenAIResponsesNativeHistory(model: Model): boolean {
+	return model.api === "openai-responses" || model.api === "openai-codex-responses";
 }
 
 /** Whether these items replay regardless of the session's warmed replay state. */
@@ -409,28 +419,49 @@ function clampReplayedInputImages(
 	state: ImageClampState,
 ): { providerPayload: ProviderPayload } | undefined {
 	if (!clampWanted(state)) return undefined;
+	if (!replaysOpenAIResponsesNativeHistory(state.model)) return undefined;
 	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, state.model.provider);
 	if (!payload) return undefined;
 	// Same eligibility as the accounting, marker exception included.
 	if (!state.replaysNativeHistory && !hasCompactionMarker(payload.items)) return undefined;
 	let items: Array<Record<string, unknown>> | undefined;
+	// Call ids of the computer outputs evicted below. Their paired `computer_call`
+	// goes with them: `computer_call_output.output` accepts only a real
+	// `computer_screenshot` ref, so there is nothing to degrade it to in place —
+	// and a call left behind without its output is an orphan the provider rejects.
+	const droppedComputerCallIds = new Set<string>();
 	for (let index = 0; index < payload.items.length; index++) {
 		if (!clampWanted(state)) break;
 		const item = payload.items[index];
+		if (item?.type === "computer_call_output") {
+			const [screenshot] = nativeInputImageParts(item);
+			if (!screenshot || !dropsNativeInputImage(screenshot, state)) continue;
+			payNativeInputImageDrop(screenshot, state);
+			if (typeof item.call_id === "string") droppedComputerCallIds.add(item.call_id);
+			items ??= [...payload.items];
+			continue;
+		}
 		const rewritten = dropNativeInputImages(item, state);
 		if (!rewritten) continue;
 		items ??= [...payload.items];
 		items[index] = rewritten;
 	}
-	return items ? { providerPayload: { ...payload, items } } : undefined;
+	if (!items) return undefined;
+	const surviving =
+		droppedComputerCallIds.size > 0
+			? items.filter(item => !isDroppedComputerItem(item, droppedComputerCallIds))
+			: items;
+	return { providerPayload: { ...payload, items: surviving } };
 }
 
-/**
- * Stands in for an evicted replayed screenshot. `computer_call_output.output`
- * accepts only a `computer_screenshot` ref, so a cleared one keeps that shape
- * with a file id the provider will not resolve rather than inline bytes.
- */
-const OMITTED_SCREENSHOT_FILE_ID = "omitted-for-image-budget";
+/** Whether this item is an evicted computer output, or the call it was paired with. */
+function isDroppedComputerItem(
+	item: Record<string, unknown> | undefined,
+	droppedCallIds: ReadonlySet<string>,
+): boolean {
+	if (item?.type !== "computer_call_output" && item?.type !== "computer_call") return false;
+	return typeof item.call_id === "string" && droppedCallIds.has(item.call_id);
+}
 
 /** `undefined` when the item carries no inline image worth dropping. */
 function dropNativeInputImages(
@@ -443,16 +474,6 @@ function dropNativeInputImages(
 		if (!dropsNativeInputImage(item, state)) return undefined;
 		payNativeInputImageDrop(item, state);
 		return omitted;
-	}
-	if (item.type === "computer_call_output") {
-		// Its `output` must stay a `computer_screenshot` ref — the schema accepts
-		// nothing else there, and degrading the ITEM would orphan the paired
-		// `computer_call`. Swap the inline data uri for a file-backed ref shape so
-		// the item survives carrying no bytes.
-		const [screenshot] = nativeInputImageParts(item);
-		if (!screenshot || !dropsNativeInputImage(screenshot, state)) return undefined;
-		payNativeInputImageDrop(screenshot, state);
-		return { ...item, output: { type: "computer_screenshot", file_id: OMITTED_SCREENSHOT_FILE_ID } };
 	}
 	if (!Array.isArray(item.content)) return undefined;
 	let content: unknown[] | undefined;

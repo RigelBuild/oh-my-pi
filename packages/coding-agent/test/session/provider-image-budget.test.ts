@@ -1076,11 +1076,13 @@ describe("provider context image budgets", () => {
 						type: "openaiResponsesHistory",
 						provider: OPENAI_MODEL.provider,
 						items: [
+							{ type: "computer_call", call_id: "c1" },
 							{
 								type: "computer_call_output",
 								call_id: "c1",
 								output: { type: "computer_screenshot", image_url: dataUri(big) },
 							},
+							{ type: "computer_call", call_id: "c2" },
 							{
 								type: "computer_call_output",
 								call_id: "c2",
@@ -1095,13 +1097,45 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
 
 		const items = replayedItems(clamped.messages[0]);
-		// Both items survive — degrading one would orphan its paired call — but the
-		// oldest no longer carries inline bytes.
-		expect(items.length).toBe(2);
-		const outputs = items.map(item => (isRecord(item.output) ? item.output : undefined));
-		expect(outputs[0]?.image_url).toBeUndefined();
-		expect(outputs[0]?.type).toBe("computer_screenshot");
-		expect(outputs[1]?.image_url).toBeDefined();
+		// The oldest pair is REMOVED, call and output together: there is no valid
+		// empty `computer_screenshot` to degrade the output to, and a call left
+		// without its output is an orphan the provider rejects. Never a fabricated
+		// file ref, which the next request would ask the provider to resolve.
+		const callIds = items.map(item => `${String(item.type)}:${String(item.call_id)}`);
+		expect(callIds).toEqual(["computer_call:c2", "computer_call_output:c2"]);
+		expect(JSON.stringify(items)).not.toContain("omitted");
+	});
+
+	it("ignores a native payload a completions model will never replay", async () => {
+		// Switching to a same-provider `openai-completions` model leaves the payload
+		// attached and unread. Charging it would evict a live image for bytes the
+		// completions converter never sends.
+		const completionsModel = { ...OPENAI_MODEL, api: "openai-completions" } as Model;
+		const stale = "s".repeat(15 * 1000 * 1000);
+		const liveImage = "L".repeat(3 * 1000 * 1000);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "restored turn" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(stale) }] },
+						],
+					},
+				},
+				{ role: "user", timestamp: 2, content: [image(liveImage)] },
+				{ role: "user", timestamp: 3, content: [image(liveImage)] },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, completionsModel);
+
+		// Both live images survive; the stale payload never entered the budget.
+		expect(imageData(clamped).length).toBe(2);
 	});
 
 	it("treats a managed session with no provider state yet as unwarmed", async () => {
