@@ -1243,6 +1243,41 @@ describe("provider context image budgets", () => {
 		expect(survivingInlineBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
 	});
 
+	it("does not charge a replayed orphan computer output the converter repairs", async () => {
+		// `repairOrphanResponsesToolOutputs()` rewrites an output with no preceding
+		// `computer_call` into a 16 KB-capped assistant note, so its screenshot
+		// never travels — charging it evicted a live image for bytes already gone.
+		const orphan = "o".repeat(10 * 1000 * 1000);
+		const live = "v".repeat(10 * 1000 * 1000);
+		const context: Context = {
+			messages: [
+				{ role: "user", timestamp: 1, content: [image(live)] },
+				{
+					role: "user",
+					timestamp: 2,
+					content: [{ type: "text", text: "compaction summary" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "compaction", id: "c" },
+							{
+								type: "computer_call_output",
+								call_id: "gone",
+								output: { type: "computer_screenshot", image_url: dataUri(orphan) },
+							},
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
+
+		// The live image survives: the orphan's 10 MB never reach the wire.
+		expect(imageData(clamped).some(data => data.startsWith("v"))).toBe(true);
+	});
+
 	it("treats a managed session with no provider state yet as unwarmed", async () => {
 		// The provider-context transform runs BEFORE `streamOpenAIResponses` creates
 		// the session state, so on the first request the map exists and is EMPTY.
