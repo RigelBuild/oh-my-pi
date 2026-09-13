@@ -7,7 +7,6 @@ import type {
 	Model,
 	ProviderSessionState,
 	TextContent,
-	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -194,22 +193,6 @@ function replayedItems(message: Message | undefined): Array<Record<string, unkno
 	const payload = message && "providerPayload" in message ? message.providerPayload : undefined;
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return [];
 	return payload.items;
-}
-
-function computerResultMessage(toolCallId: string, data: string): ToolResultMessage {
-	return {
-		role: "toolResult",
-		timestamp: 1,
-		toolCallId,
-		toolName: "computer",
-		content: [text("screenshot")],
-		isError: false,
-		providerMetadata: {
-			type: "computer",
-			acknowledgedSafetyChecks: [],
-			screenshot: { type: "computer_screenshot", image_url: dataUri(data) },
-		},
-	};
 }
 
 describe("provider context image budgets", () => {
@@ -753,25 +736,6 @@ describe("provider context image budgets", () => {
 		expect(remaining.length).toBe(1);
 		// The item keeps its shape and position rather than being removed.
 		expect(items.length).toBe(2);
-	});
-
-	it("clears the screenshot metadata a computer result actually sends", async () => {
-		// `computer_call_output.output` carries `providerMetadata.screenshot`, not
-		// the mirrored content image, so dropping only the content block gives back
-		// no wire bytes at all.
-		const big = "z".repeat(9 * 1024 * 1024);
-		const context: Context = {
-			messages: [computerResultMessage("call-1", big), computerResultMessage("call-2", big)],
-		};
-
-		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
-
-		const first = clamped.messages[0];
-		expect(first?.role).toBe("toolResult");
-		// The oldest screenshot is cleared; the newer one still travels.
-		expect(first && "providerMetadata" in first ? first.providerMetadata : undefined).toBeUndefined();
-		const second = clamped.messages[1];
-		expect(second && "providerMetadata" in second ? second.providerMetadata : undefined).toBeDefined();
 	});
 
 	it("treats a managed session with no provider state yet as unwarmed", async () => {

@@ -70,10 +70,6 @@ function collectImageStats(
 				inlineSizes.push(...replayedImageResultSizes(message, byteModel, replaysNativeHistory));
 			continue;
 		}
-		if (message.role === "toolResult" && byteModel !== undefined) {
-			const screenshot = inlineComputerScreenshot(message.providerMetadata);
-			if (screenshot !== undefined) inlineSizes.push(screenshot.length);
-		}
 		if (byteModel !== undefined) {
 			const replayed = replayedInputImageSizes(message, byteModel, replaysNativeHistory);
 			if (replayed.length > 0) inlineSizes.push(...replayed);
@@ -184,22 +180,6 @@ function nativeInputImageParts(item: Record<string, unknown> | undefined): Array
 	return item.content.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "input_image");
 }
 
-/**
- * The inline base64 of a computer result's replayed screenshot, or `undefined`
- * when it carries none.
- *
- * `openai-shared.ts` `appendResponsesToolResultMessages()` sends
- * `providerMetadata.screenshot` as the `computer_call_output.output`, so the
- * metadata copy is what travels — the mirrored generic content image is dropped
- * on the floor. Clamping only the content block therefore removed no wire bytes
- * at all, and a result with no mirrored copy went uncounted entirely.
- */
-function inlineComputerScreenshot(metadata: ToolResultProviderMetadata | undefined): string | undefined {
-	if (metadata?.type !== "computer") return undefined;
-	const image = inlineImageFromDataUri(metadata.screenshot.image_url);
-	return image && image.data.length > 0 ? image.data : undefined;
-}
-
 /** Count of oldest images to drop so the surviving image payload fits `byteLimit`. */
 function imageDropCountForBytes(sizes: readonly number[], byteLimit: number): number {
 	let total = 0;
@@ -279,14 +259,9 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageClampState
 
 function clampToolResultMessage(message: ToolResultMessage, state: ImageClampState): ToolResultMessage {
 	if (!clampWanted(state)) return message;
-	const screenshotDropped = clampComputerScreenshot(message, state);
 	const content = clampContent(message.content, state);
-	if (!content) return screenshotDropped ? { ...message, providerMetadata: undefined } : message;
-	return {
-		...message,
-		content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE],
-		...(screenshotDropped ? { providerMetadata: undefined } : {}),
-	};
+	if (!content) return message;
+	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] };
 }
 
 /**
@@ -344,20 +319,6 @@ function dropNativeInputImages(
 function inlineNativeImageSize(part: Record<string, unknown>): boolean {
 	const image = inlineImageFromDataUri(part.image_url);
 	return image !== undefined && image.data.length > 0;
-}
-
-/**
- * Clears a computer result's replayed screenshot while byte pressure remains.
- * That metadata copy is what `computer_call_output.output` sends, so it is the
- * only way this result gives back wire bytes. `computer_call_output` accepts
- * only a `computer_screenshot` ref with no text alternative, so the metadata is
- * cleared outright rather than degraded in place.
- */
-function clampComputerScreenshot(message: ToolResultMessage, state: ImageClampState): boolean {
-	if (state.remainingInlineDrops <= 0) return false;
-	if (inlineComputerScreenshot(message.providerMetadata) === undefined) return false;
-	state.remainingInlineDrops--;
-	return true;
 }
 
 /**
