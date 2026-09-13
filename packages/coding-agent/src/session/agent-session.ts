@@ -6011,7 +6011,11 @@ export class AgentSession {
 	 * (`#historyRewriteCount`): `shake`/`dropImages` mutate the branch in place
 	 * and persist it only through an awaited `rewriteEntries()`, which a sealed
 	 * manager turns into a no-op while the caller still reads a successful
-	 * reduction and the replacement reopens the unchanged transcript.
+	 * reduction and the replacement reopens the unchanged transcript. Counts
+	 * in-flight title generation (`#titleGenerationInFlightFor`,
+	 * `#replanTitleRefreshInFlight`) for the same reason: it runs agent-idle and
+	 * persists through an awaited `setSessionName()`, which disposal's abort
+	 * destroys.
 	 */
 	#hasUnpersistedInput(): boolean {
 		return (
@@ -6065,7 +6069,15 @@ export class AgentSession {
 			// by an awaited rewriteEntries(); recycling first seals the manager, so
 			// that call writes nothing while the caller still reads a successful
 			// reduction and the replacement reopens the unchanged transcript.
-			this.#historyRewriteCount > 0
+			this.#historyRewriteCount > 0 ||
+			// In-flight title generation is the same loss again: it runs with the
+			// foreground agent IDLE (a slow title backend during the first turn), so
+			// no counter above observes it, and it persists by an awaited
+			// `setSessionName()` through this manager. Disposal aborts the title
+			// controller, so the replacement reopens the same conversation without
+			// the title that was already being generated.
+			this.#titleGenerationInFlightFor !== undefined ||
+			this.#replanTitleRefreshInFlight !== undefined
 		);
 	}
 

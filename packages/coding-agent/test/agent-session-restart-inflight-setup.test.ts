@@ -159,6 +159,30 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		await turn;
 	});
 
+	// Title generation is the same loss off the foreground: it runs with the
+	// agent IDLE (a slow title backend during the first turn) and persists by an
+	// awaited setSessionName() through this SessionManager, which restart
+	// disposal seals — and disposal aborts the title controller outright. So the
+	// replacement reopens the same conversation without the title that was
+	// already being generated. Restart must refuse rather than lose it.
+	it("refuses restart while title generation is still in flight", async () => {
+		await buildLiveSession();
+
+		// Park the generator so the session is title-busy with the agent idle,
+		// which is the state the barrier previously ignored.
+		const titleGate = Promise.withResolvers<string>();
+		vi.spyOn(session, "generateTitle").mockImplementation(() => titleGate.promise);
+
+		session.maybeStartTitleGeneration("a first message worth titling");
+		await drainEventLoop();
+		expect(session.isStreaming).toBe(false);
+
+		await expect(session.requestRestart()).resolves.toEqual({ ok: false, reason: "busy" });
+
+		titleGate.resolve("");
+		await drainEventLoop();
+	});
+
 	// One step earlier than the buffered-result cases below: a command that is
 	// STILL RUNNING has produced no result to buffer yet, and the agent can be
 	// idle while it runs. Disposal neither waits for nor aborts it, so the
