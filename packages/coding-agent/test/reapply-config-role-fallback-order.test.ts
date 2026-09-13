@@ -222,6 +222,21 @@ describe("--reapply-config configured default fallback order", () => {
 		expect(resumed.model?.id).toBe(realCandidate.id);
 	});
 
+	it("stops at a bare self alias ahead of a later suffixed one", async () => {
+		// `missing/model,*,*:low`: the concrete candidate does not resolve, so the
+		// BARE `*` is the fallback reached — and it names no thinking knob, so the
+		// session keeps its own level. Scanning for the first pattern that carries
+		// a suffix skipped it and applied `low` from a fallback never reached.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay("missing/model,*,*:low");
+
+		const resumed = await resume(sessionFile, settings, true);
+
+		expect(resumed.configuredThinkingLevel()).not.toBe(ThinkingLevel.Low);
+	});
+
 	it("applies the suffix of a self alias reached past an unresolvable candidate", async () => {
 		// `missing/model,*:low`: the concrete candidate is CONFIGURED but resolves
 		// to nothing, so `*:low` is the fallback actually reached and its `low` is
