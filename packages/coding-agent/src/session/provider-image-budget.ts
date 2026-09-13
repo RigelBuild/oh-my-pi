@@ -85,9 +85,11 @@ function collectImageStats(
 		// it consumes the provider's per-request image COUNT as well as bytes —
 		// unlike a replayed `image_generation_call` result, which is an assistant
 		// output item rather than an input part.
-		const replayed = replayedInputImageSizes(message, byteModel ?? countModel, replaysNativeHistory);
+		const replayed = replayedInputImages(message, byteModel ?? countModel, replaysNativeHistory);
 		total += replayed.length;
-		if (byteModel !== undefined && replayed.length > 0) inlineSizes.push(...replayed);
+		if (byteModel !== undefined) {
+			for (const size of replayed) if (size > 0) inlineSizes.push(size);
+		}
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type !== "image") continue;
@@ -169,10 +171,10 @@ function replayedImageResult(item: Record<string, unknown>): string | undefined 
  * `message.content` alone therefore read zero while megabytes travelled, and a
  * resumed session kept failing with 413 because no drop was ever owed.
  *
- * Bytes only, like a replayed generation result: these ride inside a replayed
- * item rather than as image parts the provider counts.
+ * Returns one size per image part — 0 for a reference-backed one, which counts
+ * against the per-request image cap while carrying no inline bytes.
  */
-function replayedInputImageSizes(message: Message, model: Model, replaysNativeHistory: boolean): number[] {
+function replayedInputImages(message: Message, model: Model, replaysNativeHistory: boolean): number[] {
 	if (message.role !== "user" && message.role !== "developer") return [];
 	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
 	if (!payload) return [];
@@ -182,11 +184,14 @@ function replayedInputImageSizes(message: Message, model: Model, replaysNativeHi
 	// is exactly the oversized remote-compaction replacement this accounts for,
 	// so skipping it on a cold resume let the very first request bust the cap.
 	if (!replaysNativeHistory && !hasCompactionMarker(payload.items)) return [];
+	// One entry per image PART, whatever it carries. An HTTPS- or file-backed
+	// `input_image` is still sent as an image input and still consumes the count
+	// cap, so recording only the inline ones left a payload of references
+	// uncounted and un-evictable; its size is 0 and the byte tally skips it.
 	const sizes: number[] = [];
 	for (const item of payload.items) {
 		for (const part of nativeInputImageParts(item)) {
-			const image = inlineImageFromDataUri(part.image_url);
-			if (image && image.data.length > 0) sizes.push(image.data.length);
+			sizes.push(inlineImageFromDataUri(part.image_url)?.data.length ?? 0);
 		}
 	}
 	return sizes;
@@ -318,7 +323,8 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 	// image, so the mirrored content block must not also pay down a budget — it
 	// was never charged one.
 	if (sendsComputerScreenshot(message, state.model)) {
-		if (!clampComputerScreenshot(message, state)) return message;
+		if (!clampComputerScreenshot(state)) return message;
+
 		const clampedContent = clampContent(message.content, { ...state, remainingInlineDrops: 0 });
 		return {
 			...message,
@@ -367,8 +373,8 @@ function dropNativeInputImages(
 	if (!item) return undefined;
 	const omitted = { type: "input_text", text: IMAGE_OMISSION_NOTICE.text };
 	if (item.type === "input_image") {
-		if (!inlineNativeImageSize(item)) return undefined;
-		payNativeInputImageDrop(state);
+		if (!dropsNativeInputImage(item, state)) return undefined;
+		payNativeInputImageDrop(item, state);
 		return omitted;
 	}
 	if (!Array.isArray(item.content)) return undefined;
@@ -376,22 +382,31 @@ function dropNativeInputImages(
 	for (let index = 0; index < item.content.length; index++) {
 		if (!clampWanted(state)) break;
 		const part = item.content[index];
-		if (!isRecord(part) || part.type !== "input_image" || !inlineNativeImageSize(part)) continue;
-		payNativeInputImageDrop(state);
+		if (!isRecord(part) || part.type !== "input_image" || !dropsNativeInputImage(part, state)) continue;
+		payNativeInputImageDrop(part, state);
 		content ??= [...item.content];
 		content[index] = omitted;
 	}
 	return content ? { ...item, content } : undefined;
 }
 
-/** A replayed input image is an image part AND inline bytes, so it pays both. */
-function payNativeInputImageDrop(state: ImageClampState): void {
-	if (state.remainingInlineDrops > 0) state.remainingInlineDrops--;
+/**
+ * An inline replayed image pays down BOTH allowances; a reference-backed one is
+ * an image part carrying no bytes, so it pays only the count — the same split
+ * `clampContent` applies to ordinary image parts.
+ */
+function payNativeInputImageDrop(part: Record<string, unknown>, state: ImageClampState): void {
+	if (isInlineNativeImage(part) && state.remainingInlineDrops > 0) state.remainingInlineDrops--;
 	if (state.remainingDrops > 0) state.remainingDrops--;
 }
 
+/** Whether dropping this part serves an allowance that still wants a drop. */
+function dropsNativeInputImage(part: Record<string, unknown>, state: ImageClampState): boolean {
+	return isInlineNativeImage(part) ? clampWanted(state) : state.remainingDrops > 0;
+}
+
 /** Whether this native part carries inline bytes at all. */
-function inlineNativeImageSize(part: Record<string, unknown>): boolean {
+function isInlineNativeImage(part: Record<string, unknown>): boolean {
 	const image = inlineImageFromDataUri(part.image_url);
 	return image !== undefined && image.data.length > 0;
 }
@@ -403,9 +418,13 @@ function inlineNativeImageSize(part: Record<string, unknown>): boolean {
  * only a `computer_screenshot` ref with no text alternative, so the metadata is
  * cleared outright rather than degraded in place.
  */
-function clampComputerScreenshot(message: ToolResultMessage, state: ImageClampState): boolean {
-	if (state.remainingInlineDrops <= 0) return false;
-	state.remainingInlineDrops--;
+function clampComputerScreenshot(state: ImageClampState): boolean {
+	// EITHER constraint, not just bytes: a screenshot is an image part under the
+	// count cap too, so more than the cap of small ones leaves `remainingDrops`
+	// positive with no bytes owed — and gating on bytes alone returned every
+	// result unchanged while the request stayed over the count.
+	if (!clampWanted(state)) return false;
+	if (state.remainingInlineDrops > 0) state.remainingInlineDrops--;
 	if (state.remainingDrops > 0) state.remainingDrops--;
 	return true;
 }
@@ -493,18 +512,20 @@ export const PROVIDER_IMAGE_COUNT_DECODE_SLACK = 1;
  *  Bytes are deliberately NOT considered here — normalization
  *  rewrites inline sizes, so only {@link clampProviderContextImages}, running
  *  after it, sees final byte counts. */
-export function clampProviderContextImageCount(context: Context, model: Model): Context {
+export function clampProviderContextImageCount(context: Context, model: Model, replaysNativeHistory = true): Context {
 	if (!model.input.includes("image")) return context;
 	const admissible = providerImageBudget(model.provider) * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK);
-	// A replayed generation result is not an image part, so the byte flag cannot
-	// change this tally — but a replayed `input_image` IS one, and is counted.
-	const countDrops = collectImageStats(context, undefined, true, model).total - admissible;
+	// A replayed generation result is not an image part, so it never reaches this
+	// tally — but a replayed `input_image` IS one, so this pass needs the same
+	// replay decision the byte pass gets. Hard-coding it let a payload the request
+	// would not send justify dropping generic images it WOULD.
+	const countDrops = collectImageStats(context, undefined, replaysNativeHistory, model).total - admissible;
 	if (countDrops <= 0) return context;
 	return applyImageClamp(context, {
 		remainingDrops: countDrops,
 		remainingInlineDrops: 0,
 		model,
-		replaysNativeHistory: true,
+		replaysNativeHistory,
 	});
 }
 
@@ -821,7 +842,7 @@ export async function applyProviderImagePipeline(
 	replaysNativeHistory = true,
 	decorate?: (context: Context, model: Model) => Promise<Context>,
 ): Promise<Context> {
-	let transformed = clampProviderContextImageCount(context, model);
+	let transformed = clampProviderContextImageCount(context, model, replaysNativeHistory);
 	transformed = await normalizeForModel(transformed, model);
 	transformed = await dropUnreadableContextImages(transformed, model);
 	transformed = await applyProviderSizePass(transformed, model);
