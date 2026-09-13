@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildModelFallbackNotification } from "../src/main";
+import { buildModelFallbackNotification, renderStartupModelNotice } from "../src/main";
 
 describe("buildModelFallbackNotification", () => {
 	it("renders a --reapply-config adoption as informational, not a warning", () => {
@@ -44,5 +44,54 @@ describe("buildModelFallbackNotification", () => {
 			"Could not restore the session's openai/gpt-5 (--reapply-config: resumed on anthropic/claude-opus-4-1 from config instead of the session's x/y)",
 		);
 		expect(notify.kind).toBe("warn");
+	});
+});
+
+describe("renderStartupModelNotice", () => {
+	const ADOPTION =
+		"--reapply-config: resumed on anthropic/claude-sonnet-4-5 from config instead of the session's openai/gpt-5";
+
+	it("reports an adopted config model under -p", () => {
+		// `notifs` is drained only by `runInteractiveMode`, and the noninteractive
+		// print block is gated on having NO model — so a `--reapply-config` run
+		// that successfully adopted a different model told the user nothing.
+		const notice = renderStartupModelNotice({
+			isInteractive: false,
+			hasModel: true,
+			modelFallbackMessage: ADOPTION,
+		});
+
+		expect(notice).toBeDefined();
+		expect(notice).toContain("resumed on anthropic/claude-sonnet-4-5");
+		expect(notice?.endsWith("\n")).toBe(true);
+	});
+
+	it("reports a broken config default that still restored the session model", () => {
+		const notice = renderStartupModelNotice({
+			isInteractive: false,
+			hasModel: true,
+			modelFallbackMessage:
+				'--reapply-config: config default "anthropic/nope" did not resolve; kept the session\'s anthropic/claude-sonnet-4-5',
+		});
+
+		expect(notice).toContain("did not resolve");
+	});
+
+	it("stays silent in interactive mode, where the notice queue carries it", () => {
+		expect(
+			renderStartupModelNotice({ isInteractive: true, hasModel: true, modelFallbackMessage: ADOPTION }),
+		).toBeUndefined();
+	});
+
+	it("stays silent with no model, where the caller prints the longer diagnostic", () => {
+		expect(
+			renderStartupModelNotice({ isInteractive: false, hasModel: false, modelFallbackMessage: ADOPTION }),
+		).toBeUndefined();
+	});
+
+	it("stays silent when nothing moved", () => {
+		expect(
+			renderStartupModelNotice({ isInteractive: false, hasModel: true, modelFallbackMessage: undefined }),
+		).toBeUndefined();
 	});
 });
