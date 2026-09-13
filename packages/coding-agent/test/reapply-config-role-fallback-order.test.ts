@@ -13,6 +13,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -219,6 +220,37 @@ describe("--reapply-config configured default fallback order", () => {
 
 		expect(resumed.model?.provider).toBe(realCandidate.provider);
 		expect(resumed.model?.id).toBe(realCandidate.id);
+	});
+
+	it("applies the suffix of a self alias reached past an unresolvable candidate", async () => {
+		// `missing/model,*:low`: the concrete candidate is CONFIGURED but resolves
+		// to nothing, so `*:low` is the fallback actually reached and its `low` is
+		// the live knob. Gating on "was a concrete pattern configured" suppressed
+		// it, leaving a fresh session on the arbitrary fallback model's default.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay("missing/model,*:low");
+
+		const resumed = await resume(sessionFile, settings, true);
+
+		expect(resumed.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+	});
+
+	it("ignores a thinking suffix on a fallback that did not win", async () => {
+		// `"anthropic/...,*:low"`: the concrete entry resolves, so the `low` belongs
+		// to a fallback that was never selected. Scanning every pattern for a
+		// suffix ran the CHOSEN model at the loser's level.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const winner = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay(`${modelValue(winner)},*:low`);
+
+		const resumed = await resume(sessionFile, settings, true);
+
+		expect(resumed.model?.id).toBe(winner.id);
+		expect(resumed.configuredThinkingLevel()).not.toBe(ThinkingLevel.Low);
 	});
 
 	it("keeps the baked session model on a bare resume even when a later candidate matched first", async () => {

@@ -80,6 +80,7 @@ import {
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	type ResolvedModelRoleValue,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
@@ -1613,9 +1614,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// (`["*:xhigh", "@default"]`) still names the thinking knob, and the
 	// flattened string parses as neither.
 	//
-	const selfAliasThinkingLevel = defaultRolePatterns
-		.map(pattern => parseDefaultModelRoleSelfAlias(pattern)?.level)
-		.find(level => level !== undefined);
+	// Only when no concrete candidate RESOLVED, though. A self alias names no
+	// model, so in `["anthropic/claude-sonnet-4-5", "*:low"]` the concrete entry
+	// wins and the `low` belongs to a fallback that was never selected — reading
+	// it anyway ran the chosen model at the loser's level.
+	//
+	// Keyed on what the resolver reached, not on what config listed: with
+	// `missing/model,*:low` the concrete candidate is configured but resolves to
+	// nothing, so `*:low` IS the reached fallback and its suffix is the live
+	// knob. Testing "was a concrete pattern configured" suppressed it there.
+	// Read lazily — `defaultRoleSpec` is re-resolved once late-registering
+	// extension providers appear, which can turn an unresolved candidate into a
+	// resolved one.
+	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined =>
+		spec.model
+			? undefined
+			: defaultRolePatterns
+					.map(pattern => parseDefaultModelRoleSelfAlias(pattern)?.level)
+					.find(level => level !== undefined);
 	const adoptConfigModel = Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigDefaultRole;
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
@@ -1743,6 +1759,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			defaultRoleSpec.explicitThinkingLevel && defaultRoleSpec.thinkingLevel !== ThinkingLevel.Inherit
 				? defaultRoleSpec.thinkingLevel
 				: undefined;
+		const selfAliasThinkingLevel = selfAliasThinkingLevelFor(defaultRoleSpec);
 		const hasConfigThinkingLevel =
 			configRoleThinkingLevel !== undefined ||
 			selfAliasThinkingLevel !== undefined ||
