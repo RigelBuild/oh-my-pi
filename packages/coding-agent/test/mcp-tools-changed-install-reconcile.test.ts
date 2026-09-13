@@ -37,6 +37,15 @@ import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { warmupToolName } from "./fixtures/warmup-empty-tools-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "warmup-empty-tools-mcp.ts");
+
+/** Poll a predicate that has no event to gate on (transport-internal state). */
+async function waitUntil(predicate: () => boolean, timeoutMs = 10_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() > deadline) throw new Error("waitUntil timed out");
+		await Bun.sleep(5);
+	}
+}
 const SERVER_NAME = "warmup";
 const HEALED_TOOL_NAME = `mcp__${SERVER_NAME}_${warmupToolName(0)}`;
 const HEALED_ROUTE = `xd://${HEALED_TOOL_NAME}`;
@@ -294,6 +303,67 @@ describe("MCP tools-changed install-time reconcile", () => {
 		} finally {
 			// A stdio fixture shutting down mid-teardown surfaces a retryable
 			// transport close; it says nothing about the contract under test.
+			try {
+				await manager.disconnectAll();
+			} catch {
+				// ignored: teardown noise, not a contract failure
+			}
+		}
+	}, 30_000);
+
+	// A `/mcp refresh` issued after the connection is in `#connections` but while
+	// its initial `tools/list` is still in `#pendingToolLoads` does NOT coalesce:
+	// the refresh single-flight keys on `#pendingToolRefresh` only, so two lists
+	// run concurrently. If the refresh answers FIRST, the delayed initial
+	// response replaced the live registry with its older catalog — and being
+	// non-empty it schedules no empty-toolset recovery, so the session stayed on
+	// the obsolete roster for good.
+	//
+	// The interleaving is scripted by the fixture, not hoped for: the FIRST
+	// listing (the initial load, advertising one tool) is delayed well past the
+	// second (the refresh, advertising two), so the older response provably lands
+	// after the newer one was applied.
+	//
+	// RED (pre-fix): the late initial response overwrote the refresh's roster, so
+	// the second tool disappeared.
+	it("refuses an initial tool load that answers after an overlapping refresh applied", async () => {
+		const manager = new MCPManager(tempDir);
+		const secondToolName = `mcp__${SERVER_NAME}_${warmupToolName(1)}`;
+		try {
+			// List 1 -> 1 tool, delayed 750ms. List 2 -> 2 tools, immediate.
+			const connected = manager.connectServers(
+				{
+					[SERVER_NAME]: {
+						type: "stdio",
+						command: process.execPath,
+						args: [FIXTURE_PATH],
+						env: {
+							OMP_TEST_TOOLS_PER_LIST: "1,2",
+							OMP_TEST_LIST_DELAY_MS: "750,0",
+							OMP_TEST_LIST_LOG: listLog,
+						},
+					},
+				},
+				{},
+			);
+
+			// The refresh is issued while the initial load is still pending — the
+			// window the single-flight does not cover. `"connected"` is exactly that
+			// state: the connection is in `#connections` (so `refreshServerTools`
+			// will actually list rather than return early) while its initial
+			// `tools/list` is still in `#pendingToolLoads`.
+			await waitUntil(() => manager.getConnectionStatus(SERVER_NAME) === "connected");
+			const refresh = manager.refreshServerTools(SERVER_NAME).catch(() => {});
+
+			await Promise.allSettled([connected, refresh]);
+			// Give the delayed first response time to land and be refused.
+			// The delayed first response lands after both calls above settled; give
+			// it room to arrive and be refused.
+			await Bun.sleep(1500);
+
+			// The refresh's newer, larger catalog stands.
+			expect(manager.getTools().map(tool => tool.name)).toContain(secondToolName);
+		} finally {
 			try {
 				await manager.disconnectAll();
 			} catch {

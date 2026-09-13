@@ -276,6 +276,18 @@ export class MCPManager {
 	#toolsRegistered = false;
 	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
+	/**
+	 * Per-server request ordering for `tools/list` applies. Every listing path
+	 * takes a ticket BEFORE issuing its request; a response may only write the
+	 * registry if no LATER request has already written it. Without this, a
+	 * `/mcp refresh` issued while the connection's initial load is still in
+	 * `#pendingToolLoads` runs concurrently (the refresh single-flight keys on
+	 * `#pendingToolRefresh` only), and if the refresh answers first the delayed
+	 * initial response overwrites the live registry with its older catalog —
+	 * permanently, since a non-empty stale result schedules no recovery.
+	 */
+	#toolApplyTicket = new Map<string, number>();
+	#toolApplyApplied = new Map<string, number>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
@@ -913,9 +925,14 @@ export class MCPManager {
 				// sessions by response latency, so a delayed answer to THIS request
 				// could overwrite a newer catalog another session already persisted.
 				const observedAt = this.#claimCatalogOrder(name);
+				// Ordering ticket taken with the catalog token, before the request:
+				// a `/mcp refresh` issued while this load is still pending runs
+				// concurrently, and whichever response lands second must not be able
+				// to overwrite a newer one already applied.
+				const applyTicket = this.#nextToolApplyTicket(name);
 				try {
 					const serverTools = await listTools(connection);
-					return { connection, serverTools, observedAt };
+					return { connection, serverTools, observedAt, applyTicket };
 				} catch (error) {
 					// Detach and delete synchronously, then close in the background:
 					// awaiting a slow HTTP close (session DELETE) here would keep
@@ -933,9 +950,19 @@ export class MCPManager {
 			connectionTasks.push({ name, config, tracked, toolsPromise });
 
 			void toolsPromise
-				.then(async ({ connection, serverTools, observedAt }) => {
+				.then(async ({ connection, serverTools, observedAt, applyTicket }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
+					// A later request already wrote the registry (a `/mcp refresh`
+					// that overlapped this load and answered first). Applying now
+					// would replace the newer catalog with this older one and, being
+					// non-empty, would schedule no recovery — the session would stay
+					// on the obsolete roster.
+					if (!this.#claimToolApply(name, applyTicket)) {
+						notify({ type: "connected", serverName: name });
+						await this.#loadServerResourcesAndPrompts(name, connection);
+						return;
+					}
 					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
 						this.reconnectServer(name, options);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
@@ -1059,6 +1086,25 @@ export class MCPManager {
 	 * can prefix another's (`atlassian` vs `atlassian:atlassian`) and a name
 	 * with sanitized characters never prefix-matches its own tools at all.
 	 */
+	/** Take the next apply ticket for `name`; call before issuing `tools/list`. */
+	#nextToolApplyTicket(name: string): number {
+		const ticket = (this.#toolApplyTicket.get(name) ?? 0) + 1;
+		this.#toolApplyTicket.set(name, ticket);
+		return ticket;
+	}
+
+	/**
+	 * Record that `ticket`'s response is being applied, or refuse it because a
+	 * later request already wrote the registry. Ties lose: an equal ticket means
+	 * the same request already applied.
+	 */
+	#claimToolApply(name: string, ticket: number): boolean {
+		const applied = this.#toolApplyApplied.get(name) ?? 0;
+		if (ticket <= applied) return false;
+		this.#toolApplyApplied.set(name, ticket);
+		return true;
+	}
+
 	#replaceServerTools(name: string, tools: CustomTool<TSchema, MCPToolDetails>[]): void {
 		// Every registration path (connect, reconnect, refresh) funnels here, so
 		// this is the one place that can record "a toolset has been listed" —
@@ -1355,6 +1401,12 @@ export class MCPManager {
 
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
+		// Safe to reset only because every listing path also re-checks identity
+		// (`#connections.get(name) !== connection`, or the `#pendingToolLoads`
+		// entry), so a response outliving this teardown is already dropped before
+		// its ticket is consulted.
+		this.#toolApplyTicket.clear();
+		this.#toolApplyApplied.clear();
 		this.#pendingReconnections.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
@@ -1601,12 +1653,18 @@ export class MCPManager {
 			// Token claimed before the request, not after the response: see the
 			// same capture on the connect path.
 			const observedAt = this.#claimCatalogOrder(name);
+			const applyTicket = this.#nextToolApplyTicket(name);
 			const serverTools = await listTools(connection);
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools, observedAt);
-			this.#replaceServerTools(name, customTools);
-			void this.#fireToolsChanged();
+			// A reconnect is a fresh connection, so its listing is the newest thing
+			// there is — but it still takes a ticket, so a response from the
+			// connection it replaced cannot be applied after it.
+			if (this.#claimToolApply(name, applyTicket)) {
+				this.#replaceServerTools(name, customTools);
+				void this.#fireToolsChanged();
+			}
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			// A reconnect that lands mid-warmup can also see an empty toolset;
 			// re-list on a backoff so tools appear once the server populates. Only
@@ -1684,6 +1742,11 @@ export class MCPManager {
 			// response: a `/mcp refresh` whose `tools/list` is delayed must not
 			// outrank a newer catalog another session already persisted.
 			const observedAt = this.#claimCatalogOrder(name);
+			// Ordering ticket, same rule: this refresh can run concurrently with a
+			// connection-time load still in `#pendingToolLoads` (the single-flight
+			// above keys on `#pendingToolRefresh` only), so whichever response is
+			// applied second must lose rather than overwrite the newer catalog.
+			const applyTicket = this.#nextToolApplyTicket(name);
 			const serverTools = await listTools(connection);
 
 			// The connection may have been replaced (disconnect+reconnect under the
@@ -1700,6 +1763,11 @@ export class MCPManager {
 			if (this.#connections.get(name) !== connection) {
 				throw new Error(`Server "${name}" was replaced while refreshing tools`);
 			}
+
+			// A later request already applied (the overlapping initial load, or a
+			// re-run refresh). This response is older than what the registry
+			// holds, so drop it rather than regress the roster.
+			if (!this.#claimToolApply(name, applyTicket)) return;
 
 			const reconnect = () => this.reconnectServer(name);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
