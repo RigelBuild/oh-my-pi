@@ -3211,11 +3211,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				defaultRoleSpec.model.provider === model.provider &&
 				defaultRoleSpec.model.id === model.id;
 			if (restoredSessionModelIndex >= 0) {
-				// The post-resolution fallback restored the session's baked model:
-				// the config default named a model that did not resolve.
+				// The post-resolution fallback restored one of the session's saved
+				// models: the config default named a model that did not resolve.
+				//
+				// Index 0 is the session's ACTIVE model; anything later is a saved
+				// fallback, which means the active model failed to restore too and
+				// the resume did change models. Saying "kept" there hid a swap the
+				// user had no other signal for.
+				const restoredActiveModel = restoredSessionModelIndex === 0;
 				modelFallbackMessage = `--reapply-config: config default "${defaultRoleValue}" did not resolve${
 					defaultRoleSpec.warning ? ` (${defaultRoleSpec.warning})` : ""
-				}; kept the session's ${formatModelString(model)}`;
+				}${
+					restoredActiveModel
+						? `; kept the session's ${formatModelString(model)}`
+						: ` and the session's ${bakedSessionModel} could not be restored; using its saved fallback ${formatModelString(model)}`
+				}`;
 			} else if (configDefaultResolved) {
 				// The config default resolved and won over the baked model. Notice
 				// only when it is genuinely a different model than the session ran.

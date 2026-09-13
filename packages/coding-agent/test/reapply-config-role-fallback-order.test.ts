@@ -114,6 +114,44 @@ describe("--reapply-config configured default fallback order", () => {
 		return sessionFile;
 	}
 
+	/**
+	 * A session whose ACTIVE model is unavailable while its `default` role model
+	 * still resolves, so the restore walk lands past index 0.
+	 *
+	 * `getRestorableSessionModels` returns two entries only when the LAST
+	 * `model_change` names a non-default role: the active role model first, the
+	 * default second. A trailing `default` change collapses the list to one.
+	 */
+	async function writeTwoModelSession(earlierValue: string, activeValue: string): Promise<string> {
+		const sessionFile = path.join(tempDir.path(), `two-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "two-model-session", timestamp, cwd: tempDir.path() },
+				{
+					type: "model_change",
+					id: "earlier-model",
+					parentId: null,
+					timestamp,
+					model: earlierValue,
+					role: "default",
+				},
+				{
+					type: "model_change",
+					id: "active-model",
+					parentId: "earlier-model",
+					timestamp,
+					model: activeValue,
+					role: "task",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		return sessionFile;
+	}
+
 	async function loadOverlay(defaultRole: string): Promise<Settings> {
 		const overlayPath = path.join(tempDir.path(), `overlay-${Bun.nanoseconds()}.yml`);
 		await Bun.write(overlayPath, `modelRoles:\n  default: "${defaultRole}"\n`);
@@ -126,6 +164,15 @@ describe("--reapply-config configured default fallback order", () => {
 	}
 
 	async function resume(sessionFile: string, settings: Settings, reapplyConfig: boolean): Promise<AgentSession> {
+		return (await resumeResult(sessionFile, settings, reapplyConfig)).session;
+	}
+
+	/** Same resume, but keeping the result so `modelFallbackMessage` is readable. */
+	async function resumeResult(
+		sessionFile: string,
+		settings: Settings,
+		reapplyConfig: boolean,
+	): Promise<{ session: AgentSession; modelFallbackMessage?: string }> {
 		// A registry private to this resume: the extension provider registration
 		// must not leak into any other test's catalog.
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
@@ -150,7 +197,7 @@ describe("--reapply-config configured default fallback order", () => {
 			reapplyConfig,
 		});
 		session = result.session;
-		return result.session;
+		return result;
 	}
 
 	it("resumes on the first configured candidate once its extension provider registers", async () => {
@@ -294,6 +341,24 @@ describe("--reapply-config configured default fallback order", () => {
 
 		expect(resumed.model?.id).toBe(bakedModel.id);
 		expect(resumed.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+	});
+
+	it("reports that the active session model failed to restore, not that it was kept", async () => {
+		// Config default broken AND the session's active model (index 0) gone, but
+		// an earlier saved model resolves. Treating every nonnegative restore index
+		// as "kept the session's model" claimed nothing changed while the resume
+		// had in fact moved off the active model.
+		const earlier = anthropicModel("claude-opus-4-1");
+		const sessionFile = await writeTwoModelSession(modelValue(earlier), "anthropic/definitely-not-a-model:low");
+
+		const settings = await loadOverlay("missing/model");
+
+		const result = await resumeResult(sessionFile, settings, true);
+
+		expect(result.session.model?.id).toBe(earlier.id);
+		const notice = result.modelFallbackMessage ?? "";
+		expect(notice).toContain("could not be restored");
+		expect(notice).not.toContain("kept the session");
 	});
 
 	it("ignores a thinking suffix on a fallback that did not win", async () => {
