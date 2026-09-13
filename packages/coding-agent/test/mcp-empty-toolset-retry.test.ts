@@ -24,6 +24,7 @@
  * manager's own `#onToolsChanged` signal directly; the `it(…, timeout)` bound
  * fails the test if the heal never fires.
  */
+import type { CasOutcome } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -51,10 +52,10 @@ function createFakeStorage(): AgentStorage & { raw: Map<string, string> } {
 		setCache(key: string, value: string): void {
 			raw.set(key, value);
 		},
-		setCacheIfMatches(key: string, expectedValue: string | null, value: string): boolean {
-			if ((raw.get(key) ?? null) !== expectedValue) return false;
+		setCacheIfMatches(key: string, expectedValue: string | null, value: string): CasOutcome {
+			if ((raw.get(key) ?? null) !== expectedValue) return "mismatch";
 			raw.set(key, value);
-			return true;
+			return "written";
 		},
 	};
 	return stub as unknown as AgentStorage & { raw: Map<string, string> };

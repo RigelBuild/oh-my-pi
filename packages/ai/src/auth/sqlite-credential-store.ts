@@ -348,6 +348,15 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
  * `getApiKey`, `listProviders`, `deleteProvider`) that callers can use directly
  * without going through `AuthStorage`.
  */
+/**
+ * Outcome of a conditional cache write. `"mismatch"` is a real CAS loss — a peer
+ * published first, which is worth re-reading and retrying. `"unavailable"` means
+ * the write never compared anything (locked or unwritable database), which a
+ * best-effort caller should abandon rather than retry: each attempt pays the
+ * full `busy_timeout` synchronously.
+ */
+export type CasOutcome = "written" | "mismatch" | "unavailable";
+
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
 	#listActiveStmt: Statement;
@@ -1544,15 +1553,25 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * the row was written; a failure to write means someone else got there
 	 * first, which is information the caller acts on rather than an error.
 	 */
-	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
+	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
 		try {
 			const result =
 				expectedValue === null
 					? this.#casCacheAbsentStmt.run(key, value, expiresAtSec, key)
 					: this.#casCacheStmt.run(key, value, expiresAtSec, key, expectedValue);
-			return result.changes > 0;
-		} catch {
-			return false;
+			return result.changes > 0 ? "written" : "mismatch";
+		} catch (error) {
+			// An operational failure is NOT a CAS miss. A miss says a peer already
+			// published something, which a caller answers by re-reading and
+			// retrying; a locked or unwritable database says nothing about the data,
+			// and retrying it synchronously just pays the `busy_timeout` again per
+			// attempt. Reported separately so the caller can abandon a best-effort
+			// write instead of spinning.
+			logger.debug("conditional cache write failed", {
+				key,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return "unavailable";
 		}
 	}
 

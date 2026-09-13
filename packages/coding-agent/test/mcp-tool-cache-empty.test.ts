@@ -38,6 +38,7 @@
  *     `tools/list` with no bounded lifetime (a large or disabled MCP timeout)
  *     cannot land after the marker expired and re-persist a retired catalog.
  */
+import type { CasOutcome } from "@oh-my-pi/pi-ai";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { MCPToolCache, toolCatalogObservedAt } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -55,10 +56,10 @@ function createFakeStorage(): AgentStorage & { raw: Map<string, string> } {
 		setCache(key: string, value: string): void {
 			raw.set(key, value);
 		},
-		setCacheIfMatches(key: string, expectedValue: string | null, value: string): boolean {
-			if ((raw.get(key) ?? null) !== expectedValue) return false;
+		setCacheIfMatches(key: string, expectedValue: string | null, value: string): CasOutcome {
+			if ((raw.get(key) ?? null) !== expectedValue) return "mismatch";
 			raw.set(key, value);
-			return true;
+			return "written";
 		},
 	};
 	return stub as unknown as AgentStorage & { raw: Map<string, string> };
@@ -84,10 +85,10 @@ function createExpiringFakeStorage(): AgentStorage & { expiryOf(key: string): nu
 		setCache(key: string, value: string, expiresAtSec: number): void {
 			raw.set(key, { value, expiresAtSec });
 		},
-		setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
-			if (visible(key) !== expectedValue) return false;
+		setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
+			if (visible(key) !== expectedValue) return "mismatch";
 			raw.set(key, { value, expiresAtSec });
-			return true;
+			return "written";
 		},
 		expiryOf(key: string): number | undefined {
 			return raw.get(key)?.expiresAtSec;
@@ -136,10 +137,10 @@ function createInterleavedStorage(): AgentStorage & { armPeerWrite(write: (store
 		setCache(key: string, value: string, expiresAtSec: number): void {
 			raw.set(key, { value, expiresAtSec });
 		},
-		setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
-			if (visible(key) !== expectedValue) return false;
+		setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
+			if (visible(key) !== expectedValue) return "mismatch";
 			raw.set(key, { value, expiresAtSec });
-			return true;
+			return "written";
 		},
 	};
 	return stub as unknown as AgentStorage & { armPeerWrite(write: (store: PeerWriter) => void): void };
@@ -699,7 +700,7 @@ describe("MCPToolCache empty-toolset guard", () => {
 		// Every CAS now loses, exactly as sustained cross-process contention
 		// looks from inside one process.
 		const contended = new MCPToolCache(storage);
-		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValue(false);
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValue("mismatch");
 		const token = contended.observeCatalogAt("litellm");
 		cas.mockRestore();
 
@@ -710,6 +711,43 @@ describe("MCPToolCache empty-toolset guard", () => {
 		// newer catalog with this unordered one.
 		await contended.set("litellm", CONFIG, [OLD_TOOL], token);
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+	});
+
+	// A CAS that could not COMPARE is not a CAS that lost. `SQLITE_BUSY` from a
+	// peer holding the write lock past `busy_timeout` used to return the same
+	// `false` as a genuine mismatch, so both loops retried it synchronously: 4
+	// attempts on the claim path and 64 on the write path, each paying the full
+	// timeout (5s interactive) on the calling thread. That is up to ~20s of frozen
+	// event loop for a claim and minutes for a catalog write — for a cache that is
+	// best-effort by design.
+	//
+	// RED (pre-fix): the store was consulted once per allowed attempt.
+	test("abandons a reservation when the store cannot compare, instead of retrying it", async () => {
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValue("unavailable");
+
+		const token = cache.observeCatalogAt("litellm");
+
+		// One attempt, not CACHE_CLAIM_ATTEMPTS: an outage is not retried.
+		expect(cas).toHaveBeenCalledTimes(1);
+		// And it still refuses to order a write it never reserved.
+		expect(token).toBeUndefined();
+		cas.mockRestore();
+	});
+
+	// The write path carries the same distinction and a 64-attempt ceiling, so
+	// spinning there is the more expensive half of the same bug.
+	test("abandons a catalog write when the store cannot compare", async () => {
+		const storage = createFakeStorage();
+		const cache = new MCPToolCache(storage);
+		const token = reserved(cache, "litellm");
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValue("unavailable");
+
+		await cache.set("litellm", CONFIG, [NEW_TOOL], token);
+
+		expect(cas).toHaveBeenCalledTimes(1);
+		cas.mockRestore();
 	});
 
 	test("a claim reserves its token so a concurrent process floors above it", async () => {

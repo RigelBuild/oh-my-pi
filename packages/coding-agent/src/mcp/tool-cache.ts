@@ -286,7 +286,15 @@ export class MCPToolCache {
 			claimed = ceiling === undefined ? reading : Math.max(reading, nextAfter(ceiling));
 			const serialized = JSON.stringify({ claimedAt: claimed } satisfies MCPToolClaimPayload);
 			const expiresAtSec = Math.floor((Date.now() + CLAIM_TTL_MS) / 1000);
-			if (this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec)) return claimed;
+			const outcome = this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec);
+			if (outcome === "written") return claimed;
+			// A locked or unwritable database is not a CAS loss: nothing was
+			// compared, so re-reading and retrying learns nothing and each attempt
+			// pays the full `busy_timeout` synchronously on this thread (5s
+			// interactive). Abandon the reservation — the caller treats an
+			// unreserved request exactly like an exhausted one and simply skips the
+			// persisted catalog, leaving the live tools untouched.
+			if (outcome === "unavailable") break;
 		}
 		// Out of attempts: nothing this request computed was ever published.
 		// Returning it anyway is not safe in the direction the old comment here
@@ -594,7 +602,13 @@ export class MCPToolCache {
 			}
 
 			const expiresAtSec = Math.floor((Date.now() + args.ttlMs) / 1000);
-			if (this.storage.setCacheIfMatches(key, persistedNow, serialized, expiresAtSec)) return;
+			const outcome = this.storage.setCacheIfMatches(key, persistedNow, serialized, expiresAtSec);
+			if (outcome === "written") return;
+			// Same distinction as the claim loop, and it matters more here: this
+			// loop allows 64 attempts, so spinning on a held write lock would block
+			// the event loop for minutes rather than seconds. This cache is
+			// best-effort, so an unavailable store means give up, not retry.
+			if (outcome === "unavailable") return;
 		}
 
 		logger.debug("MCP tool cache write contended out", { serverName: args.serverName });
