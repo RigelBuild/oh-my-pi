@@ -272,13 +272,22 @@ export class ModelControls {
 	 *
 	 * No receipt at all means nothing is pinned yet — restoration re-derives
 	 * every family from `tier.*` in that state.
+	 *
+	 * A LEGACY receipt (written before the tracking list existed) omits the
+	 * field, and restoration reads that as fully pinned
+	 * (`applySettingsTrackedServiceTiers` returns the persisted map untouched
+	 * when the list is absent). Reading it here as fully TRACKING contradicted
+	 * that: writing a receipt about one family then marked the others
+	 * config-following, and a later `tier.*` edit overwrote a pin the legacy
+	 * receipt had recorded. Absent list means pinned, in both readers.
 	 */
 	#pinnedServiceTierFamilies(): ReadonlySet<keyof ServiceTierByFamily> {
 		const branch = this.#host.sessionManager.getBranch();
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
 			if (entry.type !== "service_tier_change") continue;
-			const tracking = new Set(entry.settingsTrackingFamilies ?? SERVICE_TIER_FAMILIES);
+			if (!entry.settingsTrackingFamilies) return new Set(SERVICE_TIER_FAMILIES);
+			const tracking = new Set(entry.settingsTrackingFamilies);
 			return new Set(SERVICE_TIER_FAMILIES.filter(family => !tracking.has(family)));
 		}
 		return new Set();
