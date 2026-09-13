@@ -1032,6 +1032,58 @@ describe("AgentLifecycleManager", () => {
 		await revival.catch(() => {});
 	});
 
+	// A child that was ALREADY mid-turn when the recycle began is covered by
+	// neither the barrier nor the pre-pass: the barrier only excludes work
+	// ENTERING through `ensureLive()` after it was raised, and `park()` detaches
+	// and disposes whatever is attached without consulting session state. So an
+	// otherwise-idle parent's restart aborted an unrelated child request — a
+	// follow-up, IRC wake, or collaboration chat — mid-flight.
+	//
+	// RED (pre-fix): parkAll() resolved while the child was still `running`, and
+	// its session was disposed with the turn in flight.
+	it("waits for a mid-turn adopted child to go idle before parking it", async () => {
+		const stub = makeSessionStub();
+		const ref = registerIdleSub("Busy-Sub", stub.session);
+		lifecycle.adopt("Busy-Sub", { idleTtlMs: 0 });
+		// The child picks up a follow-up BEFORE the recycle begins.
+		registry.setStatus("Busy-Sub", "running", ref);
+
+		const parking = lifecycle.parkAll();
+		await flushAsync();
+		// Mid-turn: parking must not have disposed it yet.
+		expect(stub.disposeCalls()).toBe(0);
+		expect(registry.get("Busy-Sub")?.session).not.toBeNull();
+
+		// The turn ends; only now may the park commit.
+		registry.setStatus("Busy-Sub", "idle", ref);
+		(await parking)();
+
+		expect(registry.get("Busy-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+	});
+
+	// The drain is bounded by the SAME deadline as the phases around it: the
+	// recycle path calls `session.beginDispose()` before awaiting parkAll(), so a
+	// child whose turn never ends would wedge the restart permanently rather than
+	// merely slow it. A bounded abort of one turn beats that.
+	//
+	// Event-gated: the turn never ends on its own, so only the deadline can
+	// complete the call.
+	it("bounds a mid-turn adopted child by the parking deadline", async () => {
+		const stub = makeSessionStub();
+		const ref = registerIdleSub("Wedged-Turn-Sub", stub.session);
+		lifecycle.adopt("Wedged-Turn-Sub", { idleTtlMs: 0 });
+		registry.setStatus("Wedged-Turn-Sub", "running", ref);
+
+		// Deadline already past: the drain cannot wait at all.
+		const release = await lifecycle.parkAll(Date.now());
+		release();
+
+		// Parked anyway rather than wedging the restart.
+		expect(registry.get("Wedged-Turn-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+	});
+
 	// Third face of the same finding, on the CALLER side. `parkAll()` waits out a
 	// pre-barrier revival and then parks the session it registered — but awaiting
 	// that promise also resolves the original `ensureLive()` caller, in the gap
