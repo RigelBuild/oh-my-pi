@@ -249,6 +249,26 @@ function computerTurn(toolCallId: string, data: string): Message[] {
 	return [computerCallMessage(toolCallId), computerResultMessage(toolCallId, data)];
 }
 
+/** A paired turn whose screenshot lives server-side, so it carries no inline bytes. */
+function referencedComputerTurn(toolCallId: string): Message[] {
+	return [
+		computerCallMessage(toolCallId),
+		{
+			role: "toolResult",
+			timestamp: 1,
+			toolCallId,
+			toolName: "computer",
+			content: [text("screenshot")],
+			isError: false,
+			providerMetadata: {
+				type: "computer",
+				acknowledgedSafetyChecks: [],
+				screenshot: { type: "computer_screenshot", file_id: "server-side-shot" },
+			},
+		},
+	];
+}
+
 function computerResultMessage(toolCallId: string, data: string): ToolResultMessage {
 	return {
 		role: "toolResult",
@@ -1136,6 +1156,91 @@ describe("provider context image budgets", () => {
 
 		// Both live images survive; the stale payload never entered the budget.
 		expect(imageData(clamped).length).toBe(2);
+	});
+
+	it("counts a native payload an Azure Responses model replays", async () => {
+		// azure-openai-responses.ts builds its request with `nativeHistory: { replay: true }`.
+		const azureModel = { ...OPENAI_MODEL, api: "azure-openai-responses" } as Model;
+		const big = "z".repeat(9 * 1024 * 1024);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "compaction summary" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(big) }] },
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(big) }] },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, azureModel);
+
+		const images = replayedItems(clamped.messages[0]).filter(item => JSON.stringify(item).includes("input_image"));
+		expect(images.length).toBe(1);
+	});
+
+	it("does not charge a replayed turn's superseded generic content", async () => {
+		// `convertConversationMessages()` replays the payload and `continue`s past
+		// `msg.content`, so the attached frames never reach the wire — charging them
+		// would evict the native history that does.
+		const nativeImage = "n".repeat(9 * 1000 * 1000);
+		const attached = "a".repeat(9 * 1000 * 1000);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "compaction summary" }, image(attached)],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "compaction", id: "c" },
+							{
+								type: "message",
+								role: "user",
+								content: [{ type: "input_image", image_url: dataUri(nativeImage) }],
+							},
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		// The native image survives: 9 MB alone fits the 16 MB budget.
+		const images = replayedItems(clamped.messages[0]).filter(item => JSON.stringify(item).includes("input_image"));
+		expect(images.length).toBe(1);
+	});
+
+	it("keeps the byte debt when the dropped screenshot carries no inline bytes", async () => {
+		// The oldest image is a server-side screenshot contributing nothing to the
+		// byte tally, so retiring a byte drop for it would leave the two inline
+		// images over the cap.
+		const half = "h".repeat(10 * 1000 * 1000);
+		const context: Context = {
+			messages: [
+				...referencedComputerTurn("call-ref"),
+				{ role: "user", timestamp: 9, content: [image(half)] },
+				{ role: "user", timestamp: 10, content: [image(half)] },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL);
+
+		const survivingInlineBytes = clamped.messages
+			.flatMap(message => (Array.isArray(message.content) ? message.content : []))
+			.filter((part): part is ImageContent => part.type === "image" && part.url === undefined)
+			.reduce((sum, part) => sum + part.data.length, 0);
+		expect(survivingInlineBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
 	});
 
 	it("treats a managed session with no provider state yet as unwarmed", async () => {
