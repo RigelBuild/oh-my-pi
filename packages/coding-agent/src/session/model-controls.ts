@@ -209,8 +209,16 @@ export class ModelControls {
 	 */
 	applyReloadedServiceTiers(previousConfigured: ServiceTierByFamily, nextConfigured: ServiceTierByFamily): void {
 		const next: ServiceTierByFamily = { ...this.#serviceTierByFamily };
+		// Provenance from the RECEIPT, not from value equality. An explicit
+		// selection that happens to match the configured value leaves the live
+		// entry equal to `previousConfigured`, so the equality test below read it
+		// as config-following and a later `tier.*` edit overwrote the pin. The
+		// receipt records which families were pinned, which is the only durable
+		// evidence of the user's intent.
+		const pinned = this.#pinnedServiceTierFamilies();
 		let moved = false;
 		for (const family of SERVICE_TIER_FAMILIES) {
+			if (pinned.has(family)) continue;
 			if (previousConfigured[family] === nextConfigured[family]) continue;
 			if (this.#serviceTierByFamily[family] !== previousConfigured[family]) continue;
 			const tier = nextConfigured[family];
@@ -597,7 +605,14 @@ export class ModelControls {
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		//
+		// `explicit: true` for the same reason the `model_change` above carries no
+		// `settingsTracking` flag: the cycle is a user pin. Without it a cycle to
+		// `other-model:low` while the effective level is ALREADY `low` wrote no
+		// receipt at all — the value did not change — so the thinking state still
+		// read as settings-tracking and the next `/refresh settings` could replace
+		// the scoped entry's explicit level with the model's metadata default.
+		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel, false, { explicit: true });
 		await this.#host.syncAfterModelChange(previousEditMode);
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };

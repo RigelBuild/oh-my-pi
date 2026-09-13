@@ -226,6 +226,44 @@ describe("AgentSession refresh('settings'): model-swap precedence", () => {
 		}
 	});
 
+	it("pins the thinking level of a scoped cycle whose level did not change", async () => {
+		// The level must start out SETTINGS-TRACKING, so the config supplies `low`
+		// rather than an explicit startup selection — an explicit one writes its own
+		// receipt and the session is already pinned, which makes this test vacuous.
+		//
+		// Cycling to a scoped entry that also says `low` then wrote no receipt at
+		// all, because the value did not move, so the state stayed tracking and the
+		// next refresh replaced the scoped entry's explicit level.
+		const h = await makeHarness({
+			rawConfig: `modelRoles:\n  default: ${bundledAnthropic("claude-sonnet-4-5").provider}/claude-sonnet-4-5\ndefaultThinkingLevel: low\n`,
+		});
+		try {
+			h.session.setScopedModels([
+				{ model: h.modelA, thinkingLevel: ThinkingLevel.Low },
+				{ model: h.modelB, thinkingLevel: ThinkingLevel.Low },
+			]);
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+
+			const cycled = await h.session.cycleModel();
+			if (!cycled) throw new Error("Expected cycleModel to switch models");
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+
+			// A refresh whose config now names a different level must not move the
+			// scoped pin.
+			await fs.writeFile(
+				h.settingsPath,
+				`modelRoles:\n  default: ${h.modelA.provider}/${h.modelA.id}\ndefaultThinkingLevel: high\n`,
+			);
+			await h.session.refresh("settings");
+
+			// RED (pre-fix): no receipt existed, so the level read as tracking and
+			// the refresh replaced it with `high`.
+			expect(h.session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+		} finally {
+			await h.dispose();
+		}
+	});
+
 	it("preserves an explicitly cycled model across a settings refresh", async () => {
 		const h = await makeHarness();
 		const modelC = bundledAnthropic("claude-haiku-4-5");
