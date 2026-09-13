@@ -544,22 +544,18 @@ export class MCPManager {
 			// Draining rather than a single pass: awaiting one collected firing can
 			// admit the next, and the roster is only settled when a drain adds none.
 			//
-			// In-flight LISTINGS count as pending too. A `tools/list` that has not
-			// answered yet has fired nothing, so a sink-only drain reports settled
-			// and the firing lands afterwards — exactly the window this exists to
-			// close. Their rejections are already handled at their own callsites;
-			// swallowing here only orders the wait.
+			// A listing still IN FLIGHT is deliberately not waited on. It has fired
+			// nothing yet, but waiting for it would re-gate startup on the slowest
+			// server's timeout — the whole point of leaving pending connects in the
+			// background (`connectServers`, issue #2100) — and a server configured
+			// `timeout: 0` could block session creation forever. What this closes is
+			// the narrower window the caller actually creates: a listing that
+			// ALREADY answered during the caller's own await, whose handler is
+			// running with its promise discarded.
 			drain: async () => {
-				for (;;) {
-					const loads = [...this.#pendingToolLoads.values(), ...this.#pendingToolRefresh.values()].map(pending =>
-						("promise" in pending ? pending.promise : pending).then(
-							() => {},
-							() => {},
-						),
-					);
-					const fired = sink.splice(0);
-					if (loads.length === 0 && fired.length === 0) return;
-					await Promise.all([...loads, ...fired]);
+				while (sink.length > 0) {
+					const pending = sink.splice(0);
+					await Promise.all(pending);
 				}
 			},
 			close: () => {
