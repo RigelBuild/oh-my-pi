@@ -337,13 +337,31 @@ function sendsComputerScreenshot(
  */
 function demotesComputerScreenshot(message: ToolResultMessage, model: Model | undefined): boolean {
 	if (model === undefined || model.supportsComputerUse === true) return false;
-	if (!usesResponsesToolResultConverter(model)) return false;
+	// Codex deletes the metadata before converting, so its screenshot travels as
+	// a generic content image and must be accounted as one.
+	if (!serializesDemotedScreenshotNote(model)) return false;
 	return message.providerMetadata?.type === "computer";
 }
 
 /** The API routes whose tool results go through `appendResponsesToolResultMessages()`. */
 function usesResponsesToolResultConverter(model: Model): boolean {
 	return replaysOpenAIResponsesNativeHistory(model);
+}
+
+/**
+ * Whether this route SERIALIZES a demoted computer screenshot as the
+ * metadata-based assistant note.
+ *
+ * Narrower than {@link usesResponsesToolResultConverter}, and the difference is
+ * Codex. `openai-codex-responses` reaches the same converter, but it calls
+ * `unrollCodexComputerToolResult()` first, which DELETES `providerMetadata` — so
+ * the converter never sees a computer result and encodes the generic content
+ * image as an ordinary function result instead. Classifying that as
+ * metadata-demoted made `collectImageStats()` skip an image that does travel,
+ * leaving the count cap short on a long history.
+ */
+function serializesDemotedScreenshotNote(model: Model): boolean {
+	return usesResponsesToolResultConverter(model) && model.api !== "openai-codex-responses";
 }
 
 /**

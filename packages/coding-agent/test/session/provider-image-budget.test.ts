@@ -75,6 +75,26 @@ const COMPUTER_MODEL = buildModel({
 	supportsComputerUse: true,
 });
 
+/**
+ * Codex: reaches the same Responses tool-result converter, but its own
+ * `convertMessages()` calls `unrollCodexComputerToolResult()` first, which
+ * DELETES `providerMetadata` — so a demoted screenshot travels as an ordinary
+ * content image rather than a metadata note.
+ */
+const CODEX_MODEL = buildModel({
+	id: "gpt-6-codex-cli",
+	name: "gpt-6-codex-cli",
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://chatgpt.com/backend-api/codex",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+	supportsComputerUse: false,
+});
+
 const ANTHROPIC_MODEL = buildModel({
 	id: "claude-opus-4-8",
 	name: "claude-opus-4-8",
@@ -1051,6 +1071,31 @@ describe("provider context image budgets", () => {
 			message => message.role === "toolResult" && message.providerMetadata !== undefined,
 		);
 		expect(surviving.length).toBe(providerImageBudget(COMPUTER_MODEL.provider));
+	});
+
+	it("counts a Codex computer screenshot as the generic image it actually sends", async () => {
+		// Codex reaches `appendResponsesToolResultMessages()` like the other
+		// Responses routes, so it looked metadata-demoted — but its own
+		// `convertMessages()` calls `unrollCodexComputerToolResult()` first, which
+		// deletes `providerMetadata`. The converter therefore never sees a computer
+		// result and encodes the generic CONTENT image as an ordinary function
+		// result. Treating it as demoted made the content loop skip that image, so
+		// the count tally read zero for every screenshot and a long history could
+		// exceed the per-request cap.
+		//
+		// RED (pre-fix): nothing was evicted, because `total` never counted these.
+		const overCount = providerImageBudget(CODEX_MODEL.provider) + 2;
+		const context: Context = {
+			messages: Array.from({ length: overCount }, (_, index) =>
+				computerTurn(`call-${index}`, "c".repeat(32)),
+			).flat(),
+		};
+
+		const clamped = clampProviderContextImages(context, CODEX_MODEL);
+
+		// The images that travel are the generic content ones, so the surviving
+		// count is the provider's cap.
+		expect(imageData(clamped).length).toBe(providerImageBudget(CODEX_MODEL.provider));
 	});
 
 	it("gives an Anthropic-compatible proxy the Anthropic byte allowance", async () => {
