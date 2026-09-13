@@ -594,6 +594,52 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("keeps a manually deselected built-in inactive when its gate is re-enabled", async () => {
+		// `/tools` records an explicit active set. A gate going false->true only
+		// makes the tool AVAILABLE again; unconditionally re-adding the name
+		// overrode the user's own deselection and made `bash` callable again.
+		const h = await makeHarness("bash:\n  enabled: true\n");
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("bash");
+
+			// The user deselects it through `/tools`.
+			await h.session.setActiveToolsByName(h.session.getEnabledToolNames().filter(name => name !== "bash"));
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+
+			// Then the setting is toggled off and back on through two refreshes.
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: false\n");
+			await h.session.refresh("settings");
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: true\n");
+			await h.session.refresh("settings");
+
+			// RED (pre-fix): re-enabling the gate reactivated a tool the user had
+			// explicitly turned off.
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("drops the native registry entry when a built-in gate is disabled", async () => {
+		// A retained inactive entry is indistinguishable from a user deselection to
+		// the late-registration path in `sdk.ts`, which sees an existing entry and
+		// declines to install an extension's same-named replacement — so the
+		// extension tool stayed inactive where a fresh session would expose it.
+		const h = await makeHarness("bash:\n  enabled: true\n");
+		try {
+			expect(h.session.getToolByName("bash")).toBeDefined();
+
+			await fs.writeFile(h.settingsPath, "bash:\n  enabled: false\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+			// RED (pre-fix): only the active name went; the registry entry remained.
+			expect(h.session.getToolByName("bash")).toBeUndefined();
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("builds a core built-in whose startup gate was off when it is re-enabled", async () => {
 		// No registry entry exists in this case — `createTools` never built the
 		// tool — so re-activation is not enough and the tool has to be constructed.

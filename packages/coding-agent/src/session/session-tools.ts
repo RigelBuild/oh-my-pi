@@ -1706,7 +1706,22 @@ export class SessionTools {
 				// still offers the custom one. A name with no entry at all is treated
 				// as owned, matching the behaviour before this reconcile existed.
 				const entry = this.#toolRegistry.get(name);
-				if (entry === undefined || this.#builtInToolNames.has(name)) next.delete(name);
+				if (entry === undefined || this.#builtInToolNames.has(name)) {
+					next.delete(name);
+					// The registry entry goes too, exactly as the setting-gated group
+					// reconcile below does. A retained inactive entry is
+					// indistinguishable from a user deselection to the late-registration
+					// path in `sdk.ts`, which sees `existingTool && !alreadyEnabled` and
+					// declines to install an extension's same-named replacement — so a
+					// session that disabled the native gate hid an extension tool a
+					// freshly started session with the same config exposes. Only the
+					// session's OWN built-in entry is dropped, so an entry another
+					// registrant already replaced survives.
+					if (entry !== undefined && this.#builtInToolNames.has(name)) {
+						this.#toolRegistry.delete(name);
+						this.#builtInToolNames.delete(name);
+					}
+				}
 				continue;
 			}
 			// Enabled and permitted. Build it if this session never did: when the
@@ -1718,6 +1733,12 @@ export class SessionTools {
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 			}
+			// Availability, not selection. `/tools` records an explicit active set in
+			// `#runtimeSelectedToolNames`, so a built-in the user deselected must
+			// stay inactive across a gate going false->true — re-enabling the
+			// setting only makes it available again. Absent that record the session
+			// has no explicit selection and the gate decides, as before.
+			if (this.#runtimeSelectedToolNames !== undefined && !this.#runtimeSelectedToolNames.has(name)) continue;
 			next.add(name);
 		}
 		if (next.size === active.length && active.every(name => next.has(name))) return false;
