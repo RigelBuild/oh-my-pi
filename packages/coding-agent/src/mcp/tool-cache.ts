@@ -620,12 +620,32 @@ export class MCPToolCache {
 		// early return, so the losses that keep us here are all older writers:
 		// finite, one per request already in flight. The count remains only as a
 		// backstop against a storage layer that never reports success.
+		const claim = claimKey(args.serverName);
 		for (let attempt = 0; attempt < CACHE_WRITE_ATTEMPTS; attempt++) {
 			const persistedNow = this.storage.getCache(key);
-			const persistedStartedAt = readWriteStartedAt(persistedNow);
+			// The catalog row, PLUS the durable claim row as a fallback when the
+			// catalog row is gone. The catalog row (and its tombstone) expires
+			// after `CACHE_TTL_MS`, but an MCP request has no bounded lifetime —
+			// `timeout: 0` disables it outright — so a response outliving that TTL
+			// found an ABSENT row, passed this comparison, and restored a retired
+			// toolset for another full TTL. The claim row is retained for 100 years
+			// precisely to cover requests that outlive the catalog, so it is the
+			// ordering state that survives.
+			//
+			// Consulted only in the catalog row's ABSENCE, and only for a claim
+			// strictly ABOVE our own token. A claim is published before its
+			// `tools/list` answers, so our own claim is sitting there at exactly our
+			// token: comparing against it unconditionally would make every write
+			// refuse itself.
+			const persistedStartedAt =
+				readWriteStartedAt(persistedNow) ??
+				((): number | undefined => {
+					const claimedAt = readClaimedAt(this.storage.getCache(claim));
+					return claimedAt !== undefined && claimedAt > args.writeStartedAt ? claimedAt : undefined;
+				})();
 			if (persistedStartedAt !== undefined) {
-				// The row's `tools/list` was issued at or after ours, so it is the
-				// newer observation of the server. Leave it standing.
+				// The newer observation of the server is already recorded. Leave the
+				// row standing.
 				if (persistedStartedAt >= args.writeStartedAt) return;
 			} else if (persistedNow !== args.baseline?.bytes && args.unorderable === "drop") {
 				return;
