@@ -9,7 +9,8 @@
  */
 import { createHash } from "node:crypto";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import type { CasOutcome } from "./auth/sqlite-credential-store";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -78,6 +79,7 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
+export type { CasOutcome } from "./auth/sqlite-credential-store";
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
@@ -442,7 +444,7 @@ export interface AuthCredentialStore {
 	 * Optional: stores whose cache is private to one process have no such
 	 * window, and callers fall back to a plain read-then-`setCache`.
 	 */
-	setCacheIfMatches?(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean;
+	setCacheIfMatches?(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome;
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix?(prefix: string): void;
 	cleanExpiredCache(): void;

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
+	type CasOutcome,
 	isSqliteBusyError,
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
@@ -845,8 +846,10 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * the `setCache` it informs. Returns `false` without writing when the
 	 * underlying store cannot make the check part of the write.
 	 */
-	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
-		return this.#authStore.setCacheIfMatches?.(key, expectedValue, value, expiresAtSec) ?? false;
+	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
+		// A store without the method cannot compare anything, which is the
+		// `"unavailable"` case, not a CAS loss: retrying it would spin forever.
+		return this.#authStore.setCacheIfMatches?.(key, expectedValue, value, expiresAtSec) ?? "unavailable";
 	}
 
 	/**

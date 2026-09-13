@@ -19,6 +19,7 @@ import {
 	type StoredAuthCredential,
 	type StoredCredentialBlock,
 } from "../auth-storage";
+import type { CasOutcome } from "../auth/sqlite-credential-store";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
@@ -1065,10 +1066,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * check and the write without interruption, so the guard is exact rather
 	 * than a best effort.
 	 */
-	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
-		if (this.getCache(key) !== expectedValue) return false;
+	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
+		if (this.getCache(key) !== expectedValue) return "mismatch";
 		this.#cache.set(key, { value, expiresAtSec });
-		return true;
+		return "written";
 	}
 
 	/** Drop all cache rows whose keys start with the supplied prefix. */

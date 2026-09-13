@@ -15,6 +15,7 @@
  * The fixture holds its `tools/list` open, so a token sampled after the
  * response lands is measurably later than one sampled before the request.
  */
+import type { CasOutcome } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -37,10 +38,10 @@ function createFakeStorage(): AgentStorage & { raw: Map<string, string> } {
 		setCache(key: string, value: string): void {
 			raw.set(key, value);
 		},
-		setCacheIfMatches(key: string, expectedValue: string | null, value: string): boolean {
-			if ((raw.get(key) ?? null) !== expectedValue) return false;
+		setCacheIfMatches(key: string, expectedValue: string | null, value: string): CasOutcome {
+			if ((raw.get(key) ?? null) !== expectedValue) return "mismatch";
 			raw.set(key, value);
-			return true;
+			return "written";
 		},
 	};
 	return stub as unknown as AgentStorage & { raw: Map<string, string> };
@@ -132,11 +133,11 @@ describe("MCP tool cache request-time ordering token", () => {
 				rows.set(key, value);
 				expiries.set(key, expiresAtSec);
 			},
-			setCacheIfMatches: (key: string, expected: string | null, value: string, expiresAtSec: number): boolean => {
-				if ((rows.get(key) ?? null) !== expected) return false;
+			setCacheIfMatches: (key: string, expected: string | null, value: string, expiresAtSec: number): CasOutcome => {
+				if ((rows.get(key) ?? null) !== expected) return "mismatch";
 				rows.set(key, value);
 				expiries.set(key, expiresAtSec);
-				return true;
+				return "written";
 			},
 		} as unknown as AgentStorage;
 		const cache = new MCPToolCache(storage);
@@ -188,10 +189,10 @@ describe("MCP tool cache request-time ordering token", () => {
 			setCache(key: string, value: string, expiresAtSec: number): void {
 				raw.set(key, { value, expiresAtSec });
 			},
-			setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): boolean {
-				if (visible(key) !== expectedValue) return false;
+			setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
+				if (visible(key) !== expectedValue) return "mismatch";
 				raw.set(key, { value, expiresAtSec });
-				return true;
+				return "written";
 			},
 		} as unknown as AgentStorage;
 
