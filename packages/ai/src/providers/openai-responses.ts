@@ -265,10 +265,17 @@ export function willReplayOpenAIResponsesNativeHistory(
 	model: Model,
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
 ): boolean {
+	// No MAP at all is an unmanaged session, which always replays — the default
+	// `buildParams` takes. A managed map with no entry is the opposite: the state
+	// has simply not been created yet, and `createOpenAIResponsesProviderSessionState`
+	// will create it `nativeHistoryReplayWarmed: false`. That is exactly the
+	// first-request case this exists for, and the provider-context transform runs
+	// BEFORE `streamOpenAIResponses` creates the entry — so an absent entry must
+	// read as cold, not as warm.
 	if (!providerSessionState) return true;
 	const key = `${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`;
 	const existing = providerSessionState.get(key) as OpenAIResponsesProviderSessionState | undefined;
-	return existing?.nativeHistoryReplayWarmed ?? true;
+	return existing?.nativeHistoryReplayWarmed ?? false;
 }
 
 function getOpenAIResponsesProviderSessionState(

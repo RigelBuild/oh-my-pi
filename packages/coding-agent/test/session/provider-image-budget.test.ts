@@ -1,6 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Context, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Model,
+	ProviderSessionState,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	applyProviderImagePipeline,
@@ -678,6 +686,18 @@ describe("provider context image budgets", () => {
 		// Every image survives: none of them put bytes on the wire.
 		expect(piped.messages.length).toBe(count);
 		expect(imageData(piped).length).toBe(count);
+	});
+
+	it("treats a managed session with no provider state yet as unwarmed", async () => {
+		// The provider-context transform runs BEFORE `streamOpenAIResponses` creates
+		// the session state, so on the first request the map exists and is EMPTY.
+		// Defaulting that to warm charged image-generation results the provider was
+		// about to omit. An absent MAP is different — an unmanaged session, which
+		// always replays.
+		const managedButEmpty = new Map<string, ProviderSessionState>();
+
+		expect(willReplayOpenAIResponsesNativeHistory(OPENAI_MODEL, managedButEmpty)).toBe(false);
+		expect(willReplayOpenAIResponsesNativeHistory(OPENAI_MODEL, undefined)).toBe(true);
 	});
 
 	it("still never charges a display-only assistant content image", async () => {
