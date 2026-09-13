@@ -210,12 +210,39 @@ function replayedInputImages(message: Message, model: Model, replaysNativeHistor
 	// cap, so recording only the inline ones left a payload of references
 	// uncounted and un-evictable; its size is 0 and the byte tally skips it.
 	const sizes: number[] = [];
-	for (const item of payload.items) {
-		for (const part of nativeInputImageParts(item)) {
+	const repairedOrphans = repairedOrphanItemIndices(payload.items, model);
+	for (let index = 0; index < payload.items.length; index++) {
+		if (repairedOrphans.has(index)) continue;
+		for (const part of nativeInputImageParts(payload.items[index])) {
 			sizes.push(inlineImageFromDataUri(part.image_url)?.data.length ?? 0);
 		}
 	}
 	return sizes;
+}
+
+/**
+ * Indices of replayed `computer_call_output` items the converter will replace
+ * with a short assistant note before they reach the wire.
+ *
+ * `repairOrphanResponsesToolOutputs()` rewrites an output whose `computer_call`
+ * does not precede it, truncating the serialized output to 16 KB — so its
+ * screenshot never travels, and charging it evicted live images to make room
+ * for bytes that were already gone. Only the two routes that pass
+ * `repairOrphanOutputs: true` do this; the Codex route replays the orphan
+ * unchanged, so there its bytes are real.
+ */
+function repairedOrphanItemIndices(items: readonly Record<string, unknown>[], model: Model): ReadonlySet<number> {
+	const repaired = new Set<number>();
+	if (model.api !== "openai-responses" && model.api !== "azure-openai-responses") return repaired;
+	const precedingCalls = new Set<string>();
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index];
+		const callId = typeof item?.call_id === "string" ? item.call_id : undefined;
+		if (!callId) continue;
+		if (item.type === "computer_call") precedingCalls.add(callId);
+		else if (item.type === "computer_call_output" && !precedingCalls.has(callId)) repaired.add(index);
+	}
+	return repaired;
 }
 
 /** The API routes whose converters replay an `openaiResponsesHistory` payload. */
@@ -453,8 +480,10 @@ function clampReplayedInputImages(
 	// `computer_screenshot` ref, so there is nothing to degrade it to in place —
 	// and a call left behind without its output is an orphan the provider rejects.
 	const droppedComputerCallIds = new Set<string>();
+	const repairedOrphans = repairedOrphanItemIndices(payload.items, state.model);
 	for (let index = 0; index < payload.items.length; index++) {
 		if (!clampWanted(state)) break;
+		if (repairedOrphans.has(index)) continue;
 		const item = payload.items[index];
 		if (item?.type === "computer_call_output") {
 			const [screenshot] = nativeInputImageParts(item);
