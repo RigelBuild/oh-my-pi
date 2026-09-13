@@ -561,7 +561,22 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 		if (state.remainingInlineDrops <= 0) return message;
 		if (inlineComputerScreenshot(message.providerMetadata) === undefined) return message;
 		state.remainingInlineDrops--;
-		return { ...message, providerMetadata: undefined };
+		// Clearing the metadata CHANGES THE ROUTE: without it the result is no
+		// longer a computer result, so `appendResponsesToolResultMessages()` stops
+		// demoting and sends the generic content image instead. Redacting the
+		// metadata alone therefore reclaimed nothing — the same bytes travelled as
+		// the mirror. Drop the mirror in the same edit, unpaid: its bytes were
+		// charged once, through the metadata.
+		const mirrored = clampContent(message.content, {
+			...state,
+			remainingDrops: 0,
+			remainingInlineDrops: Number.POSITIVE_INFINITY,
+		});
+		return {
+			...message,
+			providerMetadata: undefined,
+			content: mirrored && mirrored.length > 0 ? mirrored : (mirrored ?? message.content),
+		};
 	}
 	// Dropping the metadata screenshot already removes this result's only wire
 	// image, so the mirrored content block must not also pay down a budget — it

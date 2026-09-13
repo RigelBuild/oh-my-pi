@@ -1106,6 +1106,29 @@ describe("provider context image budgets", () => {
 		expect(imageData(clamped).length).toBe(liveImages);
 	});
 
+	it("drops the content mirror when it redacts a demoted screenshot", async () => {
+		// Clearing `providerMetadata` takes the result OFF the demotion branch:
+		// `appendResponsesToolResultMessages()` only demotes a `type: "computer"`
+		// result, so afterwards the generic content image is what travels. Redacting
+		// the metadata alone therefore reclaimed no bytes at all — the same
+		// screenshot went out as the mirror.
+		const big = "b".repeat(providerImageByteBudget(VISION_ONLY_MODEL.provider));
+		const context: Context = {
+			messages: [
+				// The fixture already mirrors the screenshot into generic content.
+				computerResultMessage("call-demoted", big),
+				{ role: "user", timestamp: 2, content: [image("c".repeat(4096))] },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, VISION_ONLY_MODEL, true);
+		const result = clamped.messages[0];
+
+		expect(result.role === "toolResult" && result.providerMetadata).toBeUndefined();
+		// RED (pre-fix): the mirror survived, so the redaction freed nothing.
+		expect(imageData(clamped).some(data => data === big)).toBe(false);
+	});
+
 	it("counts input images a replayed assistant snapshot splices onto the wire", async () => {
 		// A legacy same-model assistant payload with `dt` absent/false is a full
 		// SNAPSHOT: `buildResponsesInput()` splices it over the whole message list,
