@@ -947,7 +947,15 @@ export class ModelControls {
 
 	/** Set one family's tier (or clear it with `undefined`); persists the change. */
 	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
-		if (this.#serviceTierByFamily[family] === tier) return;
+		// An explicit selection of the value already held still PINS the family.
+		// Returning early here recorded no receipt, so selecting `priority` while
+		// `tier.openai: priority` (including `/fast on`) left the family reading as
+		// config-following, and a later `tier.openai` edit overwrote the choice.
+		// The value does not move, so only the provenance is rewritten.
+		if (this.#serviceTierByFamily[family] === tier) {
+			this.#applyServiceTierByFamily({ ...this.#serviceTierByFamily }, family);
+			return;
+		}
 		const next: ServiceTierByFamily = { ...this.#serviceTierByFamily };
 		if (tier) next[family] = tier;
 		else delete next[family];

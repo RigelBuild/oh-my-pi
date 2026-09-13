@@ -506,6 +506,49 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("pins a family when the explicit selection matches the configured tier", async () => {
+		// `/fast on` while `tier.openai: priority` selects the value already held.
+		// The equality early-return wrote no receipt, so the family still read as
+		// config-following and a later `tier.openai` edit overwrote the choice.
+		const h = await makeHarness("tier:\n  openai: priority\n", { persistSession: true });
+		try {
+			// The value does not move; only the provenance does.
+			h.session.setServiceTierFamily("openai", "priority");
+			expect(h.session.serviceTierByFamily.openai).toBe("priority");
+
+			const sessionFile = h.session.sessionFile;
+			if (!sessionFile) throw new Error("Expected a persisted session file");
+			h.session.sessionManager.appendMessage({
+				role: "assistant",
+				provider: "anthropic",
+				model: h.modelA.id,
+				content: [{ type: "text", text: "reply" }],
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				api: "anthropic-messages",
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			await h.session.sessionManager.flush();
+
+			await fs.writeFile(h.settingsPath, "tier:\n  openai: flex\n");
+			await h.session.settings.reload();
+
+			expect(await h.session.switchSession(sessionFile)).toBe(true);
+
+			// The explicit selection outranks the config edit; pre-fix this read `flex`.
+			expect(h.session.serviceTierByFamily.openai).toBe("priority");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("reapplies the shared-LSP flag when lsp.shared moves on disk", async () => {
 		// `lsp.shared` is copied into module state in `lsp/client.ts` that
 		// `getOrCreateClient` consults when it COLD-STARTS a server, never re-read
