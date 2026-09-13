@@ -3,9 +3,11 @@ import type {
 	AssistantMessage,
 	Context,
 	ImageContent,
+	Message,
 	Model,
 	ProviderSessionState,
 	TextContent,
+	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -178,6 +180,36 @@ function replayedResults(context: Context): string[] {
 		}
 	}
 	return out;
+}
+
+function dataUri(data: string): string {
+	return `data:image/png;base64,${data}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function replayedItems(message: Message | undefined): Array<Record<string, unknown>> {
+	const payload = message && "providerPayload" in message ? message.providerPayload : undefined;
+	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return [];
+	return payload.items;
+}
+
+function computerResultMessage(toolCallId: string, data: string): ToolResultMessage {
+	return {
+		role: "toolResult",
+		timestamp: 1,
+		toolCallId,
+		toolName: "computer",
+		content: [text("screenshot")],
+		isError: false,
+		providerMetadata: {
+			type: "computer",
+			acknowledgedSafetyChecks: [],
+			screenshot: { type: "computer_screenshot", image_url: dataUri(data) },
+		},
+	};
 }
 
 describe("provider context image budgets", () => {
@@ -686,6 +718,60 @@ describe("provider context image budgets", () => {
 		// Every image survives: none of them put bytes on the wire.
 		expect(piped.messages.length).toBe(count);
 		expect(imageData(piped).length).toBe(count);
+	});
+
+	it("charges and evicts the images a replayed native history carries", async () => {
+		// A remote-compaction replacement retains `input_image` items whose bytes
+		// live ONLY on the payload: the generic content was reduced to text, so a
+		// content-only tally reads zero while megabytes travel.
+		const big = "y".repeat(9 * 1024 * 1024);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "compaction summary" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(big) }] },
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(big) }] },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		const items = replayedItems(clamped.messages[0]);
+		const remaining = items.flatMap(item =>
+			Array.isArray(item.content) ? item.content.filter(part => isRecord(part) && part.type === "input_image") : [],
+		);
+		// Two 9 MB images exceed the 16 MB budget; the oldest is degraded in place.
+		expect(remaining.length).toBe(1);
+		// The item keeps its shape and position rather than being removed.
+		expect(items.length).toBe(2);
+	});
+
+	it("clears the screenshot metadata a computer result actually sends", async () => {
+		// `computer_call_output.output` carries `providerMetadata.screenshot`, not
+		// the mirrored content image, so dropping only the content block gives back
+		// no wire bytes at all.
+		const big = "z".repeat(9 * 1024 * 1024);
+		const context: Context = {
+			messages: [computerResultMessage("call-1", big), computerResultMessage("call-2", big)],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+
+		const first = clamped.messages[0];
+		expect(first?.role).toBe("toolResult");
+		// The oldest screenshot is cleared; the newer one still travels.
+		expect(first && "providerMetadata" in first ? first.providerMetadata : undefined).toBeUndefined();
+		const second = clamped.messages[1];
+		expect(second && "providerMetadata" in second ? second.providerMetadata : undefined).toBeDefined();
 	});
 
 	it("treats a managed session with no provider state yet as unwarmed", async () => {

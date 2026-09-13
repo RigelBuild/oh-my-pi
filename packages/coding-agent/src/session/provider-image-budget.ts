@@ -70,6 +70,14 @@ function collectImageStats(
 				inlineSizes.push(...replayedImageResultSizes(message, byteModel, replaysNativeHistory));
 			continue;
 		}
+		if (message.role === "toolResult" && byteModel !== undefined) {
+			const screenshot = inlineComputerScreenshot(message.providerMetadata);
+			if (screenshot !== undefined) inlineSizes.push(screenshot.length);
+		}
+		if (byteModel !== undefined) {
+			const replayed = replayedInputImageSizes(message, byteModel, replaysNativeHistory);
+			if (replayed.length > 0) inlineSizes.push(...replayed);
+		}
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type !== "image") continue;
@@ -138,6 +146,60 @@ function replayedImageResult(item: Record<string, unknown>): string | undefined 
 	return typeof result === "string" && result.length > 0 ? result : undefined;
 }
 
+/**
+ * Base64 sizes of the inline `input_image` parts this turn's replayed native
+ * history carries.
+ *
+ * A remote-compaction replacement can retain `input_image` items whose bytes
+ * exist ONLY inside a user/developer `providerPayload`:
+ * `session-context.ts` attaches the full snapshot to the summary and
+ * `openai-shared.ts` `convertConversationMessages()` replays it instead of the
+ * generic content, which `inputContentParts()` reduced to text. Tallying
+ * `message.content` alone therefore read zero while megabytes travelled, and a
+ * resumed session kept failing with 413 because no drop was ever owed.
+ *
+ * Bytes only, like a replayed generation result: these ride inside a replayed
+ * item rather than as image parts the provider counts.
+ */
+function replayedInputImageSizes(message: Message, model: Model, replaysNativeHistory: boolean): number[] {
+	if (message.role !== "user" && message.role !== "developer") return [];
+	if (!replaysNativeHistory) return [];
+	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
+	if (!payload) return [];
+	const sizes: number[] = [];
+	for (const item of payload.items) {
+		for (const part of nativeInputImageParts(item)) {
+			const image = inlineImageFromDataUri(part.image_url);
+			if (image && image.data.length > 0) sizes.push(image.data.length);
+		}
+	}
+	return sizes;
+}
+
+/** The `input_image` parts of a replayed item, whether nested in `content` or not. */
+function nativeInputImageParts(item: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
+	if (!item) return [];
+	if (item.type === "input_image") return [item];
+	if (!Array.isArray(item.content)) return [];
+	return item.content.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "input_image");
+}
+
+/**
+ * The inline base64 of a computer result's replayed screenshot, or `undefined`
+ * when it carries none.
+ *
+ * `openai-shared.ts` `appendResponsesToolResultMessages()` sends
+ * `providerMetadata.screenshot` as the `computer_call_output.output`, so the
+ * metadata copy is what travels — the mirrored generic content image is dropped
+ * on the floor. Clamping only the content block therefore removed no wire bytes
+ * at all, and a result with no mirrored copy went uncounted entirely.
+ */
+function inlineComputerScreenshot(metadata: ToolResultProviderMetadata | undefined): string | undefined {
+	if (metadata?.type !== "computer") return undefined;
+	const image = inlineImageFromDataUri(metadata.screenshot.image_url);
+	return image && image.data.length > 0 ? image.data : undefined;
+}
+
 /** Count of oldest images to drop so the surviving image payload fits `byteLimit`. */
 function imageDropCountForBytes(sizes: readonly number[], byteLimit: number): number {
 	let total = 0;
@@ -198,26 +260,104 @@ function clampContent(
 // empty content array is skipped by the Anthropic converter, so the turn would
 // vanish from the transcript and take its conversational position with it.
 function clampUserMessage(message: UserMessage, state: ImageClampState): UserMessage {
-	if (!Array.isArray(message.content) || !clampWanted(state)) return message;
+	const payload = clampReplayedInputImages(message, state);
+	if (!Array.isArray(message.content) || !clampWanted(state)) return payload ? { ...message, ...payload } : message;
 	const content = clampContent(message.content, state);
-	return content
-		? { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE], providerPayload: undefined }
-		: message;
+	if (!content) return payload ? { ...message, ...payload } : message;
+	// Dropping a generic image already discards the payload, which is where the
+	// replayed copy of that same image lives.
+	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE], providerPayload: undefined };
 }
 
 function clampDeveloperMessage(message: DeveloperMessage, state: ImageClampState): DeveloperMessage {
-	if (!Array.isArray(message.content) || !clampWanted(state)) return message;
+	const payload = clampReplayedInputImages(message, state);
+	if (!Array.isArray(message.content) || !clampWanted(state)) return payload ? { ...message, ...payload } : message;
 	const content = clampContent(message.content, state);
-	return content
-		? { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE], providerPayload: undefined }
-		: message;
+	if (!content) return payload ? { ...message, ...payload } : message;
+	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE], providerPayload: undefined };
 }
 
 function clampToolResultMessage(message: ToolResultMessage, state: ImageClampState): ToolResultMessage {
 	if (!clampWanted(state)) return message;
+	const screenshotDropped = clampComputerScreenshot(message, state);
 	const content = clampContent(message.content, state);
-	if (!content) return message;
-	return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] };
+	if (!content) return screenshotDropped ? { ...message, providerMetadata: undefined } : message;
+	return {
+		...message,
+		content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE],
+		...(screenshotDropped ? { providerMetadata: undefined } : {}),
+	};
+}
+
+/**
+ * Evicts the inline `input_image` parts a replayed payload would carry, by
+ * degrading each to the `input_text` the Responses input schema accepts in the
+ * same position — the same in-place rewrite the undecodable path uses, for the
+ * same reason: the payload also holds compaction markers and call ids the
+ * generic content does not reproduce, so clearing it would lose real history.
+ */
+function clampReplayedInputImages(
+	message: UserMessage | DeveloperMessage,
+	state: ImageClampState,
+): { providerPayload: ProviderPayload } | undefined {
+	if (state.remainingInlineDrops <= 0 || !state.replaysNativeHistory) return undefined;
+	const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, state.model.provider);
+	if (!payload) return undefined;
+	let items: Array<Record<string, unknown>> | undefined;
+	for (let index = 0; index < payload.items.length; index++) {
+		if (state.remainingInlineDrops <= 0) break;
+		const item = payload.items[index];
+		const rewritten = dropNativeInputImages(item, state);
+		if (!rewritten) continue;
+		items ??= [...payload.items];
+		items[index] = rewritten;
+	}
+	return items ? { providerPayload: { ...payload, items } } : undefined;
+}
+
+/** `undefined` when the item carries no inline image worth dropping. */
+function dropNativeInputImages(
+	item: Record<string, unknown> | undefined,
+	state: ImageClampState,
+): Record<string, unknown> | undefined {
+	if (!item) return undefined;
+	const omitted = { type: "input_text", text: IMAGE_OMISSION_NOTICE.text };
+	if (item.type === "input_image") {
+		if (!inlineNativeImageSize(item)) return undefined;
+		state.remainingInlineDrops--;
+		return omitted;
+	}
+	if (!Array.isArray(item.content)) return undefined;
+	let content: unknown[] | undefined;
+	for (let index = 0; index < item.content.length; index++) {
+		if (state.remainingInlineDrops <= 0) break;
+		const part = item.content[index];
+		if (!isRecord(part) || part.type !== "input_image" || !inlineNativeImageSize(part)) continue;
+		state.remainingInlineDrops--;
+		content ??= [...item.content];
+		content[index] = omitted;
+	}
+	return content ? { ...item, content } : undefined;
+}
+
+/** Whether this native part carries inline bytes at all. */
+function inlineNativeImageSize(part: Record<string, unknown>): boolean {
+	const image = inlineImageFromDataUri(part.image_url);
+	return image !== undefined && image.data.length > 0;
+}
+
+/**
+ * Clears a computer result's replayed screenshot while byte pressure remains.
+ * That metadata copy is what `computer_call_output.output` sends, so it is the
+ * only way this result gives back wire bytes. `computer_call_output` accepts
+ * only a `computer_screenshot` ref with no text alternative, so the metadata is
+ * cleared outright rather than degraded in place.
+ */
+function clampComputerScreenshot(message: ToolResultMessage, state: ImageClampState): boolean {
+	if (state.remainingInlineDrops <= 0) return false;
+	if (inlineComputerScreenshot(message.providerMetadata) === undefined) return false;
+	state.remainingInlineDrops--;
+	return true;
 }
 
 /**
