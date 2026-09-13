@@ -594,6 +594,27 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("keeps an explicit tier pin through a settings refresh that moves the file", async () => {
+		// The pin's value EQUALS what the file configured, so inferring provenance
+		// from value equality read it as config-following and the reload overwrote
+		// it. The receipt is the only durable record of the explicit selection.
+		const h = await makeHarness("tier:\n  openai: priority\n");
+		try {
+			// Explicitly select the same value the file already configures.
+			h.session.setServiceTierFamily("openai", "priority");
+
+			await fs.writeFile(h.settingsPath, "tier:\n  openai: flex\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// RED (pre-fix): the live value equalled `previousConfigured`, so the
+			// reconcile treated the pin as config-derived and wrote `flex`.
+			expect(h.session.serviceTierByFamily.openai).toBe("priority");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("keeps a manually deselected built-in inactive when its gate is re-enabled", async () => {
 		// `/tools` records an explicit active set. A gate going false->true only
 		// makes the tool AVAILABLE again; unconditionally re-adding the name
