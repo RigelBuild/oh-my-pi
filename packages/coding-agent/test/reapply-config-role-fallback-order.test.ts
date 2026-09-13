@@ -276,6 +276,26 @@ describe("--reapply-config configured default fallback order", () => {
 		expect(resumed.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
 	});
 
+	it("stops at a reached self alias ahead of a later resolvable model", async () => {
+		// `missing/model,*:low,<anthropic>`: the concrete first entry does not
+		// resolve, so `*:low` at index 1 is the first entry the fallback REACHES —
+		// and an alias means "keep the session's model at this level". But
+		// `resolveModelRoleValue` walks past an alias (a circular selector resolves
+		// to no model) and returns the index-2 Anthropic model, so gating on "did
+		// anything match" classified the alias as unreached: the resume adopted the
+		// lower-priority model and dropped its `low`.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const later = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay(`missing/model,*:low,${modelValue(later)}`);
+
+		const resumed = await resume(sessionFile, settings, true);
+
+		expect(resumed.model?.id).toBe(bakedModel.id);
+		expect(resumed.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+	});
+
 	it("ignores a thinking suffix on a fallback that did not win", async () => {
 		// `"anthropic/...,*:low"`: the concrete entry resolves, so the `low` belongs
 		// to a fallback that was never selected. Scanning every pattern for a

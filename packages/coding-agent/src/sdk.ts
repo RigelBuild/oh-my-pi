@@ -1621,8 +1621,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// mid-startup. A captured `false` outlived the registration that disproved it
 	// and handed the resume to the baked-model fallback, which then made the
 	// post-registration retry unreachable because a model was already set.
-	const hasConfigDefaultRole = (): boolean =>
-		defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern)) || defaultRoleSpec.model !== undefined;
+	const hasConfigDefaultRole = (): boolean => {
+		// A self alias the fallback reaches first means config asked to KEEP the
+		// session's model, so a model matched further down the list is not the
+		// configured default — adopting it resumed on a lower-priority entry.
+		if (reachedSelfAlias(defaultRoleSpec)) return false;
+		return (
+			defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern)) ||
+			defaultRoleSpec.model !== undefined
+		);
+	};
 	// A self alias sets no model but a suffixed one (`*:xhigh`) still names the
 	// THINKING knob. `resolveModelRoleValue` cannot report it — the circular
 	// selector resolves to no model, hence `explicitThinkingLevel: false` — so
@@ -1656,14 +1664,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// all. Read by the saved-suffix reparse, whose whole purpose is correcting
 	// that value.
 	let savedSuffixIsReadable = true;
-	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined => {
-		if (spec.model) return undefined;
-		for (const pattern of defaultRolePatterns) {
+	//
+	// By POSITION, not by "did anything match". `resolveModelRoleValue` walks
+	// past an alias because a circular selector resolves to no model, so in
+	// `missing/model,*:low,anthropic/claude-sonnet-4-5` it returns the Anthropic
+	// model from index 2 — while the alias at index 1 is the first entry the
+	// fallback actually REACHED, and fallback stops at the first usable entry.
+	// Treating any later match as proof that no alias was reached adopted the
+	// lower-priority model and dropped the alias's level.
+	const reachedSelfAlias = (spec: ResolvedModelRoleValue): { level?: ConfiguredThinkingLevel } | undefined => {
+		const matchedIndex = spec.model ? (spec.matchedPatternIndex ?? 0) : defaultRolePatterns.length;
+		for (const [index, pattern] of defaultRolePatterns.entries()) {
+			if (index >= matchedIndex) break;
 			const alias = parseDefaultModelRoleSelfAlias(pattern);
-			if (alias) return alias.level;
+			if (alias) return alias;
 		}
 		return undefined;
 	};
+	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined =>
+		reachedSelfAlias(spec)?.level;
 	const adoptConfigModel = (): boolean =>
 		Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigDefaultRole();
 	let model = options.model;
@@ -2991,6 +3010,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					matchPreferences: modelMatchPreferences,
 				});
 				if (!reResolvedRoleSpec.model) return false;
+				// A self alias EARLIER in the list than the matched pattern is the
+				// entry fallback reached, and it names the session's own model — so
+				// this later match is not the configured default. Publish the spec so
+				// the alias's suffix is still live, but adopt nothing.
+				if (reachedSelfAlias(reResolvedRoleSpec)) {
+					defaultRoleSpec = reResolvedRoleSpec;
+					return false;
+				}
 				defaultRoleSpec = reResolvedRoleSpec;
 				const resolvedDefaultModel = reResolvedRoleSpec.model;
 				model = resolvedDefaultModel;
