@@ -6325,7 +6325,23 @@ export class AgentSession {
 			// `refreshInBackground` owns the promise and swallows discovery errors,
 			// and the registry outlives this session by contract, so nothing here
 			// is left attached to the disposed one.
-			setTimeout(() => this.#modelRegistry.refreshInBackground(), 0).unref?.();
+			// CHAINED behind any refresh already in flight, not just fired. A
+			// caller-owned registry can have a slow background pass running when the
+			// restart begins, and `refreshInBackground()` returns immediately while
+			// `#backgroundRefresh` is set — so a plain call is silently dropped. That
+			// earlier pass chose its discovery providers BEFORE the offline reload
+			// above re-read models.yml, so it cannot cover a newly configured
+			// provider or endpoint, and nothing would run after it settles: the
+			// replacement comes back missing exactly the model change the restart was
+			// requested for. Awaiting the settle first makes the post-reload pass
+			// happen in every case; the await is inside the macrotask, so the handoff
+			// still does not pay for it.
+			setTimeout(() => {
+				void this.#modelRegistry
+					.awaitBackgroundRefresh()
+					.catch(() => {})
+					.then(() => this.#modelRegistry.refreshInBackground());
+			}, 0).unref?.();
 			return { ok: true };
 		} catch (err) {
 			// A throw between the recycle dispose and the host callback leaves a
