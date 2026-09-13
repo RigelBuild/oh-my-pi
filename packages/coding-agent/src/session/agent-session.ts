@@ -2381,18 +2381,26 @@ export class AgentSession {
 				if (path === "browser.enabled" && this.#reconcileBrowserMcpFilter) {
 					// Two corrections the sibling MCP paths already make.
 					//
-					// Ownership: a subagent granted `refresh` inherits its parent's
-					// manager, so reconciling here would connect or disconnect the
-					// PARENT's browser transports from the child's settings scope
-					// while only the child's tool registry is rebuilt. Same predicate
-					// the project-config and full-MCP blocks gate on.
+					// Inheritance: a subagent granted `refresh` is handed its parent's
+					// manager (`structured-subagent.ts` forwards `session.mcpManager`),
+					// so reconciling here would connect or disconnect the PARENT's
+					// browser transports from the child's settings scope while only the
+					// child's tool registry is rebuilt.
+					//
+					// Keyed on task depth rather than on owning the manager: a
+					// TOP-LEVEL SDK caller that supplies its own manager owns no less
+					// of it for having built it outside the session, and gating on
+					// ownership silently stopped reconciling for every embedder that
+					// passes `mcpManager` — the case upstream's own
+					// `sdk-computer-prelude-toggle` test pins. Depth names the actual
+					// hazard: only a child shares a manager with someone else.
 					//
 					// Effective availability, not the raw setting: the filter means
 					// "the callable browser prelude replaces these servers", which
 					// needs `eval` registered AND active. Forwarding the bare value
 					// disconnects the browser servers of a session that has no
 					// prelude to replace them, stripping its only browser capability.
-					if (this.#disconnectOwnedMcpManager) {
+					if (this.#taskDepth === 0) {
 						const tools = await this.#reconcileBrowserMcpFilter(
 							shouldFilterBrowserMCPForPrelude({
 								restrictToolNames: false,
@@ -6175,11 +6183,10 @@ export class AgentSession {
 					// and only on a real transition so an unrelated gate edit
 					// touches no connection.
 					const evalIsActive = this.agent.state.tools.some(tool => tool.name === "eval");
-					if (
-						evalWasActive !== evalIsActive &&
-						this.#reconcileBrowserMcpFilter &&
-						this.#disconnectOwnedMcpManager
-					) {
+					// Depth, not ownership — same reason as the `browser.enabled`
+					// listener: a top-level embedder supplying its own manager must
+					// still reconcile; only a subagent shares one with a parent.
+					if (evalWasActive !== evalIsActive && this.#reconcileBrowserMcpFilter && this.#taskDepth === 0) {
 						const tools = await this.#reconcileBrowserMcpFilter(
 							shouldFilterBrowserMCPForPrelude({
 								restrictToolNames: false,

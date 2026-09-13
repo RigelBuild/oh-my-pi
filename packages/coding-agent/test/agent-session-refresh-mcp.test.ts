@@ -912,7 +912,10 @@ describe("AgentSession.refresh('mcp')", () => {
 	// (`mcpManager` set, `disconnectOwnedMcpManager` unset). Reconciling there
 	// connects or disconnects the PARENT's browser transports from the child's
 	// settings scope while only the child's tool registry is rebuilt.
-	it("does not reconcile browser MCP on an inherited manager", async () => {
+	//
+	// Keyed on task DEPTH, not on owning the manager: a top-level embedder that
+	// supplies its own manager still has to reconcile.
+	it("does not reconcile browser MCP on a subagent's inherited manager", async () => {
 		const dir = TempDir.createSync("@pi-refresh-mcp-browser-inherited-");
 		const settingsPath = `${dir.path()}/config.yml`;
 		await fsp.writeFile(settingsPath, "browser:\n  enabled: true\n");
@@ -935,7 +938,8 @@ describe("AgentSession.refresh('mcp')", () => {
 			toolRegistry: new Map<string, AgentTool>(),
 			extensionRoots: () => roots,
 			mcpManager: manager,
-			// No `disconnectOwnedMcpManager`: the manager belongs to the parent.
+			// A subagent: the manager it was handed belongs to its parent.
+			memoryTaskDepth: 1,
 			reconcileBrowserMcpFilter: async enabled => {
 				reconciledWith.push(enabled);
 				return manager.getTools();
