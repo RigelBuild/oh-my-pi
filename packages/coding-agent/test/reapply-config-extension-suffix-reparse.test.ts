@@ -338,6 +338,116 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	}, 30000);
 
+	test("does not block startup on a cold catalog configured thinking outranks", async () => {
+		// The third exclusion on the same read. Under `--reapply-config` with a
+		// configured thinking value, `adoptConfigThinking` skips the saved-suffix
+		// branch entirely — so the corrected value is discarded here too, and the
+		// await buys nothing but the discovery timeout.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		// Held open for the whole of session creation, so "startup waited" and
+		// "startup did not" are distinguishable without timing.
+		const catalogGate = Promise.withResolvers<void>();
+		let catalogReleased = false;
+		const dynamicProviderExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				// The config model is STATIC, so resolving it needs no catalog: the
+				// held-open fetch below is reached only by the saved-suffix reparse.
+				models: [
+					{
+						id: "config-pick",
+						name: "Config Pick",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+				fetchDynamicModels: async () => {
+					await catalogGate.promise;
+					return [
+						{
+							id: "router:low",
+							name: "Router Low",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+
+		// Same baked session, plus the `thinking_level_change` that outranks the
+		// saved selector's suffix.
+		const sessionFile = path.join(tempDir, `baked-cfg-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "baked-cfg-session", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: "runtime-provider/router:low",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+
+		// No persisted entry and no `--thinking`: config's OWN thinking value is what
+		// outranks the saved suffix here, through `adoptConfigThinking`.
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "runtime-provider/config-pick");
+		settings.set("defaultThinkingLevel", ThinkingLevel.High);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-cfg"));
+
+		const created = createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [dynamicProviderExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			const { session } = await created;
+			// The catalog never came back, and startup finished anyway.
+			expect(catalogReleased).toBe(false);
+			expect(session.model?.id).toBe("config-pick");
+			await session.dispose();
+		} finally {
+			catalogReleased = true;
+			catalogGate.resolve();
+		}
+	}, 30000);
+
 	// The third cell, and the one both fixes above miss: the config/CLI model is
 	// STATICALLY visible, so `model` is resolved before the reparse — while the
 	// saved id lives only in the cold dynamic catalog, so only the reparse can

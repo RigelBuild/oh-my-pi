@@ -1644,6 +1644,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// `missing/model,*,*:low` the bare `*` wins and the session keeps its own
 	// level; skipping to the later `*:low` applied a suffix from a fallback
 	// resolution never reached.
+	// Set by `pickInitialThinkingLevel`, which owns the precedence this answers:
+	// whether its single read of `restoredSessionThinkingLevel` can be reached at
+	// all. Read by the saved-suffix reparse, whose whole purpose is correcting
+	// that value.
+	let savedSuffixIsReadable = true;
 	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined => {
 		if (spec.model) return undefined;
 		for (const pattern of defaultRolePatterns) {
@@ -1785,6 +1790,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			selfAliasThinkingLevel !== undefined ||
 			settings.isConfigured("defaultThinkingLevel");
 		const adoptConfigThinking = Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigThinkingLevel;
+		// Every condition under which the ONE read of `restoredSessionThinkingLevel`
+		// below is unreachable. Recorded on the closure so the discovery fetch that
+		// exists only to correct that value can ask the same question instead of
+		// re-deriving a subset of it.
+		savedSuffixIsReadable = options.thinkingLevel === undefined && !hasThinkingEntry && !adoptConfigThinking;
 		let level = options.thinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry && !adoptConfigThinking) {
 			level =
@@ -2592,7 +2602,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// a `--thinking` pin, therefore discards whatever this fetch would
 			// correct, and a cold dynamic provider charges the startup its full
 			// discovery timeout for a value nothing reads.
-			const savedSuffixIsReadable = options.thinkingLevel === undefined && !hasThinkingEntry;
 			if (
 				savedSuffixIsReadable &&
 				savedParse?.thinkingLevel !== undefined &&
