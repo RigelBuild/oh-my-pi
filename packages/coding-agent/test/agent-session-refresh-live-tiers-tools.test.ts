@@ -630,6 +630,59 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 30_000);
 
+	it("keeps an MCP tool the user disabled through /tools across a tool rebind", async () => {
+		// A settings refresh calls `refreshMCPTools(manager.getTools())` whenever
+		// ANY setting changes -- `reconcileProjectConfigFilter()` self-guards on
+		// no-change, but the rebind ran regardless. The active set was then rebuilt
+		// as "every manager tool, unconditionally", so a tool the user had turned
+		// off through `/tools` became callable again.
+		const h = await makeHarness("ui:\n  thinkingBlock: true\n");
+		try {
+			const tools: CustomTool[] = ["mcp__srv__alpha", "mcp__srv__beta"].map(name => ({
+				name,
+				label: name,
+				description: name,
+				parameters: { type: "object" as const },
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			}));
+
+			// The manager connects; both tools arrive active, which is correct.
+			await h.session.refreshMCPTools(tools);
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__alpha");
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__beta");
+
+			// The user turns one off.
+			await h.session.setActiveToolsByName(
+				h.session.getEnabledToolNames().filter(name => name !== "mcp__srv__beta"),
+			);
+			expect(h.session.getEnabledToolNames()).not.toContain("mcp__srv__beta");
+
+			// An unrelated settings edit rebinds the SAME manager tools.
+			await h.session.refreshMCPTools(tools);
+
+			// RED (pre-fix): "mcp__srv__beta" is active and callable again.
+			expect(h.session.getEnabledToolNames()).not.toContain("mcp__srv__beta");
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__alpha");
+
+			// A NEWLY connected tool still arrives active -- the deselection is
+			// remembered per tool, not a blanket freeze of the MCP set.
+			await h.session.refreshMCPTools([
+				...tools,
+				{
+					name: "mcp__srv__gamma",
+					label: "gamma",
+					description: "gamma",
+					parameters: { type: "object" as const },
+					execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+				},
+			]);
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__gamma");
+			expect(h.session.getEnabledToolNames()).not.toContain("mcp__srv__beta");
+		} finally {
+			await h.dispose();
+		}
+	});
+
 	it("mounts xd:// for a session that started with the setting off", async () => {
 		// `createTools` allocates `session.xdev` only when `tools.xdev` was true at
 		// startup, so a session that began disabled had no state for the reconcile
