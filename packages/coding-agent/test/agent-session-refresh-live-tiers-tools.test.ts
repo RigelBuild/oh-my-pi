@@ -19,6 +19,7 @@
  *     Ctrl+P cycle pin (must be preserved).
  */
 import { afterEach, describe, expect, it, vi, spyOn } from "bun:test";
+import * as browserTools from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -624,6 +625,63 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 
 			expect(h.session.getMountedXdevToolNames().length).toBeGreaterThan(0);
 			expect(h.session.getActiveToolNames()).not.toContain(mountedBefore[0]);
+		} finally {
+			await h.dispose();
+		}
+	}, 30_000);
+
+	it("mounts xd:// for a session that started with the setting off", async () => {
+		// `createTools` allocates `session.xdev` only when `tools.xdev` was true at
+		// startup, so a session that began disabled had no state for the reconcile
+		// to act on: a false->true refresh was a silent no-op and every tool stayed
+		// top-level, unlike a fresh session started enabled. The flip test above
+		// starts ENABLED, so it exercises true->false->true and reuses the state
+		// startup already built — it cannot see this.
+		const h = await makeHarness("tools:\n  xdev: false\n");
+		try {
+			expect(h.session.getMountedXdevToolNames()).toEqual([]);
+			const topLevelBefore = h.session.getActiveToolNames();
+			expect(topLevelBefore).toContain("read");
+
+			await fs.writeFile(h.settingsPath, "tools:\n  xdev: true\n");
+			await h.session.refresh("settings");
+
+			// RED (pre-fix): no state existed, so nothing mounted and this was [].
+			const mounted = h.session.getMountedXdevToolNames();
+			expect(mounted.length).toBeGreaterThan(0);
+			expect(h.session.getActiveToolNames()).not.toContain(mounted[0]);
+		} finally {
+			await h.dispose();
+		}
+	}, 30_000);
+
+	it("runs the browser mode-change lifecycle when browser.headless flips", async () => {
+		// `refresh('settings')` reloaded the value but reconciled only
+		// `browser.enabled`, so an open tab kept the kind it was opened under. The
+		// next `browser.open` resolved the NEW kind, found the same-named tab on
+		// the old one, and failed with "bound to a different browser" until the
+		// user closed it by hand — the restart `/browser` performs on the same
+		// toggle never ran.
+		const h = await makeHarness("browser:\n  headless: true\n");
+		try {
+			const restarts: number[] = [];
+			const restart = spyOn(browserTools, "restartBrowserForModeChange").mockImplementation(async () => {
+				restarts.push(1);
+			});
+			try {
+				await fs.writeFile(h.settingsPath, "browser:\n  headless: true\n  idleCloseSec: 31\n");
+				await h.session.refresh("settings");
+				// An unrelated browser edit must not restart anything.
+				expect(restarts).toHaveLength(0);
+
+				await fs.writeFile(h.settingsPath, "browser:\n  headless: false\n");
+				await h.session.refresh("settings");
+
+				// RED (pre-fix): no restart ran, so the open tab kept the old kind.
+				expect(restarts).toHaveLength(1);
+			} finally {
+				restart.mockRestore();
+			}
 		} finally {
 			await h.dispose();
 		}

@@ -390,6 +390,8 @@ export interface AgentSessionConfig {
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
 	xdev?: XdevState;
+	/** Allocates `xd://` state for a session that started with `tools.xdev` false. */
+	createXdevState?: () => XdevState | undefined;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */

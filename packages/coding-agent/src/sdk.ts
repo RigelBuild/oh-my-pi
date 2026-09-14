@@ -4409,6 +4409,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
+			// Allocates the state a session that started with `tools.xdev` FALSE
+			// never got, so a later false->true refresh can mount. Same startup
+			// gates `createTools` applies: a restricted session installs no xd://
+			// at all, and mounting rides the write grant as its execution
+			// transport, so a session without `write` gets nothing here either.
+			createXdevState: () => {
+				if (restrictToolNames || toolSession.xdev) return undefined;
+				if (!toolRegistry.has("write")) return undefined;
+				const state = {
+					tools: toolRegistry,
+					mountedNames: new Set<string>(),
+					builtInNames: builtInRegistryToolNames,
+					isActive: (name: string) => toolSession.isToolActive?.(name) === true,
+				};
+				toolSession.xdev = state;
+				return state;
+			},
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,

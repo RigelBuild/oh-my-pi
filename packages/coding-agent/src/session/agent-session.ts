@@ -231,6 +231,7 @@ import {
 	releaseIdleTabsForOwner,
 	releaseTabsForOwner,
 } from "../tools/browser/tab-supervisor";
+import { restartBrowserForModeChange } from "../tools/browser";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -2089,6 +2090,7 @@ export class AgentSession {
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
+			createXdevState: config.createXdevState,
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
@@ -6145,6 +6147,12 @@ export class AgentSession {
 				advisorEnabled: this.settings.get("advisor.enabled"),
 				externalThinking: this.settings.get("externalThinking"),
 				browserEnabled: this.settings.get("browser.enabled"),
+				// The browser MODE, not just whether it is enabled. A live tab is
+				// bound to the kind it was opened under, so a `browser.headless`
+				// edit left the open tab on the old kind and the next
+				// `browser.open` failed with "bound to a different browser" until
+				// the user closed it by hand.
+				browserHeadless: this.settings.get("browser.headless"),
 				// Gate whether the `generate_image`/`tts` tool sets exist at all;
 				// installed once at construction with no later add/remove path.
 				imageGenEnabled: this.settings.get("generate_image.enabled"),
@@ -6426,6 +6434,12 @@ export class AgentSession {
 				}
 				if (this.settings.get("tools.xdev") !== previousSubsystems.xdevEnabled) {
 					await this.#tools.applyReloadedXdevPresentation();
+				}
+				// The same lifecycle `/browser` runs when it toggles the mode: the
+				// reload alone changes which kind the next open RESOLVES, while the
+				// tab already open keeps the old one.
+				if (this.settings.get("browser.headless") !== previousSubsystems.browserHeadless) {
+					await restartBrowserForModeChange();
 				}
 				// `browser.enabled`/`computer.enabled` DO reach a listener — the
 				// eval-prelude `onEffectiveChange` subscriber — but it launches an
