@@ -63,7 +63,10 @@ function collectImageStats(
 	let total = 0;
 	const inlineSizes: number[] = [];
 	const pairedComputerCallIds = collectPairedComputerCallIds(context, countModel, replaysNativeHistory);
-	for (const message of context.messages) {
+	// Everything before a full-snapshot replacement is spliced off the wire, so
+	// it owes neither budget — see `wireStartIndex`.
+	const wireStart = wireStartIndex(context, countModel, replaysNativeHistory);
+	for (const message of context.messages.slice(wireStart)) {
 		if (message.role === "assistant") {
 			// An assistant's generic `content` images are display-only, but its
 			// replayed native image results are NOT — see
@@ -527,6 +530,28 @@ function serializesDemotedScreenshotNote(model: Model): boolean {
  * is emitted for an assistant tool call whose `providerMetadata.type` is
  * `"computer"`, so that is what pairs a later result's screenshot.
  */
+/**
+ * Index of the first message that survives onto the wire.
+ *
+ * `convertConversationMessages()` treats a replayed payload with `dt` falsy as
+ * a FULL SNAPSHOT: `messages.splice(0, messages.length, ...wireItems)` throws
+ * away everything accumulated before it. Tallying across that boundary counted
+ * images the request never sends — a 20 MB user image before a 20 MB snapshot
+ * measured 40 MB, so the single computed drop was spent on the image the splice
+ * already removes and the snapshot stayed over the limit. The clamp shares this
+ * boundary: a drop applied before it reclaims nothing.
+ */
+function wireStartIndex(context: Context, model: Model, replaysNativeHistory: boolean): number {
+	let start = 0;
+	for (let index = 0; index < context.messages.length; index++) {
+		const message = context.messages[index];
+		if (message?.role !== "assistant") continue;
+		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
+		if (payload && !payload.dt) start = index;
+	}
+	return start;
+}
+
 function collectPairedComputerCallIds(context: Context, model: Model, replaysNativeHistory: boolean): Set<string> {
 	let ids = new Set<string>();
 	for (const message of context.messages) {
@@ -601,6 +626,8 @@ interface ImageClampState {
 	replaysNativeHistory: boolean;
 	/** Call ids of the computer calls still present, which pair a result's screenshot. */
 	pairedComputerCallIds: ReadonlySet<string>;
+	/** First message index that survives onto the wire — see `wireStartIndex`. */
+	wireStartIndex: number;
 }
 
 /**
@@ -902,7 +929,11 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 
 /** Applies an already-computed drop allowance oldest-first across the context. */
 function applyImageClamp(context: Context, state: ImageClampState): Context {
-	const messages = context.messages.map(message => {
+	const messages = context.messages.map((message, index) => {
+		// Before the splice boundary nothing reaches the wire, so a drop applied
+		// here reclaims no bytes while consuming the allowance the surviving
+		// payload needs.
+		if (index < state.wireStartIndex) return message;
 		switch (message.role) {
 			case "user":
 				return clampUserMessage(message, state);
@@ -972,6 +1003,7 @@ export function clampProviderContextImageCount(context: Context, model: Model, r
 		// Same set the accounting used: a clamp deciding pairing differently from
 		// the tally clears metadata whose mirror then travels instead.
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
+		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
 	});
 }
 
@@ -1005,6 +1037,7 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 		// Same set the accounting used: a clamp deciding pairing differently from
 		// the tally clears metadata whose mirror then travels instead.
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
+		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
 	});
 }
 

@@ -780,9 +780,13 @@ describe("provider context image budgets", () => {
 			],
 		};
 
-		// Warmed (the default) the payload is charged and the older user image goes.
+		// Warmed, the payload is charged — and since it has no `dt` it is a full
+		// SNAPSHOT, so the splice takes the older user image off the wire anyway.
+		// The drop therefore has to land on a replayed result: spending it on the
+		// user image reclaimed nothing and left the payload over the limit.
 		const warmed = clampProviderContextImages(context, OPENAI_MODEL, true);
-		expect(imageData(warmed)).not.toContain(generated);
+		expect(replayedResults(warmed)).toHaveLength(1);
+		expect(imageData(warmed)).toContain(generated);
 
 		// Unwarmed, nothing is charged and the live image survives untouched.
 		const unwarmed = clampProviderContextImages(context, OPENAI_MODEL, false);
@@ -1783,6 +1787,38 @@ describe("replayed assistant payload byte accounting", () => {
 });
 
 describe("computer pairing across a snapshot replacement", () => {
+	it("does not charge images a full snapshot splices off the wire", async () => {
+		// `buildResponsesInput()` replaces the whole accumulated input at a
+		// `dt`-falsy payload, so everything before it is not on the wire and owes
+		// neither budget. Tallying across the boundary measured the SUM of both
+		// sides, so the allowance was spent evicting content the splice already
+		// removes — a drop that reclaims nothing the request was going to send.
+		const over = "x".repeat(providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api) + 4_000_000);
+		const context: Context = {
+			messages: [
+				{ role: "user", timestamp: 1, content: [image(over)] },
+				{
+					...assistantTurn([], 2),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						// No `dt`: replaces the whole accumulated input.
+						items: [{ type: "image_generation_call", id: "ig_0", status: "completed", result: over }],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// RED (pre-fix): the pre-splice image was charged and evicted, spending the
+		// allowance on bytes the request never carries.
+		expect(imageData(clamped)).toContain(over);
+	});
+
 	it("charges the mirror of a computer call a full snapshot splices away", async () => {
 		// `buildResponsesInput()` treats a `dt`-falsy assistant payload as a full
 		// SNAPSHOT: it splices away every message built so far and clears its
@@ -1796,7 +1832,7 @@ describe("computer pairing across a snapshot replacement", () => {
 		const bigMirror = "m".repeat(providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api) + 1);
 		const unpairedResult: ToolResultMessage = {
 			role: "toolResult",
-			timestamp: 2,
+			timestamp: 4,
 			toolCallId: "call-spliced",
 			toolName: "computer",
 			content: [text("screenshot"), image(bigMirror)],
@@ -1807,10 +1843,12 @@ describe("computer pairing across a snapshot replacement", () => {
 				screenshot: { type: "computer_screenshot", image_url: dataUri(tinyScreenshot) },
 			},
 		};
+		// The call is BEFORE the snapshot and its result AFTER it: the splice takes
+		// the call off the wire while the result survives, which is the shape that
+		// leaves the result unpaired.
 		const context: Context = {
 			messages: [
 				computerCallMessage("call-spliced"),
-				unpairedResult,
 				{
 					...assistantTurn([], 3),
 					api: OPENAI_MODEL.api,
@@ -1823,6 +1861,7 @@ describe("computer pairing across a snapshot replacement", () => {
 						items: [{ type: "reasoning", id: "rs_keepme", summary: [] }],
 					},
 				},
+				unpairedResult,
 			],
 		};
 
