@@ -597,6 +597,35 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("rebuilds the memory backend when its own configuration changes", async () => {
+		// `memory.backend` stays `hindsight`, so gating the transition on the
+		// backend ID alone skipped it: the live state kept the client, endpoint and
+		// credentials built at startup, and every later recall/retain went to the
+		// old endpoint while the refresh reported the new settings applied.
+		const h = await makeHarness(
+			"memory:\n  backend: hindsight\nhindsight:\n  apiUrl: https://old.example.invalid\n  apiToken: old-token\n",
+		);
+		try {
+			const applied: number[] = [];
+			const apply = spyOn(h.session, "applyMemoryBackend").mockImplementation(async () => {
+				applied.push(1);
+			});
+
+			await fs.writeFile(
+				h.settingsPath,
+				"memory:\n  backend: hindsight\nhindsight:\n  apiUrl: https://new.example.invalid\n  apiToken: new-token\n",
+			);
+			const result = await h.session.refresh("settings");
+			apply.mockRestore();
+
+			expect(result.settingsChanged).toBe(true);
+			// RED (pre-fix): the backend ID was unchanged, so no transition ran.
+			expect(applied.length).toBeGreaterThan(0);
+		} finally {
+			await h.dispose();
+		}
+	}, 30_000);
+
 	it("probes Python before activating eval that a refresh enabled", async () => {
 		// With both backends off at startup nothing probes, so reachability is
 		// UNKNOWN — not available. Recording the skipped probe as success let this

@@ -168,6 +168,7 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
+import { loadHindsightConfig } from "../hindsight/config";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
@@ -6128,6 +6129,12 @@ export class AgentSession {
 			// `settings.get(...)` at use time.
 			const previousSubsystems = {
 				memoryBackend: this.settings.get("memory.backend"),
+				// The backend's CONSTRUCTION-time config, not just its id. A live
+				// Hindsight state holds the client, endpoint, credentials, and
+				// timeouts it was built with, so an `hindsight.apiUrl`/`apiToken`/
+				// timeout edit left every later recall and retain going to the old
+				// endpoint while the refresh reported the new settings applied.
+				memoryBackendConfig: this.#memoryBackendConfigFingerprint(),
 				autoLearnEnabled: this.settings.get("autolearn.enabled"),
 				// Copied into `ModelControls` at construction and read from there by
 				// Ctrl+P and `/models`; a reload alone never revisits it.
@@ -6408,7 +6415,10 @@ export class AgentSession {
 				// controller calls this for the same reason). Without it the model
 				// sees the new backend over the old backend's tools, and calls
 				// targeting the new one fail until restart.
-				if (this.settings.get("memory.backend") !== previousSubsystems.memoryBackend) {
+				if (
+					this.settings.get("memory.backend") !== previousSubsystems.memoryBackend ||
+					this.#memoryBackendConfigFingerprint() !== previousSubsystems.memoryBackendConfig
+				) {
 					await this.applyMemoryBackend();
 				}
 				// `browser.enabled`/`computer.enabled` DO reach a listener — the
@@ -7478,6 +7488,27 @@ export class AgentSession {
 	/** Releases the local startup slot if `signal` still owns it. */
 	endLocalMemoryStartup(signal: AbortSignal): void {
 		this.#memory.endLocalMemoryStartup(signal);
+	}
+
+	/**
+	 * The active memory backend's construction-time configuration, as a value a
+	 * refresh can compare.
+	 *
+	 * Only Hindsight builds a client from settings; the other backends take
+	 * nothing a reload could move, so they fingerprint as their id alone.
+	 */
+	#memoryBackendConfigFingerprint(): string {
+		if (this.settings.get("memory.backend") !== "hindsight") return "";
+		const config = loadHindsightConfig(this.settings);
+		return JSON.stringify([
+			config.hindsightApiUrl,
+			config.hindsightApiToken,
+			config.requestTimeoutMs,
+			config.reflectTimeoutMs,
+			config.recallTimeoutMs,
+			config.retainTimeoutMs,
+			config.debug,
+		]);
 	}
 
 	/** Apply the backend; cwd rebinding can skip Mnemopi auto-retention while still draining writes. */
