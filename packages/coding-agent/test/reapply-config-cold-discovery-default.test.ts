@@ -137,6 +137,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 		sessionFile: string,
 		settings: Settings,
 		extraProviders: Record<string, unknown> = {},
+		authOverride: AuthStorage = authStorage,
 	): Promise<AgentSession> {
 		const modelsPath = path.join(tempDir.path(), "models.yml");
 		await Bun.write(
@@ -153,13 +154,13 @@ describe("--reapply-config cold-discovery configured default", () => {
 				},
 			}),
 		);
-		const modelRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: mockOllamaDiscovery });
+		const modelRegistry = new ModelRegistry(authOverride, modelsPath, { fetch: mockOllamaDiscovery });
 		observed = observeRefreshOrder(modelRegistry);
 		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir.path(), "startup"));
 		const result = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
-			authStorage,
+			authStorage: authOverride,
 			modelRegistry,
 			sessionManager,
 			settings,
@@ -305,5 +306,39 @@ describe("--reapply-config cold-discovery configured default", () => {
 
 		expect(resumed.model?.provider).toBe("ollama");
 		expect(resumed.model?.id).toBe(DISCOVERED_MODEL);
+	});
+
+	it("discovers a cold provider's only model when no default role is configured", async () => {
+		// No `modelRoles.default` at all, and the only authenticated provider is a
+		// COLD discovery-only ollama (keyless, no static rows). `defaultRolePatterns`
+		// is therefore empty, so the candidate filter refuses unconditionally — but
+		// the arbitrary-model fallback has no candidate list to filter and genuinely
+		// wants the refresh. With the filter wrongly gating that fallback, discovery
+		// never runs and startup reports no available model; the fallback must opt
+		// out of the filter and discover the provider's single model instead.
+		const bakedModel = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		// A fresh auth store with NO anthropic key: nothing static is authenticated,
+		// so no already-available model can shadow the discovery fallback. ollama is
+		// keyless (`auth: "none"`), so it needs no stored credential.
+		const noAuthDir = TempDir.createSync("@omp-reapply-cold-noauth-");
+		const noAuth = await AuthStorage.create(path.join(noAuthDir.path(), "auth.db"));
+		try {
+			const settings = await Settings.loadIsolated({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				inMemory: true,
+				configFiles: [],
+			});
+
+			const resumed = await resume(sessionFile, settings, {}, noAuth);
+
+			expect(resumed.model?.provider).toBe("ollama");
+			expect(resumed.model?.id).toBe(DISCOVERED_MODEL);
+		} finally {
+			noAuth.close();
+			noAuthDir.removeSync();
+		}
 	});
 });

@@ -3213,9 +3213,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 				return false;
 			};
-			const refreshDiscoveryOnce = async (): Promise<boolean> => {
+			// The candidate filter above exists to spare a CONFIGURED-DEFAULT retry a
+			// full discovery timeout on behalf of candidates discovery cannot help.
+			// It is meaningful only when there is a candidate list to filter, so it
+			// gates the configured-default retry alone (`filterCandidates: true`).
+			// The arbitrary-model fallback has no candidate list — with no
+			// `modelRoles.default` at all, `defaultRolePatterns` is empty and the
+			// filter returns false unconditionally — yet it genuinely wants the
+			// refresh: a COLD discovery-only provider's single model resolves only
+			// once discovery runs. That caller passes `filterCandidates: false`.
+			const refreshDiscoveryOnce = async (filterCandidates: boolean): Promise<boolean> => {
 				if (discoveryRefreshed || !modelRegistry.hasRefreshableProviders()) return false;
-				if (!unresolvedCandidateCanDiscover()) return false;
+				if (filterCandidates && !unresolvedCandidateCanDiscover()) return false;
 				discoveryRefreshed = true;
 				await runtimeDiscoveryPromise;
 				// And the background refresh startup kicked off for a registry the SDK
@@ -3248,7 +3257,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// the baked restore left `model` set at index 0 and this guard
 				// concluded there was nothing left to discover.
 				(!model || (defaultRoleSpec.matchedPatternIndex ?? 0) > 0 || reResolveConfigDefault()) &&
-				(await refreshDiscoveryOnce())
+				(await refreshDiscoveryOnce(true))
 			) {
 				await tryResolveDefaultRole();
 				// The winner may have changed, and with it whether the saved suffix is
@@ -3314,8 +3323,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// what is left here is #6114: nothing resolved at all and the only
 				// catalog that could carry a model is a discovery provider's.
 				// `refreshDiscoveryOnce` is a no-op when that pass already ran, so
-				// the common path never pays for a second one.
-				if (!pick && !hasExplicitModel && (await refreshDiscoveryOnce())) {
+				// the common path never pays for a second one. This fallback has no
+				// candidate list to filter — with no configured default at all the
+				// candidate filter's `defaultRolePatterns` is empty and would refuse
+				// unconditionally — so it opts out (`filterCandidates: false`) and
+				// asks discovery directly.
+				if (!pick && !hasExplicitModel && (await refreshDiscoveryOnce(false))) {
 					const refreshedCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
 					pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth), provider =>
 						modelRegistry.hasConcreteAuth(provider),
