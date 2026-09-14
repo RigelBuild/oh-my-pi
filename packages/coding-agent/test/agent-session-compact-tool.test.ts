@@ -4,6 +4,7 @@ import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
@@ -2182,6 +2183,69 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(order.filter(entry => entry === "terminal_end")).toHaveLength(1);
 	}, 15_000);
 
+	it("keeps the saved end until the last failing barrier claimant exits", async () => {
+		// Same window as the single-claimant case below, with TWO parked prompts
+		// that both bail. The claim was consumed by whichever released FIRST, and
+		// that release returns early because the other claimant still contributes
+		// to `#promptInFlightCount` -- so the last one out found no saved end, and
+		// since neither failed prompt emits a replacement `agent_end`, an RPC/ACP
+		// subscriber sitting after the earlier non-terminal end waits forever.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const terminalEnds: boolean[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") terminalEnds.push(event.isTerminal !== false);
+		});
+
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		// Both park behind the barrier; API-key validation runs after it and
+		// throws, so each resumes and exits without ever invoking the agent.
+		// `sendCustomMessage(..., { triggerTurn: true })` takes the same barrier
+		// and, unlike `prompt()`, two of them can park concurrently -- which is
+		// what makes the shared claim observable. Both are denied by the usage
+		// preflight after the barrier, so neither dispatches.
+		// The primary's own `agent.prompt()` call is already in flight, so replacing
+		// it now only affects the two claimants: each resumes past the barrier and
+		// throws before dispatching, exactly like a denied usage preflight.
+		vi.spyOn(session.agent, "prompt").mockRejectedValue(new Error("preflight denied"));
+		const firstParked = session.sendCustomMessage(
+			{ customType: "test", content: "first typed during the rewrite" },
+			{ triggerTurn: true },
+		);
+		const secondParked = session.sendCustomMessage(
+			{ customType: "test", content: "second typed during the rewrite" },
+			{ triggerTurn: true },
+		);
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+
+		summaryGate.resolve();
+		// Each resolves false (or throws) without ever invoking the agent.
+		await Promise.allSettled([firstParked, secondParked]);
+		await primary;
+		await session.waitForIdle();
+		for (let i = 0; i < 50; i++) await Bun.sleep(0);
+
+		// Nothing owes a turn now, so the end must have landed terminally.
+		expect(terminalEnds.length).toBeGreaterThan(0);
+		expect(terminalEnds[terminalEnds.length - 1]).toBe(true);
+	}, 15_000);
+
 	it("still reports idle when a non-turn operation waited out the compaction", async () => {
 		// The barrier is shared with operations that start NO turn -- `fork`,
 		// `newSession`, `shake`, `resetSessionContext`, tree navigation. Counting
@@ -2863,6 +2927,104 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		unregister();
 	}, 15_000);
 
+	it("re-defers an unclaimed yield end rather than emitting it over an IRC wake", async () => {
+		// Mirror of the barrier-bail case, on the YIELD restore. The entry going
+		// stale says only that THIS pass starts no turn -- an IRC wake can have
+		// arrived while the flush was scheduled and still be waiting in its own
+		// drain with `#promptInFlightCount === 0`. The restore checked only that
+		// count and the remaining entries, so it emitted the saved end terminally
+		// immediately before the wake's turn started, and an RPC/ACP subscriber
+		// could submit a competing prompt into it.
+		//
+		// RED (pre-fix): a terminal end preceded the wake's `agent_start`.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		let superseded = false;
+		let queued = false;
+		const unregister = session.yieldQueue.register<string>("compact-restore-probe", {
+			// The scheduled flush's stale check is the exact seam: it runs
+			// synchronously just before the unclaimed callback, so landing the wake
+			// here puts a real continuation in flight at restore time -- after the
+			// classifier already downgraded the end for the entry alone.
+			isStale: () => {
+				if (superseded && !queued) {
+					// Straight onto the agent's follow-up queue: the session-level
+					// helpers start or count a turn, which the pre-fix guard's
+					// `#promptInFlightCount` check already covers. This is the state
+					// the finding names -- a continuation waiting in its own drain with
+					// the count still zero.
+					queued = true;
+					session.agent.followUp({
+						role: "user",
+						content: "queued during the restore window",
+						timestamp: Date.now(),
+					});
+				}
+				return superseded;
+			},
+			build: survivors =>
+				survivors.length === 0
+					? null
+					: {
+							role: "user",
+							content: [{ type: "text", text: survivors.join(" ") }],
+							timestamp: Date.now(),
+						},
+		});
+
+		const order: string[] = [];
+		let downgradedEnds = 0;
+		session.subscribe(event => {
+			if (event.type === "agent_start") order.push("agent_start");
+			if (event.type !== "agent_end") return;
+			order.push(event.isTerminal !== false ? "terminal_end" : "end");
+			if (event.isTerminal !== false) return;
+			// The classifier just downgraded this end for the entry. Supersede it
+			// AND land an IRC wake in the same window: the scheduled flush then
+			// drops the entry and reports it claimed nothing, with a real
+			// continuation already pending.
+			downgradedEnds++;
+			superseded = true;
+		});
+
+		const first = session.yieldQueue.enqueueWithReceipt("compact-restore-probe", "first result");
+		await summaryStarted.promise;
+		await first;
+
+		const second = session.yieldQueue
+			.enqueueWithReceipt("compact-restore-probe", "second result")
+			.catch(() => undefined);
+		summaryGate.resolve();
+		await session.waitForIdle();
+		await second;
+		await session.waitForIdle();
+		for (let i = 0; i < 50; i++) await Bun.sleep(0);
+
+		// The window was actually entered.
+		expect(downgradedEnds).toBeGreaterThan(0);
+		// RED (pre-fix): the restore emitted a terminal end here even though a
+		// queued continuation was waiting -- it read only the prompt count and the
+		// remaining entries, neither of which sees the agent queue. Routing through
+		// the classifier re-evaluates every probe, so the end stays non-terminal
+		// until the queued message is answered.
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+		expect(order).not.toContain("terminal_end");
+		unregister();
+	}, 15_000);
+
 	it("does not report a turn in flight while it waits out the rewrite", async () => {
 		// CONTRACT (the barrier's POSITION, not merely its presence): the wait has
 		// to happen BEFORE the in-flight increment. The pass's `abort()` calls
@@ -3011,6 +3173,127 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		// A wait, not a refusal — the request was valid, only early.
 		expect(result).toBeDefined();
 		expect(session.messages).toHaveLength(0);
+	}, 15_000);
+
+	it("keeps the end non-terminal across a host's queued-delivery gap", async () => {
+		// The subscriber boundary is fire-and-forget: `#emit` discards listener
+		// promises, and a host handler may itself be queued behind an earlier
+		// serialized one. So awaiting the `auto_compaction_end` emission does not
+		// prove the queued delivery claimed a turn -- the finalizer could clear
+		// the gate and emit the saved terminal end first, telling an RPC/ACP
+		// client the session was idle immediately before the queued prompt began.
+		//
+		// `claimPostCompactionContinuation()` is what a host with queued input
+		// takes synchronously to cover that gap.
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		const order: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") order.push(event.isTerminal !== false ? "terminal_end" : "end");
+		});
+
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		// Exactly what a host does on `auto_compaction_end` when it holds queued
+		// input: claim before awaiting anything, and only then do its async work.
+		const claim = session.claimPostCompactionContinuation();
+		summaryGate.resolve();
+		await primary;
+		await session.waitForIdle();
+		for (let i = 0; i < 20; i++) await Bun.sleep(0);
+
+		// RED (pre-fix): no lease existed, so the finalizer emitted the terminal
+		// end here -- in the gap before the host's delivery starts its turn.
+		expect(order).not.toContain("terminal_end");
+
+		// Delivery started (or nothing was left): the lease drops and the session
+		// reports idle. A wait, not a ban.
+		claim[Symbol.dispose]();
+		for (let i = 0; i < 20; i++) await Bun.sleep(0);
+		expect(order).toContain("terminal_end");
+	}, 15_000);
+
+	it("holds a /btw branch adoption until the rewrite finishes", async () => {
+		// Same hazard as the context reset above, on the other boundary op. A
+		// requested pass that is SCHEDULED but has not installed its controller
+		// leaves `isCompacting` false, and the pass's own `abort()` keeps
+		// `isStreaming` false for the whole rewrite -- so every predicate
+		// `branchFromBtw()` checks reads idle. It could then create the branched
+		// session and replace the active history while the compaction started
+		// during its flush/advisor awaits, both rewriting the same manager.
+		const order: string[] = [];
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("compaction:done");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		// Persisted: `branchFromBtw()` refuses outright without a session file.
+		const session = await createHarnessWithRealCompaction({ persist: true });
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+
+		const branch = session
+			.branchFromBtw(
+				"why",
+				{
+					role: "assistant",
+					content: "because",
+					timestamp: Date.now(),
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+					stopReason: "stop",
+				} as unknown as AssistantMessage,
+				session.sessionManager.getLeafId() ?? "",
+				session.sessionManager.getSessionId(),
+			)
+			.then(result => {
+				order.push("btw:done");
+				return result;
+			})
+			.catch(error => {
+				order.push("btw:threw");
+				throw error;
+			});
+		// Every chance to run early: without the barrier it proceeds here.
+		await Bun.sleep(0);
+		await Bun.sleep(0);
+		// RED (pre-fix): "btw:done" or "btw:threw" already sits here, i.e. the
+		// adoption ran against the history being rewritten.
+		expect(order).toEqual([]);
+
+		summaryGate.resolve();
+		await branch.catch(() => undefined);
+		await primary;
+		await session.waitForIdle();
+
+		// Barrier POSITION: the adoption resolved after the summary landed.
+		expect(order[0]).toBe("compaction:done");
 	}, 15_000);
 
 	it("holds a history-mutating shake until the rewrite finishes", async () => {

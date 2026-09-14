@@ -912,6 +912,13 @@ export class AgentSession {
 	/** Parked barrier callers that will start a turn on resume (see `#settleActiveCompaction`). */
 	#compactionBarrierWaiters = 0;
 	/**
+	 * Callers that parked on the barrier and have not yet reported whether they
+	 * dispatched. The downgrade record below is ONE field shared by all of them,
+	 * so it may only be consumed by the last one out — see
+	 * `#releaseCompactionBarrierClaim`.
+	 */
+	#compactionBarrierClaimants = 0;
+	/**
 	 * Live focus holder for the single deferred requested-compaction pass on
 	 * `#requestedCompaction`. The detached run reads `.instructions` at apply
 	 * time, so a second `compact` request that coalesces onto the pending pass
@@ -1877,8 +1884,19 @@ export class AgentSession {
 				if (!downgraded) return;
 				this.#yieldDowngradedAgentEnd = undefined;
 				if (this.#isDisposed || this.#promptInFlightCount > 0) return;
-				if (this.yieldQueue.hasIdleDeliverable()) return;
-				this.#emit(downgraded);
+				// Through the CLASSIFIER, not a direct `#emit()`, for the same reason
+				// `#releaseCompactionBarrierClaim` re-defers: the entry going stale
+				// says only that THIS pass starts no turn. A steer/follow-up or IRC
+				// wake can have arrived while the flush was scheduled and be waiting
+				// in its own drain with the count still zero, so checking the count
+				// and the remaining entries here would emit terminal immediately
+				// before that continuation starts. `#flushPendingAgentEnd` owns every
+				// probe — the agent queues, the pending IRC wake, and the yield
+				// deliverable this one already covers — and re-downgrades under
+				// whichever continuation is now live, preserving the restore path.
+				if (this.#pendingAgentEndEmit) return;
+				this.#pendingAgentEndEmit = downgraded;
+				this.#flushPendingAgentEnd();
 			},
 		});
 		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
@@ -6662,6 +6680,18 @@ export class AgentSession {
 		// caller is still to come, and swallowing it here would leave the real bail
 		// with nothing to restore.
 		if (!parked) return;
+		this.#compactionBarrierClaimants = Math.max(0, this.#compactionBarrierClaimants - 1);
+		// Concurrent claimants share ONE downgrade record, so consuming it here
+		// while a sibling is still parked leaves the last one out with nothing to
+		// restore — and a failed claimant emits no end of its own, so the session
+		// would never report idle. A dispatching caller still clears it: its turn
+		// owns the replacement end. Otherwise only the last claimant may take it.
+		//
+		// Re-deferring instead of holding does not help: `#flushPendingAgentEnd`
+		// re-downgrades only when `#promptInFlightCount === 0`, and a sibling
+		// claimant keeps that count positive — which is exactly how the record was
+		// being dropped.
+		if (!dispatched && this.#compactionBarrierClaimants > 0) return;
 		const downgraded = this.#barrierDowngradedAgentEnd;
 		this.#barrierDowngradedAgentEnd = undefined;
 		if (dispatched || !downgraded) return;
@@ -6685,6 +6715,40 @@ export class AgentSession {
 		this.#flushPendingAgentEnd();
 	}
 
+	/**
+	 * Claim the turn a host is about to start once a compaction pass finishes, so
+	 * the pass's finalizer does not report the session idle in between.
+	 *
+	 * The `auto_compaction_end` fan-out is fire-and-forget for subscribers
+	 * (`#emit` discards their promises) and a host's handler may itself be queued
+	 * behind an earlier serialized one, so awaiting the emission does NOT prove
+	 * the queued delivery has claimed anything. A host that knows it holds queued
+	 * input takes this lease synchronously, before it awaits, and disposes it once
+	 * the delivery has started a turn (or once it knows none is coming).
+	 *
+	 * Backed by the same counter a barrier waiter uses, because it is the same
+	 * situation: a successor turn that exists but has not reached
+	 * `#beginInFlight()` yet, and so is invisible to the in-flight probe.
+	 */
+	claimPostCompactionContinuation(): Disposable {
+		this.#compactionBarrierWaiters++;
+		this.#compactionBarrierClaimants++;
+		let released = false;
+		return {
+			[Symbol.dispose]: () => {
+				if (released) return;
+				released = true;
+				this.#compactionBarrierWaiters--;
+				// Released exactly like a parked prompt that never dispatched: the
+				// downgrade taken on this lease's behalf has to come back, because the
+				// delivery may have started nothing. The restore routes through the
+				// classifier, so a delivery that DID start a turn simply re-downgrades
+				// under it and that turn emits its own end.
+				this.#releaseCompactionBarrierClaim(true, false);
+			},
+		};
+	}
+
 	async #settleActiveCompaction(options?: { producesTurn?: boolean }): Promise<boolean> {
 		let parked = false;
 		while (true) {
@@ -6695,6 +6759,9 @@ export class AgentSession {
 				// the in-flight probe in `#flushPendingAgentEnd`.
 				if (options?.producesTurn) {
 					this.#compactionBarrierWaiters++;
+					// Held past the barrier, unlike the waiter count: it is released here
+					// but the claim lives until the caller reports its dispatch.
+					if (!parked) this.#compactionBarrierClaimants++;
 					parked = true;
 				}
 				try {
@@ -10701,6 +10768,17 @@ export class AgentSession {
 		if (!leafId || this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
+
+		// A requested compaction that is SCHEDULED but has not installed its
+		// controller yet is invisible to the guard below: `isCompacting` is false
+		// until the pass starts, and the pass calls `abort()`, so `isStreaming`
+		// reads false for the whole rewrite too. Without this the compaction could
+		// start during the flush/advisor awaits further down while this branch is
+		// already replacing the active history, and both would rewrite the same
+		// manager concurrently. Wait it out first -- the request is valid, only
+		// early -- so the predicates below read settled state. Same position and
+		// reasoning as `resetSessionContext()`, the sibling boundary op.
+		await this.#settleActiveCompaction();
 
 		if (
 			this.isStreaming ||

@@ -2156,6 +2156,19 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
+		// Claimed SYNCHRONOUSLY, before anything below awaits. When queued input
+		// exists, `flushCompactionQueue()` at the tail of this handler starts its
+		// turn -- but the session cannot see that turn coming: the
+		// `auto_compaction_end` fan-out discards subscriber promises, and this
+		// handler may itself be queued behind an earlier serialized one, so the
+		// pass's finalizer can release the terminal `agent_end` before the flush is
+		// reached and tell an RPC/ACP client the session is idle. The lease makes
+		// the pending delivery visible for the whole gap, and is disposed once the
+		// flush has started the turn (or once nothing is left to deliver).
+		using _continuation =
+			(this.ctx.compactionQueuedMessages?.length ?? 0) > 0
+				? this.ctx.session.claimPostCompactionContinuation()
+				: undefined;
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(false);
