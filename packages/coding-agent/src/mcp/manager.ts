@@ -297,6 +297,17 @@ export class MCPManager {
 	 */
 	#toolApplyTicket = new Map<string, number>();
 	#toolApplyApplied = new Map<string, number>();
+	/**
+	 * The raw tool definitions of the WINNING apply per server — the toolset the
+	 * live registry currently holds. `listTools()` caches its result on the
+	 * shared `connection.tools` as a side effect, so a losing out-of-order
+	 * response (rejected by the apply ticket below) still leaves its obsolete
+	 * definitions on `connection.tools`, which `/status` and `listTools()`
+	 * consumers read directly. On a rejected apply the loser restores
+	 * `connection.tools` from this record so those consumers never observe a
+	 * count or roster the registry already refused.
+	 */
+	#appliedServerTools = new Map<string, MCPToolDefinition[]>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
@@ -966,8 +977,12 @@ export class MCPManager {
 					// that overlapped this load and answered first). Applying now
 					// would replace the newer catalog with this older one and, being
 					// non-empty, would schedule no recovery — the session would stay
-					// on the obsolete roster.
+					// on the obsolete roster. `listTools()` cached this loser's
+					// obsolete definitions on `connection.tools`; restore the
+					// winning roster so `/status` and `listTools(connection)`
+					// consumers do not read a count the registry already refused.
 					if (!this.#claimToolApply(name, applyTicket)) {
+						this.#restoreAppliedServerTools(name, connection);
 						notify({ type: "connected", serverName: name });
 						await this.#loadServerResourcesAndPrompts(name, connection);
 						return;
@@ -975,6 +990,7 @@ export class MCPManager {
 					const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) =>
 						this.reconnectServer(name, options);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+					this.#recordAppliedServerTools(name, connection, serverTools);
 					this.#replaceServerTools(name, customTools);
 					void this.#fireToolsChanged();
 					void this.toolCache?.set(name, config, serverTools, observedAt);
@@ -1132,6 +1148,33 @@ export class MCPManager {
 		if (ticket <= applied) return false;
 		this.#toolApplyApplied.set(name, ticket);
 		return true;
+	}
+
+	/**
+	 * Record the raw definitions a WINNING apply installed, and reset the
+	 * shared `connection.tools` cache to them. `listTools()` populates
+	 * `connection.tools` as a side effect of every request, so this is also the
+	 * point that makes the winner's roster the one that cache holds.
+	 */
+	#recordAppliedServerTools(name: string, connection: MCPServerConnection, serverTools: MCPToolDefinition[]): void {
+		this.#appliedServerTools.set(name, serverTools);
+		connection.tools = serverTools;
+	}
+
+	/**
+	 * Restore `connection.tools` to the roster the live registry holds after a
+	 * LOSING out-of-order response. `listTools()` cached the loser's obsolete
+	 * definitions on the shared `connection.tools`; the apply ticket then
+	 * refused them for the registry but left `connection.tools` stale, so
+	 * `/status` (`command-controller.ts` reads `conn.tools`) and any
+	 * `listTools(connection)` consumer would report the superseded count until
+	 * an explicit refresh. Only touches the still-current connection: a
+	 * replaced one is being discarded, and its cache no longer feeds a consumer.
+	 */
+	#restoreAppliedServerTools(name: string, connection: MCPServerConnection): void {
+		if (this.#connections.get(name) !== connection) return;
+		const applied = this.#appliedServerTools.get(name);
+		if (applied !== undefined) connection.tools = applied;
 	}
 
 	#replaceServerTools(name: string, tools: CustomTool<TSchema, MCPToolDetails>[]): void {
@@ -1390,6 +1433,7 @@ export class MCPManager {
 		this.#reconnectHistory.delete(name);
 		this.#pendingEmptyRetries.delete(name);
 		this.#pendingToolRefresh.delete(name);
+		this.#appliedServerTools.delete(name);
 
 		const connection = this.#connections.get(name);
 
@@ -1436,6 +1480,7 @@ export class MCPManager {
 		// its ticket is consulted.
 		this.#toolApplyTicket.clear();
 		this.#toolApplyApplied.clear();
+		this.#appliedServerTools.clear();
 		this.#pendingReconnections.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
@@ -1684,15 +1729,35 @@ export class MCPManager {
 			const observedAt = this.#claimCatalogOrder(name);
 			const applyTicket = this.#nextToolApplyTicket(name);
 			const serverTools = await listTools(connection);
+			// The reconnect may have been torn down (a `/mcp reload` ran
+			// `disconnectAll`, which bumps the epoch and CLEARS the per-server
+			// apply-ticket counters) or replaced under the same name while
+			// `tools/list` was in flight. The apply ticket cannot guard this on its
+			// own: once the counters are reset a replacement connection restarts at
+			// a LOWER ticket than this still-outstanding request, so a stale
+			// response settling after the teardown would out-rank it and restore the
+			// disconnected roster — or, with no replacement, resurrect a roster on a
+			// manager that was fully disconnected. Re-check identity here, the same
+			// guard the connect and refresh apply paths already run after their own
+			// `await` (see `#pendingToolLoads`/`#connections` checks above).
+			if (this.#connections.get(name) !== connection || this.#epoch !== reconnectEpoch) {
+				throw new Error(`Server "${name}" was disconnected during reconnection`);
+			}
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools, observedAt);
 			// A reconnect is a fresh connection, so its listing is the newest thing
 			// there is — but it still takes a ticket, so a response from the
-			// connection it replaced cannot be applied after it.
+			// connection it replaced cannot be applied after it. On the losing
+			// branch `listTools()` still cached this response on `connection.tools`;
+			// restore the winning roster so consumers reading `conn.tools` do not
+			// report a superseded count.
 			if (this.#claimToolApply(name, applyTicket)) {
+				this.#recordAppliedServerTools(name, connection, serverTools);
 				this.#replaceServerTools(name, customTools);
 				void this.#fireToolsChanged();
+			} else {
+				this.#restoreAppliedServerTools(name, connection);
 			}
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			// A reconnect that lands mid-warmup can also see an empty toolset;
@@ -1795,14 +1860,22 @@ export class MCPManager {
 
 			// A later request already applied (the overlapping initial load, or a
 			// re-run refresh). This response is older than what the registry
-			// holds, so drop it rather than regress the roster.
-			if (!this.#claimToolApply(name, applyTicket)) return;
+			// holds, so drop it rather than regress the roster. `listTools()`
+			// cached this loser's obsolete definitions on `connection.tools`
+			// (which `#doRefresh` cleared, then it repopulated); restore the
+			// winning roster so `/status` and `listTools(connection)` consumers do
+			// not read a count the registry already refused.
+			if (!this.#claimToolApply(name, applyTicket)) {
+				this.#restoreAppliedServerTools(name, connection);
+				return;
+			}
 
 			const reconnect = () => this.reconnectServer(name);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, connection.config, serverTools, observedAt);
 
 			// Replace tools from this server
+			this.#recordAppliedServerTools(name, connection, serverTools);
 			this.#replaceServerTools(name, customTools);
 			await this.#fireToolsChanged();
 
