@@ -29,6 +29,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { ImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/service";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1036,5 +1037,30 @@ describe("AgentSession refresh('settings'): awaited reconciliation tails", () =>
 		} finally {
 			await h.dispose();
 		}
+	});
+});
+
+describe("AgentSession dispose: active blob broker", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+	it("disposes the broker enabled mid-session when the session is disposed", async () => {
+		// Start with image URLs OFF so no broker exists at construction, then
+		// enable them through `refresh('settings')`. `reloadBlobBroker` disposes
+		// only the RETIRED instance (here: none), so the newly built broker is
+		// live. Pre-fix, session disposal never stopped the current broker, so
+		// its callback server and local exposure/tunnel outlived the SDK session.
+		const disposeSpy = vi.spyOn(ImageUrlService.prototype, "dispose");
+		const h = await makeHarness("compaction:\n  enabled: false\nimages:\n  urls:\n    enabled: false\n");
+
+		await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\nimages:\n  urls:\n    enabled: true\n");
+		const result = await h.session.refresh("settings");
+		expect(result.settingsChanged).toBe(true);
+		// The enable retired nothing, so no broker was disposed building it.
+		expect(disposeSpy).not.toHaveBeenCalled();
+
+		// `h.dispose()` disposes the session first (then closes auth/tempdir).
+		await h.dispose();
+		expect(disposeSpy).toHaveBeenCalledTimes(1);
 	});
 });
