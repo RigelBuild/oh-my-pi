@@ -649,7 +649,7 @@ describe("AgentSession restart-latch prompt contract", () => {
 		// The restart did NOT recreate the session over the shutting-down host.
 		expect(onRestart).not.toHaveBeenCalled();
 		// The captured reattach file survives the host's normal disposal.
-		expect(fs.existsSync(capturedFile)).toBe(true);
+		expect(await Bun.file(capturedFile).exists()).toBe(true);
 	});
 
 	it("cancels the restart during the SDK wrapper's in-progress teardown, before the inner dispose() is called", async () => {
@@ -818,7 +818,7 @@ describe("AgentSession restart-latch prompt contract", () => {
 		await session.sessionManager.ensureOnDisk();
 		const capturedFile = session.sessionFile;
 		if (!capturedFile) throw new Error("Expected a persisted session file");
-		expect(fs.existsSync(capturedFile)).toBe(true);
+		expect(await Bun.file(capturedFile).exists()).toBe(true);
 
 		// Latch the restart, then delete the captured file while it is parked at
 		// the quiescence gate — exactly what empty-move cleanup does to a moved

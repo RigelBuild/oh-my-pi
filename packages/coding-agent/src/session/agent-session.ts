@@ -5939,7 +5939,16 @@ export class AgentSession {
 			// controller, so the replacement reopens the same conversation without
 			// the title that was already being generated.
 			this.#titleGenerationInFlightFor !== undefined ||
-			this.#replanTitleRefreshInFlight !== undefined
+			this.#replanTitleRefreshInFlight !== undefined ||
+			// An auto-learn capture is the same shape once more, and it is started
+			// by the DEFERRED `agent_end` a qualifying turn fires — so under
+			// `autolearn.autoContinue` a turn that invoked `restart` has a private
+			// model/tool run going while the foreground agent is idle. Disposal
+			// aborts it (`beginDispose`), and the replacement never replays that
+			// `agent_end`, so a managed-skill update already being generated is
+			// lost. Refuse until it settles; the host re-requests and the recycle
+			// proceeds.
+			this.#autolearnCaptureTask !== undefined
 		);
 	}
 
