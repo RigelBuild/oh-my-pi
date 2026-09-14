@@ -19,6 +19,8 @@ import * as path from "node:path";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, getActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import * as skillsModule from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { getActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { RuleProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/rule-protocol";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1479,6 +1481,98 @@ describe("AgentSession refresh: disposal mid-hook must not publish globals", () 
 			expect(parkedOutcome).toBe("Session disposed before refresh could run");
 		} finally {
 			if (!liveDisposed) releaseHook.resolve();
+			if (live) await live.dispose();
+			await disposed.dispose();
+		}
+	});
+});
+
+// The two hand-placed disposal fences (`#doRefresh` entry, post-`onBeforeRefresh`)
+// both sit BEFORE `reloadSkillsAndRules` is even called. But that function's OWN
+// disk scans — `loadSkills` for skills, `loadCapability` for rules — are async
+// suspension points BETWEEN its entry and the `setActiveSkills`/`setActiveRules`
+// global swaps. A session disposed DURING that scan resumes past both call-site
+// fences and publishes anyway. The class-closing fix gates the swap at its own
+// point, so this test disposes inside `loadSkills` (not the hook): only the
+// publication gate can catch it, and — unlike the hook case — the refresh
+// RESOLVES (nothing rejects), so the headline proof is the untouched global.
+describe("AgentSession refresh: disposal during the roster scan must not publish globals", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("keeps a second live session's global roster when a session disposed mid-scan resumes to publish", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const disposedSkill = `disposed-scan-${marker}`;
+		const liveSkill = `live-scan-${marker}`;
+
+		const disposed = await makeHarness({}, {}, async cwd => {
+			await fs.mkdir(path.join(cwd, ".omp", "skills", disposedSkill), { recursive: true });
+			await fs.writeFile(
+				path.join(cwd, ".omp", "skills", disposedSkill, "SKILL.md"),
+				`---\nname: ${disposedSkill}\ndescription: ${disposedSkill} fixture\n---\nbody\n`,
+			);
+		});
+		let live: Harness | undefined;
+		let released = false;
+		// The scan pauses on an EVENT: `enteredScan` signals `loadSkills` is
+		// in flight, `releaseScan` resumes it — so disposal drops deterministically
+		// into the window AFTER both call-site fences and BEFORE the swap.
+		const enteredScan = Promise.withResolvers<void>();
+		const releaseScan = Promise.withResolvers<void>();
+		try {
+			// Session B publishes `liveSkill` into the process-global snapshot at
+			// construction — the roster `getActiveSkills()` consumers serve.
+			live = await makeHarness({}, {}, async cwd => {
+				await fs.mkdir(path.join(cwd, ".omp", "skills", liveSkill), { recursive: true });
+				await fs.writeFile(
+					path.join(cwd, ".omp", "skills", liveSkill, "SKILL.md"),
+					`---\nname: ${liveSkill}\ndescription: ${liveSkill} fixture\n---\nbody\n`,
+				);
+			});
+			await live.session.refresh("skills");
+			expect(getActiveSkills().map(s => s.name)).toContain(liveSkill);
+			expect(getActiveSkills().map(s => s.name)).not.toContain(disposedSkill);
+
+			// Spy AFTER both harnesses are built, so only A's refresh scan pauses;
+			// the constructions' own `loadSkills` calls already ran unspied. The
+			// spy pauses the FIRST call, then calls through to real discovery.
+			const real = skillsModule.loadSkills;
+			let paused = false;
+			vi.spyOn(skillsModule, "loadSkills").mockImplementation(async options => {
+				if (!paused) {
+					paused = true;
+					enteredScan.resolve();
+					await releaseScan.promise;
+				}
+				return real(options);
+			});
+
+			// A's refresh enters `reloadSkillsAndRules`, clears both call-site
+			// fences (A is still live here), and parks inside `loadSkills`.
+			const parked = disposed.session.refresh("skills");
+			await enteredScan.promise;
+
+			// A is disposed WHILE its scan is parked — past both hand-placed fences.
+			disposed.session.beginDispose();
+			releaseScan.resolve();
+			released = true;
+
+			// The refresh resumes, finishes the scan, and reaches the publication
+			// gate. Post-fix it abandons the swap and RESOLVES (no fence rejects a
+			// mid-scan disposal); pre-fix it resolves after clobbering the global.
+			const parkedOutcome = await parked.then(
+				() => "resolved" as const,
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+
+			// Consumer-visible state is still B's roster. Pre-fix, A's resumed
+			// `setActiveSkills` overwrote it with `disposedSkill`.
+			expect(getActiveSkills().map(s => s.name)).toContain(liveSkill);
+			expect(getActiveSkills().map(s => s.name)).not.toContain(disposedSkill);
+			expect(parkedOutcome).toBe("resolved");
+		} finally {
+			if (!released) releaseScan.resolve();
 			if (live) await live.dispose();
 			await disposed.dispose();
 		}

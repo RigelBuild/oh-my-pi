@@ -113,6 +113,18 @@ export interface ReloadSkillsAndRulesOptions {
 	 * parent itself refreshed.
 	 */
 	publishGlobals?: boolean;
+	/**
+	 * Disposal gate consulted IMMEDIATELY BEFORE each global publication, the
+	 * same `shouldAbort` seam the MCP reconnect threads. Both the skills scan
+	 * (`loadSkills`) and the rules scan (`loadCapability`) are `await`s between
+	 * this reload's entry and its `setActiveSkills`/`setActiveRules` swaps, so a
+	 * caller's disposal can complete DURING discovery and a hand-placed fence at
+	 * the call site cannot see it. Re-checking here, at the publication point,
+	 * closes the class: a disposed top-level session abandons the swap instead of
+	 * overwriting the process-wide roster another live session already published.
+	 * Ignored when `publishGlobals` is false (no swap to gate). Omitted, no gate.
+	 */
+	shouldAbort?: () => boolean;
 }
 
 /** Fresh roster produced by a reload — counts plus the swapped skills/rule buckets. */
@@ -183,7 +195,6 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 				cwd,
 			});
 	const skills = options.skills ?? discovered?.skills ?? [];
-	if (publishGlobals) setActiveSkills(skills);
 
 	// Rules: re-bucket through the LIVE ttsr manager (preserving injected state),
 	// exactly as `sdk.ts` does at init. A caller-supplied rule policy (SDK `rules`
@@ -222,7 +233,18 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 	// whose file still existed, regardless of what this pass actually bucketed.
 	const publishedTtsrRules = options.ttsrManager.getRules().filter(rule => ttsrRuleNames.has(rule.name));
 	const activeRules = [...rulebookRules, ...alwaysApplyRules, ...publishedTtsrRules];
-	if (publishGlobals) setActiveRules(activeRules);
+	// Publish both process-global snapshots together, gated at the swap point.
+	// Every disk scan above (`loadSkills`, `loadCapability`) is an `await`, so a
+	// caller disposed DURING discovery reaches here anyway; a fence at the call
+	// site ran before this function and cannot see that disposal. Re-checking
+	// `shouldAbort` immediately before the swaps — which are synchronous, so no
+	// suspension separates the check from either — abandons the publication so a
+	// dead session never overwrites the roster a live one already published. The
+	// caller's session-local state below still takes the fresh roster.
+	if (publishGlobals && !options.shouldAbort?.()) {
+		setActiveSkills(skills);
+		setActiveRules(activeRules);
+	}
 
 	return {
 		skills: skills.length,
