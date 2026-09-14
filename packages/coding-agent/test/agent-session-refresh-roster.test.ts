@@ -1386,3 +1386,101 @@ describe("AgentSession refresh: the spawn-facing rule snapshot", () => {
 		}
 	});
 });
+
+// The `#doRefresh` entry fence rejects a refresh whose turn arrives after
+// disposal, but `onBeforeRefresh` is an async suspension point PAST that fence:
+// the host may stage config while `beginDispose()` completes, so on resume the
+// session can already be disposed even though the entry guard passed. Without a
+// recheck the roster block below runs and a `skills`/`rules`/`all` refresh calls
+// `reloadSkillsAndRules({ publishGlobals: true })`, letting a DISPOSED top-level
+// session overwrite the process-wide active skill/rule snapshots — clobbering the
+// roster another live session already published. The MCP reconnect's own
+// `shouldAbort` gate covers only the MCP scan, not this roster publication.
+describe("AgentSession refresh: disposal mid-hook must not publish globals", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("keeps a second live session's global roster when a disposed session's paused refresh resumes", async () => {
+		const marker = Bun.nanoseconds().toString(36);
+		const disposedRule = `disposed-session-${marker}`;
+		const liveRule = `live-session-${marker}`;
+
+		// The refresh's hook pauses on an EVENT, not a timer: `enteredHook`
+		// signals the paused state, `releaseHook` resumes it — so disposal is
+		// sequenced deterministically into the gap.
+		const enteredHook = Promise.withResolvers<void>();
+		const releaseHook = Promise.withResolvers<void>();
+
+		// Session A: a top-level session whose async `onBeforeRefresh` parks the
+		// refresh after the entry fence but before any surface is re-read.
+		const disposed = await makeHarness(
+			{},
+			{
+				onBeforeRefresh: async () => {
+					enteredHook.resolve();
+					await releaseHook.promise;
+				},
+			},
+			async cwd => {
+				await fs.mkdir(path.join(cwd, ".omp", "rules"), { recursive: true });
+				await fs.writeFile(
+					path.join(cwd, ".omp", "rules", `${disposedRule}.md`),
+					`---\nname: ${disposedRule}\nalwaysApply: true\n---\nDISPOSED_BODY_${marker}\n`,
+				);
+			},
+		);
+		let liveDisposed = false;
+		let live: Harness | undefined;
+		try {
+			// A's refresh enters the hook and parks. Nothing is published yet: the
+			// hook is the first statement in the critical section.
+			const parked = disposed.session.refresh("rules");
+			await enteredHook.promise;
+
+			// Session B: a second top-level session over its OWN rule. Its
+			// construction publishes `liveRule` into the process-global snapshot —
+			// the roster a real consumer (`RuleProtocolHandler`, `getActiveRules()`)
+			// serves.
+			live = await makeHarness({}, {}, async cwd => {
+				await fs.mkdir(path.join(cwd, ".omp", "rules"), { recursive: true });
+				await fs.writeFile(
+					path.join(cwd, ".omp", "rules", `${liveRule}.md`),
+					`---\nname: ${liveRule}\nalwaysApply: true\n---\nLIVE_BODY_${marker}\n`,
+				);
+			});
+			await live.session.refresh("rules");
+			// B's roster is the one the process now advertises.
+			expect(getActiveRules().map(r => r.name)).toContain(liveRule);
+			expect(getActiveRules().map(r => r.name)).not.toContain(disposedRule);
+
+			// A is disposed while its refresh is parked in the async hook.
+			disposed.session.beginDispose();
+			liveDisposed = true;
+			// Resume the parked refresh: it now runs its post-hook body.
+			releaseHook.resolve();
+
+			// Settle the parked refresh either way before inspecting state, so the
+			// headline assertion is the consumer-visible snapshot, not the reject
+			// signal. Post-fix it rejects at the re-applied disposal fence; pre-fix
+			// it resolves after clobbering the global roster.
+			const parkedOutcome = await parked.then(
+				() => "resolved" as const,
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+
+			// The consumer-visible state is B's roster, untouched by the disposed
+			// session's resumed refresh. Pre-fix (no recheck after the hook): the
+			// resumed refresh ran `reloadSkillsAndRules({ publishGlobals: true })`
+			// and overwrote the global snapshot with A's `disposedRule`.
+			expect(getActiveRules().map(r => r.name)).toContain(liveRule);
+			expect(getActiveRules().map(r => r.name)).not.toContain(disposedRule);
+			// And the disposed session's refresh was rejected at the fence.
+			expect(parkedOutcome).toBe("Session disposed before refresh could run");
+		} finally {
+			if (!liveDisposed) releaseHook.resolve();
+			if (live) await live.dispose();
+			await disposed.dispose();
+		}
+	});
+});
