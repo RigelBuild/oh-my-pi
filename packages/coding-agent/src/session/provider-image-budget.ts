@@ -410,6 +410,16 @@ function replayedInputImages(
 	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
 	for (let index = 0; index < payload.items.length; index++) {
 		if (repairedOrphans.has(index)) continue;
+		// A generation result carries bytes but no image PART: the user/developer
+		// replay converter sends it verbatim, exactly as the assistant snapshot
+		// does. It is a BYTE-only charge, so it rides the demoted channel — charged
+		// to the byte budget, never counted against the image cap. See
+		// {@link replayedImageResult} and the assistant path's `replayedPayloadByteSizes`.
+		const result = replayedImageResult(payload.items[index]);
+		if (result !== undefined) {
+			demotedSizes.push(result.length);
+			continue;
+		}
 		// `adaptResponsesReplayItemsForModel()` rewrites a replayed
 		// `computer_call`/`computer_call_output` into a short assistant TEXT
 		// message when the model does not support computer use, so its screenshot
@@ -1096,6 +1106,17 @@ function clampReplayedInputImages(
 		if (!clampWanted(state)) break;
 		if (repairedOrphans.has(index)) continue;
 		const item = payload.items[index];
+		// A generation result answers a BYTE drop only, so clear its `result` while
+		// byte pressure remains — the same edit `clampAssistantMessage` makes on the
+		// assistant snapshot. Emptying it stops the replay (the sanitizer drops an
+		// empty result) while the payload's other items survive.
+		if (replayedImageResult(item) !== undefined) {
+			if (state.remainingInlineDrops <= 0) continue;
+			state.remainingInlineDrops--;
+			items ??= [...payload.items];
+			items[index] = { ...item, result: "" };
+			continue;
+		}
 		if (item?.type === "computer_call_output") {
 			const [screenshot] = nativeInputImageParts(item);
 			if (!screenshot) continue;

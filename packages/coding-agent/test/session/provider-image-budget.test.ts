@@ -2473,6 +2473,57 @@ describe("byte clamp preserves what actually reaches the wire", () => {
 		// The malformed result never reaches the wire regardless.
 		expect(serialized).not.toContain(dead);
 	});
+
+	it("evicts an oversized generation result a replayed user payload carries", () => {
+		// A remote-compaction replacement is attached to its user summary and
+		// carries an `image_generation_call.result`. `convertConversationMessages()`
+		// replays that payload verbatim (marker branch), so the sanitizer keeps the
+		// completed result and its base64 travels — but the user/developer
+		// accounting collected only `input_image`/computer parts, never a
+		// generation result. Those bytes entered neither the tally nor the eviction
+		// path, so one oversized result busts the byte budget with no drop owed.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+		const over = "u".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("summary")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						// A `compaction_summary` marker replays this payload even on a cold
+						// session, exactly like the oversized restored replacement this
+						// accounts for.
+						items: [
+							{ type: "compaction_summary" },
+							{ type: "image_generation_call", id: "ig_0", status: "completed", result: over },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would.
+		const wire = buildResponsesInput({
+			model: OPENAI_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		const serialized = JSON.stringify(wire);
+		// Prove the fixture reaches the branch: the marker still replays, so the
+		// payload's own items (the summary marker) are on the wire — the result is
+		// what got cleared, not the whole turn dropped.
+		expect(wire.some(item => item.type === "image_generation_call")).toBe(false);
+		// RED (pre-fix): the generation result was charged to neither budget, so no
+		// drop was owed and the oversized base64 shipped whole.
+		expect(serialized).not.toContain(over);
+	});
 });
 
 describe("replayed computer screenshots reach the wire as image parts", () => {
