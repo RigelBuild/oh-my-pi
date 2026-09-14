@@ -601,8 +601,34 @@ export class AgentLifecycleManager {
 	 * permanent wedge is worse than one aborted turn.
 	 */
 	async #drainRunningAdoptions(deadlineAt: number): Promise<void> {
+		// Looped, not a single pass, for the same reason the re-read below exists
+		// one scope in: a pass that observes nothing running still spends a
+		// microtask, and an `ensureLive()` that already handed back an idle child
+		// has a caller — a pending `IrcBus.send()` or a collab continuation —
+		// which can call `prompt()` in exactly that window. The barrier does not
+		// cover it: that `ensureLive()` returned before the barrier was raised, so
+		// it never waited on one. Draining again re-reads the statuses, so a turn
+		// that started during the previous pass is drained rather than parked
+		// mid-request. Bounded by the same deadline as everything else here, and
+		// each pass either observes a distinct turn ending or finds nothing.
+		while (Date.now() < deadlineAt) {
+			if (await this.#drainRunningAdoptionsOnce(deadlineAt)) continue;
+			// A pass that found nothing running still spent a microtask, so yield
+			// once and re-read before committing: that is the whole window, and a
+			// continuation dispatching in it is what this loop exists to catch.
+			await Promise.resolve();
+			if (!this.#hasRunningAdoption()) return;
+		}
+	}
+
+	#hasRunningAdoption(): boolean {
+		return [...this.#adopted.keys()].some(id => this.#registry.get(id)?.status === "running");
+	}
+
+	/** One drain pass. Returns whether anything was running (so a re-read is worth a pass). */
+	async #drainRunningAdoptionsOnce(deadlineAt: number): Promise<boolean> {
 		const running = [...this.#adopted.keys()].filter(id => this.#registry.get(id)?.status === "running");
-		if (running.length === 0) return;
+		if (running.length === 0) return false;
 		const remaining = new Set(running);
 		const settled = Promise.withResolvers<void>();
 		const unsubscribe = this.#registry.onChange(event => {
@@ -620,7 +646,7 @@ export class AgentLifecycleManager {
 			for (const id of Array.from(remaining)) {
 				if (this.#registry.get(id)?.status !== "running") remaining.delete(id);
 			}
-			if (remaining.size === 0) return;
+			if (remaining.size === 0) return true;
 			await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => settled.promise);
 		} catch (error) {
 			logger.warn("Adopted agent was still running at the parking deadline", {
@@ -630,6 +656,7 @@ export class AgentLifecycleManager {
 		} finally {
 			unsubscribe();
 		}
+		return true;
 	}
 
 	/**

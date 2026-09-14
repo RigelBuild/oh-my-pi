@@ -15,18 +15,6 @@
 
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
-## [18.1.21] - 2026-09-14
-
-### Fixed
-
-- Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
-- Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
-- Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
-- Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
-- First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
-- Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
-- Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
-
 ### Fixed
 
 - SDK embedders can wire a restart lifecycle callback (`onRestartRequested`) that exposes an in-session `restart` tool, cooperatively recycling the agent session to pick up host-staged changes a live refresh cannot reach. The tool is offered only when the embedder supplies the callback; a default `omp` CLI session does not present it. Input that arrives while the recycle is tearing down — a steer, a follow-up, an agent-initiated directive, a host or ACP message — is now refused rather than queued into the session being replaced, including input that was already parked in image preparation when the teardown began; a host or ACP message discarded that way reports no turn started, and any queue label it carried is handed back through the dropped-prompt hook so an interactive host can restore it. A host shutdown that races the recycle joins it instead of running a second teardown that would leave the replacement with no transcript to reopen ([#10289](https://github.com/can1357/oh-my-pi/pull/10289) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
@@ -45,6 +33,21 @@
 - An in-session restart now refuses while title generation is still running, instead of recycling over it. Title generation runs with the agent idle and persists through an awaited `setSessionName()` on the session manager that restart disposal seals — and disposal aborts the title controller — so the replacement reopened the same conversation without the title that was already being generated ([#10289](https://github.com/can1357/oh-my-pi/pull/10289) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - A persisted subagent revival that completed just before an all-agent parking handoff is no longer handed to its `ensureLive()` caller in the gap before the barrier parks it, so a concurrent hub send can no longer start work on a session the recycle is about to detach and dispose ([#10289](https://github.com/can1357/oh-my-pi/pull/10289) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - The in-session restart now lets an adopted subagent finish a turn that was already in flight before parking it, so restarting an otherwise-idle parent no longer aborts an unrelated child request (a follow-up, IRC wake, or collaboration chat); a child still running at the parking deadline is parked anyway rather than wedging the restart ([#10289](https://github.com/can1357/oh-my-pi/pull/10289) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
+## [18.1.21] - 2026-09-14
+
+### Fixed
+
+- Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
+- Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
+- Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
+- Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
+- First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
+- Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
+- Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
+### Fixed
+
 ## [18.1.20] - 2026-09-13
 
 ### Added

@@ -5950,6 +5950,14 @@ export class AgentSession {
 			// lost. Refuse until it settles; the host re-requests and the recycle
 			// proceeds.
 			this.#autolearnCaptureTask !== undefined ||
+			// And an advisor review, for the same reason one step further out: with
+			// the default `advisor.syncBacklog: "off"` a terminal turn can leave an
+			// advisor model request running after the primary agent goes idle, so no
+			// counter above observes it. `beginDispose()` -> `stopRuntime()` ABORTS
+			// that request and clears its pending deltas, and the replacement never
+			// replays the terminal turn — so an accepted review, and the note it was
+			// producing, are simply gone.
+			this.#advisors.hasActiveReviews ||
 			// An accepted IRC reply obligation is the same loss on the peer side:
 			// an auto-reply can run with the foreground agent idle (side-channel
 			// during streaming with async delivery off, or idle in plan mode), and

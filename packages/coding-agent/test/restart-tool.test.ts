@@ -37,7 +37,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { RestartTool } from "@oh-my-pi/pi-coding-agent/tools/restart";
-import { logger, prompt, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, prompt, removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import failedTemplate from "../src/prompts/tools/restart-failed.md" with { type: "text" };
 import refusedTemplate from "../src/prompts/tools/restart-refused.md" with { type: "text" };
 import scheduledTemplate from "../src/prompts/tools/restart-scheduled.md" with { type: "text" };
@@ -103,7 +103,7 @@ describe("RestartTool binding guard", () => {
 const REFUSAL_DISCRIMINATORS = [
 	["unavailable", "restart is unavailable"],
 	["no-session-file", "no session file"],
-	["busy", "input is still queued"],
+	["busy", "work in flight that a recycle would lose"],
 ] as const;
 
 // Every model-facing string this tool emits is loaded from a static `.md` prompt
@@ -289,7 +289,7 @@ describe("RestartTool outcome reporting (split on dispose ordering)", () => {
 			typeof queued[0]!.content === "string"
 				? queued[0]!.content
 				: queued[0]!.content.map(b => (b.type === "text" ? b.text : "")).join("");
-		expect(text).toContain("input is still queued");
+		expect(text).toContain("work in flight that a recycle would lose");
 	});
 
 	// A pre-dispose rejection is rendered into a `display: true` message, so the
@@ -506,9 +506,9 @@ describe("RestartTool no-deadlock (model turn)", () => {
 	const sessions: AgentSession[] = [];
 	const authStorages: AuthStorage[] = [];
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-restart-tool-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
+		await fs.promises.mkdir(tempDir, { recursive: true });
 	});
 
 	afterEach(async () => {
@@ -518,8 +518,8 @@ describe("RestartTool no-deadlock (model turn)", () => {
 		for (const authStorage of authStorages.splice(0)) {
 			authStorage.close();
 		}
-		if (tempDir && fs.existsSync(tempDir)) {
-			removeSyncWithRetries(tempDir);
+		if (tempDir && (await Bun.file(tempDir).exists())) {
+			await removeWithRetries(tempDir);
 		}
 		vi.restoreAllMocks();
 		AsyncJobManager.resetForTests();
@@ -586,8 +586,8 @@ describe("RestartTool no-deadlock (model turn)", () => {
 
 		const cwd = path.join(tempDir, "cwd");
 		const sessionDir = path.join(tempDir, "sessions");
-		fs.mkdirSync(cwd, { recursive: true });
-		fs.mkdirSync(sessionDir, { recursive: true });
+		await fs.promises.mkdir(cwd, { recursive: true });
+		await fs.promises.mkdir(sessionDir, { recursive: true });
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		authStorages.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
