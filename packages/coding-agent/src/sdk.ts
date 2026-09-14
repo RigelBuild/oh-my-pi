@@ -1510,8 +1510,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// so a settings-derived seed starts empty, the reconcile sees no change, and
 	// the revoked directory stays granted forever. Sessions written before the
 	// header carried provenance report nothing, which keeps their roots manual —
-	// the prior behaviour, and the safe direction.
-	let settingsOwnedRoots = new Set(options.additionalDirectories ? [] : sessionManager.getSettingsOwnedDirectories());
+	// the prior behaviour, and the safe direction. Only a startup seed: the live
+	// listener re-reads the manager's CURRENT ownership so a `/remove-dir` +
+	// `/add-dir` between edits is honoured instead of a stale startup snapshot.
+	const settingsOwnedSeed = new Set(options.additionalDirectories ? [] : sessionManager.getSettingsOwnedDirectories());
 	if (options.additionalDirectories) {
 		// `--add-dir` pins the list for the session, so nothing is settings-owned
 		// and the reconcile below is skipped entirely. Merge with header roots
@@ -1529,10 +1531,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const { roots, owned } = reconcileSettingsWorkspaceRoots({
 			cwd: sessionManager.getCwd(),
 			live: sessionManager.getAdditionalDirectories(),
-			previouslyOwned: settingsOwnedRoots,
+			previouslyOwned: settingsOwnedSeed,
 			configured: configuredDirs,
 		});
-		settingsOwnedRoots = owned;
 		await sessionManager.setAdditionalDirectories(roots);
 		await sessionManager.setSettingsOwnedDirectories([...owned]);
 	}
@@ -4716,9 +4717,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// An explicit `--add-dir` list owns the roots for the session; a config
 			// edit must not override what the invocation pinned.
 			if (options.additionalDirectories) return;
-			// Reconcile against the roots the PREVIOUS settings value granted, not
-			// against the live list: the live list already contains them, so a union
-			// could never revoke a removed root. See
+			// Reconcile against the roots the manager CURRENTLY records as
+			// settings-owned, not against the live list and not against a startup
+			// snapshot: the live list already contains them, so a union could never
+			// revoke a removed root, and a captured snapshot would misclassify a
+			// root that was `/remove-dir`'d (dropping its ownership) then `/add-dir`'d
+			// back as manual. Reading the manager keeps one source of truth. See
 			// `reconcileSettingsWorkspaceRoots` for why the origin has to be tracked.
 			//
 			// Resolved against the session's CURRENT directory, not the
@@ -4729,10 +4733,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const { roots, owned } = reconcileSettingsWorkspaceRoots({
 				cwd: sessionManager.getCwd(),
 				live: sessionManager.getAdditionalDirectories(),
-				previouslyOwned: settingsOwnedRoots,
+				previouslyOwned: new Set(sessionManager.getSettingsOwnedDirectories()),
 				configured: Array.isArray(value) ? (value as string[]) : [],
 			});
-			settingsOwnedRoots = owned;
 			// Started eagerly, and the handle is registered so `/refresh settings`
 			// joins it: a listener return value is discarded, so without this the
 			// refresh reports completion while the prompt still advertises the

@@ -630,6 +630,61 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 30_000);
 
+	it("re-arms idle compaction with the reloaded values when an idle setting changes", async () => {
+		// The interactive idle-compaction timer copies `idleEnabled`/
+		// `idleThresholdTokens`/`idleTimeoutSeconds` into an armed `setTimeout` and
+		// never re-reads them; the settings SELECTOR re-arms it for exactly these
+		// keys. A reload took neither path, so `/refresh settings` left the armed
+		// callback on the old threshold/timeout and blind to a disable. The re-arm
+		// hook is the host seam the reload drives; a reconciler that reads the live
+		// setting the way the real timer does proves the reloaded value reaches the
+		// arming path, and that an unrelated edit never re-arms.
+		const h = await makeHarness(
+			"compaction:\n  idleEnabled: true\n  idleThresholdTokens: 100\n  idleTimeoutSeconds: 60\n",
+		);
+		try {
+			// Mirror what `refreshIdleCompactionTimer` reads at arm time.
+			const arms: { enabled: boolean; threshold: number; timeout: number }[] = [];
+			h.session.setReconcileIdleCompaction(() => {
+				arms.push({
+					enabled: h.session.settings.get("compaction.idleEnabled"),
+					threshold: h.session.settings.get("compaction.idleThresholdTokens"),
+					timeout: h.session.settings.get("compaction.idleTimeoutSeconds"),
+				});
+			});
+
+			// An unrelated edit must NOT re-arm.
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  idleEnabled: true\n  idleThresholdTokens: 100\n  idleTimeoutSeconds: 60\nincludeModelInPrompt: false\n",
+			);
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+			expect(arms).toHaveLength(0);
+
+			// A threshold edit re-arms, and the re-arm sees the RELOADED value.
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  idleEnabled: true\n  idleThresholdTokens: 500\n  idleTimeoutSeconds: 60\nincludeModelInPrompt: false\n",
+			);
+			await h.session.refresh("settings");
+			expect(arms).toHaveLength(1);
+			// RED (pre-fix): no re-arm ran at all, so this length was 0.
+			expect(arms[0]).toEqual({ enabled: true, threshold: 500, timeout: 60 });
+
+			// A disable re-arms too, so a pending compaction is cancelled instead of
+			// firing after the user turned idle compaction off.
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  idleEnabled: false\n  idleThresholdTokens: 500\n  idleTimeoutSeconds: 60\nincludeModelInPrompt: false\n",
+			);
+			await h.session.refresh("settings");
+			expect(arms).toHaveLength(2);
+			expect(arms[1].enabled).toBe(false);
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("keeps an MCP tool the user disabled through /tools across a tool rebind", async () => {
 		// A settings refresh calls `refreshMCPTools(manager.getTools())` whenever
 		// ANY setting changes -- `reconcileProjectConfigFilter()` self-guards on
@@ -678,6 +733,57 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 			]);
 			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__gamma");
 			expect(h.session.getEnabledToolNames()).not.toContain("mcp__srv__beta");
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("keeps an MCP deselection across a transient tool disappearance", async () => {
+		// The rebind case above snapshots the PREVIOUS refresh only. When an
+		// intermediate refresh drops the tool -- the server failed, or removed the
+		// tool -- both `previousMcpManagerToolNames` and `previousActiveMcpToolNames`
+		// forget the name, so a later reconnect reads as newly connected and, pre-fix,
+		// re-activates a tool the user had turned off through `/tools`.
+		const h = await makeHarness("ui:\n  thinkingBlock: true\n");
+		try {
+			const make = (name: string): CustomTool => ({
+				name,
+				label: name,
+				description: name,
+				parameters: { type: "object" as const },
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			});
+			const alpha = make("mcp__srv__alpha");
+			const beta = make("mcp__srv__beta");
+
+			// Both connect active.
+			await h.session.refreshMCPTools([alpha, beta]);
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__beta");
+
+			// The user turns beta off through `/tools`.
+			await h.session.setActiveToolsByName(
+				h.session.getEnabledToolNames().filter(name => name !== "mcp__srv__beta"),
+			);
+			expect(h.session.getEnabledToolNames()).not.toContain("mcp__srv__beta");
+
+			// An intermediate refresh where the server dropped beta entirely: it is
+			// absent from the catalog, so the one-refresh-back snapshots lose it.
+			await h.session.refreshMCPTools([alpha]);
+			expect(h.session.getEnabledToolNames()).not.toContain("mcp__srv__beta");
+
+			// beta reconnects. RED (pre-fix): the predicate sees it as newly
+			// connected and activates it, silently re-enabling a disabled tool.
+			await h.session.refreshMCPTools([alpha, beta]);
+			expect(h.session.getEnabledToolNames()).not.toContain("mcp__srv__beta");
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__alpha");
+
+			// Re-selecting beta through `/tools` clears the ledger, so a subsequent
+			// reconnect keeps it active -- the outage guard is not a permanent freeze.
+			await h.session.setActiveToolsByName([...h.session.getEnabledToolNames(), "mcp__srv__beta"]);
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__beta");
+			await h.session.refreshMCPTools([alpha]);
+			await h.session.refreshMCPTools([alpha, beta]);
+			expect(h.session.getEnabledToolNames()).toContain("mcp__srv__beta");
 		} finally {
 			await h.dispose();
 		}

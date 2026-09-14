@@ -313,6 +313,20 @@ export class SessionTools {
 	#rpcHostToolNames = new Set<string>();
 	#mcpManagerToolNames = new Set<string>();
 	#extensionMcpTools = new Map<string, AgentTool>();
+	/**
+	 * MCP tool names the user has EXPLICITLY deselected through `/tools`, kept
+	 * across refreshes so a transient server/tool disappearance cannot silently
+	 * reactivate a disabled tool. A refresh's active set is rebuilt from the
+	 * PREVIOUS refresh's snapshot ({@link #applyMCPToolRefresh}); once an
+	 * intermediate refresh drops a name (the server failed or dropped the tool),
+	 * both `previousMcpManagerToolNames` and `previousActiveMcpToolNames` forget
+	 * it, so its later reconnect reads as newly connected and would activate. A
+	 * durable ledger — not `#runtimeSelectedToolNames`, which excludes mounted
+	 * `xd://` names and cannot tell a returning-deselected tool from a genuinely
+	 * new one — records the choice so it survives the outage. Maintained at the
+	 * `/tools` choke point ({@link #applyToolPresentation}).
+	 */
+	#deselectedMcpToolNames = new Set<string>();
 	#xdev: XdevState | undefined;
 	readonly #createXdevState: (() => XdevState | undefined) | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
@@ -1807,10 +1821,24 @@ export class SessionTools {
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
+		// Record which currently-registered MCP tools this explicit selection
+		// keeps off, so a later refresh whose snapshots have forgotten the name
+		// (a transient server/tool outage) does not treat its reconnect as a new
+		// activation. A re-selected name clears from the ledger. Only names still
+		// in the registry are judged: an already-gone tool keeps whatever the
+		// ledger last recorded.
+		const previousDeselectedMcpToolNames = new Set(this.#deselectedMcpToolNames);
+		const normalizedSet = new Set(normalized);
+		for (const name of this.#toolRegistry.keys()) {
+			if (!isMCPToolName(name)) continue;
+			if (normalizedSet.has(name)) this.#deselectedMcpToolNames.delete(name);
+			else this.#deselectedMcpToolNames.add(name);
+		}
 		try {
 			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
+			this.#deselectedMcpToolNames = previousDeselectedMcpToolNames;
 			throw error;
 		}
 	}
@@ -2396,9 +2424,19 @@ export class SessionTools {
 		// a tool the user had turned off through `/tools`, because a refresh runs
 		// for reasons that have nothing to do with MCP — any settings edit reaches
 		// here, and `reconcileProjectConfigFilter()` self-guards on no-change.
+		//
+		// The prior-selection snapshots only reach back ONE refresh. An
+		// intermediate refresh where the server failed or dropped the tool erases
+		// its name from both, so its later reconnect would read as new and
+		// activate — silently re-enabling a tool the user disabled. The durable
+		// `#deselectedMcpToolNames` ledger, maintained at the `/tools` choke
+		// point, remembers that choice across the outage, so a transient
+		// disappearance cannot resurrect a disabled tool.
 		const previousActiveMcpToolNameSet = new Set(previousActiveMcpToolNames);
 		const selectedManagerToolNames = Array.from(this.#mcpManagerToolNames).filter(
-			name => !previousMcpManagerToolNames.has(name) || previousActiveMcpToolNameSet.has(name),
+			name =>
+				!this.#deselectedMcpToolNames.has(name) &&
+				(!previousMcpManagerToolNames.has(name) || previousActiveMcpToolNameSet.has(name)),
 		);
 		// Extension-owned MCP tools retain their prior selection while both sets
 		// share one registry.

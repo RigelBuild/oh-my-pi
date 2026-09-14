@@ -483,6 +483,48 @@ describe("AgentSession refresh('settings'): live workspace roots", () => {
 		}
 	});
 
+	it("keeps a re-added root manual when the listener reads the manager's live ownership", async () => {
+		// The listener historically reconciled against a `settingsOwnedRoots`
+		// closure captured at startup, an INDEPENDENT copy of the manager's
+		// ownership set. A settings-owned root removed with `/remove-dir`
+		// (which clears the manager's ownership) and re-added with `/add-dir`
+		// (manual, unowned) stayed classified settings-owned by that stale
+		// closure, so a later settings refresh that dropped the configured value
+		// revoked the independently re-added root. Reading the manager's CURRENT
+		// ownership at the listener keeps one source of truth.
+		const h = await makeHarness("compaction:\n  enabled: false\n");
+		try {
+			const added = path.join(h.cwd, "extra-root");
+			await fs.mkdir(added, { recursive: true });
+
+			// Settings grant the root: the listener records it settings-owned.
+			await fs.writeFile(
+				h.settingsPath,
+				`compaction:\n  enabled: false\nworkspace:\n  additionalDirectories:\n    - ${added}\n`,
+			);
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+			expect(h.session.sessionManager.getAdditionalDirectories()).toEqual([added]);
+			expect(h.session.sessionManager.getSettingsOwnedDirectories()).toEqual([added]);
+
+			// `/remove-dir` drops the manager's ownership, then `/add-dir` re-adds
+			// it as a manual (unowned) root.
+			await h.session.sessionManager.removeWorkspaceDirectory(added);
+			await h.session.sessionManager.addWorkspaceDirectory(added);
+			expect(h.session.sessionManager.getAdditionalDirectories()).toEqual([added]);
+			expect(h.session.sessionManager.getSettingsOwnedDirectories()).toEqual([]);
+
+			// A settings refresh that no longer names the root must NOT revoke it:
+			// the manager no longer owns it. RED (pre-fix): the stale closure still
+			// claimed ownership, so the reconcile revoked the manual re-add.
+			await fs.writeFile(h.settingsPath, "compaction:\n  enabled: false\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+			expect(h.session.sessionManager.getAdditionalDirectories()).toEqual([added]);
+			expect(h.session.sessionManager.getSettingsOwnedDirectories()).toEqual([]);
+		} finally {
+			await h.dispose();
+		}
+	});
+
 	it("revokes a settings root removed while the session was stopped", async () => {
 		// The live reconcile above only catches an edit the RUNNING session
 		// observes. Across a stop the ownership set was rebuilt from the roots
