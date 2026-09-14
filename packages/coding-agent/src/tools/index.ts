@@ -675,7 +675,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
 	// we only probe Python when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
-	let pythonAvailable = true;
+	// `undefined` = the probe never ran, which is NOT the same as success. With
+	// both backends off at startup nothing probes, and recording that as
+	// available let a later `eval.py` edit plus `/refresh settings` advertise
+	// `eval` on a machine with no usable kernel — where a fresh session under the
+	// same settings omits it. The reconcile re-probes when the state is unknown.
+	let pythonAvailable: boolean | undefined = true;
 	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
 	if (!skipEvalPreflight && !allowJs && evalRequested) {
 		if (allowPython) {
@@ -689,10 +694,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			if (!availability.ok) {
 				logger.warn("Python kernel unavailable and JS backend disabled", { reason: availability.reason });
 			}
+		} else {
+			// Both backends off: nothing probed, so reachability is unknown.
+			pythonAvailable = undefined;
 		}
 	}
 
-	const effectivePythonAllowed = allowPython && pythonAvailable;
+	const effectivePythonAllowed = allowPython && pythonAvailable === true;
 	// Eval is exposed whenever any backend is reachable. A backend may be
 	// unreachable, in which case eval dispatches exclusively to the others.
 	const allowEval = effectivePythonAllowed || allowJs;
@@ -791,13 +799,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			case "hub":
 				return !restrictToolNames && session.enableIrc !== false;
 			case "eval":
-				// Only the PROBE result, never the settings half: kernel
-				// reachability is decided once, here, and a settings edit cannot
-				// make an absent kernel appear. `pythonAvailable` stays true when
-				// the probe never ran (JS allowed, or eval unrequested), so
-				// both-backends-off records eval as permitted and the reconcile
-				// decides it from the live settings.
-				return allowJs || pythonAvailable;
+				// Only the PROBE result, never the settings half: a settings edit
+				// cannot make an absent kernel appear. `undefined` means the probe
+				// never ran, which still permits the tool — the reconcile re-probes
+				// before activating it, rather than trusting a skipped probe.
+				return allowJs || pythonAvailable !== false;
 			case "context_notes":
 			case "new_context":
 				// Both read and annotate the transcript through the read/grep
