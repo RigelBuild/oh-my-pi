@@ -21,7 +21,8 @@ import {
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
+import { providerImageByteBudget } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
 

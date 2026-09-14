@@ -20,7 +20,8 @@ import {
 	clampProviderContextImages,
 	PROVIDER_IMAGE_COUNT_DECODE_SLACK,
 } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
-import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
+import { providerImageByteBudget } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { largeDecodablePng, smoothDecodablePng } from "./fixtures/decodable-png";
 
 const UMANS_MODEL = buildModel({

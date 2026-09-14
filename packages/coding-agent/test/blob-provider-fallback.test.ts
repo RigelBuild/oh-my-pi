@@ -5,7 +5,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "@oh-my-pi/pi-coding-agent/blob-broker/stream-fallback";
-import { providerImageByteBudget } from "@oh-my-pi/snapcompact";
+import { providerImageByteBudget } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { smoothDecodablePng } from "./session/fixtures/decodable-png";
 
 const model: Model = buildModel({
