@@ -174,4 +174,28 @@ describe("AgentSession memory backend lifecycle", () => {
 		expect(current.getActiveToolNames()).toContain("retain");
 		expect(current.getActiveToolNames()).not.toContain("recall");
 	});
+
+	it("keeps an explicit selection when a backend first registers its tools", async () => {
+		// Enabling a backend from `off` registers its memory tools for the FIRST
+		// time, so nothing was `removed`. Pre-fix every newly created tool was
+		// activated on the strength of `!removed.has(name)`, overriding a `/tools`
+		// selection the user had already narrowed while memory was off.
+		const current = createSession(async () =>
+			settings.get("memory.backend") === "mnemopi" ? [createTool("recall"), createTool("retain")] : [],
+		);
+
+		// `/tools` narrowing while memory is off: record an explicit active set.
+		await current.setActiveToolsByName(["read"]);
+		expect(current.getActiveToolNames()).toEqual(["read"]);
+
+		// Turn the backend on: its tools become AVAILABLE but must respect the
+		// explicit selection instead of forcing themselves active.
+		settings.override("memory.backend", "mnemopi");
+		await current.applyMemoryBackend();
+
+		expect(current.getAllToolNames()).toEqual(expect.arrayContaining(["read", "recall", "retain"]));
+		expect(current.getActiveToolNames()).toEqual(["read"]);
+		expect(current.getActiveToolNames()).not.toContain("recall");
+		expect(current.getActiveToolNames()).not.toContain("retain");
+	});
 });
