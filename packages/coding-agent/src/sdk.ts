@@ -5003,6 +5003,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//     an MCP manager (fresh OR reused) needs its own bridge to its own
 		//     `extensionRunner` so extensions loaded in that session receive frames.
 		//     Guarded only by `mcpManager` (see the second `if` below).
+		// A manager this session does NOT own still publishes late tool sets: a
+		// server slower than `STARTUP_TIMEOUT_MS` has its load left in the
+		// background by `connectServers`, and its tools arrive afterwards. The
+		// owner slot above belongs to whoever built the manager, so observe
+		// through the multi-listener hook instead — otherwise those tools never
+		// reached this session's registry, before or after a refresh.
+		if (mcpManager && options.mcpManager) {
+			const unsubscribe = mcpManager.addToolsChangedListener(async tools => {
+				try {
+					await session.refreshMCPTools(tools);
+				} catch (error) {
+					logger.warn("MCP tool refresh failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			});
+			// Unsubscribed with the session: the manager outlives it, so a retained
+			// listener would rebind tools onto a disposed session.
+			postmortem.register("mcp-shared-tools-listener", unsubscribe);
+		}
 		if (mcpManager && !options.mcpManager) {
 			mcpManager.setOnToolsChanged(async tools => {
 				try {
