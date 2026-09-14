@@ -444,7 +444,25 @@ export interface AuthCredentialStore {
 	 * Optional: stores whose cache is private to one process have no such
 	 * window, and callers fall back to a plain read-then-`setCache`.
 	 */
-	setCacheIfMatches?(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome;
+	setCacheIfMatches?(
+		key: string,
+		expectedValue: string | null,
+		value: string,
+		expiresAtSec: number,
+		options?: {
+			/**
+			 * Do not wait on a lock another process holds: report `"unavailable"`
+			 * at once instead of paying the store's busy timeout.
+			 *
+			 * For a BEST-EFFORT write whose caller already treats `"unavailable"`
+			 * as "skip this". The default blocking behaviour charges that timeout
+			 * on the calling thread, and a caller that makes one such write per
+			 * item multiplies it — which is how a handful of MCP servers turned a
+			 * held lock into tens of seconds of frozen startup.
+			 */
+			nonblocking?: boolean;
+		},
+	): CasOutcome;
 	/** Drop all cache rows whose keys start with the supplied prefix. */
 	deleteCachePrefix?(prefix: string): void;
 	cleanExpiredCache(): void;

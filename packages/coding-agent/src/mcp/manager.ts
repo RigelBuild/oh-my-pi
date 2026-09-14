@@ -68,6 +68,15 @@ export type MCPConfigLoader = (cwd: string, options?: LoadMCPConfigsOptions) => 
 type ToolLoadResult = {
 	connection: MCPServerConnection;
 	serverTools: MCPToolDefinition[];
+	/**
+	 * Apply ticket taken before this load's `tools/list`. Both consumers — the
+	 * background handler and `connectServers`' foreground apply — must make the
+	 * same ordering decision, so the ticket travels with the result rather than
+	 * being known only inside the background chain.
+	 */
+	applyTicket: number;
+	/** Catalog ordering token, claimed with the ticket before the request. */
+	observedAt: number | undefined;
 };
 
 interface AuthRefreshableMCPTransport extends MCPTransport {
@@ -1093,8 +1102,14 @@ export class MCPManager {
 				if (task.tracked.status === "fulfilled") {
 					const value = task.tracked.value;
 					if (!value) continue;
-					const { connection, serverTools } = value;
+					const { connection, serverTools, applyTicket } = value;
 					connectedServers.add(name);
+					// Same ordering decision the background handler makes. A
+					// `tools/list_changed` that arrived while this initial list was
+					// pending can answer first, and without this check the fulfilled
+					// task was applied unconditionally here and restored the older
+					// roster the background handler had just correctly refused.
+					if (this.#toolApplySuperseded(name, applyTicket)) continue;
 					const reconnect = () => this.reconnectServer(name);
 					this.#replaceServerTools(name, MCPTool.fromTools(connection, serverTools, reconnect));
 				} else if (task.tracked.status === "rejected") {
@@ -1144,6 +1159,20 @@ export class MCPManager {
 	 * later request already wrote the registry. Ties lose: an equal ticket means
 	 * the same request already applied.
 	 */
+	/**
+	 * Whether a LATER request's response already wrote the registry, so this
+	 * ticket's tools are stale. Read-only, unlike {@link #claimToolApply}: the
+	 * foreground startup apply must consult the same decision without consuming
+	 * the claim the background handler needs for its own follow-up work (cache
+	 * write, empty-toolset retry, tools-changed fire).
+	 *
+	 * An EQUAL ticket is not superseded: that is this same response, already
+	 * applied by the background handler, so re-applying is idempotent.
+	 */
+	#toolApplySuperseded(name: string, ticket: number): boolean {
+		return ticket < (this.#toolApplyApplied.get(name) ?? 0);
+	}
+
 	#claimToolApply(name: string, ticket: number): boolean {
 		const applied = this.#toolApplyApplied.get(name) ?? 0;
 		if (ticket <= applied) return false;

@@ -845,11 +845,21 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * share one agent.db, so a peer can replace the row between a `getCache` and
 	 * the `setCache` it informs. Returns `false` without writing when the
 	 * underlying store cannot make the check part of the write.
+	 *
+	 * `nonblocking` asks the store not to wait on a lock a peer process holds,
+	 * reporting `"unavailable"` immediately instead. For a best-effort write
+	 * whose caller already treats that outcome as "skip".
 	 */
-	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
+	setCacheIfMatches(
+		key: string,
+		expectedValue: string | null,
+		value: string,
+		expiresAtSec: number,
+		options?: { nonblocking?: boolean },
+	): CasOutcome {
 		// A store without the method cannot compare anything, which is the
 		// `"unavailable"` case, not a CAS loss: retrying it would spin forever.
-		return this.#authStore.setCacheIfMatches?.(key, expectedValue, value, expiresAtSec) ?? "unavailable";
+		return this.#authStore.setCacheIfMatches?.(key, expectedValue, value, expiresAtSec, options) ?? "unavailable";
 	}
 
 	/**
