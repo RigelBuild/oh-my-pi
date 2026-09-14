@@ -855,9 +855,41 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		// shared tables so this cannot drift from the predicate above. The
 		// settings half is deliberately NOT consulted: this records what the
 		// invocation allows, and the reconcile evaluates the setting live.
+		// A companion the expansion above appends — `ast_grep` beside `grep`,
+		// `ast_edit` beside `edit`, the context-management pair, the auto-learn
+		// tools — is appended only when its SETTING is already on. Reading
+		// membership of the list alone therefore encoded the startup value of the
+		// very setting the reconcile exists to re-evaluate, so an explicit
+		// unrestricted list that started with the setting off could never gain the
+		// tool, though a fresh session with the same list and the new setting
+		// auto-includes it. Permission comes from the sibling/invocation condition
+		// instead, exactly as the expansion's non-settings half states it.
+		const companionInvocationAllows = (name: string): boolean => {
+			if (restrictToolNames || !requestedTools) return false;
+			switch (name) {
+				case "ast_grep":
+					return requestedTools.includes("grep");
+				case "ast_edit":
+					return requestedTools.includes("edit");
+				case "context_notes":
+				case "new_context":
+					return requestedTools.includes("read") && requestedTools.includes("grep");
+				case "manage_skill":
+				case "learn":
+					return (session.taskDepth ?? 0) === 0;
+				default:
+					return false;
+			}
+		};
 		for (const name of [...Object.keys(BOOLEAN_GATED_TOOLS), ...Object.keys(COMPOUND_GATED_TOOLS)]) {
 			if (!(name in allTools)) continue;
-			if (filteredRequestedTools !== undefined && !requestedTools?.includes(name)) continue;
+			if (
+				filteredRequestedTools !== undefined &&
+				!requestedTools?.includes(name) &&
+				!companionInvocationAllows(name)
+			) {
+				continue;
+			}
 			if (!invocationPermitsGatedTool(name)) continue;
 			permitted.add(name);
 		}

@@ -80,6 +80,8 @@ async function makeHarness(
 		enableMCP?: boolean;
 		/** Run the REAL Python preflight, for the probe-on-activation path. */
 		pythonPreflight?: boolean;
+		/** Restricted list: the invocation half no settings edit may widen. */
+		restrictToolNames?: boolean;
 	},
 ): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-tiers-tools-");
@@ -118,6 +120,7 @@ async function makeHarness(
 		skipPythonPreflight: options?.pythonPreflight !== true,
 		customTools: options?.customTools,
 		toolNames: options?.toolNames,
+		restrictToolNames: options?.restrictToolNames ?? false,
 		taskDepth: options?.taskDepth,
 	});
 
@@ -729,6 +732,45 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 			// RED (pre-fix): re-enabling the gate reactivated a tool the user had
 			// explicitly turned off.
 			expect(h.session.getEnabledToolNames()).not.toContain("bash");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("builds an auto-included companion a refresh enables for an explicit tool list", async () => {
+		// An unrestricted session with an explicit `toolNames` list gets its
+		// companions appended only when their setting is already on, so recording
+		// the permission set from LIST MEMBERSHIP encoded the startup value of the
+		// very setting the reconcile re-evaluates: `["read", "grep"]` started with
+		// `astGrep.enabled: false` could never gain `ast_grep`, though a fresh
+		// session with the same list and the new setting auto-includes it.
+		const h = await makeHarness("astGrep:\n  enabled: false\n", { toolNames: ["read", "grep"] });
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("ast_grep");
+
+			await fs.writeFile(h.settingsPath, "astGrep:\n  enabled: true\n");
+			await h.session.refresh("settings");
+
+			// RED (pre-fix): permanently excluded, because the startup list never
+			// carried the name.
+			expect(h.session.getEnabledToolNames()).toContain("ast_grep");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("still refuses a companion a restricted tool list excluded", async () => {
+		// The invocation half must stay narrow: a RESTRICTED list owns its active
+		// set, so no settings edit may widen it. Same setting flip, opposite
+		// outcome — this is what the permission set exists to protect.
+		const h = await makeHarness("astGrep:\n  enabled: false\n", {
+			toolNames: ["read", "grep"],
+			restrictToolNames: true,
+		});
+		try {
+			await fs.writeFile(h.settingsPath, "astGrep:\n  enabled: true\n");
+			await h.session.refresh("settings");
+			expect(h.session.getEnabledToolNames()).not.toContain("ast_grep");
 		} finally {
 			await h.dispose();
 		}
