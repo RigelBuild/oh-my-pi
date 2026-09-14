@@ -168,6 +168,59 @@ describe("AuthStorage identity-less usage reports", () => {
 		}
 	}, 20_000);
 
+	it("does not stamp a shared-pool report, so its several keys collapse to one account", async () => {
+		// charm-hyper sells a prepaid credit balance that is ACCOUNT-WIDE, not
+		// per-key: it issues several keys per account that all observe one pool, so
+		// it marks every limit `scope.shared` and its contract says consumers must
+		// COLLAPSE those identical reports, not treat each key as its own account.
+		// The identity-less credential stamp is what would break that collapse:
+		// stamping each key with a distinct credentialKey exposes one balance as
+		// several accounts, and the Prometheus exposition never re-emits
+		// `scope.shared`, so nothing downstream could recognize the duplicates
+		// afterward. Such a report must stay UNSTAMPED so the byte-identical label
+		// sets collapse in the renderer.
+		const sharedReport = (): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: { provider: "charm-hyper", windowId: "balance", shared: true },
+					amount: { remaining: 94, unit: "credits" },
+				},
+			],
+			metadata: { endpoint: "https://example.invalid/credits" },
+		});
+		const charmRow = (id: number): StoredAuthCredential => ({
+			id,
+			provider: "charm-hyper",
+			credential: { type: "api_key", key: `sk-${id}` },
+			disabledCause: null,
+		});
+		const storage = new AuthStorage(makeStore([charmRow(41), charmRow(42)]), {
+			usageProviderResolver: provider =>
+				provider === "charm-hyper"
+					? ({ id: "charm-hyper", fetchUsage: async () => sharedReport() } as UsageProvider)
+					: undefined,
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.fetchUsageReports()) ?? [];
+			const charm = reports.filter(report => report.provider === "charm-hyper");
+			const keys = charm.map(report => report.metadata?.credentialKey);
+
+			// GREEN: neither shared-pool report is stamped, so both stay identical
+			// and the renderer collapses them into one account-wide series.
+			// RED (pre-fix): the identity-less stamp keyed each by its row id, so the
+			// two keys were distinct and one pool rendered as two accounts.
+			expect(charm).toHaveLength(2);
+			expect(keys.every(key => key === undefined)).toBe(true);
+		} finally {
+			storage.close();
+		}
+	}, 20_000);
+
 	it("stamps stored xai-oauth credentials, which take their own collection branch", async () => {
 		// `xai-oauth` is collected by a provider-specific branch that builds each
 		// request and `continue`s before the shared stamp, so a pool of

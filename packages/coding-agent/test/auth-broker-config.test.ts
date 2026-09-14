@@ -61,6 +61,22 @@ describe("parseSubscriptionsConfig", () => {
 		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/duplicates an earlier entry after case-folding/i);
 	});
 
+	it("keeps two opaque account ids that differ only in case, not folding them into a collision", () => {
+		// The folded index exists ONLY for the email fallback. Opaque provider
+		// account ids are case-SENSITIVE, so "Foo" and "foo" under one provider are
+		// two DISTINCT accounts, not a collision. Folding every key rejected the
+		// whole config at startup as a false duplicate — even though exact lookup
+		// treats these ids as distinct. Only email-shaped ("@") keys are folded.
+		const raw = `{"accounts":{"Foo":{"provider":"anthropic","plan":"max"},"foo":{"provider":"anthropic","plan":"pro"}}}`;
+
+		// RED (pre-fix): threw /duplicates an earlier entry after case-folding/.
+		const config = parseSubscriptionsConfig(raw, FILE);
+
+		// Both distinct case-sensitive ids resolve to their own plan, unchanged.
+		expect(config.lookup("anthropic", "Foo", "")?.plan).toBe("max");
+		expect(config.lookup("anthropic", "foo", "")?.plan).toBe("pro");
+	});
+
 	it("does not case-fold a real account id through the email fallback", () => {
 		// Account ids are case-SENSITIVE, so the case-folded index must apply only
 		// to the unidentified-sentinel path: a report that recovered "ACCT-1" must
