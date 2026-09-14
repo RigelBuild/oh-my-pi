@@ -245,3 +245,70 @@ describe("AgentSession refresh('rules'): disabled-TTSR published snapshot", () =
 		}
 	});
 });
+
+describe("AgentSession refresh: provider-gate re-sync before rediscovery", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	// The `cursor` provider's PROJECT rules load unconditionally, so an
+	// `alwaysApply` rule under `.cursor/rules/` is a clean consumer-visible probe
+	// for whether the whole-provider gate admits `cursor`: it lands in
+	// `getActiveRules()` when the provider is enabled and is absent when disabled.
+	async function seedCursorRule(cwd: string, ruleName: string): Promise<void> {
+		await fs.mkdir(path.join(cwd, ".cursor", "rules"), { recursive: true });
+		await fs.writeFile(
+			path.join(cwd, ".cursor", "rules", `${ruleName}.mdc`),
+			`---\nalwaysApply: true\n---\ngate body for ${ruleName}\n`,
+		);
+	}
+
+	it("stops loading a provider's rules after an external disabledProviders edit", async () => {
+		const ruleName = `cursor-gate-${Bun.nanoseconds().toString(36)}`;
+		const h = await seedCursorHarness(ruleName);
+		try {
+			await h.session.refresh("all");
+			// Baseline: the provider is enabled, so its always-apply rule is live.
+			expect(getActiveRules().map(r => r.name)).toContain(ruleName);
+
+			// External edit disables the provider, then the user refreshes.
+			await fs.writeFile(h.settingsPath, "disabledProviders:\n  - cursor\n");
+			await h.session.refresh("all");
+
+			// Pre-fix: `settings.reload()` updated only the `Settings` instance;
+			// `resetCapabilities()` cleared only the fs cache. The MODULE-level
+			// `disabledProviders` set that `filterProviders` consults stayed empty,
+			// so `cursor` kept loading and its rule stayed in the active set.
+			expect(getActiveRules().map(r => r.name)).not.toContain(ruleName);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	it("resumes loading a provider's rules after an external disabledProviders removal", async () => {
+		const ruleName = `cursor-gate-${Bun.nanoseconds().toString(36)}`;
+		// Provider starts DISABLED on disk, so the rule is absent at startup.
+		const h = await seedCursorHarness(ruleName, "disabledProviders:\n  - cursor\n");
+		try {
+			await h.session.refresh("all");
+			expect(getActiveRules().map(r => r.name)).not.toContain(ruleName);
+
+			// External edit re-enables the provider (empties the list), then refresh.
+			await fs.writeFile(h.settingsPath, "disabledProviders: []\n");
+			await h.session.refresh("all");
+
+			// The enable direction: the module gate must drop `cursor`, so the
+			// provider loads again and its rule reappears.
+			expect(getActiveRules().map(r => r.name)).toContain(ruleName);
+		} finally {
+			await h.dispose();
+		}
+	});
+
+	async function seedCursorHarness(ruleName: string, initialSettings?: string): Promise<Harness> {
+		return makeHarness(async cwd => {
+			await seedCursorRule(cwd, ruleName);
+			if (initialSettings) await fs.writeFile(path.join(cwd, "config.yml"), initialSettings);
+		});
+	}
+});
