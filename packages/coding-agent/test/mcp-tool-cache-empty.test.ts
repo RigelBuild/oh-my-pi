@@ -788,6 +788,50 @@ describe("MCPToolCache empty-toolset guard", () => {
 		expect(await startup.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
 
+	// The cross-process half of the store-locked reservation. A store lock skips
+	// the persisted catalog (round 3), but the newer response must still leave a
+	// DURABLE barrier: an OLDER request reserved by a DIFFERENT instance holds a
+	// strictly lower PUBLISHED token, and its delayed response lands afterwards.
+	// `#writeOrdered` compares the catalog row and that request's OWN claim,
+	// never an in-memory barrier, so without a cross-process signal the older
+	// response caches its superseded catalog for the full TTL. Publishing the
+	// newer reservation's token to the shared claim row is what refuses it.
+	//
+	// RED (round 3): the newer response only marked its in-process barrier, so a
+	// fresh startup served the older catalog the newer request had superseded.
+	test("a store-locked reservation publishes a durable barrier against an older cross-process response", async () => {
+		const storage = createFakeStorage();
+		const older = new MCPToolCache(storage);
+		const newer = new MCPToolCache(storage);
+
+		// The older request reserves first and publishes its (lower) claim token.
+		// It belongs to a process that will outlive nothing here; its response is
+		// merely delayed behind the newer one.
+		const olderToken = reserved(older, "litellm");
+
+		// The newer request's `tools/list` goes out while the store is briefly
+		// locked, so its claim CANNOT publish and it reserves unreserved. Its
+		// floored token still lands above the older published claim.
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValueOnce("unavailable");
+		const newerToken = newer.observeCatalogAt("litellm");
+		cas.mockRestore();
+		expect(newerToken).toBeUndefined();
+
+		// The newer response lands FIRST. It skips the persisted catalog (no
+		// established order) but must publish a barrier to the shared claim row.
+		await newer.set("litellm", CONFIG, [NEW_TOOL], newerToken);
+
+		// The older response lands LAST through its own instance, carrying its
+		// published lower token. The barrier must refuse its superseded catalog.
+		await older.set("litellm", CONFIG, [OLD_TOOL], olderToken);
+
+		// A subsequent startup builds a fresh cache over the same store. It must
+		// NOT read the older catalog the newer request superseded; the store holds
+		// no authoritative catalog, so a live re-list repopulates it.
+		const startup = new MCPToolCache(storage);
+		expect((await startup.get("litellm", CONFIG)) ?? []).not.toContainEqual(OLD_TOOL);
+	});
+
 	// A tombstone's ordering must outlive the CATALOG TTL, because an MCP request
 	// does not have a bounded lifetime — `timeout: 0` disables the timeout
 	// outright. When an older `tools/list` is in flight for longer than the

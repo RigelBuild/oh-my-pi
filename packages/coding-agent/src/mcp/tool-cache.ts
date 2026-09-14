@@ -462,6 +462,11 @@ export class MCPToolCache {
 			);
 			const seen = this.#newestObserved.get(serverName);
 			this.#newestObserved.set(serverName, Math.max(seen ?? unreservedAt, unreservedAt));
+			// The in-process mark only orders writers on THIS instance. An older
+			// request reserved by a DIFFERENT instance floored a lower token and can
+			// still land after this one, so publish `unreservedAt` to the shared
+			// claim row — the one cross-process signal an unreserved write can leave.
+			this.#publishUnreservedBarrier(serverName, unreservedAt);
 			return;
 		}
 		const writeStartedAt = writeToken ?? toolCatalogObservedAt();
@@ -567,6 +572,38 @@ export class MCPToolCache {
 			baseline: { bytes: persistedBeforeHash },
 			unorderable: "drop",
 		});
+	}
+
+	/**
+	 * Raise the shared claim row to `barrier` so a later cross-process write
+	 * defers to it, without persisting a catalog.
+	 *
+	 * A reservation whose claim never published (a store lock, or an exhausted
+	 * CAS) still observed the server, later than anything already in flight on
+	 * this instance. It cannot persist a catalog — its token has no established
+	 * order — but an OLDER request from another instance, holding a strictly
+	 * lower published token, can still land afterwards and pass `#writeOrdered`
+	 * (which compares the catalog row and that request's OWN claim, never a
+	 * barrier) to cache its superseded catalog for the full TTL. The claim row
+	 * is the one cross-process ordering state an unreserved response can leave,
+	 * so CAS `barrier` above whatever it holds. Nonblocking and best-effort: if
+	 * the store is still locked the barrier is skipped, but so is every peer's
+	 * write, so nothing regresses.
+	 */
+	#publishUnreservedBarrier(serverName: string, barrier: number): void {
+		const claim = claimKey(serverName);
+		for (let attempt = 0; attempt < CACHE_CLAIM_ATTEMPTS; attempt++) {
+			const claimRaw = this.storage.getCache(claim);
+			const claimedAt = readClaimedAt(claimRaw);
+			if (claimedAt !== undefined && claimedAt >= barrier) return;
+			const serialized = JSON.stringify({ claimedAt: barrier } satisfies MCPToolClaimPayload);
+			const expiresAtSec = Math.floor((Date.now() + CLAIM_TTL_MS) / 1000);
+			const outcome = this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec, {
+				nonblocking: true,
+			});
+			if (outcome === "written") return;
+			if (outcome === "unavailable") return;
+		}
 	}
 
 	/**
