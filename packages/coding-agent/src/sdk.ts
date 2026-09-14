@@ -707,12 +707,15 @@ export interface CreateAgentSessionOptions {
 	 *   the old session) belong in {@link additionalExtensionPaths}, which adds
 	 *   to discovery rather than replacing it.
 	 * - Do NOT re-pass {@link contextFiles}, {@link skills},
-	 *   {@link promptTemplates}, or {@link slashCommands} with the values captured
-	 *   at first launch. Each bypasses disk discovery when supplied, so re-passing
-	 *   the stale value defeats the reload — restart would silently keep the old
-	 *   `AGENTS.md`, skills, templates, and commands. Omit them so
-	 *   `createAgentSession` re-runs discovery and picks up the on-disk changes
-	 *   restart promises.
+	 *   {@link promptTemplates}, {@link slashCommands}, or {@link rules} with the
+	 *   values captured at first launch. Each bypasses disk discovery when
+	 *   supplied, so re-passing the stale value defeats the reload — restart
+	 *   would silently keep the old `AGENTS.md`, skills, templates, commands, and
+	 *   rule files. Omit them so `createAgentSession` re-runs discovery and picks
+	 *   up the on-disk changes restart promises. `rules` is only a snapshot
+	 *   hazard: rules a host **authored itself** are genuine configuration and
+	 *   stay, exactly like any other host-chosen option — the rule is not to
+	 *   forward a list harvested from the outgoing session.
 	 * - Do NOT re-pass {@link preloadedPreparedExtensions},
 	 *   {@link preloadedCustomToolPaths}, or {@link workspaceTree} when they are
 	 *   snapshots of the outgoing session. Each short-circuits the discovery it
@@ -729,6 +732,26 @@ export interface CreateAgentSessionOptions {
 	 *   switch the user made before restarting. Omit it and the active model is
 	 *   restored from the transcript, or re-pass the session's CURRENT
 	 *   `session.model` together with {@link resolveModelFromRegistry}.
+	 * - Do NOT re-pass {@link thinkingLevel}, {@link openAIServiceTier}, or
+	 *   {@link resolveServiceTierByFamily} with the values you LAUNCHED with.
+	 *   Each behaves exactly like `model`: it is a launch-time option that
+	 *   outranks the persisted history, so re-passing it rolls the user's live
+	 *   setting back. `pickInitialThinkingLevel` consults the persisted
+	 *   `thinking_level_change` only when `thinkingLevel` is undefined, and an
+	 *   explicit or resolved service tier likewise takes precedence over the
+	 *   restored `serviceTier` — so a replacement built from the original options
+	 *   discards every `/thinking` and `/fast` change made before the restart.
+	 *   Omit them and the replacement restores from the transcript, or re-derive
+	 *   them from the outgoing session before requesting the restart
+	 *   (`session.configuredThinkingLevel()` and `session.serviceTierByFamily`).
+	 * - Do NOT re-pass {@link prewalk} or {@link planYolo} once they have been
+	 *   consumed. Both are ONE-SHOT startup transitions, but the replacement
+	 *   forwards them into a fresh `PrewalkCoordinator` whose constructor restores
+	 *   them as active startup state — so a replacement built from the original
+	 *   options re-arms a handoff the user already completed, and its next prompt
+	 *   can re-enter plan mode or repeat the prewalk plan/model handoff. Read the
+	 *   outgoing session's remaining state before requesting the restart and
+	 *   re-pass only what is still armed; omit them otherwise.
 	 * - Do NOT re-pass the `cwd` you LAUNCHED with. Pass
 	 *   `cwd: reopenedManager.getCwd()` instead. `SessionManager.open()` adopts
 	 *   the transcript's recorded header cwd whenever that directory is
@@ -4261,7 +4284,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// demand after the recycle.
 						const lifecycle = AgentLifecycleManager.global();
 						if (options.recycle) {
-							releaseParkingBarrier = await lifecycle.parkAll();
+							// Scope the parking to THIS parent's ownership chain: with two
+							// top-level sessions sharing the global lifecycle, an unscoped
+							// parkAll() would drain, park, and stale-mark session B's
+							// children too, stranding work this recycle never touched.
+							releaseParkingBarrier = await lifecycle.parkAll(undefined, resolvedAgentId);
 						} else {
 							await lifecycle.dispose();
 						}
@@ -4613,6 +4640,40 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			} catch (error) {
 				logger.warn("Failed to restore Vibe worker sessions for this session", { error: String(error) });
 			}
+		}
+
+		// Restart parks the parent's adopted subagents and marks each retained
+		// reviver stale, so after a recycle `ensureLive()` rebuilds a child ONLY
+		// through the persisted-subagent reviver factory the replacement parent
+		// installs — the stale closure over the disposed parent's MCP/session is
+		// never invoked again. `main.ts` installs that factory for the stock CLI,
+		// but the CLI deliberately does not enable restart; an ordinary SDK host
+		// following the documented `createAgentSession` reconstruction never
+		// installs one, so every previously adopted child stays parked and
+		// `ensureLive()` rejects it permanently. Install it here on the SDK path so
+		// the factory is bound to THIS top-level session's live deps (auth, models,
+		// settings, buses) the same way the CLI does. Gated on `onRestartRequested`
+		// — the opt-in that makes a session restartable — so a non-restart SDK host
+		// and the ACP path (which keeps several concurrent top-level sessions and
+		// never wires the callback) are untouched and cannot clobber one another's
+		// factory.
+		if (agentKind === "main" && options.onRestartRequested && sessionManager.getSessionFile()) {
+			// Dynamic import (not static): `persisted-revive.ts` imports
+			// `createAgentSession` from this module, so a static import here forms a
+			// cycle. Resolved lazily on the restart-enabled path only.
+			const { createPersistedSubagentReviverFactory } = await import("./task/persisted-revive");
+			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+				createPersistedSubagentReviverFactory({
+					session,
+					authStorage,
+					modelRegistry,
+					settings,
+					enableLsp,
+					eventBus,
+					subagentEventBus,
+				}),
+				Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+			);
 		}
 
 		return {

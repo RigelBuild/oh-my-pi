@@ -560,6 +560,50 @@ interface LocalCommandWindow {
 	released: boolean;
 }
 
+/**
+ * A restart promise that releases the caller's local-command window only when
+ * the caller actually SUBSCRIBES to it (`await` / `.then` / `.catch` /
+ * `.finally`) — never at the moment `requestRestart()` is invoked.
+ *
+ * The window is `#promptInFlightCount` held across a locally-handled slash
+ * command, and the restart barrier WAITS on that counter. A handler that
+ * `await`s its own restart cannot make progress until the restart resolves, and
+ * the restart cannot resolve while the counter it holds is non-zero — so the
+ * awaited case MUST drop the window to break the circular wait. But a handler
+ * that fires `requestRestart()` fire-and-forget and keeps doing async work is
+ * still using the live runtime, so dropping its window at invocation lets the
+ * recycle observe zero in-flight prompts and dispose underneath it. Invocation
+ * is not completion: only a subscription proves the caller is awaiting the
+ * outcome rather than continuing past it, so the release is deferred to the
+ * first `.then`. `Symbol.species` is `Promise` so every chained promise is
+ * plain and the hook fires exactly once, on the caller's own subscription.
+ */
+class SubscriptionReleasePromise<T> extends Promise<T> {
+	static override get [Symbol.species](): PromiseConstructor {
+		return Promise;
+	}
+	#onFirstSubscribe: (() => void) | undefined;
+
+	static wrap<T>(inner: Promise<T>, onFirstSubscribe: () => void): SubscriptionReleasePromise<T> {
+		const wrapped = new SubscriptionReleasePromise<T>((resolve, reject) => {
+			inner.then(resolve, reject);
+		});
+		wrapped.#onFirstSubscribe = onFirstSubscribe;
+		return wrapped;
+	}
+
+	// oxlint-disable-next-line unicorn/no-thenable -- the subscription hook is the whole point; see requestRestart()
+	override then<R1 = T, R2 = never>(
+		onFulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
+		onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
+	): Promise<R1 | R2> {
+		const fire = this.#onFirstSubscribe;
+		this.#onFirstSubscribe = undefined;
+		fire?.();
+		return super.then(onFulfilled, onRejected);
+	}
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -6001,6 +6045,11 @@ export class AgentSession {
 	 * input is queued.
 	 */
 	requestRestart(): Promise<RequestRestartResult> {
+		// Capture the caller's local-command window SYNCHRONOUSLY — the async
+		// context that names it is the handler's, and it is gone by the time a
+		// deferred `.then` runs. The DECREMENT is deferred to first subscription
+		// below; capturing here only reads which window to release later.
+		const releaseOwnWindow = this.#captureOwnLocalCommandWindowRelease();
 		// Coalesce: a second call while one is in flight returns the same promise,
 		// so the host callback fires exactly once per restart. Unlike #disposeCall
 		// this is cleared on a recoverable pre-dispose failure.
@@ -6009,15 +6058,14 @@ export class AgentSession {
 			// own would, so a locally-handled slash command that awaits this
 			// promise deadlocks against it the same way: the handler's window is
 			// held until the restart resolves, and the restart cannot resolve until
-			// the counter drains. Releasing only in the committing path below would
-			// make the deadlock depend on which requester arrived first — an
-			// external restart that latched microseconds earlier is the whole
-			// difference — so the caller's own window is dropped before handing
-			// back either promise. Idempotent and scoped to THIS async chain, so a
-			// requester outside a command window releases nothing and every other
-			// in-flight prompt still blocks the recycle.
-			this.#releaseOwnLocalCommandWindow();
-			return this.#restartCall;
+			// the counter drains. But dropping the window at invocation is wrong for
+			// a fire-and-forget caller that keeps using the live runtime, so the
+			// release is deferred to the first subscription — a handler that awaits
+			// this promise releases and breaks the deadlock, while one that fires it
+			// and forgets holds its window until it exits. Idempotent and scoped to
+			// THIS async chain, so a requester outside a command window releases
+			// nothing and every other in-flight prompt still blocks the recycle.
+			return SubscriptionReleasePromise.wrap(this.#restartCall, releaseOwnWindow);
 		}
 		// Pre-latch refusals: return WITHOUT latching or caching so the session
 		// stays fully live.
@@ -6029,38 +6077,47 @@ export class AgentSession {
 		// Commit: latch first (so no turn can start between the wait and the
 		// callback), then coalesce the committed attempt.
 		this.#restarting = true;
+		this.#restartCall = this.#doRequestRestart(this.#onRestartRequested, sessionFile);
 		// A restart requested from INSIDE a locally-handled slash command must not
 		// wait for its own caller. prompt() holds #promptInFlightCount across such
 		// a handler so an unrelated restart blocks on it instead of disposing
 		// underneath; but when the handler is the requester, its #endInFlight()
 		// cannot run until this restart resolves, and #doRequestRestart's wait
 		// cannot resolve until that counter reaches zero. The restart tool sidesteps
-		// this by firing from an untracked continuation — an SDK extension or
-		// custom-TS command that `await`s requestRestart() cannot, so drop the
-		// caller's own window from the wait it owns. Only that window: any OTHER
-		// in-flight prompt still blocks the recycle, and prompt()'s `released` flag
-		// keeps the counter balanced when the handler finally unwinds.
-		this.#releaseOwnLocalCommandWindow();
-		this.#restartCall = this.#doRequestRestart(this.#onRestartRequested, sessionFile);
-		return this.#restartCall;
+		// this by firing from an untracked continuation. An SDK extension or
+		// custom-TS command that `await`s requestRestart() cannot — but only an
+		// AWAIT proves the caller is blocked on the outcome rather than continuing
+		// past it, so the window is dropped on first subscription, not at
+		// invocation: a fire-and-forget handler still doing async work keeps the
+		// live runtime it is using. Only that window: any OTHER in-flight prompt
+		// still blocks the recycle, and prompt()'s `released` flag keeps the
+		// counter balanced when the handler finally unwinds.
+		return SubscriptionReleasePromise.wrap(this.#restartCall, releaseOwnWindow);
 	}
 
 	/**
-	 * Drop the locally-handled slash-command window on the CURRENT async call
-	 * chain from `#promptInFlightCount`, if this call is running inside one.
+	 * Capture the locally-handled slash-command window on the CURRENT async call
+	 * chain and return a release that drops it from `#promptInFlightCount`. The
+	 * capture is synchronous (the async context naming the window is the
+	 * handler's, gone by the time a deferred subscription runs); the returned
+	 * release is deferred to first subscription by {@link requestRestart}.
 	 *
 	 * Only the requester's own window: a restart still has to wait for every
 	 * other in-flight prompt, and dropping this one is sound precisely because
-	 * the handler cannot finish until the restart it is awaiting does. The
-	 * `released` flag it sets makes `prompt()`'s `#endInFlight()` a no-op, so the
-	 * decrement happens exactly once. Idempotent: a handler that requests a
-	 * restart twice releases once.
+	 * the handler that subscribes cannot finish until the restart it is awaiting
+	 * does. The `released` flag makes `prompt()`'s `#endInFlight()` a no-op, so
+	 * the decrement happens exactly once. Idempotent: a handler that requests a
+	 * restart twice, or one whose promise is subscribed twice, releases once.
+	 * Returns a no-op when this call is not running inside a command window.
 	 */
-	#releaseOwnLocalCommandWindow(): void {
+	#captureOwnLocalCommandWindowRelease(): () => void {
 		const window = this.#localCommandScope.getStore();
-		if (!window || window.released) return;
-		window.released = true;
-		this.#endInFlight();
+		if (!window) return () => {};
+		return () => {
+			if (window.released) return;
+			window.released = true;
+			this.#endInFlight();
+		};
 	}
 
 	async #doRequestRestart(
