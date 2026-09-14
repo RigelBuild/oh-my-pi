@@ -730,6 +730,17 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 		});
 	}
 
+	// Case-folded view of every configured key, for the email fallback only.
+	// Built here rather than at insert so a duplicate that differs ONLY in email
+	// casing keeps the loader's existing fail-loudly duplicate check on the
+	// stored spelling; last one wins in this view, which never shadows an exact
+	// hit above.
+	const emailKeyed = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
+	for (const [key, value] of accounts) {
+		const [keyProvider = "", keyAccount = "", keyOrg = ""] = key.split("\x00");
+		emailKeyed.set(`${keyProvider}\x00${keyAccount.toLowerCase()}\x00${keyOrg}`, value);
+	}
+
 	return {
 		// Prefer the exact org-scoped entry; fall back to an org-less config entry
 		// so a pre-org config (no `org` key) still resolves for every org of that
@@ -747,9 +758,17 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 				(org.length > 0 ? accounts.get(`${provider}\x00${account}\x00`) : undefined);
 			if (byAccount !== undefined) return byAccount;
 			if (account !== UNIDENTIFIED_ACCOUNT || !email) return undefined;
+			// The report's email arrives already trimmed and lowercased
+			// (`emailLabelOf`), while an account key is stored trim-only so real
+			// account IDS stay case-sensitive. So an email-only entry written with
+			// different casing ("Alice@Example.com") would never join its own
+			// report. Try the stored spelling first, then the case-folded index —
+			// email is case-insensitive in practice, account ids are not.
 			return (
 				accounts.get(`${provider}\x00${email}\x00${org}`) ??
-				(org.length > 0 ? accounts.get(`${provider}\x00${email}\x00`) : undefined)
+				(org.length > 0 ? accounts.get(`${provider}\x00${email}\x00`) : undefined) ??
+				emailKeyed.get(`${provider}\x00${email}\x00${org}`) ??
+				(org.length > 0 ? emailKeyed.get(`${provider}\x00${email}\x00`) : undefined)
 			);
 		},
 		plans,

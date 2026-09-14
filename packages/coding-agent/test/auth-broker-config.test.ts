@@ -34,6 +34,31 @@ describe("parseSubscriptionsConfig", () => {
 		expect(config.lookup("anthropic", "unidentified", "", "b@example.com")?.plan).toBe("pro");
 	});
 
+	it("matches an email-only account whose config casing differs from the report", () => {
+		// `emailLabelOf()` trims and lowercases the report email, while an account
+		// key is stored trim-only so real account IDs stay case-sensitive. An
+		// operator writing the email as it appears in their provider console --
+		// mixed case -- therefore configured an entry that never joined its own
+		// report, and its plan and renewal series silently vanished.
+		const raw = `{"accounts":{"Alice@Example.com":{"provider":"anthropic","plan":"max"}}}`;
+
+		const config = parseSubscriptionsConfig(raw, FILE);
+
+		// RED (pre-fix): undefined.
+		expect(config.lookup("anthropic", "unidentified", "", "alice@example.com")?.plan).toBe("max");
+	});
+
+	it("does not case-fold a real account id through the email fallback", () => {
+		// Account ids are case-SENSITIVE, so the case-folded index must apply only
+		// to the unidentified-sentinel path: a report that recovered "ACCT-1" must
+		// not resolve a config entry named "acct-1".
+		const raw = `{"accounts":{"acct-1":{"provider":"anthropic","plan":"max"}}}`;
+
+		const config = parseSubscriptionsConfig(raw, FILE);
+
+		expect(config.lookup("anthropic", "ACCT-1", "")).toBeUndefined();
+	});
+
 	it("prefers the account key over the email fallback", () => {
 		// The email fallback applies ONLY to the sentinel: a report that recovered
 		// a real account keeps resolving by it, so an unrelated config entry named
