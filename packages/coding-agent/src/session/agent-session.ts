@@ -5916,6 +5916,24 @@ export class AgentSession {
 	}
 
 	async #doRefresh(scope: RefreshScope): Promise<RefreshResult> {
+		// Fence against disposal. `refresh()` serializes callers onto
+		// `#refreshTail`, so a second caller stays queued behind the first even
+		// when `beginDispose()` runs (setting `#isDisposed`) while the first is in
+		// flight — and disposal does not drain the tail. The invariant is that no
+		// refresh work runs after `beginDispose()`: for an `mcp`/`all` refresh,
+		// teardown runs its single `disconnectAll()` in parallel with the active
+		// first refresh, and if the queued one then ran it would call
+		// `reloadMcpServers` and reconnect MCP subprocesses onto an
+		// already-disposed session that will never disconnect them again. Reject
+		// the queued work rather than silently returning an empty result, so the
+		// caller learns its refresh did not apply. Chosen over draining the tail
+		// from teardown: a refresh can itself start long-lived work (MCP
+		// reconnect, prompt rebuild), so awaiting the tail inside `#doDispose`
+		// would let disposal re-enter exactly the work it is tearing down. A guard
+		// here is the single authoritative gate — every refresh reaches
+		// `#doRefresh` through the tail continuation, so this rejects both a
+		// queued caller and any `refresh()` issued after disposal begins.
+		if (this.#isDisposed) throw new Error("Session disposed before refresh could run");
 		// Host pre-hook: stage fresh config to disk before any surface is re-read.
 		// First statement in the critical section, so a throw here releases the
 		// mutex with all roster/settings/MCP state untouched.

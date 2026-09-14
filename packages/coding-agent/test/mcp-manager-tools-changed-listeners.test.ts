@@ -93,4 +93,33 @@ describe("MCPManager tools-changed listeners", () => {
 		expect(observerRan).toBe(true);
 		expect(ownerCalls.length).toBeGreaterThan(0);
 	}, 60_000);
+
+	it("isolates a rejecting owner handler from observers", async () => {
+		manager = new MCPManager(tempDir);
+		// The owner slot rejects — exactly the caller-supplied `setOnToolsChanged`
+		// handler that throws or returns a rejected promise. Before the fix the
+		// await in `#emitToolsChanged` rejected here, so no observer ran and the
+		// discarded promise surfaced as an unhandled rejection.
+		manager.setOnToolsChanged(async () => {
+			throw new Error("owner failure");
+		});
+		// Records that the observer actually RAN: without it this test also passes
+		// when observers are never reached because the fixture never fires.
+		let observerRan = false;
+		const observed = Promise.withResolvers<void>();
+		const observerCalls: number[] = [];
+		manager.addToolsChangedListener(tools => {
+			observerRan = true;
+			observerCalls.push(tools.length);
+			observed.resolve();
+		});
+
+		await manager.connectServers({ notifications: serverConfig() }, {});
+		await observed.promise;
+
+		// RED (pre-fix): the owner reject short-circuited the emit, so the
+		// observer never ran and `observerRan` stayed false.
+		expect(observerRan).toBe(true);
+		expect(observerCalls.length).toBeGreaterThan(0);
+	}, 60_000);
 });

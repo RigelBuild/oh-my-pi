@@ -424,7 +424,18 @@ export class MCPManager {
 
 	/** Fires the owner handler and every observer, isolating their failures. */
 	async #emitToolsChanged(): Promise<void> {
-		await this.#onToolsChanged?.(this.#tools);
+		// Isolate the owner handler exactly as each observer below is isolated: a
+		// caller-supplied owner (`setOnToolsChanged`) that throws or rejects must
+		// not stop the `addToolsChangedListener` observers from running. Without
+		// this catch the await rejected before any observer ran, so the session
+		// observer `sdk.ts` installs for caller-supplied managers never received
+		// late server tools — and most callers discard this promise, so the
+		// rejection surfaced as an unhandled rejection.
+		try {
+			await this.#onToolsChanged?.(this.#tools);
+		} catch (error) {
+			logger.debug("MCP tools-changed owner handler threw", { error });
+		}
 		for (const listener of this.#toolsChangedListeners) {
 			try {
 				await listener(this.#tools);
