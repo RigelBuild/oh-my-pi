@@ -597,6 +597,35 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("moves built-ins between xd:// and top level when tools.xdev flips", async () => {
+		// `createTools` reads `tools.xdev` once to decide the presentation, and
+		// nothing revisited it: true->false left built-ins mounted behind `xd://`
+		// and false->true left them top-level, while the refresh reported the new
+		// settings applied.
+		const h = await makeHarness("tools:\n  xdev: true\n");
+		try {
+			const mountedBefore = h.session.getMountedXdevToolNames();
+			expect(mountedBefore.length).toBeGreaterThan(0);
+			expect(h.session.getActiveToolNames()).not.toContain(mountedBefore[0]);
+
+			await fs.writeFile(h.settingsPath, "tools:\n  xdev: false\n");
+			await h.session.refresh("settings");
+
+			// RED (pre-fix): still mounted, so the devices stayed behind `xd://`.
+			expect(h.session.getMountedXdevToolNames()).toEqual([]);
+			expect(h.session.getActiveToolNames()).toContain(mountedBefore[0]);
+
+			// And back: the false->true direction has to re-mount them.
+			await fs.writeFile(h.settingsPath, "tools:\n  xdev: true\n");
+			await h.session.refresh("settings");
+
+			expect(h.session.getMountedXdevToolNames().length).toBeGreaterThan(0);
+			expect(h.session.getActiveToolNames()).not.toContain(mountedBefore[0]);
+		} finally {
+			await h.dispose();
+		}
+	}, 30_000);
+
 	it("rebuilds the memory backend when its own configuration changes", async () => {
 		// `memory.backend` stays `hindsight`, so gating the transition on the
 		// backend ID alone skipped it: the live state kept the client, endpoint and
