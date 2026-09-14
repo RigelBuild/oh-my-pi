@@ -1736,6 +1736,15 @@ export class SessionTools {
 				if (active.includes("think")) {
 					await this.#applyActiveToolsByName(active.filter(name => name !== "think"));
 				}
+				// Drop the session's OWN built-in entry too, as
+				// `#applyBooleanGatedBuiltins` does: a retained inactive entry reads
+				// as a `/tools` deselection to sdk.ts late registration, hiding an
+				// extension's later `think` replacement. Provenance-gated.
+				const entry = this.#toolRegistry.get("think");
+				if (entry !== undefined && this.#builtInToolNames.has("think")) {
+					this.#toolRegistry.delete("think");
+					this.#builtInToolNames.delete("think");
+				}
 				return true;
 			}
 			// Construction PERMISSION, exactly as `#applyBooleanGatedBuiltins`

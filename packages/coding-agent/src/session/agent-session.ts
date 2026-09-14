@@ -6578,6 +6578,13 @@ export class AgentSession {
 					// parent itself refreshed. The child still gets the fresh roster
 					// in its own session-local state below.
 					publishGlobals: this.#agentKind === "main",
+					// Gate the global publication on live disposal at the swap point.
+					// The reload's own disk scans are suspension points past the
+					// entry fence, so `beginDispose()` can complete while this awaits;
+					// checking here abandons the swap so a torn-down session never
+					// clobbers the roster another live session published. Same
+					// `shouldAbort` seam the MCP reconnect threads below.
+					shouldAbort: () => this.#isDisposed,
 				});
 				// Compare against the value captured BEFORE the reload, and do it
 				// AFTER `applyReloadedSkills` installs `freshSkillsSettings`: the
