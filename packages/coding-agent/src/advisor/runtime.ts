@@ -334,6 +334,17 @@ export class AdvisorRuntime {
 	get backlog(): number {
 		return this.#backlog;
 	}
+	/**
+	 * Whether a model request is in flight, or deltas are queued for one.
+	 *
+	 * The advisor runs with the PRIMARY agent idle (the default
+	 * `advisor.syncBacklog: "off"` lets a terminal turn's review outlive it), so
+	 * a caller asking "is this session quiescent" cannot see this work through
+	 * the primary agent at all.
+	 */
+	get reviewInFlight(): boolean {
+		return this.#promptInFlight !== undefined || this.#backlog > 0;
+	}
 	get quotaExhausted(): boolean {
 		return this.#quotaExhausted;
 	}

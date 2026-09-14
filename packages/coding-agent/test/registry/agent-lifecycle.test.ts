@@ -1062,6 +1062,45 @@ describe("AgentLifecycleManager", () => {
 		expect(stub.disposeCalls()).toBe(1);
 	});
 
+	// Fourth face, in the window AFTER `ensureLive()` hands back an ALREADY-LIVE
+	// idle child. That caller never waited on a barrier — its `ensureLive()`
+	// returned before one was raised — so nothing couples it to this handoff, and
+	// its own continuation (a pending `IrcBus.send()`, a collab chat) can call
+	// `prompt()` and mark the child running in the gap between the drain's
+	// snapshot and the parking snapshot. `park()` then detaches and disposes that
+	// live turn.
+	//
+	// The drain is therefore a loop: a pass that observed nothing running still
+	// spent a microtask, so the statuses are re-read before committing.
+	//
+	// RED (pre-fix): the single-pass drain saw an idle child, and the turn that
+	// started one microtask later was parked mid-request.
+	it("re-drains a child that starts a turn after the first drain pass", async () => {
+		const stub = makeSessionStub();
+		const ref = registerIdleSub("Late-Turn-Sub", stub.session);
+		lifecycle.adopt("Late-Turn-Sub", { idleTtlMs: 0 });
+
+		// Idle at the moment parking begins: the first drain pass finds nothing,
+		// which is exactly the state that made the gap reachable.
+		expect(registry.get("Late-Turn-Sub")?.status).toBe("idle");
+
+		const parking = lifecycle.parkAll();
+		// One microtask later the already-resolved `ensureLive()` caller dispatches.
+		await Promise.resolve();
+		registry.setStatus("Late-Turn-Sub", "running", ref);
+		await flushAsync();
+
+		// The re-read caught it: the turn is still alive.
+		expect(stub.disposeCalls()).toBe(0);
+		expect(registry.get("Late-Turn-Sub")?.session).not.toBeNull();
+
+		registry.setStatus("Late-Turn-Sub", "idle", ref);
+		(await parking)();
+
+		expect(registry.get("Late-Turn-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+	});
+
 	// The drain is bounded by the SAME deadline as the phases around it: the
 	// recycle path calls `session.beginDispose()` before awaiting parkAll(), so a
 	// child whose turn never ends would wedge the restart permanently rather than
