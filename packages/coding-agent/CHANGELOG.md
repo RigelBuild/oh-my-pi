@@ -28,8 +28,6 @@
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
 
-### Added
-
 ## [18.1.20] - 2026-09-13
 
 ### Added
