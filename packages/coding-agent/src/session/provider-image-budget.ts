@@ -19,6 +19,7 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "@oh-my-pi/pi-ai/utils";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
+import { sanitizeMalformedToolCalls } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageByteBudget } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -42,6 +43,36 @@ const REPLAYED_IMAGE_OMISSION_ITEM: Record<string, unknown> = {
 	role: "assistant",
 	content: [{ type: "output_text", text: IMAGE_OMISSION_NOTICE.text }],
 };
+
+/**
+ * Tool-result messages that survive `sanitizeMalformedToolCalls()` — the same
+ * predicate `transformMessages()` applies before any converter runs.
+ *
+ * A persisted assistant tool call with an empty id or name is malformed, so the
+ * sanitizer drops BOTH it and its matched tool result before the wire. This
+ * traversal must not charge that result's image bytes: charging them let an
+ * older VALID image plus the dead result exceed the budget, so oldest-first
+ * eviction discarded the valid image while the converter then dropped the
+ * malformed pair — the request carried NEITHER, though the live one fit alone.
+ *
+ * The sanitizer pushes a surviving tool result by REFERENCE and omits a dropped
+ * one, so reference membership is an exact "was it dropped" test. Assistant
+ * messages it may REWRITE into a new object (filtering a malformed block) still
+ * replay their payload, so they are never keyed here; only tool results, which
+ * it never rewrites, drive the byte skip below.
+ */
+function survivingToolResults(context: Context): ReadonlySet<Message> {
+	const survivors = new Set<Message>();
+	for (const message of sanitizeMalformedToolCalls(context.messages)) {
+		if (message.role === "toolResult") survivors.add(message);
+	}
+	return survivors;
+}
+
+/** A tool result the malformed-tool-call sanitizer drops before the wire. */
+function droppedByToolCallSanitization(message: Message, survivors: ReadonlySet<Message>): boolean {
+	return message.role === "toolResult" && !survivors.has(message);
+}
 
 /**
  * The single traversal both budgets are derived from, so the population each
@@ -89,6 +120,10 @@ function collectImageStats(
 	// Everything before a full-snapshot replacement is spliced off the wire, so
 	// it owes neither budget — see `wireStartIndex`.
 	const wireStart = wireStartIndex(context, countModel, replaysNativeHistory);
+	// A tool result the malformed-tool-call sanitizer drops never reaches the
+	// wire, so charging its bytes evicts a live image for a payload the converter
+	// already removes — see `survivingToolResults`.
+	const survivingResults = survivingToolResults(context);
 	for (const message of context.messages.slice(wireStart)) {
 		if (message.role === "assistant") {
 			// An assistant's generic `content` images are display-only, but its
@@ -114,6 +149,10 @@ function collectImageStats(
 					: replayedAssistantInputImages(message, countModel, replaysNativeHistory, repairedOrphans).length;
 			continue;
 		}
+		// A tool result whose paired call is malformed is dropped by
+		// `sanitizeMalformedToolCalls()` before any converter runs, so its image
+		// bytes never travel and must not be charged.
+		if (droppedByToolCallSanitization(message, survivingResults)) continue;
 		// A computer result's metadata screenshot REPLACES its generic content on
 		// the wire — `appendResponsesToolResultMessages()` sends the metadata copy
 		// as the `computer_call_output.output` and never looks at the content. So
@@ -845,6 +884,13 @@ interface ImageClampState {
 	 * one it evicts). See `collectRepairedOrphanIndices`.
 	 */
 	repairedOrphansByMessage: ReadonlyMap<Message, ReadonlySet<number>>;
+	/**
+	 * Tool results that survive `sanitizeMalformedToolCalls()`. A dropped result
+	 * never reaches the wire, so the accounting does not charge it — and the clamp
+	 * must not spend an allowance evicting its image either. See
+	 * `survivingToolResults`.
+	 */
+	survivingToolResults: ReadonlySet<Message>;
 }
 
 /**
@@ -1233,6 +1279,10 @@ function applyImageClamp(context: Context, state: ImageClampState): Context {
 			case "developer":
 				return clampDeveloperMessage(message, state);
 			case "toolResult":
+				// A result the malformed-tool-call sanitizer drops never reaches the
+				// wire, so the accounting did not charge it — evicting its image here
+				// would spend an allowance a live image needs.
+				if (droppedByToolCallSanitization(message, state.survivingToolResults)) return message;
 				return clampToolResultMessage(message, state);
 			case "assistant":
 				// Generic assistant images are display artifacts the request never
@@ -1312,6 +1362,7 @@ function clampImageCountToCap(context: Context, model: Model, replaysNativeHisto
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
 		repairedOrphansByMessage: collectRepairedOrphanIndices(context, model, replaysNativeHistory),
+		survivingToolResults: survivingToolResults(context),
 	});
 }
 
@@ -1359,6 +1410,7 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
 		repairedOrphansByMessage: collectRepairedOrphanIndices(context, model, replaysNativeHistory),
+		survivingToolResults: survivingToolResults(context),
 	});
 }
 

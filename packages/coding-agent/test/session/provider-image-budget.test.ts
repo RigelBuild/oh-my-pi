@@ -2872,3 +2872,75 @@ describe("byte clamp applies to a text-only Responses model", () => {
 		expect(serialized).not.toContain(big);
 	});
 });
+
+describe("byte accounting excludes results dropped by message sanitization", () => {
+	it("keeps an older valid image the dead malformed result's bytes should never have evicted", () => {
+		// A persisted assistant tool call with an EMPTY id is malformed, so
+		// `transformMessages()` -> `sanitizeMalformedToolCalls()` drops BOTH it and
+		// its matched tool result before any converter runs. Charging that result's
+		// image bytes here let an older VALID image plus the dead result exceed the
+		// budget: oldest-first eviction discarded the valid image, the converter
+		// then dropped the malformed pair, and the wire carried NEITHER — though
+		// the live one fit on its own.
+		const budget = providerImageByteBudget(ANTHROPIC_MODEL.provider, ANTHROPIC_MODEL.api);
+		// Each fits the budget alone; together they bust it, so charging both owes
+		// exactly one drop that oldest-first eviction lands on the valid image.
+		const valid = "V".repeat(Math.floor(budget * 0.7));
+		const dead = "D".repeat(Math.floor(budget * 0.7));
+		const context: Context = {
+			messages: [
+				// The older valid image: on its own it fits the byte budget.
+				{ role: "user", timestamp: 1, content: [image(valid)] },
+				// A malformed assistant tool call: empty id, so the sanitizer drops it.
+				{
+					role: "assistant",
+					timestamp: 2,
+					content: [{ type: "toolCall", id: "", name: "read", arguments: {} }],
+					api: ANTHROPIC_MODEL.api,
+					provider: ANTHROPIC_MODEL.provider,
+					model: ANTHROPIC_MODEL.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+				},
+				// Its matched result, dropped with it: its image bytes never travel.
+				{
+					role: "toolResult",
+					timestamp: 3,
+					toolCallId: "",
+					toolName: "read",
+					content: [image(dead)],
+					isError: false,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, ANTHROPIC_MODEL);
+
+		// The FINAL wire the request actually sends, converted the real way.
+		let validSurvives = false;
+		for (const param of convertAnthropicMessages(clamped.messages, ANTHROPIC_MODEL, false)) {
+			if (typeof param.content === "string") continue;
+			for (const block of param.content) {
+				if (
+					block.type === "image" &&
+					isRecord(block.source) &&
+					block.source.type === "base64" &&
+					block.source.data === valid
+				) {
+					validSurvives = true;
+				}
+			}
+		}
+		// RED (pre-fix): the dead result's bytes were charged, the valid image was
+		// evicted to fit them, and the converter then dropped the malformed pair —
+		// so the wire carried no image at all.
+		expect(validSurvives).toBe(true);
+	});
+});
