@@ -730,39 +730,45 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 		});
 	}
 
-	// Case-folded view for the email fallback only. It exists so an email-only
-	// entry an operator wrote in mixed case ("Alice@Example.com") still joins its
-	// own report, whose email arrives lowercased (`emailLabelOf`). Built here
-	// rather than at insert so a duplicate that differs ONLY in email casing keeps
-	// the loader's existing fail-loudly duplicate check on the stored spelling.
+	// Reject two account keys that fold to one identity under case — storage
+	// will silently merge them, so a config that keeps both is unreachable.
 	//
-	// Only EMAIL-shaped keys are folded. The stored `accounts` map is
-	// case-SENSITIVE on purpose: opaque provider account ids are case-sensitive
-	// (a report that recovered "Foo" must not resolve a config entry "foo"), so
-	// two legitimate account ids differing only in case ("Foo" and "foo") are
-	// distinct identities, not a collision. Folding them would both (a) reject the
-	// whole config at startup as a false duplicate and (b) case-fold ids the exact
-	// lookup treats as distinct — neither of which the email fallback needs. An
-	// address is recognized by an "@": that is the only shape `emailLabelOf`
-	// lowercases and the only shape the fallback ever looks up.
+	// `AuthStorage.#getUsageReportIdentifiers()` lowercases EVERY report
+	// identifier before grouping (both the anthropic/openai-codex path and the
+	// general path end in `.toLowerCase()`), and `#mergeUsageReportGroup()` then
+	// keeps only ONE report's metadata (the one with the most limits, ties broken
+	// by `fetchedAt`). So two same-provider, same-org reports whose account ids
+	// differ only in case ("Foo" and "foo") produce the SAME identifier and are
+	// merged before rendering — only one casing survives into lookup, and the
+	// other config entry can never be reached (its limits may already be combined
+	// with the survivor's). That is the silent omission the rest of this loader
+	// rejects loudly, so reject a case-only collision here too rather than letting
+	// property order decide which entry wins.
 	//
-	// Two email-shaped keys that fold together ("Alice@Example.com" and
-	// "ALICE@example.com") ARE a genuine collision: email is case-insensitive in
-	// practice, report emails are lowercased, so one configured plan/renewal would
-	// win by property order and the other would be silently unreachable — the
-	// silent omission the rest of this loader rejects loudly. Fail on that rather
-	// than letting the last write win.
+	// This holds for opaque account ids exactly as it does for email-shaped keys:
+	// storage folds case on both, so the exact `accounts` lookup staying
+	// case-sensitive does NOT make "Foo"/"foo" distinct identities at the metrics
+	// layer. A single spelling still resolves case-sensitively; only a config
+	// carrying BOTH casings of the same {provider, account, org} is rejected.
+	//
+	// The email fallback index below is a separate concern: it is populated only
+	// from email-shaped ("@") keys, because the fallback only ever looks up a
+	// lowercased report email (`emailLabelOf`) — an opaque id is never an email,
+	// so folding it into that index would add an unreachable entry. Building the
+	// index here rather than at insert keeps the loader's exact-spelling duplicate
+	// check on the stored key intact.
 	const emailKeyed = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
+	const foldedIdentities = new Set<string>();
 	for (const [key, value] of accounts) {
 		const [keyProvider = "", keyAccount = "", keyOrg = ""] = key.split("\x00");
-		if (!keyAccount.includes("@")) continue;
 		const foldedKey = `${keyProvider}\x00${keyAccount.toLowerCase()}\x00${keyOrg}`;
-		if (emailKeyed.has(foldedKey)) {
+		if (foldedIdentities.has(foldedKey)) {
 			throw new Error(
 				`subscription config ${file}: account "${keyAccount}" duplicates an earlier entry after case-folding (provider "${keyProvider}", account "${keyAccount.toLowerCase()}", org "${keyOrg}")`,
 			);
 		}
-		emailKeyed.set(foldedKey, value);
+		foldedIdentities.add(foldedKey);
+		if (keyAccount.includes("@")) emailKeyed.set(foldedKey, value);
 	}
 
 	return {

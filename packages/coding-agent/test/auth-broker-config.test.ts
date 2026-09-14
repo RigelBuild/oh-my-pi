@@ -61,20 +61,34 @@ describe("parseSubscriptionsConfig", () => {
 		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/duplicates an earlier entry after case-folding/i);
 	});
 
-	it("keeps two opaque account ids that differ only in case, not folding them into a collision", () => {
-		// The folded index exists ONLY for the email fallback. Opaque provider
-		// account ids are case-SENSITIVE, so "Foo" and "foo" under one provider are
-		// two DISTINCT accounts, not a collision. Folding every key rejected the
-		// whole config at startup as a false duplicate — even though exact lookup
-		// treats these ids as distinct. Only email-shaped ("@") keys are folded.
+	it("rejects two opaque account ids that differ only in case", () => {
+		// Storage folds case: `AuthStorage.#getUsageReportIdentifiers()` lowercases
+		// EVERY identifier before grouping, so two same-provider, same-org reports
+		// whose opaque account ids differ only in case ("Foo" and "foo") merge into
+		// one group and `#mergeUsageReportGroup()` keeps only one report's
+		// metadata. So a config carrying BOTH casings has one entry that can never
+		// be reached — the silent omission this loader rejects loudly. This is NOT
+		// an email-shaped key, so the fold collision must cover opaque ids too.
 		const raw = `{"accounts":{"Foo":{"provider":"anthropic","plan":"max"},"foo":{"provider":"anthropic","plan":"pro"}}}`;
 
-		// RED (pre-fix): threw /duplicates an earlier entry after case-folding/.
+		// RED (pre-fix): no throw; only email-shaped keys were folded, so both
+		// opaque ids were kept and the "foo" report silently merged into "Foo".
+		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/duplicates an earlier entry after case-folding/i);
+	});
+
+	it("keeps two opaque account ids that are genuinely distinct", () => {
+		// The fold collision only fires on a case-ONLY difference. Two opaque ids
+		// that differ by more than case ("acct-1" vs "acct-2") are distinct
+		// identities storage never merges, so both load and resolve case-sensitively.
+		const raw = `{"accounts":{"acct-1":{"provider":"anthropic","plan":"max"},"acct-2":{"provider":"anthropic","plan":"pro"}}}`;
+
 		const config = parseSubscriptionsConfig(raw, FILE);
 
-		// Both distinct case-sensitive ids resolve to their own plan, unchanged.
-		expect(config.lookup("anthropic", "Foo", "")?.plan).toBe("max");
-		expect(config.lookup("anthropic", "foo", "")?.plan).toBe("pro");
+		expect(config.lookup("anthropic", "acct-1", "")?.plan).toBe("max");
+		expect(config.lookup("anthropic", "acct-2", "")?.plan).toBe("pro");
+		// A single opaque id still resolves case-sensitively — a report that
+		// recovered "ACCT-1" must not resolve the "acct-1" entry.
+		expect(config.lookup("anthropic", "ACCT-1", "")).toBeUndefined();
 	});
 
 	it("does not case-fold a real account id through the email fallback", () => {
