@@ -1686,3 +1686,98 @@ describe("count cap ahead of the decode pass", () => {
 		expect(wireImageCount(clampProviderContextImages(clamped, UMANS_MODEL), UMANS_MODEL)).toBe(budget);
 	});
 });
+
+describe("replayed assistant payload byte accounting", () => {
+	// `supportsComputerUse` defaults to TRUE on a Responses model, so the
+	// demotion path needs a model that explicitly lacks it — with the default
+	// fixture the converter replays the computer items natively and the test
+	// would pass for the wrong reason.
+	const NO_COMPUTER_MODEL = buildModel({
+		id: "gpt-6-codex",
+		name: "gpt-6-codex",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+		supportsComputerUse: false,
+	});
+	const BYTE_BUDGET = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+
+	/** Base64 of `bytes` length, distinct per `tag` so drops are identifiable. */
+	function payloadOfSize(tag: string, bytes: number): string {
+		return `${tag}${"A".repeat(Math.max(0, bytes - tag.length))}`;
+	}
+
+	function payloadTurn(items: Array<Record<string, unknown>>, model: Model = NO_COMPUTER_MODEL): AssistantMessage {
+		return {
+			...assistantTurn([], 1),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: model.provider,
+				items: [{ type: "reasoning", id: "rs_keepme", summary: [] }, ...items],
+			},
+		};
+	}
+
+	it("charges a demoted computer item's bytes without charging an image slot", async () => {
+		// `adaptResponsesReplayItemsForModel()` stringifies the WHOLE item — base64
+		// data URI included — into an untruncated assistant text message when the
+		// model does not support computer use. Excluding it from the count is
+		// right; excluding its BYTES let several restored screenshots exceed the
+		// request-size limit while the byte clamp measured zero.
+		const big = payloadOfSize("demoted", BYTE_BUDGET + 1);
+		const context: Context = {
+			messages: [
+				payloadTurn([
+					{
+						type: "computer_call_output",
+						call_id: "call-1",
+						output: { type: "computer_screenshot", image_url: dataUri(big) },
+					},
+				]),
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, NO_COMPUTER_MODEL);
+
+		// RED (pre-fix): the demoted item was invisible to the byte tally, so no
+		// drop was owed and the oversized payload travelled whole.
+		const remaining = JSON.stringify(clamped.messages).includes(big);
+		expect(remaining).toBe(false);
+	});
+
+	it("spends a byte drop on the oversized item, not an earlier small one", async () => {
+		// The clamp evicts in the payload's OWN item order, so a size sequence
+		// built as "all generation results, then all input images" could size the
+		// allowance against a late large result while the clamp spent it on an
+		// early small input — leaving the request over the byte limit.
+		const small = payloadOfSize("small", 64);
+		const big = payloadOfSize("big", BYTE_BUDGET + 1);
+		const context: Context = {
+			messages: [
+				payloadTurn([
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_image", image_url: dataUri(small) }],
+					},
+					{ type: "image_generation_call", id: "ig_0", status: "completed", result: big },
+				]),
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL);
+		const serialized = JSON.stringify(clamped.messages);
+
+		// RED (pre-fix): the single drop landed on the small input image and the
+		// oversized generation result survived.
+		expect(serialized).not.toContain(big);
+	});
+});
