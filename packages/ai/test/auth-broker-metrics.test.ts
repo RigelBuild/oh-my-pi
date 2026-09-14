@@ -1181,6 +1181,57 @@ describe("accountLabelOf", () => {
 		expect(body).not.toContain("duplicate series dropped");
 	});
 
+	test("distinguishes mixed-account reports by their credential stamp", () => {
+		// A report whose limits carry CONFLICTING `scope.accountId` values has no
+		// single account label, so `#reportHasNoIdentity` counts it as
+		// identity-less (its `#getUsageReportScopeAccountId` returns undefined on a
+		// conflict) and the storage layer stamps each such report with a distinct
+		// `credentialKey`. That discriminator must be consulted rather than
+		// returning the sentinel early, or two conflicting-scope reports collapse
+		// to one `unidentified` identity, their matching limit ids collide, and
+		// `add()` drops the later credential's gauges.
+		const mk = (credentialKey: string): UsageReport => ({
+			provider: "openai-codex",
+			fetchedAt: 1,
+			metadata: { credentialKey },
+			limits: ["acct-x", "acct-y"].map(accountId => ({
+				id: `openai-codex:${accountId}`,
+				label: "Weekly",
+				scope: { provider: "openai-codex" as const, accountId },
+				amount: { usedFraction: 0.2, unit: "percent" as const },
+			})),
+		});
+		// RED (pre-fix): the conflicting-scope branch returned UNIDENTIFIED_ACCOUNT
+		// early, so both were "unidentified".
+		expect(accountLabelOf(mk("11"))).toBe("credential:11");
+		expect(accountLabelOf(mk("12"))).toBe("credential:12");
+
+		// End to end: both credentials' gauges survive, no dropped-duplicate note.
+		const body = renderUsageMetrics([mk("11"), mk("12")]);
+		expect(body).toContain('account="credential:11"');
+		expect(body).toContain('account="credential:12"');
+		expect(body).not.toContain("duplicate series dropped");
+	});
+
+	test("a mixed-account report with no credential stamp is still the sentinel", () => {
+		// The credential stamp is present only on reports storage saw as
+		// identity-less. Absent it, a conflicting-scope report has no stable
+		// distinguisher of its own and stays the sentinel — falling through to
+		// projectId/aliases would mislabel the whole multi-account report.
+		const report: UsageReport = {
+			provider: "openai-codex",
+			fetchedAt: 1,
+			metadata: { projectId: "proj-should-not-win" },
+			limits: ["acct-x", "acct-y"].map(accountId => ({
+				id: `openai-codex:${accountId}`,
+				label: "Weekly",
+				scope: { provider: "openai-codex" as const, accountId },
+				amount: { usedFraction: 0.2, unit: "percent" as const },
+			})),
+		};
+		expect(accountLabelOf(report)).toBe(UNIDENTIFIED_ACCOUNT);
+	});
+
 	test("keeps the stamp out of a report that has its own identity", () => {
 		// The stamp may never re-key a series that can already be attributed: the
 		// account label is the dashboard's join key.

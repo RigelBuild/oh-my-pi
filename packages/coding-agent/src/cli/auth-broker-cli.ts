@@ -745,31 +745,33 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 		// Prefer the exact org-scoped entry; fall back to an org-less config entry
 		// so a pre-org config (no `org` key) still resolves for every org of that
 		// account, matching the prior single-key behavior.
-		// An email-only identity (no account/project/org id recovered) labels
-		// `account="unidentified"`, which is the SAME key for every such report of
-		// a provider — so resolve those against the email before falling back, or
-		// one email-only account's plan and renewal date apply to another's.
-		// Config entries name that account by its email, which is what an operator
-		// has for it. Reports that DID recover an account keep the existing
-		// precedence untouched.
 		lookup: (provider, account, org, email) => {
-			const byAccount =
+			// The `{provider, account, org}` entry, org-scoped then org-less.
+			const byAccount = () =>
 				accounts.get(`${provider}\x00${account}\x00${org}`) ??
 				(org.length > 0 ? accounts.get(`${provider}\x00${account}\x00`) : undefined);
-			if (byAccount !== undefined) return byAccount;
-			if (account !== UNIDENTIFIED_ACCOUNT || !email) return undefined;
 			// The report's email arrives already trimmed and lowercased
 			// (`emailLabelOf`), while an account key is stored trim-only so real
 			// account IDS stay case-sensitive. So an email-only entry written with
 			// different casing ("Alice@Example.com") would never join its own
 			// report. Try the stored spelling first, then the case-folded index —
 			// email is case-insensitive in practice, account ids are not.
-			return (
+			const byEmail = () =>
 				accounts.get(`${provider}\x00${email}\x00${org}`) ??
 				(org.length > 0 ? accounts.get(`${provider}\x00${email}\x00`) : undefined) ??
 				emailKeyed.get(`${provider}\x00${email}\x00${org}`) ??
-				(org.length > 0 ? emailKeyed.get(`${provider}\x00${email}\x00`) : undefined)
-			);
+				(org.length > 0 ? emailKeyed.get(`${provider}\x00${email}\x00`) : undefined);
+			// An email-only identity (no account/project/org id recovered) labels
+			// `account="unidentified"`, which is the SAME key for every such report
+			// of a provider — so resolve those against the email that DID survive
+			// FIRST, or a config that also carries an `accounts.unidentified`
+			// fallback would answer every such report with the sentinel entry and
+			// one generic plan/renewal would apply to every email-only account.
+			// The email is the operator's own name for the account, so it is the
+			// specific match; the sentinel entry is the fallback. Reports that DID
+			// recover an account keep the existing precedence untouched.
+			if (account === UNIDENTIFIED_ACCOUNT && email) return byEmail() ?? byAccount();
+			return byAccount();
 		},
 		plans,
 	};

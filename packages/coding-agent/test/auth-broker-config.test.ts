@@ -70,6 +70,28 @@ describe("parseSubscriptionsConfig", () => {
 		expect(config.lookup("anthropic", "acct-1", "", "a@example.com")?.plan).toBe("max");
 	});
 
+	it("prefers a specific email entry over the unidentified sentinel entry", () => {
+		// A config MAY carry BOTH an `accounts.unidentified` generic fallback AND
+		// a specific email entry. An email-only report labels
+		// `account="unidentified"`, so a lookup that consults the sentinel key
+		// before the email answers every such report with the generic entry and
+		// one plan/renewal applies to every email-only account. The email is the
+		// operator's own name for the account, so it must win; the sentinel entry
+		// is only the fallback for a report with no email.
+		const raw = `{"accounts":{"unidentified":{"provider":"anthropic","plan":"free"},"a@example.com":{"provider":"anthropic","plan":"max"}}}`;
+
+		const config = parseSubscriptionsConfig(raw, FILE);
+
+		// RED (pre-fix): the `{provider, unidentified, org}` lookup ran first and
+		// returned the sentinel entry, so this was `"free"`.
+		expect(config.lookup("anthropic", "unidentified", "", "a@example.com")?.plan).toBe("max");
+		// An email-only report with NO matching email entry still falls back to
+		// the sentinel entry.
+		expect(config.lookup("anthropic", "unidentified", "", "z@example.com")?.plan).toBe("free");
+		// A report with no email at all resolves the sentinel entry directly.
+		expect(config.lookup("anthropic", "unidentified", "")?.plan).toBe("free");
+	});
+
 	it("still detects a duplicate after a value containing an escaped quote", () => {
 		// Without escape handling the scanner ends the `plan` string at the
 		// backslash-quote, resyncs half a token off, and misses the repeated

@@ -147,7 +147,20 @@ export function accountLabelOf(report: UsageReport): string {
 	// "this report has no account identity", which is a different question from
 	// "this report has several".
 	const scopeAccount = uniqueScopeValue(report, limit => limit.scope.accountId);
-	if (scopeAccount === CONFLICTING_SCOPE) return UNIDENTIFIED_ACCOUNT;
+	if (scopeAccount === CONFLICTING_SCOPE) {
+		// The report holds several accounts, so it has no single account label —
+		// but that is exactly the shape `AuthStorage.#reportHasNoIdentity` counts
+		// as identity-less (its `#getUsageReportScopeAccountId` returns undefined
+		// on a conflict), so the storage layer has already stamped each such
+		// report with a DISTINCT `credentialKey`. Consult that discriminator
+		// before the sentinel: returning `UNIDENTIFIED_ACCOUNT` early collapses
+		// two conflicting-scope reports into one identity, their matching limit
+		// ids collide into duplicate series, and `add()` drops the later
+		// credential's gauges entirely. Only the credential stamp is safe here —
+		// falling through to `projectId`/the account aliases/`scope.projectId`
+		// would mislabel the whole multi-account report with one of them.
+		return metadataIdentity(report, "credential", ["credentialKey"]) ?? UNIDENTIFIED_ACCOUNT;
+	}
 	if (scopeAccount !== undefined) return primaryIdentity(scopeAccount);
 	// Identity-less: reach for a stable per-credential distinguisher so distinct
 	// credentials do not collapse into one dropped-duplicate series. Namespaced
