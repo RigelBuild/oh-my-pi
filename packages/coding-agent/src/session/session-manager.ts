@@ -2054,17 +2054,22 @@ export class SessionManager {
 		const idx = this.#additionalDirectories.findIndex(p => path.resolve(p) === resolved);
 		if (idx === -1) return null;
 		this.#additionalDirectories = this.#additionalDirectories.filter((_, i) => i !== idx);
+		// A root that is gone cannot still be settings-owned; leaving the name
+		// behind would let a later removal from `workspace.additionalDirectories`
+		// re-revoke a directory a subsequent manual `/add-dir` re-added, because
+		// the reconcile would still see it as settings-granted. Update the
+		// in-memory ownership BEFORE the fallback return: the transcript is still
+		// in the stale bucket, so persistence waits for relocation, but the live
+		// ownership set must already forget this root or a later settings refresh
+		// that removes the configured value would revoke an independently
+		// re-added root.
+		this.#settingsOwnedDirectories = this.#settingsOwnedDirectories.filter(dir =>
+			this.#additionalDirectories.includes(dir),
+		);
 		// In fallback keep edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
 			return resolved;
 		}
-		// A root that is gone cannot still be settings-owned; leaving the name
-		// behind would let a later removal from `workspace.additionalDirectories`
-		// re-revoke a directory a subsequent manual `/add-dir` re-added, because
-		// the reconcile would still see it as settings-granted.
-		this.#settingsOwnedDirectories = this.#settingsOwnedDirectories.filter(dir =>
-			this.#additionalDirectories.includes(dir),
-		);
 		if (this.#additionalDirectories.length === 0) {
 			this.#header.additionalDirectories = undefined;
 		} else {
