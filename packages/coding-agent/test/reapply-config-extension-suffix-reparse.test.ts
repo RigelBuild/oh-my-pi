@@ -1049,4 +1049,138 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			await session.dispose();
 		}
 	});
+
+	test("reparses a saved suffix when a late default flips adoption false->true", async () => {
+		// The adoption classification is itself PROVISIONAL. `adoptConfigModel()`
+		// is read before extensions register, so an all-self-alias default
+		// (`default,@default`) that only resolves once an extension supplies its
+		// model classifies as "no config default" -- adoption starts false. The
+		// early bare-resume restore then reads the saved `custom/router:low` as the
+		// already-known static `custom/router` at low effort, seeding an INVENTED
+		// `low` into `restoredSessionThinkingLevel`. When the extension registers a
+		// model with id `default`, `default,@default` resolves and
+		// `tryResolveDefaultRole()` adopts it -- and `pickInitialThinkingLevel`
+		// transfers the stale `low` onto the late config model, because the only
+		// saved-suffix reparse was gated on the early `adoptConfigModel()` and so
+		// never ran. Widening that gate to `reResolveConfigDefault()` re-settles
+		// the suffix through the same machinery once the winner is real.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		// `custom/router` is a STATIC provider, so it is known at the early restore
+		// -- that is what seeds the `:low` misread before any extension loads.
+		const modelsPath = path.join(tempDir, `flip-models-${Bun.nanoseconds()}.yml`);
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					custom: {
+						baseUrl: "https://custom.example.invalid/v1",
+						api: "openai-completions",
+						auth: "none",
+						models: [{ id: "router", name: "Router" }],
+					},
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+		// The premise, measured: the bare id is visible early, the suffix-shaped
+		// literal and the `default` model are NOT -- they arrive with the extension.
+		expect(modelRegistry.find("custom", "router")).toBeDefined();
+		expect(modelRegistry.find("custom", "router:low")).toBeUndefined();
+		expect(modelRegistry.find("custom", "default")).toBeUndefined();
+
+		// The extension augments the SAME provider: the literal `router:low` id (so
+		// the reparse recognizes it whole and drops the invented suffix) and a
+		// reasoning `default` model (so `default,@default` resolves late and a
+		// level is observable at all on the model it selects).
+		const augmentCustom: ExtensionFactory = pi => {
+			pi.registerProvider("custom", {
+				baseUrl: "https://custom.example.invalid/v1",
+				apiKey: "CUSTOM_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "router:low",
+						name: "Router Low",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+					{
+						id: "default",
+						name: "Late Default",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "default,@default");
+
+		const sessionFile = path.join(tempDir, `flip-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "flip-session", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: "custom/router:low",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-flip"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [augmentCustom],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			// The premise, measured: the extension really did register the literal
+			// suffix-shaped id and the `default` model the config resolves to.
+			expect(modelRegistry.find("custom", "router:low")).toBeDefined();
+			expect(modelRegistry.find("custom", "default")).toBeDefined();
+			// The adoption really did flip: the late `default` model won the config
+			// default, not the baked `custom/router`.
+			expect(session.model?.provider).toBe("custom");
+			expect(session.model?.id).toBe("default");
+			// RED (pre-fix): the invented `low` -- the tail of a literal model id --
+			// rode onto the late config-selected model because the reparse was
+			// skipped while adoption read false.
+			expect(session.thinkingLevel).not.toBe(ThinkingLevel.Low);
+		} finally {
+			await session.dispose();
+		}
+	}, 20000);
 });

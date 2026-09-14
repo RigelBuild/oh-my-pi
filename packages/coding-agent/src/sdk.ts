@@ -2680,7 +2680,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// its trailing segment is misread as the session's thinking choice, then
 		// carried onto the config- or CLI-selected model. Re-parse now that the
 		// providers are registered; the predicate can finally see those ids.
-		if ((adoptConfigModel() || hasExplicitModel) && savedSessionModelStrings.length > 0) {
+		//
+		// `reResolveConfigDefault()` widens the gate past the EARLY adoption
+		// classification, which is itself provisional: `adoptConfigModel()` is read
+		// before extensions register, so an all-self-alias `default,@default` that
+		// only resolves once an extension supplies its model classifies as "no
+		// config default" here and would skip this reparse entirely — leaving the
+		// invented `low` the early restore seeded to ride onto the late
+		// config-selected model at `tryResolveDefaultRole()` below. Running the
+		// block (and, for a cold dynamic id, arming `retrySavedSuffixParse`)
+		// whenever config named a default that has not been adopted yet re-settles
+		// the suffix through the same machinery, once the winner is real.
+		if ((adoptConfigModel() || hasExplicitModel || reResolveConfigDefault()) && savedSessionModelStrings.length > 0) {
 			const savedSessionModelString = savedSessionModelStrings[0];
 			const reparseSavedSuffix = () =>
 				parseModelString(savedSessionModelString, {
