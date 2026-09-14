@@ -512,6 +512,85 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	// learn it is a literal. Correcting `restoredSessionThinkingLevel` alone left
 	// the misread `low` in `thinkingLevel`/`effectiveThinkingLevel`, because the
 	// later recomputation is gated on `!model` and never ran.
+	test("matches a pinned model whose saved selector differs only in provider casing", async () => {
+		// The caller's own `options.model` counts as literal, so an id the registry
+		// has never seen is still recognized whole. But that comparison was
+		// case-SENSITIVE while every other model reference resolves case-
+		// insensitively (`resolveProviderModelReference` lowercases both halves),
+		// so a saved `Runtime-Provider/router:low` missed its own pinned model and
+		// the parser split the literal id's `:low` tail off as persisted thinking.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		const settings = Settings.isolated();
+		const sessionFile = path.join(tempDir, `cased-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "cased-suffix-session", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					// Same model, spelled with a different provider casing.
+					model: "Runtime-Provider/router:low",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-cased"));
+
+		// Pinned by the caller and absent from the registry, so only the identity
+		// comparison can prove `router:low` is a literal id.
+		const pinnedModel = buildModel({
+			provider: "runtime-provider",
+			id: "router:low",
+			name: "Router Low",
+			api: "openai-completions",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		} as ModelSpec);
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+			model: pinnedModel,
+		});
+
+		try {
+			expect(session.model?.id).toBe("router:low");
+			// `low` is the tail of the id, never a thinking selection.
+			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("recomputes the thinking level when the reparse corrects an already-resolved model", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

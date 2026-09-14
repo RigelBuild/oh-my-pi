@@ -1696,6 +1696,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	/** {@link savedSuffixIsReadable}, recomputed for a default role that changed. */
 	const savedSuffixIsReadableFor = (spec: ResolvedModelRoleValue): boolean =>
 		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
+	/** Case-insensitive model-reference equality, as `resolveProviderModelReference` keys them. */
+	const sameModelReference = (left: string | undefined, right: string | undefined): boolean =>
+		left !== undefined && right !== undefined && left.trim().toLowerCase() === right.trim().toLowerCase();
 	let savedSuffixIsReadable = true;
 	/**
 	 * Redoes the saved-suffix discovery reparse when the first pass skipped it
@@ -2681,9 +2684,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// a trailing effort name (`custom/router:low`) off as persisted
 					// thinking — forcing the explicit model to a level the saved string
 					// never encoded.
+					// Compared case-INSENSITIVELY, the way `resolveProviderModelReference`
+					// keys every other model reference: a saved selector spelled
+					// `Custom/router:low` against a provider registered `custom` would
+					// otherwise miss its own pinned model, and the parser would split
+					// the literal id's `:low` tail off as persisted thinking again.
 					isLiteralModelId: (provider, id) =>
 						modelRegistry.find(provider, id) !== undefined ||
-						(options.model?.provider === provider && options.model.id === id),
+						(sameModelReference(options.model?.provider, provider) && sameModelReference(options.model?.id, id)),
 				});
 			let savedParse = reparseSavedSuffix();
 			// Registration alone is not visibility. A dynamic-only provider — an
