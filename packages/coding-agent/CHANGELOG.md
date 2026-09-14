@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in agent-callable `compact` tool (`compact.enabled`, default off) that lets the agent compact its own context at a turn boundary. A prompt arriving mid-compaction waits for the rewrite, and interrupting the requesting turn cancels it. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ### Fixed
 
+- Fixed the `compact` tool reporting the session idle when a steer or follow-up arrived during the compaction, so an RPC/ACP client could prompt into a turn that was already starting. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- A compaction's deferred terminal `agent_end` is now re-emitted when the prompt it was downgraded for resumes from the barrier and exits before reaching the agent (API-key or model validation, a usage-preflight denial, a superseded generation), so an RPC/ACP subscriber no longer waits forever for an end no successor turn will send ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
 
 ## [18.2.2] - 2026-09-16
@@ -483,14 +489,6 @@
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
 
-### Added
-
-- Added an opt-in agent-callable `compact` tool (`compact.enabled`, default off) that lets the agent compact its own context at a turn boundary. A prompt arriving mid-compaction waits for the rewrite, and interrupting the requesting turn cancels it. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
-
-### Fixed
-
-- Fixed the `compact` tool reporting the session idle when a steer or follow-up arrived during the compaction, so an RPC/ACP client could prompt into a turn that was already starting. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
-- A compaction's deferred terminal `agent_end` is now re-emitted when the prompt it was downgraded for resumes from the barrier and exits before reaching the agent (API-key or model validation, a usage-preflight denial, a superseded generation), so an RPC/ACP subscriber no longer waits forever for an end no successor turn will send ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 ## [18.1.20] - 2026-09-13
 
 ### Added

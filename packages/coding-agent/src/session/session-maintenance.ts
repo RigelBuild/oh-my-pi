@@ -1848,6 +1848,18 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * Resolves once an in-flight manual compaction has reconnected the agent
+	 * subscription and re-drained its preserved queues; `undefined` when no manual
+	 * compaction is active. Callers that must not start a turn against the
+	 * disconnected session (e.g. the compaction barrier in `#settleActiveCompaction`)
+	 * await this raw promise directly, distinct from `waitForManualCompactionCleanup`
+	 * which also claims the interrupted-turn resume.
+	 */
+	get manualCompactionCleanup(): Promise<void> | undefined {
+		return this.#manualCompactionCleanup;
+	}
+
+	/**
 	 * Park an ordinary prompt until an in-flight manual compaction has reconnected
 	 * the agent subscription and re-drained its preserved queues. A prompt waiting
 	 * here is the user's next intent, so it supersedes the interrupted-turn

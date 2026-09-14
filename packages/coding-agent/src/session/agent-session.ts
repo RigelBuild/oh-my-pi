@@ -6749,7 +6749,7 @@ export class AgentSession {
 		};
 	}
 
-	async #settleActiveCompaction(options?: { producesTurn?: boolean }): Promise<boolean> {
+	async #settleActiveCompaction(options?: { producesTurn?: boolean; alreadyClaimed?: boolean }): Promise<boolean> {
 		let parked = false;
 		while (true) {
 			const requested = this.#requestedCompaction;
@@ -6760,8 +6760,12 @@ export class AgentSession {
 				if (options?.producesTurn) {
 					this.#compactionBarrierWaiters++;
 					// Held past the barrier, unlike the waiter count: it is released here
-					// but the claim lives until the caller reports its dispatch.
-					if (!parked) this.#compactionBarrierClaimants++;
+					// but the claim lives until the caller reports its dispatch. Claimed
+					// at most ONCE per caller: `#dispatchPrompt` re-runs this settle after
+					// image preprocessing, so a caller that already holds a claim (or
+					// parked in this same call) passes `alreadyClaimed` to avoid a second
+					// token its single release would never balance.
+					if (!parked && !options?.alreadyClaimed) this.#compactionBarrierClaimants++;
 					parked = true;
 				}
 				try {
@@ -6881,189 +6885,211 @@ export class AgentSession {
 		// `abort` still overtakes either compaction; ordinary prompts wait here.
 		let parkedOnBarrier = await this.#settleActiveCompaction({ producesTurn: true });
 
-		// Expand file-based prompt templates if requested
-		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		// Once the barrier is parked the caller owns a claim + the downgraded
+		// terminal `agent_end` taken on its behalf, and the ONLY release before
+		// dispatch is `#promptWithMessage`'s own finally. But this method has
+		// pre-dispatch exits that never reach it: an `isStreaming` early return, a
+		// throw from image normalization or the vision-description call, an
+		// `AgentBusyError`. Any of those would strand the claim and the downgrade —
+		// no successor turn starts, so an RPC/ACP subscriber waits forever. Release
+		// here from every such exit; once the claim is handed to
+		// `#promptWithMessage`, it owns the single release instead.
+		let claimHandedOff = false;
+		try {
+			// Expand file-based prompt templates if requested
+			const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 
-		// Magic keywords ("ultrathink", "orchestrate"): append hidden system notices after the
-		// user's message that steer this turn. User-authored prompts only — synthetic /
-		// agent-initiated turns never trigger them.
-		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
+			// Magic keywords ("ultrathink", "orchestrate"): append hidden system notices after the
+			// user's message that steer this turn. User-authored prompts only — synthetic /
+			// agent-initiated turns never trigger them.
+			const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
 
-		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
-		// re-enables advisor auto-resume that a prior user interrupt suppressed.
-		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
-		if (options?.userInitiated ?? !options?.synthetic) {
-			this.#advisors.autoResumeSuppressed = false;
-			this.#planModeReminderCount = 0;
-			this.#planModeReminderAwaitingProgress = false;
-			// A user turn owns the next decision; drop a queued forced choice from
-			// a reminder continuation this prompt just preempted.
-			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
-		}
-
-		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
-
-		// If streaming, queue via steer()/followUp()/aside based on option
-		if (this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
-			if (!streamingBehavior) {
-				// Busy because the agent owns a turn: that turn supersedes the interrupted
-				// one (after compaction it is the queued-message drain). Busy only from
-				// another prompt's setup claims nothing yet.
-				outcome.sessionClaimed = this.agent.state.isStreaming;
-				throw new AgentBusyError();
+			// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
+			// re-enables advisor auto-resume that a prior user interrupt suppressed.
+			// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
+			if (options?.userInitiated ?? !options?.synthetic) {
+				this.#advisors.autoResumeSuppressed = false;
+				this.#planModeReminderCount = 0;
+				this.#planModeReminderAwaitingProgress = false;
+				// A user turn owns the next decision; drop a queued forced choice from
+				// a reminder continuation this prompt just preempted.
+				this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 			}
 
-			// Steer/follow-up/aside the keyword notices BEFORE the queued user message so the
-			// model reads the steering notice ahead of the prompt it modifies.
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
-				timestamp: submittedAt,
-				attribution: promptAttribution,
-			});
-			outcome.sessionClaimed = true;
-			return true;
-		}
+			const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 
-		// Skip eager preludes when the user has already queued a directive
-		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
-		const activeModel = this.agent.state.model;
-		const externalThinkingToolChoice =
-			!options?.synthetic &&
-			!hasPendingUserDirective &&
-			this.settings.get("externalThinking") &&
-			this.getEnabledToolNames().includes("think") &&
-			supportsExternalThinking(activeModel)
-				? buildNamedToolChoice("think", activeModel)
-				: undefined;
-		const eagerTodoPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
-		const eagerTaskPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
-		const videoAttachmentNotices = this.#createVideoAttachmentNotices(options?.images, submittedAt);
-		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
-
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-		if (normalizedImages?.length) {
-			userContent.push(...normalizedImages);
-		}
-		// Text-only model + image attachment: describe via a vision model and inject the
-		// description as a hidden companion (the image stays in the visible user message).
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
-
-		// The compaction barrier has to be re-run for the same reason, and
-		// `isStreaming` below does not cover it: a requested compaction calls
-		// `abort()`, so while the rewrite is in flight the session reads NOT
-		// streaming. An image-bearing call that passed the barrier at the top and
-		// suspended in normalization would dispatch into a disconnected,
-		// being-rewritten session and lose its events to the history replacement.
-		// Re-taken after the awaits above (image normalization, the vision
-		// description call) — a pass can be scheduled in that window. Either park
-		// makes this caller the owner of the downgrade taken on its behalf.
-		parkedOnBarrier = (await this.#settleActiveCompaction({ producesTurn: true })) || parkedOnBarrier;
-
-		// A concurrent prompt() can start a turn during the awaits above: image
-		// normalization and the vision-description call suspend after the
-		// isStreaming check at the top, so two callers — the CLI initial message
-		// and a freshly typed submission — can both observe an idle session.
-		// Re-check before dispatch so the loser queues exactly like the early
-		// branch instead of racing #promptWithMessage into AgentBusyError. No
-		// await sits between this check and #beginInFlight, so the winner's
-		// in-flight increment is visible to every later re-check.
-		if (this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
-			if (!streamingBehavior) {
-				outcome.sessionClaimed = this.agent.state.isStreaming;
-				throw new AgentBusyError();
-			}
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
-				timestamp: submittedAt,
-				attribution: promptAttribution,
-				preprocessed: {
-					images: normalizedImages,
-					descriptionNotice: imageDescriptionNotice,
-				},
-			});
-			outcome.sessionClaimed = true;
-			return true;
-		}
-
-		if (externalThinkingToolChoice) {
-			this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
-				label: "external-thinking",
-				now: true,
-			});
-		}
-		const message = options?.synthetic
-			? {
-					role: "developer" as const,
-					content: userContent,
-					attribution: promptAttribution,
-					timestamp: submittedAt,
-					synthetic: true,
-					userInitiated: options?.userInitiated === true ? true : undefined,
+			// If streaming, queue via steer()/followUp()/aside based on option
+			if (this.isStreaming) {
+				const streamingBehavior = options?.streamingBehavior;
+				if (!streamingBehavior) {
+					// Busy because the agent owns a turn: that turn supersedes the interrupted
+					// one (after compaction it is the queued-message drain). Busy only from
+					// another prompt's setup claims nothing yet.
+					outcome.sessionClaimed = this.agent.state.isStreaming;
+					throw new AgentBusyError();
 				}
-			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
-		const preludeMessages: AgentMessage[] = [];
-		if (eagerTodoPrelude) {
-			if (eagerTodoPrelude.toolChoice) {
-				this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
-					label: "eager-todo",
+				// Steer/follow-up/aside the keyword notices BEFORE the queued user message so the
+				// model reads the steering notice ahead of the prompt it modifies.
+				for (const notice of keywordNotices) {
+					await this.#queueCustomMessage(notice, streamingBehavior);
+				}
+				await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+					timestamp: submittedAt,
+					attribution: promptAttribution,
+				});
+				outcome.sessionClaimed = true;
+				return true;
+			}
+
+			// Skip eager preludes when the user has already queued a directive
+			const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
+			const activeModel = this.agent.state.model;
+			const externalThinkingToolChoice =
+				!options?.synthetic &&
+				!hasPendingUserDirective &&
+				this.settings.get("externalThinking") &&
+				this.getEnabledToolNames().includes("think") &&
+				supportsExternalThinking(activeModel)
+					? buildNamedToolChoice("think", activeModel)
+					: undefined;
+			const eagerTodoPrelude =
+				!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
+			const eagerTaskPrelude =
+				!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
+			const videoAttachmentNotices = this.#createVideoAttachmentNotices(options?.images, submittedAt);
+			const normalizedImages = await this.#normalizeImagesForModel(options?.images);
+
+			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+			if (normalizedImages?.length) {
+				userContent.push(...normalizedImages);
+			}
+			// Text-only model + image attachment: describe via a vision model and inject the
+			// description as a hidden companion (the image stays in the visible user message).
+			const imageDescriptionNotice = normalizedImages?.length
+				? await this.#buildImageDescriptionNotice(normalizedImages)
+				: undefined;
+
+			// The compaction barrier has to be re-run for the same reason, and
+			// `isStreaming` below does not cover it: a requested compaction calls
+			// `abort()`, so while the rewrite is in flight the session reads NOT
+			// streaming. An image-bearing call that passed the barrier at the top and
+			// suspended in normalization would dispatch into a disconnected,
+			// being-rewritten session and lose its events to the history replacement.
+			// Re-taken after the awaits above (image normalization, the vision
+			// description call) — a pass can be scheduled in that window. Either park
+			// makes this caller the owner of the downgrade taken on its behalf, but
+			// `alreadyClaimed` keeps a re-park from taking a SECOND claim the single
+			// release could never balance.
+			parkedOnBarrier =
+				(await this.#settleActiveCompaction({ producesTurn: true, alreadyClaimed: parkedOnBarrier })) ||
+				parkedOnBarrier;
+
+			// A concurrent prompt() can start a turn during the awaits above: image
+			// normalization and the vision-description call suspend after the
+			// isStreaming check at the top, so two callers — the CLI initial message
+			// and a freshly typed submission — can both observe an idle session.
+			// Re-check before dispatch so the loser queues exactly like the early
+			// branch instead of racing #promptWithMessage into AgentBusyError. No
+			// await sits between this check and #beginInFlight, so the winner's
+			// in-flight increment is visible to every later re-check.
+			if (this.isStreaming) {
+				const streamingBehavior = options?.streamingBehavior;
+				if (!streamingBehavior) {
+					outcome.sessionClaimed = this.agent.state.isStreaming;
+					throw new AgentBusyError();
+				}
+				for (const notice of keywordNotices) {
+					await this.#queueCustomMessage(notice, streamingBehavior);
+				}
+				await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+					timestamp: submittedAt,
+					attribution: promptAttribution,
+					preprocessed: {
+						images: normalizedImages,
+						descriptionNotice: imageDescriptionNotice,
+					},
+				});
+				outcome.sessionClaimed = true;
+				return true;
+			}
+
+			if (externalThinkingToolChoice) {
+				this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
+					label: "external-thinking",
+					now: true,
 				});
 			}
-			preludeMessages.push(eagerTodoPrelude.message);
-		}
-		if (eagerTaskPrelude) {
-			preludeMessages.push(eagerTaskPrelude);
-		}
+			const message = options?.synthetic
+				? {
+						role: "developer" as const,
+						content: userContent,
+						attribution: promptAttribution,
+						timestamp: submittedAt,
+						synthetic: true,
+						userInitiated: options?.userInitiated === true ? true : undefined,
+					}
+				: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
-		let dispatched = false;
-		try {
-			dispatched = await this.#promptWithMessage(message, expandedText, {
-				...options,
-				parkedOnBarrier,
-				images: normalizedImages,
-				prependMessages:
-					preludeMessages.length > 0 ||
-					keywordNotices.length > 0 ||
-					videoAttachmentNotices.length > 0 ||
-					imageDescriptionNotice
-						? [
-								...preludeMessages,
-								...keywordNotices,
-								...videoAttachmentNotices,
-								...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
-							]
-						: undefined,
-			});
-		} catch (error) {
-			if (error instanceof AgentStartPolicyChangedError && message.role === "user") {
+			const preludeMessages: AgentMessage[] = [];
+			if (eagerTodoPrelude) {
+				if (eagerTodoPrelude.toolChoice) {
+					this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
+						label: "eager-todo",
+					});
+				}
+				preludeMessages.push(eagerTodoPrelude.message);
+			}
+			if (eagerTaskPrelude) {
+				preludeMessages.push(eagerTaskPrelude);
+			}
+
+			let dispatched = false;
+			try {
+				// `#promptWithMessage` now owns the claim's single release (its finally
+				// runs whether it dispatches, bails, or throws), so the guard below
+				// must not release it too.
+				claimHandedOff = true;
+				dispatched = await this.#promptWithMessage(message, expandedText, {
+					...options,
+					parkedOnBarrier,
+					images: normalizedImages,
+					prependMessages:
+						preludeMessages.length > 0 ||
+						keywordNotices.length > 0 ||
+						videoAttachmentNotices.length > 0 ||
+						imageDescriptionNotice
+							? [
+									...preludeMessages,
+									...keywordNotices,
+									...videoAttachmentNotices,
+									...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
+								]
+							: undefined,
+				});
+			} catch (error) {
+				if (error instanceof AgentStartPolicyChangedError && message.role === "user") {
+					this.#promptDropped?.({ text: typedText, images: options?.images });
+				}
+				throw error;
+			} finally {
+				// Clean up residual eager-todo directive if the prompt never consumed it
+				// (e.g., compaction aborted, validation failed).
+				this.#toolChoiceQueue.removeByLabel("eager-todo");
+				this.#toolChoiceQueue.removeByLabel("external-thinking");
+			}
+			outcome.sessionClaimed = dispatched;
+			if (!dispatched && message.role === "user") {
+				// An abort (Esc) or preflight denial raced turn setup: the prompt never
+				// reached the agent or the session file. Hand it back to the host so the
+				// user can edit/resubmit instead of losing it (tree/branch can't offer
+				// a message that was never persisted).
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
-			throw error;
+			return true;
 		} finally {
-			// Clean up residual eager-todo directive if the prompt never consumed it
-			// (e.g., compaction aborted, validation failed).
-			this.#toolChoiceQueue.removeByLabel("eager-todo");
-			this.#toolChoiceQueue.removeByLabel("external-thinking");
+			if (parkedOnBarrier && !claimHandedOff) this.#releaseCompactionBarrierClaim(true, false);
 		}
-		outcome.sessionClaimed = dispatched;
-		if (!dispatched && message.role === "user") {
-			// An abort (Esc) or preflight denial raced turn setup: the prompt never
-			// reached the agent or the session file. Hand it back to the host so the
-			// user can edit/resubmit instead of losing it (tree/branch can't offer
-			// a message that was never persisted).
-			this.#promptDropped?.({ text: typedText, images: options?.images });
-		}
-		return true;
 	}
 
 	/**
@@ -7157,39 +7183,48 @@ export class AgentSession {
 		// turn against history a detached requested pass is about to replace. The
 		// `queueOnly` branch above is exempt — it only enqueues, never dispatches.
 		const parkedOnBarrier = await this.#settleActiveCompaction({ producesTurn: true });
-		if (this.isStreaming) {
-			const streamingBehavior = options?.streamingBehavior;
-			if (!streamingBehavior) {
-				// Mirrors #dispatchPrompt: busy because the agent owns a turn claims the
-				// session; busy only from another prompt's setup claims nothing.
-				outcome.sessionClaimed = this.agent.state.isStreaming;
-				throw new AgentBusyError();
+		// A park owns a claim + the downgraded terminal `agent_end`; the
+		// `isStreaming` early return below never reaches `#promptWithMessage`'s
+		// release, so hand the claim back from that exit or a subscriber hangs.
+		let claimHandedOff = false;
+		try {
+			if (this.isStreaming) {
+				const streamingBehavior = options?.streamingBehavior;
+				if (!streamingBehavior) {
+					// Mirrors #dispatchPrompt: busy because the agent owns a turn claims the
+					// session; busy only from another prompt's setup claims nothing.
+					outcome.sessionClaimed = this.agent.state.isStreaming;
+					throw new AgentBusyError();
+				}
+
+				for (const notice of keywordNotices) {
+					await this.#queueCustomMessage(notice, streamingBehavior);
+				}
+				await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
+				outcome.sessionClaimed = true;
+				return true;
 			}
 
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
-			outcome.sessionClaimed = true;
-			return true;
+			const customMessage: CustomMessage<T> = {
+				role: "custom",
+				customType: message.customType,
+				content: message.content,
+				display: message.display,
+				details: message.details,
+				attribution: message.attribution ?? "agent",
+				timestamp: Date.now(),
+			};
+
+			claimHandedOff = true;
+			outcome.sessionClaimed = await this.#promptWithMessage(customMessage, textContent, {
+				...options,
+				parkedOnBarrier,
+				prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
+			});
+			return outcome.sessionClaimed;
+		} finally {
+			if (parkedOnBarrier && !claimHandedOff) this.#releaseCompactionBarrierClaim(true, false);
 		}
-
-		const customMessage: CustomMessage<T> = {
-			role: "custom",
-			customType: message.customType,
-			content: message.content,
-			display: message.display,
-			details: message.details,
-			attribution: message.attribution ?? "agent",
-			timestamp: Date.now(),
-		};
-
-		outcome.sessionClaimed = await this.#promptWithMessage(customMessage, textContent, {
-			...options,
-			parkedOnBarrier,
-			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
-		});
-		return outcome.sessionClaimed;
 	}
 
 	/** Queue ownership belongs to Agent; only actual user deliveries refresh submission policy. */
