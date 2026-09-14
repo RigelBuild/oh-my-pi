@@ -2666,3 +2666,70 @@ describe("replayed computer screenshots reach the wire as image parts", () => {
 		expect(serialized).not.toContain(orphan);
 	});
 });
+
+describe("byte clamp applies to a text-only Responses model", () => {
+	// A text-only Responses line: no image input at all, on a provider absent
+	// from the byte-budget table so it falls to the floor (4 MB) — small enough
+	// to bust with a single retained screenshot. `azure-openai-responses` is not
+	// in `API_IMAGE_BYTE_BUDGETS` either, so the route floor applies too.
+	const TEXT_ONLY_RESPONSES_MODEL = buildModel({
+		id: "o3-mini-textonly",
+		name: "o3-mini-textonly",
+		api: "azure-openai-responses",
+		provider: "resp-textonly",
+		baseUrl: "https://example.openai.azure.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+		supportsComputerUse: false,
+	});
+
+	it("evicts an oversized retained screenshot demoted to an assistant text note", () => {
+		// A session holding a computer screenshot switches to a text-only Responses
+		// model. `appendResponsesToolResultMessages()` serializes
+		// `providerMetadata.screenshot` — the full data URI, untruncated — into an
+		// assistant text note whenever `supportsComputerUse` is not true, so the
+		// bytes reach the wire even though no image PART does. The old
+		// `!model.input.includes("image")` early return skipped the byte clamp
+		// entirely, so one oversized screenshot busted the request-size limit and
+		// wedged the switched session.
+		const budget = providerImageByteBudget(TEXT_ONLY_RESPONSES_MODEL.provider, TEXT_ONLY_RESPONSES_MODEL.api);
+		const big = "B".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				computerCallMessage("call-shot"),
+				{
+					role: "toolResult",
+					timestamp: 2,
+					toolCallId: "call-shot",
+					toolName: "computer",
+					content: [text("screenshot"), image(big)],
+					isError: false,
+					providerMetadata: {
+						type: "computer",
+						acknowledgedSafetyChecks: [],
+						screenshot: { type: "computer_screenshot", image_url: dataUri(big) },
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, TEXT_ONLY_RESPONSES_MODEL, true);
+
+		// The FINAL converted provider input, the shape the request actually sends.
+		const wire = buildResponsesInput({
+			model: TEXT_ONLY_RESPONSES_MODEL,
+			context: clamped,
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: false,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the byte clamp was skipped, the metadata screenshot was
+		// never redacted, and its full data URI travelled inside the demoted note.
+		expect(serialized).not.toContain(big);
+	});
+});

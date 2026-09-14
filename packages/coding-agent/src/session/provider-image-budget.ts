@@ -1199,13 +1199,25 @@ function clampImageCountToCap(context: Context, model: Model, replaysNativeHisto
  *  combined image-BYTE cap (a long snapcompact archive can stay under the count
  *  cap yet bust the request-size limit on summed frame bytes). */
 export function clampProviderContextImages(context: Context, model: Model, replaysNativeHistory = true): Context {
-	if (!model.input.includes("image")) return context;
+	// The byte budget runs REGARDLESS of vision capability. A text-only Responses
+	// model still receives a demoted computer screenshot's full data URI as an
+	// assistant text note: `appendResponsesToolResultMessages()` serializes
+	// `providerMetadata.screenshot` untruncated whenever `supportsComputerUse` is
+	// not true, so those bytes reach the wire even though no image PART does. The
+	// old `!model.input.includes("image")` early return skipped the clamp
+	// entirely, so one oversized retained screenshot 413'd the switched session.
+	const acceptsImages = model.input.includes("image");
 	const { total, inlineSizes } = collectImageStats(context, model, replaysNativeHistory, model);
 	// Not `total === 0`: a replayed native image result contributes bytes but no
 	// image part, so a context whose only images are generated ones has
 	// `total === 0` and a payload that can still bust the byte budget.
 	if (total === 0 && inlineSizes.length === 0) return context;
-	const countDrops = Math.max(0, total - providerImageBudget(model.provider));
+	// A model that cannot accept images sends no image PART on the wire — its
+	// content images are omitted and its computer screenshots demote to text — so
+	// the per-request COUNT cap is meaningless there and only the BYTE budget
+	// binds. Charging count debt would evict a call/output pair for a request
+	// that carries zero image parts.
+	const countDrops = acceptsImages ? Math.max(0, total - providerImageBudget(model.provider)) : 0;
 	const inlineDrops = imageDropCountForBytes(inlineSizes, providerImageByteBudget(model.provider, model.api));
 	if (countDrops === 0 && inlineDrops === 0) return context;
 
@@ -1266,6 +1278,12 @@ async function unreadableImageReason(image: ImageContent): Promise<string | null
  * bytes the provider is never sent.
  */
 function sendsInlineImageBytes(image: ImageContent, model: Model): boolean {
+	// A model that cannot accept images omits a generic content image on the wire
+	// — `convertResponsesInputContent()` partitions it out and leaves a text
+	// placeholder — so its inline bytes never travel and must not be charged.
+	// A demoted computer screenshot is accounted separately, through its
+	// metadata, not this block.
+	if (!model.input.includes("image")) return false;
 	const reference = image.providerFile;
 	if (reference) {
 		switch (reference.provider) {
