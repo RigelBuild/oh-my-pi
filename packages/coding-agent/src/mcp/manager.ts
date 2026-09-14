@@ -245,6 +245,7 @@ export class MCPManager {
 	 */
 	#pendingNotifications: Array<{ server: string; method: string; params: unknown }> = [];
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>;
+	readonly #toolsChangedListeners = new Set<(tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>>();
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
 	#notificationsEnabled = false;
@@ -397,6 +398,40 @@ export class MCPManager {
 	 */
 	setOnToolsChanged(handler: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>): void {
 		this.#onToolsChanged = handler;
+	}
+
+	/**
+	 * Observe tool-set changes WITHOUT taking the single owner slot.
+	 *
+	 * {@link setOnToolsChanged} has exactly one owner, so a session handed a
+	 * manager it does not own — a top-level embedder supplying `mcpManager`, or a
+	 * subagent sharing its parent's — cannot use it. Those sessions had no way to
+	 * receive a tool set published after their own snapshot, so a server slower
+	 * than the startup timeout (whose load `connectServers` deliberately leaves
+	 * in the background) never reached their registry.
+	 *
+	 * Returns an unsubscribe function. Listeners are invoked with independent
+	 * error isolation, like {@link addNotificationListener}.
+	 */
+	addToolsChangedListener(
+		listener: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>,
+	): () => void {
+		this.#toolsChangedListeners.add(listener);
+		return () => {
+			this.#toolsChangedListeners.delete(listener);
+		};
+	}
+
+	/** Fires the owner handler and every observer, isolating their failures. */
+	async #emitToolsChanged(): Promise<void> {
+		await this.#onToolsChanged?.(this.#tools);
+		for (const listener of this.#toolsChangedListeners) {
+			try {
+				await listener(this.#tools);
+			} catch (error) {
+				logger.debug("MCP tools-changed listener threw", { error });
+			}
+		}
 	}
 
 	/**
@@ -854,7 +889,7 @@ export class MCPManager {
 						this.reconnectServer(name, options);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 					this.#replaceServerTools(name, customTools);
-					void this.#onToolsChanged?.(this.#tools);
+					void this.#emitToolsChanged();
 					void this.toolCache?.set(name, config, serverTools);
 
 					notify({ type: "connected", serverName: name });
@@ -1219,7 +1254,7 @@ export class MCPManager {
 		// Remove tools from this server and notify consumers
 		const hadTools = this.#tools.some(t => t.mcpServerName === name);
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
-		if (hadTools) void this.#onToolsChanged?.(this.#tools);
+		if (hadTools) void this.#emitToolsChanged();
 
 		// Notify prompt consumers so stale commands are cleared
 		if (connection?.prompts?.length) this.#onPromptsChanged?.(name);
@@ -1463,7 +1498,7 @@ export class MCPManager {
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools);
 			this.#replaceServerTools(name, customTools);
-			void this.#onToolsChanged?.(this.#tools);
+			void this.#emitToolsChanged();
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			return connection;
 		} catch (error) {
@@ -1515,7 +1550,7 @@ export class MCPManager {
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
-		await this.#onToolsChanged?.(this.#tools);
+		await this.#emitToolsChanged();
 	}
 
 	/**
