@@ -155,6 +155,33 @@ describe("AgentSession refresh('settings'): live memory backend", () => {
 			await h.dispose();
 		}
 	});
+
+	it("re-applies the backend when a stateful setting the fingerprint missed moves", async () => {
+		// `hindsight.autoRecall` is a BEHAVIORAL Hindsight setting frozen into the
+		// live state at construction — not a connection field. The pre-fix
+		// fingerprint keyed only the endpoint/credentials/timeouts, so a
+		// `/refresh settings` toggling it reported success while auto-recall kept
+		// its launch-time value until restart. Fingerprinting the whole config
+		// keys it. Hindsight with no `apiUrl` is inert, so the backend never
+		// touches the network and the test stays light.
+		const h = await makeHarness(
+			"compaction:\n  enabled: false\nmemory:\n  backend: hindsight\nhindsight:\n  autoRecall: true\n",
+		);
+		try {
+			const applySpy = vi.spyOn(h.session, "applyMemoryBackend");
+
+			await fs.writeFile(
+				h.settingsPath,
+				"compaction:\n  enabled: false\nmemory:\n  backend: hindsight\nhindsight:\n  autoRecall: false\n",
+			);
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			expect(applySpy).toHaveBeenCalledTimes(1);
+		} finally {
+			await h.dispose();
+		}
+	});
 });
 
 describe("AgentSession refresh('settings'): live advisor", () => {

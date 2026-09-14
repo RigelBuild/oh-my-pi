@@ -1632,7 +1632,14 @@ export class SessionTools {
 	/** Replaces memory-backend tools while preserving unrelated selections. */
 	replaceMemoryTools(tools: AgentTool[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
+			const isMemoryToolName = (name: string): boolean => MEMORY_BACKEND_TOOL_NAMES.some(memory => memory === name);
 			const removed = new Set<string>(MEMORY_BACKEND_TOOL_NAMES.filter(name => this.#builtInToolNames.has(name)));
+			// The memory tools the session had ACTIVE before this rebuild. Captured
+			// before deletion so a `/tools` deselection — a name present but absent
+			// from the enabled set — survives a backend rebuild (e.g. changing a
+			// construction-time Hindsight setting), instead of being silently
+			// reactivated by re-adding every rebuilt tool.
+			const previouslyActiveMemoryToolNames = new Set(this.getEnabledToolNames().filter(isMemoryToolName));
 			const nextActive = this.getEnabledToolNames().filter(name => !removed.has(name));
 			for (const name of removed) {
 				this.#toolRegistry.delete(name);
@@ -1640,13 +1647,20 @@ export class SessionTools {
 			}
 
 			for (const tool of tools) {
-				if (!MEMORY_BACKEND_TOOL_NAMES.some(name => name === tool.name) || this.#toolRegistry.has(tool.name)) {
+				if (!isMemoryToolName(tool.name) || this.#toolRegistry.has(tool.name)) {
 					continue;
 				}
 				const wrapped = this.#wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
-				nextActive.push(wrapped.name);
+				// A NEWLY present memory tool becomes active immediately; one that was
+				// already present keeps its prior selection. Same shape as
+				// `#applyMCPToolRefresh`, so the two read consistently: a refresh runs
+				// for reasons unrelated to memory (any settings edit reaches here), and
+				// must not override a tool the user turned off through `/tools`.
+				if (!removed.has(wrapped.name) || previouslyActiveMemoryToolNames.has(wrapped.name)) {
+					nextActive.push(wrapped.name);
+				}
 			}
 			await this.#applyActiveToolsByName([...new Set(nextActive)]);
 		});
