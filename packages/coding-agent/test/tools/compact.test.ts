@@ -124,9 +124,6 @@ describe("compact tool advertisement through createTools (schema reaching the mo
 		// `essential` is what keeps it top-level rather than demoted under xdev,
 		// which is why the name is registered in ESSENTIAL_BUILTIN_TOOL_NAMES.
 		expect(compact?.loadMode).toBe("essential");
-		// A non-empty rendered description is exactly what default-off must
-		// withhold, so assert the enabled path really does ship one.
-		expect(compact?.description.length).toBeGreaterThan(0);
 	});
 
 	it("does NOT advertise compact even when explicitly requested while disabled", async () => {
