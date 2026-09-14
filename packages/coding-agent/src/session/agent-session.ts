@@ -6092,16 +6092,9 @@ export class AgentSession {
 		// First statement in the critical section, so a throw here releases the
 		// mutex with all roster/settings/MCP state untouched.
 		if (this.#onBeforeRefresh) await this.#onBeforeRefresh(scope);
-		// Re-fence after the hook. `onBeforeRefresh` may be async, and awaiting it
-		// is a suspension point: `beginDispose()` can complete while the host
-		// stages config, so on resume `#isDisposed` may now be set even though the
-		// entry guard above passed. Without this recheck a `skills`/`rules`/`all`
-		// refresh would proceed to `reloadSkillsAndRules({ publishGlobals: true })`
-		// below and a DISPOSED top-level session would overwrite the process-wide
-		// active skill/rule snapshots — clobbering the roster another live session
-		// already published. The MCP reconnect's own `shouldAbort` gate only
-		// covers the MCP scan, not this roster publication, so the same
-		// authoritative disposal fence is re-applied here.
+		// Awaiting the hook is a suspension point, so re-fence: otherwise a
+		// disposed session resumes and publishes globals over a live session's
+		// roster. The MCP `shouldAbort` gate covers only the MCP scan.
 		if (this.#isDisposed) throw new Error("Session disposed before refresh could run");
 		const doRoster = scope === "all" || scope === "skills" || scope === "rules";
 		const doSettings = scope === "all" || scope === "settings";
