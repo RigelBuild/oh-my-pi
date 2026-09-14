@@ -3860,7 +3860,14 @@ export class AuthStorage {
 				let hasUsableStoredOAuthCredential = false;
 				for (const entry of entries) {
 					if (entry.credential.type !== "oauth") continue;
-					const request = this.#buildUsageRequestForOauth(provider, entry.credential, baseUrl);
+					// Stamped here too: this branch has its own `continue`, so a pool
+					// of identity-less OAuth rows shared the `unidentified` account and
+					// xAI's fixed limit ids, and the renderer dropped every credential
+					// after the first as a duplicate series.
+					const request = {
+						...this.#buildUsageRequestForOauth(provider, entry.credential, baseUrl),
+						credentialId: entry.id,
+					};
 					if (providerImpl.supports && !providerImpl.supports(request)) continue;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;

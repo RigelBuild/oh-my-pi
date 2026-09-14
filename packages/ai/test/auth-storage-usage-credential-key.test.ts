@@ -44,6 +44,16 @@ function apiKeyRow(id: number): StoredAuthCredential {
 	return { id, provider: "synthetic", credential, disabledCause: null };
 }
 
+function xaiOauthRow(id: number): StoredAuthCredential {
+	const credential: AuthCredential = {
+		type: "oauth",
+		access: `xai-access-${id}`,
+		refresh: `xai-refresh-${id}`,
+		expires: Date.now() + 3_600_000,
+	};
+	return { id, provider: "xai-oauth", credential, disabledCause: null };
+}
+
 /** An identity-less report: fixed limit id, no account/email/project/org. */
 function identitylessReport(): UsageReport {
 	return {
@@ -104,6 +114,46 @@ describe("AuthStorage identity-less usage reports", () => {
 			expect(synthetic).toHaveLength(1);
 			// The stamp must never re-key a series that can already be attributed.
 			expect(synthetic[0].metadata?.credentialKey).toBeUndefined();
+		} finally {
+			storage.close();
+		}
+	}, 20_000);
+
+	it("stamps stored xai-oauth credentials, which take their own collection branch", async () => {
+		// `xai-oauth` is collected by a provider-specific branch that builds each
+		// request and `continue`s before the shared stamp, so a pool of
+		// identity-less OAuth rows shared the `unidentified` account and xAI's
+		// fixed limit ids — and the renderer dropped every later credential as a
+		// duplicate series.
+		const xaiReport = (): UsageReport => ({
+			provider: "xai-oauth",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "xai-oauth:monthly",
+					label: "Monthly",
+					scope: { provider: "xai-oauth", windowId: "monthly" },
+					amount: { usedFraction: 0.25, unit: "percent" },
+				},
+			],
+			metadata: { endpoint: "https://example.invalid/quotas" },
+		});
+		const storage = new AuthStorage(makeStore([xaiOauthRow(21), xaiOauthRow(22)]), {
+			usageProviderResolver: provider =>
+				provider === "xai-oauth"
+					? ({ id: "xai-oauth", fetchUsage: async () => xaiReport() } as UsageProvider)
+					: undefined,
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.fetchUsageReports()) ?? [];
+			const xai = reports.filter(report => report.provider === "xai-oauth");
+			const keys = xai.map(report => report.metadata?.credentialKey);
+
+			// RED (pre-fix): the branch pushed unstamped requests, so both reports
+			// were byte-identical.
+			expect(xai).toHaveLength(2);
+			expect(new Set(keys).size).toBe(2);
 		} finally {
 			storage.close();
 		}
