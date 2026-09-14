@@ -2756,6 +2756,54 @@ describe("replayed computer screenshots reach the wire as image parts", () => {
 			wire.some(item => item.type === "computer_call_output" && JSON.stringify(item.output ?? "").includes(orphan)),
 		).toBe(false);
 	});
+
+	it("strips a demoted computer output with no call id before it reaches the wire", async () => {
+		// A demoting Responses model rewrites a replayed `computer_call_output`
+		// into an assistant note that stringifies the WHOLE item — data URI
+		// included. When the output carries no string `call_id`, the id-keyed
+		// exclusion the clamp used could not remove it, so the clamp booked the
+		// byte debt as paid while the untouched data URI still shipped inside the
+		// note. Strip the screenshot BY INDEX instead, the same in-place rewrite
+		// the assistant-payload path uses.
+		const budget = providerImageByteBudget(VISION_ONLY_MODEL.provider, VISION_ONLY_MODEL.api);
+		const over = "z".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("restored turn")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: VISION_ONLY_MODEL.provider,
+						items: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "compaction" }] },
+							// No `call_id`: the id-keyed exclusion cannot remove it.
+							{
+								type: "computer_call_output",
+								output: { type: "computer_screenshot", image_url: dataUri(over) },
+							},
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, VISION_ONLY_MODEL, true);
+
+		const wire = buildResponsesInput({
+			model: VISION_ONLY_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the clamp decremented the byte allowance but rewrote no
+		// item, so the demoted note carried the full data URI to the wire.
+		expect(serialized).not.toContain(over);
+	});
 });
 
 describe("byte clamp applies to a text-only Responses model", () => {

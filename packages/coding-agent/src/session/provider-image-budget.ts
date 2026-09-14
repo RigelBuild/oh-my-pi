@@ -1000,6 +1000,20 @@ function clampReplayedInputImages(
 			// path, which already splits the two for the same reason.
 			if (demotesNativeComputerItems) {
 				if (state.remainingInlineDrops <= 0 || !isInlineNativeImage(screenshot)) continue;
+				// A demoted output with NO call id cannot be removed by the id-keyed
+				// exclusion below — so the converter would serialize its untouched
+				// data URI into the assistant note while the clamp already booked the
+				// byte debt as paid, and the oversized request would ship unchanged.
+				// Strip the screenshot IN PLACE by index, exactly as the
+				// assistant-payload path does; the id-keyed path stays for the rest.
+				if (typeof item.call_id !== "string") {
+					const stripped = stripDemotedComputerScreenshot(item);
+					if (!stripped) continue;
+					state.remainingInlineDrops--;
+					items ??= [...payload.items];
+					items[index] = stripped;
+					continue;
+				}
 				state.remainingInlineDrops--;
 			} else {
 				if (!dropsNativeInputImage(screenshot, state)) continue;
