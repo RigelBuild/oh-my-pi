@@ -4763,6 +4763,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// process-global postmortem list.
 		let unsubscribeMcpNotifications: (() => void) | undefined;
 		let unregisterMcpPostmortem: (() => void) | undefined;
+		// Shared-manager tools-changed observer. A session handed a manager it does
+		// NOT own (`options.mcpManager`) observes late tool sets through
+		// `addToolsChangedListener`. The manager outlives the session, so the
+		// listener MUST be torn down on dispose: registering it only with the
+		// process-global postmortem list left every disposed session strongly
+		// retained by that list, firing its listener on every later tool update
+		// until process exit. Torn down from the dispose wrapper (explicit SDK
+		// dispose) AND registered as a postmortem (process exit); the postmortem
+		// registration is cancelled on explicit dispose so the global list does
+		// not retain the session closure.
+		let unsubscribeSharedTools: (() => void) | undefined;
+		let unregisterSharedToolsPostmortem: (() => void) | undefined;
 
 		{
 			const originalDispose = session.dispose.bind(session);
@@ -4796,12 +4808,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unsubscribeCredentialDisabled?.();
 					unsubscribeMcpNotifications?.();
 					unregisterMcpPostmortem?.();
+					// Unsubscribe the shared-manager tools observer and cancel its
+					// postmortem so the disposed session is not retained by either the
+					// manager's listener set or the process-global postmortem list.
+					unsubscribeSharedTools?.();
+					unregisterSharedToolsPostmortem?.();
 					for (const callback of disposeCallbacks) callback();
 					disposeCallbacks.clear();
 					// Drop refs so the process-global postmortem list doesn't retain
 					// the bridge closure past explicit dispose.
 					unsubscribeMcpNotifications = undefined;
 					unregisterMcpPostmortem = undefined;
+					unsubscribeSharedTools = undefined;
+					unregisterSharedToolsPostmortem = undefined;
 				}
 			};
 		}
@@ -5027,7 +5046,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// through the multi-listener hook instead — otherwise those tools never
 		// reached this session's registry, before or after a refresh.
 		if (mcpManager && options.mcpManager) {
-			const unsubscribe = mcpManager.addToolsChangedListener(async tools => {
+			unsubscribeSharedTools = mcpManager.addToolsChangedListener(async tools => {
 				try {
 					await session.refreshMCPTools(tools);
 				} catch (error) {
@@ -5036,9 +5055,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					});
 				}
 			});
-			// Unsubscribed with the session: the manager outlives it, so a retained
-			// listener would rebind tools onto a disposed session.
-			postmortem.register("mcp-shared-tools-listener", unsubscribe);
+			// Torn down with the session: the manager outlives it, so a retained
+			// listener would rebind tools onto a disposed session and hold the whole
+			// session closure alive. The dispose wrapper calls
+			// `unsubscribeSharedTools`; the postmortem covers process exit without an
+			// explicit dispose. Capture the postmortem cancel so explicit dispose
+			// removes it from the global list instead of leaking a registration per
+			// session for the process lifetime.
+			unregisterSharedToolsPostmortem = postmortem.register("mcp-shared-tools-listener", () =>
+				unsubscribeSharedTools?.(),
+			);
 		}
 		if (mcpManager && !options.mcpManager) {
 			mcpManager.setOnToolsChanged(async tools => {

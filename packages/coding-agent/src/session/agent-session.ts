@@ -6764,6 +6764,15 @@ export class AgentSession {
 						evalRegistered: this.#tools.registry.has("eval"),
 						evalActive: this.agent.state.tools.some(tool => tool.name === "eval"),
 					}),
+					// Second disposal gate, downstream of the `#doRefresh` entry fence.
+					// That fence rejects a refresh whose turn arrives after disposal,
+					// but this refresh may already be in flight: `reloadMcpServers`
+					// calls `disconnectAll()` then re-reads config asynchronously, and
+					// a `dispose()` landing in that window fires teardown's own
+					// `disconnectAll()` and completes. Consulted after config load and
+					// before any connection, this abandons the reconnect so no MCP
+					// subprocess is spawned after teardown's `disconnectAll()` ran.
+					shouldAbort: () => this.#isDisposed,
 				});
 				result.mcp = true;
 				// Surface per-server reconnect failures instead of unconditionally
