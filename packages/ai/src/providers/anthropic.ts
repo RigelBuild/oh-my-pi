@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as nodeCrypto from "node:crypto";
 import * as fs from "node:fs";
 import { scheduler } from "node:timers/promises";
@@ -1013,14 +1014,24 @@ type ManyImageRungEncoder = (image: Bun.Image, format: "jpeg" | "webp", quality:
 const encodeManyImageRung: ManyImageRungEncoder = (image, format, quality) =>
 	(format === "jpeg" ? image.jpeg({ quality }) : image.webp({ quality })).bytes();
 
-let manyImageRungEncoder: ManyImageRungEncoder = encodeManyImageRung;
+/**
+ * Async-scoped rather than a module global: `bun test --parallel` runs the
+ * package's test FILES concurrently in one process, so a global replacement was
+ * visible to every other file's encodes for as long as one asynchronous capture
+ * ran, and the restore landed only after that overlap.
+ */
+const manyImageRungEncoderScope = new AsyncLocalStorage<ManyImageRungEncoder>();
 
-/** Test seam: replaces the rung encoder and returns a restore function. */
-export function setAnthropicManyImageRungEncoder(encoder: ManyImageRungEncoder): () => void {
-	manyImageRungEncoder = encoder;
-	return () => {
-		manyImageRungEncoder = encodeManyImageRung;
-	};
+/**
+ * Test seam: runs `body` with `encoder` driving the ladder, for this async
+ * context only. Scoped to the call so a concurrent encode elsewhere in the
+ * process keeps the real encoder.
+ */
+export function withAnthropicManyImageRungEncoder<T>(
+	encoder: ManyImageRungEncoder,
+	body: () => Promise<T>,
+): Promise<T> {
+	return manyImageRungEncoderScope.run(encoder, body);
 }
 
 async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<ImageContent> {
@@ -1061,7 +1072,7 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 				// catch would return the over-cap original instead.
 				let candidate: Uint8Array;
 				try {
-					candidate = await manyImageRungEncoder(image, format, quality);
+					candidate = await (manyImageRungEncoderScope.getStore() ?? encodeManyImageRung)(image, format, quality);
 				} catch {
 					continue;
 				}

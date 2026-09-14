@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { crc32 as zlibCrc32, deflateSync as zlibDeflateSync } from "node:zlib";
-import { setAnthropicManyImageRungEncoder, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { streamAnthropic, withAnthropicManyImageRungEncoder } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, Context, ImageContent, Model, TextContent, Usage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -328,21 +328,58 @@ describe("Anthropic many-image payload resizing", () => {
 		// Through the rung-encoder seam rather than `Bun.Image.prototype`: this
 		// package runs `bun test --parallel`, so patching the prototype reaches
 		// every image operation in the process and fails concurrent encodes in
-		// other files. The seam is scoped to the ladder this test is about.
-		const restoreEncoder = setAnthropicManyImageRungEncoder(async () => {
-			throw new Error("rung encode failed");
-		});
-
-		let images: AnthropicImageBlock[];
-		try {
-			images = extractToolResultImages(await capturePayload(context));
-		} finally {
-			restoreEncoder();
-		}
+		// other files. The seam is async-scoped to this capture, so a concurrent
+		// file's encodes keep the real encoder for the whole time it runs.
+		const images = await withAnthropicManyImageRungEncoder(
+			async () => {
+				throw new Error("rung encode failed");
+			},
+			async () => extractToolResultImages(await capturePayload(context)),
+		);
 
 		expect(images).toHaveLength(21);
 		const { width, height } = await new Bun.Image(Buffer.from(images[0].source.data, "base64")).metadata();
 		expect(width).toBeLessThanOrEqual(2000);
 		expect(height).toBeLessThanOrEqual(2000);
+	});
+
+	/**
+	 * The seam must not reach a concurrent encode. `bun test --parallel` runs
+	 * this package's test FILES in one process, so a module-global replacement
+	 * was live for every other file's ladder for as long as an asynchronous
+	 * capture ran — restored only after the overlap, which is exactly the
+	 * window that failed other files' "stays under the source size" assertions.
+	 */
+	it("leaves a concurrent capture on the real encoder", async () => {
+		const source = await makeWebp(2001, 100, 1, "flat");
+		const largeImage: ImageContent = { type: "image", data: source, mimeType: "image/webp" };
+		const smallImage: ImageContent = { type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" };
+		const context = makeToolResultContext([largeImage, ...Array.from({ length: 20 }, () => smallImage)]);
+
+		// The sibling capture is started OUTSIDE the scope, the way a parallel
+		// test file's capture is — it must not inherit the override — and the
+		// override body is held open across it so the two genuinely overlap.
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const overridden = withAnthropicManyImageRungEncoder(
+			async () => {
+				throw new Error("rung encode failed");
+			},
+			async () => {
+				entered.resolve();
+				await release.promise;
+				return extractToolResultImages(await capturePayload(context));
+			},
+		);
+
+		await entered.promise;
+		const outside = extractToolResultImages(await capturePayload(context));
+		release.resolve();
+		await overridden;
+
+		// The sibling ran outside the override's ladder failures, so its ladder
+		// found a rendition under the source size. With a module global it saw
+		// every rung fail and kept the heavier initial resize.
+		expect(outside[0].source.data.length).toBeLessThanOrEqual(source.length);
 	});
 });
