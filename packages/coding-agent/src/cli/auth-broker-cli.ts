@@ -38,6 +38,7 @@ import {
 	canonicalizeProviderId,
 	DEFAULT_AUTH_BROKER_BIND,
 	type SubscriptionLookup,
+	UNIDENTIFIED_ACCOUNT,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
@@ -733,9 +734,24 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 		// Prefer the exact org-scoped entry; fall back to an org-less config entry
 		// so a pre-org config (no `org` key) still resolves for every org of that
 		// account, matching the prior single-key behavior.
-		lookup: (provider, account, org) =>
-			accounts.get(`${provider}\x00${account}\x00${org}`) ??
-			(org.length > 0 ? accounts.get(`${provider}\x00${account}\x00`) : undefined),
+		// An email-only identity (no account/project/org id recovered) labels
+		// `account="unidentified"`, which is the SAME key for every such report of
+		// a provider — so resolve those against the email before falling back, or
+		// one email-only account's plan and renewal date apply to another's.
+		// Config entries name that account by its email, which is what an operator
+		// has for it. Reports that DID recover an account keep the existing
+		// precedence untouched.
+		lookup: (provider, account, org, email) => {
+			const byAccount =
+				accounts.get(`${provider}\x00${account}\x00${org}`) ??
+				(org.length > 0 ? accounts.get(`${provider}\x00${account}\x00`) : undefined);
+			if (byAccount !== undefined) return byAccount;
+			if (account !== UNIDENTIFIED_ACCOUNT || !email) return undefined;
+			return (
+				accounts.get(`${provider}\x00${email}\x00${org}`) ??
+				(org.length > 0 ? accounts.get(`${provider}\x00${email}\x00`) : undefined)
+			);
+		},
 		plans,
 	};
 }

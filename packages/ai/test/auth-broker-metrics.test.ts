@@ -7,6 +7,7 @@ import {
 	nextRenewalSeconds,
 	orgLabelOf,
 	renderUsageMetrics,
+	type SubscriptionLookup,
 	stableLabelId,
 	UNIDENTIFIED_ACCOUNT,
 } from "@oh-my-pi/pi-ai/auth-broker/prometheus-metrics";
@@ -1147,6 +1148,79 @@ describe("accountLabelOf", () => {
 		};
 		expect(accountLabelOf(report)).toBe(UNIDENTIFIED_ACCOUNT);
 		expect(accountLabelOf(report)).toBe("unidentified");
+	});
+
+	test("distinguishes truly identity-less credentials by their credential stamp", () => {
+		// `synthetic` and `charm-hyper` reports carry no account, email, project or
+		// organization identity AND use fixed limit ids, so several credentials of
+		// one provider rendered an identical label set and `add()` dropped every
+		// report after the first — those accounts vanished from the exposition.
+		// The storage layer stamps a stable, non-secret row id on exactly the
+		// reports that recovered no identity of their own.
+		const mk = (credentialKey: string): UsageReport => ({
+			provider: "synthetic",
+			fetchedAt: 1,
+			metadata: { credentialKey },
+			limits: [
+				{
+					id: "synthetic:monthly",
+					label: "Monthly",
+					scope: { provider: "synthetic", windowId: "monthly" },
+					amount: { usedFraction: 0.25, unit: "percent" },
+				},
+			],
+		});
+		expect(accountLabelOf(mk("7"))).toBe("credential:7");
+		expect(accountLabelOf(mk("8"))).toBe("credential:8");
+
+		// End to end: both credentials' gauges survive, with no dropped-duplicate
+		// note. RED (pre-fix): one `unidentified` series and a drop.
+		const body = renderUsageMetrics([mk("7"), mk("8")]);
+		expect(body).toContain('account="credential:7"');
+		expect(body).toContain('account="credential:8"');
+		expect(body).not.toContain("duplicate series dropped");
+	});
+
+	test("keeps the stamp out of a report that has its own identity", () => {
+		// The stamp may never re-key a series that can already be attributed: the
+		// account label is the dashboard's join key.
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { accountId: "acct-real", credentialKey: "7" },
+			limits: [],
+		};
+		expect(accountLabelOf(report)).toBe("acct-real");
+	});
+
+	test("resolves subscriptions per email when both accounts are unidentified", () => {
+		// Two reports of one provider with different emails but no account/project/
+		// org id both label `account="unidentified"`, while their usage series stay
+		// distinct by `email` — so a {provider, account, org} lookup applied one
+		// account's plan and renewal date to the other.
+		const mk = (email: string): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { email },
+			limits: [],
+		});
+		const seen: Array<[string, string, string, string | undefined]> = [];
+		const subscriptions: SubscriptionLookup = {
+			lookup: (provider, account, org, email) => {
+				seen.push([provider, account, org, email]);
+				if (email === "a@example.com") return { plan: "max" };
+				if (email === "b@example.com") return { plan: "pro" };
+				return undefined;
+			},
+			plans: [],
+		};
+		const body = renderUsageMetrics([mk("a@example.com"), mk("b@example.com")], { subscriptions });
+
+		// RED (pre-fix): the lookup received no email, so both reports resolved the
+		// same entry and one plan was applied to both accounts.
+		expect(seen.map(entry => entry[3])).toEqual(["a@example.com", "b@example.com"]);
+		expect(body).toContain('email="a@example.com",plan="max"');
+		expect(body).toContain('email="b@example.com",plan="pro"');
 	});
 
 	test("never uses an email as the *account* label value", () => {

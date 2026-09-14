@@ -42,7 +42,7 @@ function metadataIdentity(report: UsageReport, namespace: string, keys: readonly
  * A primary `accountId` whose own value falls inside one of these is ambiguous
  * with a fallback identity and must be lifted out — see {@link primaryIdentity}.
  */
-const RESERVED_IDENTITY = /^(?:project|account):/;
+const RESERVED_IDENTITY = /^(?:project|account|credential):/;
 
 /**
  * Label value for a primary `accountId`: the trimmed id itself, kept BARE so
@@ -157,8 +157,17 @@ export function accountLabelOf(report: UsageReport): string {
 	const accountFallback = metadataIdentity(report, "account", ["account", "user", "username"]);
 	if (accountFallback !== undefined) return accountFallback;
 	const scopeProject = uniqueScopeValue(report, limit => limit.scope.projectId);
-	if (scopeProject === CONFLICTING_SCOPE || scopeProject === undefined) return UNIDENTIFIED_ACCOUNT;
-	return `project:${scopeProject}`;
+	if (scopeProject !== CONFLICTING_SCOPE && scopeProject !== undefined) return `project:${scopeProject}`;
+	// Last resort before the sentinel: the storage layer's per-credential stamp,
+	// present only on a report that recovered no identity of its own. Providers
+	// with no account identity at all (`synthetic`, `charm-hyper`) also use fixed
+	// limit ids, so without this every one of their credentials renders the same
+	// label set and `add()` drops all but the first — the accounts disappear from
+	// the exposition entirely. The stamp is a stored row id: stable across
+	// restarts and OAuth refreshes, and never derived from token material.
+	const credentialFallback = metadataIdentity(report, "credential", ["credentialKey"]);
+	if (credentialFallback !== undefined) return credentialFallback;
+	return UNIDENTIFIED_ACCOUNT;
 }
 
 /**
@@ -362,7 +371,20 @@ export interface SubscriptionLookup {
 	 * single-org account, so one account email's several org-scoped subscriptions
 	 * each resolve to their own plan/renewal.
 	 */
-	lookup(provider: string, account: string, org: string): { plan?: string; renewsAtSeconds?: number } | undefined;
+	lookup(
+		provider: string,
+		account: string,
+		org: string,
+		/**
+		 * Canonicalized account email ({@link emailLabelOf}), empty when the
+		 * report carries none. Additive and optional so an existing implementation
+		 * keeps compiling; an implementation that ignores it resolves exactly as
+		 * before. It matters only for a report whose `account` is the sentinel:
+		 * those all share one key, so without the email one email-only account's
+		 * plan and renewal date apply to every other.
+		 */
+		email?: string,
+	): { plan?: string; renewsAtSeconds?: number } | undefined;
 	/** Per-plan facts; emitted once per `{provider, plan}`, outside the per-report loop. */
 	plans: ReadonlyArray<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }>;
 }
@@ -577,7 +599,15 @@ export function renderUsageMetrics(
 		// bill date rolled forward whole calendar months to the next occurrence
 		// at-or-after scrape time (see nextRenewalSeconds), so the gauge never
 		// reports a past renewal.
-		const subscription = subscriptions.lookup(provider, account, org);
+		// `email` participates because the usage series are already distinct by
+		// it: two reports of one provider carrying different emails but no
+		// account/project/org id both label `account="unidentified"` — reachable
+		// on the Claude path when profile recovery fails but credential emails
+		// survive — so a {provider, account, org} key applies one account's plan
+		// and renewal date to the other. The account chain deliberately never
+		// USES the email as an identity; this only stops one email's subscription
+		// facts being applied to a different email.
+		const subscription = subscriptions.lookup(provider, account, org, email);
 		if (subscription) {
 			const rawPlan = subscription.plan ?? report.metadata?.planType;
 			const plan = typeof rawPlan === "string" ? canonicalizePlan(rawPlan) : undefined;

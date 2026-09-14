@@ -837,6 +837,14 @@ type UsageRequestDescriptor = {
 	provider: Provider;
 	credential: UsageCredential;
 	baseUrl?: string;
+	/**
+	 * Stored row id of the credential this request came from, when it came from
+	 * one. Carried so a report that recovers NO identity of its own still has a
+	 * stable, non-secret discriminator downstream — see the `credentialKey`
+	 * stamp in {@link AuthStorage.#fetchUsageUncached}. Absent for env- and
+	 * override-derived credentials, which have no row.
+	 */
+	credentialId?: number;
 };
 
 type ForcedUsageRefresh = {
@@ -3528,6 +3536,18 @@ export class AuthStorage {
 			// orgId from the `anthropic-organization-id` response header but never
 			// carries a display name, so the stored name must still be attached.
 			// Never attach the stored name over a DIFFERENT org's report.
+			// A stable, non-secret per-credential discriminator. Providers whose
+			// reports carry no account, email, project, or organization identity
+			// (`synthetic`, `charm-hyper`) also use fixed limit ids, so several of
+			// their credentials render one identical label set and the exposition
+			// drops every later one as a duplicate — the accounts silently vanish
+			// from `/metrics`. The stored row id is stable across restarts and
+			// across an OAuth refresh, and is never derived from token material.
+			// Stamped ONLY when the report recovered no identity of its own, so no
+			// series that can already be attributed is re-keyed.
+			if (report && request.credentialId !== undefined && this.#reportHasNoIdentity(report)) {
+				report.metadata = { ...report.metadata, credentialKey: String(request.credentialId) };
+			}
 			if (report && params.credential.orgId !== undefined) {
 				const metadata = report.metadata ?? {};
 				const sameOrg = metadata.orgId === undefined || metadata.orgId === params.credential.orgId;
@@ -3883,6 +3903,9 @@ export class AuthStorage {
 				} else {
 					request = this.#buildUsageRequestForOauth(provider, credential, baseUrl);
 				}
+				// The stored row id, so an identity-less provider's several
+				// credentials stay distinguishable downstream.
+				request = { ...request, credentialId: entry.id };
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
 			}
@@ -3896,6 +3919,25 @@ export class AuthStorage {
 		if (!metadata || typeof metadata !== "object") return undefined;
 		const value = metadata[key];
 		return typeof value === "string" ? value.trim() : undefined;
+	}
+
+	/**
+	 * Whether a report carries none of the identities the metrics renderer's
+	 * account chain reads. Deliberately the same sources in the same order, so a
+	 * report that WOULD render a real account label is never re-keyed by the
+	 * credential stamp.
+	 */
+	#reportHasNoIdentity(report: UsageReport): boolean {
+		if (this.#getUsageReportMetadataValue(report, "accountId")) return false;
+		if (this.#getUsageReportMetadataValue(report, "email")) return false;
+		if (this.#getUsageReportMetadataValue(report, "orgId")) return false;
+		if (this.#getUsageReportMetadataValue(report, "projectId")) return false;
+		if (this.#getUsageReportMetadataValue(report, "account")) return false;
+		if (this.#getUsageReportMetadataValue(report, "user")) return false;
+		if (this.#getUsageReportMetadataValue(report, "username")) return false;
+		if (this.#getUsageReportScopeAccountId(report)) return false;
+		if (this.#getUsageReportScopeProjectId(report)) return false;
+		return true;
 	}
 
 	#getUsageReportScopeAccountId(report: UsageReport): string | undefined {

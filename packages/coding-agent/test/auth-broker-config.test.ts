@@ -21,6 +21,30 @@ describe("parseSubscriptionsConfig", () => {
 		expect(config.lookup("anthropic", "acct-1", "")).toEqual({ plan: "acct-1", renewsAtSeconds: undefined });
 	});
 
+	it("resolves an email-only account against the unidentified label", () => {
+		// When a report recovers no account/project/org id its label is the
+		// `unidentified` sentinel, which is the SAME key for every such report of a
+		// provider — so the account must be resolved by the email that DID survive,
+		// which is also how an operator names it in the config.
+		const raw = `{"accounts":{"a@example.com":{"provider":"anthropic","plan":"max"},"b@example.com":{"provider":"anthropic","plan":"pro"}}}`;
+
+		const config = parseSubscriptionsConfig(raw, FILE);
+
+		expect(config.lookup("anthropic", "unidentified", "", "a@example.com")?.plan).toBe("max");
+		expect(config.lookup("anthropic", "unidentified", "", "b@example.com")?.plan).toBe("pro");
+	});
+
+	it("prefers the account key over the email fallback", () => {
+		// The email fallback applies ONLY to the sentinel: a report that recovered
+		// a real account keeps resolving by it, so an unrelated config entry named
+		// after that account's email cannot displace it.
+		const raw = `{"accounts":{"acct-1":{"provider":"anthropic","plan":"max"},"a@example.com":{"provider":"anthropic","plan":"pro"}}}`;
+
+		const config = parseSubscriptionsConfig(raw, FILE);
+
+		expect(config.lookup("anthropic", "acct-1", "", "a@example.com")?.plan).toBe("max");
+	});
+
 	it("still detects a duplicate after a value containing an escaped quote", () => {
 		// Without escape handling the scanner ends the `plan` string at the
 		// backslash-quote, resyncs half a token off, and misses the repeated
