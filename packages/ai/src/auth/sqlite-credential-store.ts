@@ -1553,7 +1553,40 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * the row was written; a failure to write means someone else got there
 	 * first, which is information the caller acts on rather than an error.
 	 */
-	setCacheIfMatches(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
+	setCacheIfMatches(
+		key: string,
+		expectedValue: string | null,
+		value: string,
+		expiresAtSec: number,
+		options?: { nonblocking?: boolean },
+	): CasOutcome {
+		// A best-effort caller asks not to wait on a lock a peer process holds.
+		// The connection-wide `busy_timeout` is what makes a contended write block
+		// (5s interactive), so drop it to 0 for this statement and restore it
+		// after: the statement then fails immediately with SQLITE_BUSY, which the
+		// catch below already reports as `"unavailable"`.
+		if (options?.nonblocking) {
+			try {
+				this.#db.run("PRAGMA busy_timeout = 0");
+			} catch {
+				// Not settable: fall through and accept the default wait rather
+				// than failing a write that would otherwise succeed.
+			}
+			try {
+				return this.#casCache(key, expectedValue, value, expiresAtSec);
+			} finally {
+				try {
+					this.#db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+				} catch {
+					// Restoring is best-effort too; a store that cannot set the
+					// pragma never had the timeout applied in the first place.
+				}
+			}
+		}
+		return this.#casCache(key, expectedValue, value, expiresAtSec);
+	}
+
+	#casCache(key: string, expectedValue: string | null, value: string, expiresAtSec: number): CasOutcome {
 		try {
 			const result =
 				expectedValue === null

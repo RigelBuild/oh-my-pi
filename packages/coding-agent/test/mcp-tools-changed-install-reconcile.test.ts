@@ -372,6 +372,51 @@ describe("MCP tools-changed install-time reconcile", () => {
 		}
 	}, 30_000);
 
+	// Sibling of the case above, on the OTHER consumer. There the initial list is
+	// still pending at the startup cutoff, so only the background handler ever
+	// applies it. When both responses land INSIDE the 250ms startup race the
+	// fulfilled task is also processed by `connectServers`' foreground loop,
+	// which applied it unconditionally and restored the roster the background
+	// handler had just refused.
+	it("refuses a superseded initial load that fulfills inside the startup race", async () => {
+		const manager = new MCPManager(tempDir);
+		const secondToolName = `mcp__${SERVER_NAME}_${warmupToolName(1)}`;
+		try {
+			// List 1 -> 1 tool, delayed just enough to answer SECOND while still
+			// fulfilling before the startup cutoff. List 2 -> 2 tools, immediate.
+			const connected = manager.connectServers(
+				{
+					[SERVER_NAME]: {
+						type: "stdio",
+						command: process.execPath,
+						args: [FIXTURE_PATH],
+						env: {
+							OMP_TEST_TOOLS_PER_LIST: "1,2",
+							OMP_TEST_LIST_DELAY_MS: "120,0",
+							OMP_TEST_LIST_LOG: listLog,
+						},
+					},
+				},
+				{},
+			);
+
+			await waitUntil(() => manager.getConnectionStatus(SERVER_NAME) === "connected");
+			const refresh = manager.refreshServerTools(SERVER_NAME).catch(() => {});
+
+			await Promise.allSettled([connected, refresh]);
+			await Bun.sleep(500);
+
+			// RED (pre-fix): the foreground apply reinstated list 1's single tool.
+			expect(manager.getTools().map(tool => tool.name)).toContain(secondToolName);
+		} finally {
+			try {
+				await manager.disconnectAll();
+			} catch {
+				// ignored: teardown noise, not a contract failure
+			}
+		}
+	}, 30_000);
+
 	it("does not stall a mid-session toolset change on the install-time reconcile", async () => {
 		// The install-time reconcile is the only firing the SDK awaits. The
 		// ongoing notifications must stay exactly as they were, so a server that

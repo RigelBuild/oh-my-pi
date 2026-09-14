@@ -291,7 +291,16 @@ export class MCPToolCache {
 			this.#issuedHighWater.set(serverName, Math.max(issued ?? claimed, claimed));
 			const serialized = JSON.stringify({ claimedAt: claimed } satisfies MCPToolClaimPayload);
 			const expiresAtSec = Math.floor((Date.now() + CLAIM_TTL_MS) / 1000);
-			const outcome = this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec);
+			// Nonblocking: this claim is best-effort, and an unreserved request
+			// already degrades safely (it skips the persisted catalog and leaves
+			// the live tools untouched). Waiting on a peer process's lock instead
+			// charges the store's busy timeout on the event loop, and startup makes
+			// one of these per server BEFORE its `tools/list` — so a handful of
+			// configured servers serialized into tens of seconds during which the
+			// startup race and every other timer were frozen.
+			const outcome = this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec, {
+				nonblocking: true,
+			});
 			if (outcome === "written") return claimed;
 			// A locked or unwritable database is not a CAS loss: nothing was
 			// compared, so re-reading and retrying learns nothing and each attempt
