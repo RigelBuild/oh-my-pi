@@ -576,6 +576,30 @@ export class SessionTools {
 		return [...(this.#xdev?.mountedNames ?? [])];
 	}
 
+	/**
+	 * Reconcile the `xd://` PRESENTATION against a reloaded `tools.xdev`.
+	 *
+	 * `createTools` reads the setting once and decides whether built-ins are
+	 * mounted behind `xd://` or presented top-level, and no later path revisits
+	 * it — so a true->false edit left them mounted and false->true left them
+	 * top-level while the refresh reported the new settings applied.
+	 *
+	 * Only the presentation moves: this mounts and unmounts names the session
+	 * already has, and never adds a tool the invocation withheld. A session with
+	 * no `#xdev` state was constructed without the registry to populate (a
+	 * structured child, or a restricted list), so it is left alone — the same
+	 * invocation-vs-settings split every gated tool follows.
+	 */
+	async applyReloadedXdevPresentation(): Promise<boolean> {
+		if (!this.#xdev) return false;
+		// Reapplying the same selection is enough: `#applyActiveToolsByName`
+		// recomputes the mount set from the live setting on every apply, so this
+		// only has to make it run. `getEnabledToolNames` unions the current mounts,
+		// which is the set whose presentation must be recomputed.
+		await this.#applyActiveToolsByName(this.getEnabledToolNames());
+		return true;
+	}
+
 	/** Whether the edit tool is registered. */
 	get hasEditTool(): boolean {
 		return this.#toolRegistry.has("edit");
@@ -1057,9 +1081,17 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		// `tools.xdev` read LIVE. `createTools` consulted it once to allocate the
+		// xd:// state, and this predicate then keyed only on that state existing —
+		// so a session that turned the setting off kept every built-in mounted
+		// behind xd://, and one that turned it on kept them top-level, however often
+		// the tool set was reapplied. The state's existence stays the INVOCATION
+		// half (a structured child or restricted list allocates none, and no
+		// settings edit may grant it); the setting is the settings half.
+		const xdevPresentationEnabled = this.#xdev !== undefined && this.#host.settings.get("tools.xdev") === true;
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
-				this.#xdev !== undefined &&
+				xdevPresentationEnabled &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
 				!isPresentationPinned(name) &&

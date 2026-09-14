@@ -5991,6 +5991,9 @@ export class AgentSession {
 			// `settings.get(...)` at use time.
 			const previousSubsystems = {
 				memoryBackend: this.settings.get("memory.backend"),
+				// Decides whether built-ins are presented behind `xd://` or top
+				// level; read once by `createTools` with no later revisit.
+				xdevEnabled: this.settings.get("tools.xdev"),
 				// The backend's CONSTRUCTION-time config, not just its id. A live
 				// Hindsight state holds the client, endpoint, credentials, and
 				// timeouts it was built with, so an `hindsight.apiUrl`/`apiToken`/
@@ -6282,6 +6285,9 @@ export class AgentSession {
 					this.#memoryBackendConfigFingerprint() !== previousSubsystems.memoryBackendConfig
 				) {
 					await this.applyMemoryBackend();
+				}
+				if (this.settings.get("tools.xdev") !== previousSubsystems.xdevEnabled) {
+					await this.#tools.applyReloadedXdevPresentation();
 				}
 				// `browser.enabled`/`computer.enabled` DO reach a listener — the
 				// eval-prelude `onEffectiveChange` subscriber — but it launches an
