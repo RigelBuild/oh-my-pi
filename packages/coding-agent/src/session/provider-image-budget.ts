@@ -80,6 +80,12 @@ function collectImageStats(
 	let total = 0;
 	const inlineSizes: number[] = [];
 	const pairedComputerCallIds = collectPairedComputerCallIds(context, countModel, replaysNativeHistory);
+	// Cross-message orphan verdicts: a `computer_call_output` whose paired
+	// `computer_call` sits in an EARLIER wire-bound message is not an orphan, even
+	// though its own payload starts the known-call set empty. Precomputed once so
+	// every accounting pass and the clamp share one verdict — see
+	// `collectRepairedOrphanIndices`.
+	const repairedOrphansByMessage = collectRepairedOrphanIndices(context, countModel, replaysNativeHistory);
 	// Everything before a full-snapshot replacement is spliced off the wire, so
 	// it owes neither budget — see `wireStartIndex`.
 	const wireStart = wireStartIndex(context, countModel, replaysNativeHistory);
@@ -94,15 +100,18 @@ function collectImageStats(
 			// late oversized result while the clamp spent the drop on an earlier
 			// small input — leaving the request over the byte limit and still 413ing.
 			const replayedInputs: number[] = [];
+			const repairedOrphans = repairedOrphansByMessage.get(message) ?? NO_REPAIRED_ORPHANS;
 			if (byteModel !== undefined) {
-				inlineSizes.push(...replayedPayloadByteSizes(message, byteModel, replaysNativeHistory, replayedInputs));
+				inlineSizes.push(
+					...replayedPayloadByteSizes(message, byteModel, replaysNativeHistory, repairedOrphans, replayedInputs),
+				);
 			}
 			// A replayed snapshot's retained `input_image` items ARE image parts on
 			// the wire, so unlike a generation result they consume the count cap too.
 			total +=
 				byteModel !== undefined
 					? replayedInputs.length
-					: replayedAssistantInputImages(message, countModel, replaysNativeHistory).length;
+					: replayedAssistantInputImages(message, countModel, replaysNativeHistory, repairedOrphans).length;
 			continue;
 		}
 		// A computer result's metadata screenshot REPLACES its generic content on
@@ -139,7 +148,13 @@ function collectImageStats(
 		// owe bytes but no image slot — kept out of `replayed` so the count stays
 		// right, and pushed into `inlineSizes` so the byte clamp can see them.
 		const demotedReplaySizes: number[] = [];
-		const replayed = replayedInputImages(message, byteModel ?? countModel, replaysNativeHistory, demotedReplaySizes);
+		const replayed = replayedInputImages(
+			message,
+			byteModel ?? countModel,
+			replaysNativeHistory,
+			repairedOrphansByMessage.get(message) ?? NO_REPAIRED_ORPHANS,
+			demotedReplaySizes,
+		);
 		total += replayed.length;
 		if (byteModel !== undefined) {
 			for (const size of replayed) if (size > 0) inlineSizes.push(size);
@@ -180,17 +195,18 @@ function replayedPayloadByteSizes(
 	message: AssistantMessage,
 	model: Model,
 	replaysNativeHistory: boolean,
+	repairedOrphans: ReadonlySet<number>,
 	inputSizes?: number[],
 ): number[] {
 	const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
 	if (!payload) return [];
 	const sizes: number[] = [];
 	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
-	// A `computer_call_output` whose `computer_call` does not precede it is an
-	// orphan `repairOrphanResponsesToolOutputs()` rewrites into a 16 KB-capped
-	// assistant note before the wire — so its screenshot never travels and must
-	// not be charged, the same exclusion the user/developer replay path applies.
-	const repairedOrphans = repairedOrphanItemIndices(payload.items, model);
+	// A `computer_call_output` whose `computer_call` does not precede it — across
+	// the WHOLE assembled input, not just this payload — is an orphan
+	// `repairOrphanResponsesToolOutputs()` rewrites into a 16 KB-capped assistant
+	// note before the wire, so its screenshot never travels and must not be
+	// charged. See {@link collectRepairedOrphanIndices}.
 	for (let index = 0; index < payload.items.length; index++) {
 		if (repairedOrphans.has(index)) continue;
 		const item = payload.items[index];
@@ -237,15 +253,15 @@ function replayedAssistantInputImages(
 	message: AssistantMessage,
 	model: Model,
 	replaysNativeHistory: boolean,
+	repairedOrphans: ReadonlySet<number>,
 ): number[] {
 	const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
 	if (!payload) return [];
 	const sizes: number[] = [];
 	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
 	// A `computer_call_output` the converter repairs into an assistant note puts
-	// no image part on the wire — same exclusion the byte path and the
-	// user/developer replay path apply.
-	const repairedOrphans = repairedOrphanItemIndices(payload.items, model);
+	// no image part on the wire — same cross-message exclusion the byte path and
+	// the user/developer replay path apply.
 	for (let index = 0; index < payload.items.length; index++) {
 		if (repairedOrphans.has(index)) continue;
 		const item = payload.items[index];
@@ -318,6 +334,7 @@ function replayedInputImages(
 	message: Message,
 	model: Model,
 	replaysNativeHistory: boolean,
+	repairedOrphans: ReadonlySet<number>,
 	/** Sizes of bytes that travel as TEXT: charged to the byte budget, never counted. */
 	demotedSizes: number[] = [],
 ): number[] {
@@ -340,7 +357,7 @@ function replayedInputImages(
 	// cap, so recording only the inline ones left a payload of references
 	// uncounted and un-evictable; its size is 0 and the byte tally skips it.
 	const sizes: number[] = [];
-	const repairedOrphans = repairedOrphanItemIndices(payload.items, model);
+	// A cross-message-aware orphan set, precomputed by {@link collectRepairedOrphanIndices}.
 	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
 	for (let index = 0; index < payload.items.length; index++) {
 		if (repairedOrphans.has(index)) continue;
@@ -399,9 +416,12 @@ function isReplayedComputerItem(item: Record<string, unknown> | undefined): bool
 	return item?.type === "computer_call" || item?.type === "computer_call_output";
 }
 
+/** An empty orphan-index set for a message with no repaired outputs. */
+const NO_REPAIRED_ORPHANS: ReadonlySet<number> = new Set<number>();
+
 /**
- * Indices of replayed `computer_call_output` items the converter will replace
- * with a short assistant note before they reach the wire.
+ * Indices of a payload's replayed `computer_call_output` items the converter
+ * will replace with a short assistant note before they reach the wire.
  *
  * `repairOrphanResponsesToolOutputs()` rewrites an output whose `computer_call`
  * does not precede it, truncating the serialized output to 16 KB — so its
@@ -409,6 +429,14 @@ function isReplayedComputerItem(item: Record<string, unknown> | undefined): bool
  * for bytes that were already gone. Only the two routes that pass
  * `repairOrphanOutputs: true` do this; the Codex route replays the orphan
  * unchanged, so there its bytes are real.
+ *
+ * `precedingWireCalls` carries the raw call ids of every `computer_call` earlier
+ * WIRE-BOUND messages already placed on the input — `buildResponsesInput()`
+ * repairs orphans only after assembling the COMPLETE input, so a call in an
+ * earlier message pairs an output a later payload carries. Seeding the known-call
+ * set with them (rather than starting empty per payload) is what makes this
+ * helper's verdict match the converter's: a cross-message pair is charged, not
+ * skipped as "repaired away" while its oversized screenshot slips the byte clamp.
  *
  * Empty on a DEMOTING model. `buildResponsesInput()` runs
  * `adaptResponsesReplayItemsForModel()` per message FIRST — turning every
@@ -418,11 +446,15 @@ function isReplayedComputerItem(item: Record<string, unknown> | undefined): bool
  * orphan's full bytes DO travel and must be charged: {@link replayedPayloadByteSizes}
  * and {@link replayedInputImages} record them through the demoted channel.
  */
-function repairedOrphanItemIndices(items: readonly Record<string, unknown>[], model: Model): ReadonlySet<number> {
+function repairedOrphanItemIndices(
+	items: readonly Record<string, unknown>[],
+	model: Model,
+	precedingWireCalls: ReadonlySet<string>,
+): ReadonlySet<number> {
 	const repaired = new Set<number>();
 	if (model.api !== "openai-responses" && model.api !== "azure-openai-responses") return repaired;
 	if (demotesReplayedComputerItems(model)) return repaired;
-	const precedingCalls = new Set<string>();
+	const precedingCalls = new Set<string>(precedingWireCalls);
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index];
 		const callId = typeof item?.call_id === "string" ? item.call_id : undefined;
@@ -431,6 +463,73 @@ function repairedOrphanItemIndices(items: readonly Record<string, unknown>[], mo
 		else if (item.type === "computer_call_output" && !precedingCalls.has(callId)) repaired.add(index);
 	}
 	return repaired;
+}
+
+/** Adds the RAW wire call id of every replayed `computer_call` in `items` to `calls`. */
+function addReplayedComputerCallIdsRaw(items: readonly Record<string, unknown>[], calls: Set<string>): void {
+	for (const item of items) {
+		if (item.type !== "computer_call") continue;
+		if (typeof item.call_id === "string") calls.add(item.call_id);
+	}
+}
+
+/**
+ * Each replaying message's {@link repairedOrphanItemIndices}, computed with the
+ * `computer_call`s every earlier WIRE-BOUND message contributes — so the orphan
+ * verdict matches what `buildResponsesInput()` concludes over the whole input,
+ * not a payload in isolation.
+ *
+ * Preceding calls RESET at a `dt`-falsy full-snapshot splice, exactly where
+ * `convertConversationMessages()` throws away everything before it: a call the
+ * splice discards precedes nothing (mirrors `collectPairedComputerCallIds`).
+ * Only wire-bound carriers contribute — a replayed user/developer payload
+ * (`supersedesContentWithReplay`), a replayed assistant payload, and a live
+ * assistant computer tool call, which converts to a `computer_call` on the wire.
+ */
+function collectRepairedOrphanIndices(
+	context: Context,
+	model: Model,
+	replaysNativeHistory: boolean,
+): ReadonlyMap<Message, ReadonlySet<number>> {
+	const perMessage = new Map<Message, ReadonlySet<number>>();
+	// The same short-circuits `repairedOrphanItemIndices` applies: only the routes
+	// that repair orphans, and never a demoting model.
+	if (model.api !== "openai-responses" && model.api !== "azure-openai-responses") return perMessage;
+	if (demotesReplayedComputerItems(model)) return perMessage;
+	let preceding = new Set<string>();
+	for (const message of context.messages) {
+		if (message.role === "user" || message.role === "developer") {
+			// A replayed user/developer payload is APPENDED — same eligibility the
+			// accounting's `replayedInputImages` uses, marker exception included.
+			if (!supersedesContentWithReplay(message, model, replaysNativeHistory)) continue;
+			const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
+			if (!payload) continue;
+			perMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
+			addReplayedComputerCallIdsRaw(payload.items, preceding);
+			continue;
+		}
+		if (message.role !== "assistant") continue;
+		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
+		if (payload) {
+			// A `dt`-falsy payload that really splices replaces the wire, so calls
+			// before it precede nothing. Its own calls seed the new prefix.
+			if (!payload.dt && splicesItems(payload.items, model)) preceding = new Set<string>();
+			perMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
+			addReplayedComputerCallIdsRaw(payload.items, preceding);
+			continue;
+		}
+		// No replayed payload: the converter renders this turn from its blocks, so
+		// a live computer tool call becomes a `computer_call` on the wire (its id
+		// normalized). A replayed payload above suppresses content conversion, so
+		// these are counted only when nothing replayed.
+		if (!Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			if (block.providerMetadata?.type !== "computer") continue;
+			preceding.add(normalizeComputerCallId(block.id));
+		}
+	}
+	return perMessage;
 }
 
 /** The API routes whose converters replay an `openaiResponsesHistory` payload. */
@@ -740,6 +839,12 @@ interface ImageClampState {
 	pairedComputerCallIds: ReadonlySet<string>;
 	/** First message index that survives onto the wire — see `wireStartIndex`. */
 	wireStartIndex: number;
+	/**
+	 * Cross-message orphan verdicts keyed by message — the same set the accounting
+	 * used, so the clamp never evicts a payload item the tally charged (or charges
+	 * one it evicts). See `collectRepairedOrphanIndices`.
+	 */
+	repairedOrphansByMessage: ReadonlyMap<Message, ReadonlySet<number>>;
 }
 
 /**
@@ -878,7 +983,7 @@ function clampReplayedInputImages(
 	// and a call left behind without its output is an orphan the provider rejects.
 	const droppedComputerCallIds = new Set<string>();
 	const demotesNativeComputerItems = demotesReplayedComputerItems(state.model);
-	const repairedOrphans = repairedOrphanItemIndices(payload.items, state.model);
+	const repairedOrphans = state.repairedOrphansByMessage.get(message) ?? NO_REPAIRED_ORPHANS;
 	for (let index = 0; index < payload.items.length; index++) {
 		if (!clampWanted(state)) break;
 		if (repairedOrphans.has(index)) continue;
@@ -1031,7 +1136,7 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 	// no bytes and no image part on the wire, so the accounting never charged it —
 	// evicting it here would spend an allowance a real image needs. Same skip the
 	// accounting and the user/developer eviction path apply.
-	const repairedOrphans = repairedOrphanItemIndices(payload.items, state.model);
+	const repairedOrphans = state.repairedOrphansByMessage.get(message) ?? NO_REPAIRED_ORPHANS;
 	for (let index = 0; index < payload.items.length; index++) {
 		if (!clampWanted(state)) break;
 		if (repairedOrphans.has(index)) continue;
@@ -1192,6 +1297,7 @@ function clampImageCountToCap(context: Context, model: Model, replaysNativeHisto
 		// the tally clears metadata whose mirror then travels instead.
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
+		repairedOrphansByMessage: collectRepairedOrphanIndices(context, model, replaysNativeHistory),
 	});
 }
 
@@ -1238,6 +1344,7 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 		// the tally clears metadata whose mirror then travels instead.
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
+		repairedOrphansByMessage: collectRepairedOrphanIndices(context, model, replaysNativeHistory),
 	});
 }
 

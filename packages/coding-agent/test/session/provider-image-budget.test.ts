@@ -2666,6 +2666,96 @@ describe("replayed computer screenshots reach the wire as image parts", () => {
 		// The orphan's oversized screenshot never reaches the wire regardless.
 		expect(serialized).not.toContain(orphan);
 	});
+
+	it("charges a computer output whose paired call is in an earlier wire-bound message", async () => {
+		// The split case: the `computer_call` rides an EARLIER replayed assistant
+		// payload, its matching `computer_call_output` a LATER one. Each payload
+		// built its own known-call set from empty, so the later payload saw no
+		// preceding `computer_call` and misread the output as a repaired orphan —
+		// skipping its bytes. But `buildResponsesInput()` repairs orphans only after
+		// assembling the COMPLETE input, where the cross-message pair IS recognized:
+		// the screenshot travels while both accounting passes charged it nothing, so
+		// the oversized screenshot slipped the byte clamp and the request kept 413ing.
+		const budget = providerImageByteBudget(COMPUTER_MODEL.provider, COMPUTER_MODEL.api);
+		// Oversized on its own, so it alone must be the drop the clamp owes.
+		const orphan = "O".repeat(budget + 1);
+		// Newer and small, so oldest-first eviction targets the screenshot, not this.
+		const valid = "V".repeat(Math.floor(budget * 0.3));
+		const context: Context = {
+			messages: [
+				// Earlier wire-bound message: carries the pairing `computer_call`.
+				{
+					...assistantTurn([], 1),
+					api: COMPUTER_MODEL.api,
+					provider: COMPUTER_MODEL.provider,
+					model: COMPUTER_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: COMPUTER_MODEL.provider,
+						// Incremental append, not a splice: the later output stays paired.
+						dt: true,
+						items: [
+							{
+								type: "computer_call",
+								id: "cu_0",
+								call_id: "call-0",
+								action: { type: "screenshot" },
+								pending_safety_checks: [],
+								status: "completed",
+							},
+						],
+					},
+				},
+				// Later wire-bound message: carries the matching output. On its own
+				// payload this call id looks unpaired.
+				{
+					...assistantTurn([], 2),
+					api: COMPUTER_MODEL.api,
+					provider: COMPUTER_MODEL.provider,
+					model: COMPUTER_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: COMPUTER_MODEL.provider,
+						dt: true,
+						items: [
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "surviving-note" }] },
+							{
+								type: "computer_call_output",
+								call_id: "call-0",
+								output: { type: "computer_screenshot", image_url: dataUri(orphan) },
+							},
+						],
+					},
+				},
+				// A newer, small live image: on its own it fits, so it must survive.
+				{ role: "user", timestamp: 3, content: [image(valid)] },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL, true);
+
+		const wire = buildResponsesInput({
+			model: COMPUTER_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the later payload read the output as a repaired orphan, so
+		// its bytes were never charged, no drop was owed, and the oversized
+		// screenshot reached the wire whole.
+		expect(serialized).not.toContain(orphan);
+		// The newer valid image was never the drop: the screenshot alone busted the
+		// byte budget, so oldest-first eviction spent the drop on it, not this.
+		expect(serialized).toContain(valid);
+		// No `computer_call_output` still carries the oversized screenshot the byte
+		// clamp was supposed to reclaim.
+		expect(
+			wire.some(item => item.type === "computer_call_output" && JSON.stringify(item.output ?? "").includes(orphan)),
+		).toBe(false);
+	});
 });
 
 describe("byte clamp applies to a text-only Responses model", () => {
