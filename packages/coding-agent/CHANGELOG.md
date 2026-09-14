@@ -16,6 +16,7 @@
 
 - Fixed the `compact` tool reporting the session idle when a steer or follow-up arrived during the compaction, so an RPC/ACP client could prompt into a turn that was already starting. ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - A compaction's deferred terminal `agent_end` is now re-emitted when the prompt it was downgraded for resumes from the barrier and exits before reaching the agent (API-key or model validation, a usage-preflight denial, a superseded generation), so an RPC/ACP subscriber no longer waits forever for an end no successor turn will send ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- The ACP agent and the TypeScript RPC client now ignore a nonterminal `agent_end` (`isTerminal: false`), so a request no longer completes early and drops the successor turn's output when a queued steer, follow-up, IRC wake, or yield delivery continues the run ([#10287](https://github.com/can1357/oh-my-pi/pull/10287) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
 ## [18.1.21] - 2026-09-14
