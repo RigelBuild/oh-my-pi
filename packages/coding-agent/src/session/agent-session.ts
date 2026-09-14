@@ -1397,7 +1397,7 @@ export class AgentSession {
 	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
-	#wakeForIrc(records: AgentMessage[]): void {
+	#wakeForIrc(records: AgentMessage[]): boolean {
 		// Cooperative restart in progress (or session torn down): do NOT wake a
 		// turn that would append past the durability barrier. Re-queue the records
 		// as asides rather than drop — they flush to the transcript on a successful
@@ -1405,11 +1405,11 @@ export class AgentSession {
 		// resumed session on a recoverable pre-dispose failure.
 		if (this.#restarting || this.#isDisposed) {
 			this.#irc.requeuePending(records);
-			return;
+			return false;
 		}
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(records);
-			return;
+			return false;
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
 		// already-resumable follow-up can ride the wake turn normally without reordering.
@@ -1509,6 +1509,7 @@ export class AgentSession {
 					}
 				});
 			});
+		return true;
 	}
 
 	/** Remove advisor concern/blocker cards from the agent-core steer/follow-up
@@ -5948,7 +5949,14 @@ export class AgentSession {
 			// `agent_end`, so a managed-skill update already being generated is
 			// lost. Refuse until it settles; the host re-requests and the recycle
 			// proceeds.
-			this.#autolearnCaptureTask !== undefined
+			this.#autolearnCaptureTask !== undefined ||
+			// An accepted IRC reply obligation is the same loss on the peer side:
+			// an auto-reply can run with the foreground agent idle (side-channel
+			// during streaming with async delivery off, or idle in plan mode), and
+			// `#runAutoReply()` discards a completed reply at its `isDisposed()`
+			// check — so a peer that used `send await:true` gets nothing back even
+			// though its obligation was accepted.
+			this.#irc.hasPendingReplies()
 		);
 	}
 

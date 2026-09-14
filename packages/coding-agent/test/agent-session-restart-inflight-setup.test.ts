@@ -209,6 +209,63 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		await expect(session.requestRestart()).resolves.not.toEqual({ ok: false, reason: "busy" });
 	});
 
+	// The receipt names how the message REACHED the recipient. A latched restart
+	// re-queues the record instead of starting a turn, so reporting "woken" told
+	// a `send await:true` peer a turn was running that never was and it waited
+	// out its full timeout. The record is still persisted, which is exactly what
+	// "injected" already means.
+	it("reports a latched-restart delivery as injected, not woken", async () => {
+		await buildLiveSession();
+
+		// Park the recycle INSIDE dispose: `#restarting` is latched, the agent is
+		// idle, and the session is not yet disposed — the exact window where an
+		// idle delivery reaches `#wakeForIrc` and is re-queued instead of waking.
+		const disposeGate = Promise.withResolvers<void>();
+		const realDispose = session.dispose.bind(session);
+		vi.spyOn(session, "dispose").mockImplementation(async options => {
+			await disposeGate.promise;
+			return realDispose(options);
+		});
+
+		const restart = session.requestRestart();
+		await drainEventLoop();
+		expect(session.isStreaming).toBe(false);
+
+		const outcome = await session.deliverIrcMessage({
+			id: "m1",
+			from: "peer",
+			to: "self",
+			body: "ping",
+			ts: Date.now(),
+		});
+
+		// RED (pre-fix): "woken", though no turn was started for it — a
+		// `send await:true` peer then waited out its whole timeout.
+		expect(outcome).toBe("injected");
+
+		disposeGate.resolve();
+		await restart.catch(() => undefined);
+	});
+
+	// An IRC auto-reply is background work the foreground agent does not see: a
+	// side-channel reply started during streaming with async delivery off, or
+	// while idle in plan mode. `#runAutoReply()` discards a completed reply at
+	// its `isDisposed()` check, so recycling over one leaves a `send await:true`
+	// peer with nothing back despite its obligation being accepted.
+	it("refuses restart while an IRC reply obligation is pending", async () => {
+		await buildLiveSession();
+
+		const replyGate = Promise.withResolvers<void>();
+		session.trackIrcReply(replyGate.promise);
+		await drainEventLoop();
+
+		await expect(session.requestRestart()).resolves.toEqual({ ok: false, reason: "busy" });
+
+		replyGate.resolve();
+		await session.waitForIrcReplies();
+		await expect(session.requestRestart()).resolves.not.toEqual({ ok: false, reason: "busy" });
+	});
+
 	// One step earlier than the buffered-result cases below: a command that is
 	// STILL RUNNING has produced no result to buffer yet, and the agent can be
 	// idle while it runs. Disposal neither waits for nor aborts it, so the
