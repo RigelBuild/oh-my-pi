@@ -201,6 +201,7 @@ import {
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
+import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
@@ -4653,15 +4654,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `ensureLive()` rejects it permanently. Install it here on the SDK path so
 		// the factory is bound to THIS top-level session's live deps (auth, models,
 		// settings, buses) the same way the CLI does. Gated on `onRestartRequested`
-		// — the opt-in that makes a session restartable — so a non-restart SDK host
-		// and the ACP path (which keeps several concurrent top-level sessions and
-		// never wires the callback) are untouched and cannot clobber one another's
-		// factory.
+		// — the opt-in that makes a session restartable.
+		//
+		// Keyed by THIS session's id (`resolvedAgentId`): the ACP path keeps
+		// several concurrent top-level sessions on the one global manager, so a
+		// process-global slot would let the most recent install overwrite the
+		// others' factory and rebuild their children on THIS session's deps. An
+		// owner-keyed factory is selected only for refs on this session's own
+		// ownership chain, so the sessions cannot clobber one another.
 		if (agentKind === "main" && options.onRestartRequested && sessionManager.getSessionFile()) {
-			// Dynamic import (not static): `persisted-revive.ts` imports
-			// `createAgentSession` from this module, so a static import here forms a
-			// cycle. Resolved lazily on the restart-enabled path only.
-			const { createPersistedSubagentReviverFactory } = await import("./task/persisted-revive");
 			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
 				createPersistedSubagentReviverFactory({
 					session,
@@ -4673,6 +4674,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					subagentEventBus,
 				}),
 				Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+				resolvedAgentId,
 			);
 		}
 

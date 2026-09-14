@@ -128,7 +128,7 @@ interface RevivingAgent {
  * readable only by a waiter that already holds a reference to that exact
  * object — and a waiter racing several barriers does not hold one for every
  * recycle it overlaps. A failure is latched on the manager instead
- * ({@link AgentLifecycleManager.#handoffFailed}), where it outlives both the
+ * ({@link AgentLifecycleManager.#failedOwners}), where it outlives both the
  * entry that produced it and every call that raced it.
  */
 interface ParkingBarrier {
@@ -158,6 +158,9 @@ export class AgentLifecycleManager {
 			current.#revivals.clear();
 			current.#parks.clear();
 			current.#persistedReviverFactory = undefined;
+			current.#ownedReviverFactories.clear();
+			current.#failedOwners.clear();
+			current.#handoffFailedUnowned = false;
 		}
 		AgentLifecycleManager.#global = undefined;
 	}
@@ -174,8 +177,21 @@ export class AgentLifecycleManager {
 	readonly #revivals = new Map<string, RevivingAgent>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
-	/** TTL applied when a cold-revived ref is adopted on demand. */
+	/** TTL applied when a cold-revived ref is adopted on demand through {@link #persistedReviverFactory}. */
 	#persistedReviveTtlMs = 0;
+	/**
+	 * Persisted-subagent reviver factories keyed by the TOP-LEVEL session id that
+	 * installed each — the SDK/ACP path where several restart-enabled top-level
+	 * sessions share this global manager. A cold or post-recycle revival selects
+	 * the factory whose owner is on the ref's parent chain
+	 * ({@link #selectPersistedReviverFactory}), so session A's child is never
+	 * rebuilt through session B's factory — which would bind it to B's session,
+	 * auth, models, settings, buses, cwd and artifact manager. Distinct from the
+	 * unowned {@link #persistedReviverFactory} slot, which the stock CLI installs
+	 * for its single top-level session and which stays the fallback for any ref
+	 * no owned factory claims. Each entry carries its own cold-revive TTL.
+	 */
+	readonly #ownedReviverFactories = new Map<string, { factory: PersistedSubagentReviverFactory; idleTtlMs: number }>();
 	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
 	#disposed = false;
 	/**
@@ -201,9 +217,13 @@ export class AgentLifecycleManager {
 	readonly #parkingBarriers = new Set<ParkingBarrier>();
 
 	/**
-	 * Latched while the most recent recycle released with `"failed"` — a handoff
-	 * that disposed its children's shared dependencies and produced no
-	 * replacement parent to own the successors.
+	 * Top-level owner ids whose most recent recycle released with `"failed"` — a
+	 * handoff that disposed its children's shared dependencies and produced no
+	 * replacement parent to own the successors. A child is refused by
+	 * {@link ensureLive} only when a FAILED owner is on its ownership chain
+	 * ({@link #isHandoffFailedFor}), so session A's failed reattach never fences
+	 * session B's parked children: B is still live, and it may already have
+	 * installed a healthy factory before A failed.
 	 *
 	 * Latched on the MANAGER, not on the {@link ParkingBarrier}, because a
 	 * release drops its entry from `#parkingBarriers` before resolving. An
@@ -216,20 +236,27 @@ export class AgentLifecycleManager {
 	 *
 	 * RETAINED state rather than a count compared against a per-call baseline.
 	 * What the failure destroyed is not an event a caller can miss but a
-	 * condition that persists: the shared MCP, kernels and session every parked
-	 * child would be rebuilt on are gone, and stay gone until something rebuilds
-	 * them. A delta only refuses the calls that happened to be in flight across
-	 * the barrier — a call STARTING after the failure settled samples a baseline
-	 * that already includes it, sees no movement, and proceeds through the stale
-	 * retained reviver. The flag has no baseline to slip past.
+	 * condition that persists: the shared MCP, kernels and session that owner's
+	 * parked children would be rebuilt on are gone, and stay gone until something
+	 * rebuilds them. A delta only refuses the calls that happened to be in flight
+	 * across the barrier — a call STARTING after the failure settled samples a
+	 * baseline that already includes it, sees no movement, and proceeds through
+	 * the stale retained reviver. The set has no baseline to slip past.
 	 *
-	 * Cleared by {@link setPersistedSubagentReviverFactory} and by nothing else;
-	 * see there for why that event, and only that event, proves the revival
-	 * dependencies are live again. A later CLEAN recycle deliberately does not
-	 * clear it: parking children with no new factory installed rebuilds nothing
-	 * the failure disposed.
+	 * An owner is dropped by {@link setPersistedSubagentReviverFactory} for that
+	 * same owner and by nothing else; see there for why that event, and only that
+	 * event, proves the revival dependencies are live again. A later CLEAN recycle
+	 * deliberately does not drop it: parking children with no new factory
+	 * installed rebuilds nothing the failure disposed.
 	 */
-	#handoffFailed = false;
+	readonly #failedOwners = new Set<string>();
+	/**
+	 * The unowned-recycle analogue of {@link #failedOwners}: a `parkAll()` raised
+	 * WITHOUT an owner (process-scoped teardown) that released `"failed"`. Refuses
+	 * every child, since an unscoped recycle spoke for the whole manager. Cleared
+	 * by an unowned {@link setPersistedSubagentReviverFactory}.
+	 */
+	#handoffFailedUnowned = false;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -242,25 +269,73 @@ export class AgentLifecycleManager {
 	 * but no adoption. Set by the top-level session, which owns the ambient deps
 	 * (auth, models, MCP, artifacts) the factory needs at revive time.
 	 *
-	 * This is also the one event that clears {@link #handoffFailed}. After a
-	 * recycle whose reattachment produced no replacement parent, BOTH routes back
-	 * to a live session belong to the parent that went away: the retained reviver
-	 * closes over it, and the factory that would supersede that reviver is its
-	 * own, because no new parent installed one. Installing a factory IS a live
-	 * parent binding the revival dependencies to itself — it is built from that
-	 * session's auth, models, MCP and artifact managers, so its existence is the
-	 * proof the refusal was waiting for. Nothing weaker qualifies: a barrier
-	 * lifting, a later clean recycle, or time passing all leave the disposed
-	 * resources disposed.
+	 * `ownerId` is the installing top-level session's id. With several
+	 * restart-enabled top-level sessions sharing this global manager, the factory
+	 * is stored BY OWNER ({@link #ownedReviverFactories}) and a revival selects
+	 * the one whose owner is on the ref's parent chain — so session A's child is
+	 * never rebuilt through session B's factory, which closes over B's session,
+	 * auth, models, settings, buses, cwd and artifact manager. Omit `ownerId`
+	 * (the stock CLI's single top-level session) to install the unowned fallback
+	 * used for any ref no owned factory claims.
 	 *
-	 * Clearing the flag does NOT unmark the stale retained revivers the failed
-	 * recycle left behind, so the revival it re-admits still rebuilds through
-	 * this factory rather than the closure it supersedes.
+	 * This is also the one event that clears the failed-handoff refusal for the
+	 * same scope. After a recycle whose reattachment produced no replacement
+	 * parent, BOTH routes back to a live session belong to the parent that went
+	 * away: the retained reviver closes over it, and the factory that would
+	 * supersede that reviver is its own, because no new parent installed one.
+	 * Installing a factory IS a live parent binding the revival dependencies to
+	 * itself — it is built from that session's auth, models, MCP and artifact
+	 * managers, so its existence is the proof the refusal was waiting for. Nothing
+	 * weaker qualifies: a barrier lifting, a later clean recycle, or time passing
+	 * all leave the disposed resources disposed. Dropping the refusal does NOT
+	 * unmark the stale retained revivers the failed recycle left behind, so the
+	 * revival it re-admits still rebuilds through this factory rather than the
+	 * closure it supersedes.
 	 */
-	setPersistedSubagentReviverFactory(factory: PersistedSubagentReviverFactory, idleTtlMs: number): void {
-		this.#persistedReviverFactory = factory;
-		this.#persistedReviveTtlMs = idleTtlMs;
-		this.#handoffFailed = false;
+	setPersistedSubagentReviverFactory(
+		factory: PersistedSubagentReviverFactory,
+		idleTtlMs: number,
+		ownerId?: string,
+	): void {
+		if (ownerId === undefined) {
+			this.#persistedReviverFactory = factory;
+			this.#persistedReviveTtlMs = idleTtlMs;
+			this.#handoffFailedUnowned = false;
+			return;
+		}
+		this.#ownedReviverFactories.set(ownerId, { factory, idleTtlMs });
+		this.#failedOwners.delete(ownerId);
+	}
+
+	/**
+	 * The persisted-reviver factory to rebuild `ref` through: the owned factory
+	 * whose installing top-level session is on `ref`'s ownership chain, else the
+	 * unowned CLI fallback. Walking the chain means a deeper subagent resolves to
+	 * its top-level session's factory, not a nearer one.
+	 */
+	#selectPersistedReviverFactory(
+		ref: AgentRef,
+	): { factory: PersistedSubagentReviverFactory; idleTtlMs: number } | undefined {
+		for (const [ownerId, entry] of this.#ownedReviverFactories) {
+			if (this.#isOwnedBy(ref.id, ownerId)) return entry;
+		}
+		return this.#persistedReviverFactory
+			? { factory: this.#persistedReviverFactory, idleTtlMs: this.#persistedReviveTtlMs }
+			: undefined;
+	}
+
+	/**
+	 * Whether a FAILED handoff fences `ref`: an unowned failed recycle fences
+	 * every child, and an owned one fences only refs whose ownership chain
+	 * reaches that owner. Session A's failed reattach never fences session B's
+	 * children.
+	 */
+	#isHandoffFailedFor(ref: AgentRef): boolean {
+		if (this.#handoffFailedUnowned) return true;
+		for (const ownerId of this.#failedOwners) {
+			if (this.#isOwnedBy(ref.id, ownerId)) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -306,7 +381,7 @@ export class AgentLifecycleManager {
 		if (ref !== expected || ref.status !== "parked" || ref.session) return false;
 		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
 
-		const persistedFactory = ref.sessionFile ? this.#persistedReviverFactory : undefined;
+		const persistedFactory = ref.sessionFile ? this.#selectPersistedReviverFactory(ref)?.factory : undefined;
 		if (persistedFactory) {
 			try {
 				if (await persistedFactory(ref)) return false;
@@ -564,7 +639,13 @@ export class AgentLifecycleManager {
 		// because the release drops its entry before resolving and leaves nothing
 		// to read. The flag survives both — set before the entry is dropped, and
 		// held until a replacement rebinds the revival dependencies.
-		if (this.#handoffFailed) {
+		//
+		// Scoped to the recycling parent's chain: a failed reattach of one
+		// top-level session must refuse only ITS children. Another live session's
+		// parked child borrows nothing the failed recycle disposed, so refusing it
+		// would strand a healthy revival — the more so when that session already
+		// installed its own factory before the other failed.
+		if (this.#isHandoffFailedFor(ref)) {
 			throw new Error(
 				`Agent "${id}" cannot be revived: its parent session was recycled but the replacement failed to attach, so the shared resources it would be rebuilt on are gone. Its transcript remains readable at history://${id}.`,
 			);
@@ -708,7 +789,7 @@ export class AgentLifecycleManager {
 	 * turn and the park detaches instead of being cancelled.
 	 *
 	 * Reports nothing. Whether a waited-out handoff ended WITHOUT a replacement
-	 * parent is read off {@link #handoffFailed} instead, because the outcome has
+	 * parent is read off {@link #isHandoffFailedFor} instead, because the outcome has
 	 * to survive both a barrier entry that its own release deletes and every
 	 * caller that never held that entry.
 	 */
@@ -755,8 +836,10 @@ export class AgentLifecycleManager {
 		if (adoption?.ref !== ref) adoption = undefined;
 		let revive = adoption?.reviverStale ? undefined : adoption?.revive;
 		let coldAdopted = false;
-		if (!revive && ref.status === "parked" && ref.sessionFile && this.#persistedReviverFactory) {
-			revive = await this.#persistedReviverFactory(ref);
+		const selectedFactory =
+			!revive && ref.status === "parked" && ref.sessionFile ? this.#selectPersistedReviverFactory(ref) : undefined;
+		if (selectedFactory) {
+			revive = await selectedFactory.factory(ref);
 			// Teardown can complete during the factory await. A late cold revive must
 			// not cold-adopt (and later attach a live session + TTL) into a disposed
 			// manager — reject deterministically before creating any session.
@@ -776,7 +859,7 @@ export class AgentLifecycleManager {
 				adoption.revive = revive;
 				adoption.reviverStale = false;
 			} else if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
+				adoption = { ref, idleTtlMs: selectedFactory.idleTtlMs, revive };
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
 			}
@@ -948,10 +1031,16 @@ export class AgentLifecycleManager {
 			// Latched on the MANAGER before the entry is dropped, so the failure
 			// outlives this barrier: a waiter that never held a reference to it —
 			// one blocked in a park settle, or on a sibling barrier that resolved
-			// first — still reads the flag and refuses, and so does a call that
-			// arrives only after this release has settled. Recorded before the
-			// resolution below so the two can never be observed out of order.
-			if (outcome === "failed") this.#handoffFailed = true;
+			// first — still reads it and refuses, and so does a call that arrives
+			// only after this release has settled. Recorded before the resolution
+			// below so the two can never be observed out of order. Scoped the same
+			// way `parkAll()` scoped the parking: an owned recycle fences only ITS
+			// chain (via `#failedOwners`), an unowned one fences the whole manager,
+			// so session A's failed reattach never strands session B's children.
+			if (outcome === "failed") {
+				if (ownerId === undefined) this.#handoffFailedUnowned = true;
+				else this.#failedOwners.add(ownerId);
+			}
 			// Drop OUR entry before resolving, so a waiter waking on the resolution
 			// re-reads the set without it rather than looping on a barrier nobody
 			// holds. Every other live handoff keeps its own entry, so revival stays
@@ -1120,6 +1209,9 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
+		this.#ownedReviverFactories.clear();
+		this.#failedOwners.clear();
+		this.#handoffFailedUnowned = false;
 		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 

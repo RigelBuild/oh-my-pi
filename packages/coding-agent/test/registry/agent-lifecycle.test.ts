@@ -1723,6 +1723,117 @@ describe("AgentLifecycleManager", () => {
 		expect(bReviverRuns).toBe(1);
 	});
 
+	// Two restart-enabled top-level sessions coexist on the one global manager,
+	// each having installed its OWN persisted-subagent reviver factory. A cold
+	// revive of session A's child must go through A's factory — bound to A's
+	// session, auth, models, settings, buses, cwd and artifact manager — never
+	// B's. A process-global single slot let B's install overwrite A's, so A's
+	// child was rebuilt on B's dependencies.
+	//
+	// RED (pre-fix): the setter kept one slot, so B's factory (installed last)
+	// served A's child and this returns bSession, with bFactoryRuns === 1.
+	it("selects a cold-revive factory by the ref's owner, not a process-global slot", async () => {
+		const aSession = makeSessionStub();
+		const bSession = makeSessionStub();
+		let aFactoryRuns = 0;
+		let bFactoryRuns = 0;
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => async () => {
+				aFactoryRuns++;
+				return aSession.session;
+			},
+			0,
+			"SessionA",
+		);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => async () => {
+				bFactoryRuns++;
+				return bSession.session;
+			},
+			0,
+			"SessionB",
+		);
+
+		// A's child, restored from disk: a parked ref with a sessionFile and no
+		// in-memory adoption, whose ownership chain reaches "SessionA".
+		registry.register({
+			id: "A-cold",
+			displayName: "task",
+			kind: "sub",
+			parentId: "SessionA",
+			session: null,
+			sessionFile: "/tmp/A-cold.jsonl",
+			status: "parked",
+		});
+
+		const revived = await lifecycle.ensureLive("A-cold");
+		// Rebuilt through A's OWN factory, never B's — even though B installed last.
+		expect(revived).toBe(aSession.session);
+		expect(aFactoryRuns).toBe(1);
+		expect(bFactoryRuns).toBe(0);
+	});
+
+	// A's reattachment fails after parking its children, but session B is still
+	// live and had already installed a healthy factory before A failed. A's
+	// failure must fence only A's children: B's parked child borrows nothing A
+	// disposed, so it must still revive through B's own factory. A manager-wide
+	// flag fenced B's child too, indefinitely, despite none of its dependencies
+	// being gone.
+	//
+	// RED (pre-fix): release("failed") set the single manager flag, so
+	// ensureLive("B-child") threw "replacement failed to attach" instead of
+	// returning bSession.
+	it("scopes a failed handoff to the recycling owner", async () => {
+		const bSession = makeSessionStub();
+		let bFactoryRuns = 0;
+		// Session B is live and installed its factory before A's recycle.
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => async () => {
+				bFactoryRuns++;
+				return bSession.session;
+			},
+			0,
+			"SessionB",
+		);
+
+		// A's child, adopted with a reviver that A's recycle will mark stale.
+		const aChild = registry.register({
+			id: "A-child",
+			displayName: "task",
+			kind: "sub",
+			parentId: "SessionA",
+			session: makeSessionStub().session,
+			sessionFile: "/tmp/A-child.jsonl",
+			status: "idle",
+		});
+		lifecycle.adopt("A-child", { idleTtlMs: 0, revive: async () => makeSessionStub().session }, aChild);
+
+		// B's child, parked, owned by the still-live session B.
+		registry.register({
+			id: "B-child",
+			displayName: "task",
+			kind: "sub",
+			parentId: "SessionB",
+			session: null,
+			sessionFile: "/tmp/B-child.jsonl",
+			status: "parked",
+		});
+
+		// Session A recycles and its reattachment fails.
+		const release = await lifecycle.parkAll(undefined, "SessionA");
+		release("failed");
+		await flushAsync();
+
+		// A's own child is refused: the failed recycle disposed the shared
+		// resources it would be rebuilt on.
+		await expect(lifecycle.ensureLive("A-child")).rejects.toThrow(/replacement failed to attach/);
+
+		// B's child is UNAFFECTED: B is still live and never lost its deps, so it
+		// revives cleanly through B's own factory rather than being fenced by A.
+		expect(await lifecycle.ensureLive("B-child")).toBe(bSession.session);
+		expect(bFactoryRuns).toBe(1);
+	});
+
 	// Two overlapping recycles, and the failure belongs to the one the waiter
 	// never gets a reference to. A release DELETES its entry before resolving,
 	// so an outcome kept on the entry is readable only by a waiter that already
