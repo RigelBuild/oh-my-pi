@@ -8,6 +8,8 @@
  * width) before it reaches the transcript.
  */
 import { beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MCPRefreshOutcome } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
@@ -97,6 +99,22 @@ describe("/mcp refresh error rendering normalizes transport-controlled errors", 
 		expect(errorRow.length).toBeLessThan(LONG_ERROR.length);
 		expect(errorRow).toContain("overflow-");
 		expect(errorRow).not.toContain(`${"x".repeat(300)}`);
+	});
+
+	it("shortens an absolute home path in a server error", async () => {
+		// A server error can embed a path under the user's home directory; the
+		// status-row pipeline already shortens these, and this one must too.
+		const home = os.homedir();
+		const harness = makeHarness([
+			{ name: "warmup", ok: false, error: `cannot read ${path.join(home, "secrets", "mcp.json")}` },
+		]);
+
+		await harness.controller.handle("/mcp refresh");
+
+		const out = `${harness.rendered()}${harness.errored() ?? ""}`;
+		// RED (pre-fix): the full home path reached the transcript.
+		expect(out).not.toContain(home);
+		expect(out).toContain("~/secrets/mcp.json");
 	});
 
 	it("bounds the complete error row including its label prefix", async () => {
