@@ -1663,7 +1663,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// whether its single read of `restoredSessionThinkingLevel` can be reached at
 	// all. Read by the saved-suffix reparse, whose whole purpose is correcting
 	// that value.
+	/**
+	 * Whether config, with `spec` as the default role, names the thinking knob —
+	 * so `--reapply-config` adopts it over the session's own persisted level.
+	 *
+	 * A function of the SPEC, not of the ambient one, because the winning default
+	 * can change after the first pass (the discovery retry) and the answer
+	 * changes with it.
+	 */
+	const adoptsConfigThinking = (spec: ResolvedModelRoleValue): boolean => {
+		if (!options.reapplyConfig || hasExplicitModel) return false;
+		const roleLevel =
+			spec.explicitThinkingLevel && spec.thinkingLevel !== ThinkingLevel.Inherit ? spec.thinkingLevel : undefined;
+		return (
+			roleLevel !== undefined ||
+			selfAliasThinkingLevelFor(spec) !== undefined ||
+			settings.isConfigured("defaultThinkingLevel")
+		);
+	};
+	/** {@link savedSuffixIsReadable}, recomputed for a default role that changed. */
+	const savedSuffixIsReadableFor = (spec: ResolvedModelRoleValue): boolean =>
+		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
 	let savedSuffixIsReadable = true;
+	/**
+	 * Redoes the saved-suffix discovery reparse when the first pass skipped it
+	 * solely because the suffix was unreadable then. Set only in that case, and
+	 * cleared once it runs.
+	 */
+	let retrySavedSuffixParse: (() => Promise<void>) | undefined;
 	//
 	// By POSITION, not by "did anything match". `resolveModelRoleValue` walks
 	// past an alias because a circular selector resolves to no model, so in
@@ -1836,11 +1863,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? defaultRoleSpec.thinkingLevel
 				: undefined;
 		const selfAliasThinkingLevel = selfAliasThinkingLevelFor(defaultRoleSpec);
-		const hasConfigThinkingLevel =
-			configRoleThinkingLevel !== undefined ||
-			selfAliasThinkingLevel !== undefined ||
-			settings.isConfigured("defaultThinkingLevel");
-		const adoptConfigThinking = Boolean(options.reapplyConfig) && !hasExplicitModel && hasConfigThinkingLevel;
+		const adoptConfigThinking = adoptsConfigThinking(defaultRoleSpec);
 		// Every condition under which the ONE read of `restoredSessionThinkingLevel`
 		// below is unreachable. Recorded on the closure so the discovery fetch that
 		// exists only to correct that value can ask the same question instead of
@@ -2691,6 +2714,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 				savedParse = reparseSavedSuffix();
 			}
+			// A skip taken ONLY because the suffix was unreadable is PROVISIONAL: the
+			// winning default can still change below, at the discovery retry, and a
+			// new winner that names no thinking knob makes `pickInitialThinkingLevel`
+			// start consulting `restoredSessionThinkingLevel` again — which would
+			// then carry this stale, never-discovered parse. Remember the work so
+			// the retry can redo it, once, only if it is then readable.
+			if (
+				!savedSuffixIsReadable &&
+				savedParse?.thinkingLevel !== undefined &&
+				modelRegistry.canRefreshProvider(savedParse.provider)
+			) {
+				const savedProvider = savedParse.provider;
+				retrySavedSuffixParse = async (): Promise<void> => {
+					retrySavedSuffixParse = undefined;
+					await runtimeDiscoveryPromise;
+					await modelRegistry.awaitBackgroundRefresh();
+					await logger.time("restoreSessionSuffixDiscoveryRetry", () =>
+						modelRegistry.refreshDiscoverableProviders(new Set([savedProvider]), "online-if-uncached"),
+					);
+					restoredSessionThinkingLevel = reparseSavedSuffix()?.thinkingLevel;
+				};
+			}
 			restoredSessionThinkingLevel = savedParse?.thinkingLevel;
 			// The early parse already fed a WRONG level into `thinkingLevel` and
 			// `effectiveThinkingLevel`. Correcting only the restored value leaves
@@ -3021,6 +3066,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// user's configured default with a bundled provider's default whenever
 			// a stray `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issues #3569, #6162)
+			// Whether `model` currently holds a value THIS resolver adopted, and so
+			// may withdraw again when discovery refreshes the catalog behind it.
+			let adoptedDefaultRoleModel = false;
 			const tryResolveDefaultRole = async (): Promise<boolean> => {
 				if (hasExplicitModel) return false;
 				// Re-resolve the allowed set: extension factories and discovery
@@ -3030,7 +3078,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings,
 					matchPreferences: modelMatchPreferences,
 				});
-				if (!reResolvedRoleSpec.model) return false;
+				if (!reResolvedRoleSpec.model) {
+					// A model this same resolver adopted earlier is PROVISIONAL: the
+					// discovery pass between the two calls can refresh an authoritative
+					// catalog that no longer lists it. Leaving it selected resumes the
+					// session against a model the provider has withdrawn, and silently —
+					// every restore and availability fallback below is gated on `!model`,
+					// so none of them can revisit it. Drop it and let them run.
+					if (model && adoptedDefaultRoleModel) {
+						model = undefined;
+						adoptedDefaultRoleModel = false;
+						modelFallbackMessage = `Model role "default" (${settings.getModelRole("default")}) is no longer available`;
+					}
+					defaultRoleSpec = reResolvedRoleSpec;
+					return false;
+				}
 				// A self alias EARLIER in the list than the matched pattern is the
 				// entry fallback reached, and it names the session's own model — so
 				// this later match is not the configured default. Publish the spec so
@@ -3042,6 +3104,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				defaultRoleSpec = reResolvedRoleSpec;
 				const resolvedDefaultModel = reResolvedRoleSpec.model;
 				model = resolvedDefaultModel;
+				adoptedDefaultRoleModel = true;
 				modelFallbackMessage = undefined;
 				// Recompute the thinking level against the now-real model.
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
@@ -3150,6 +3213,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				(await refreshDiscoveryOnce())
 			) {
 				await tryResolveDefaultRole();
+				// The winner may have changed, and with it whether the saved suffix is
+				// readable at all: a new default that names no thinking knob makes
+				// `pickInitialThinkingLevel` consult `restoredSessionThinkingLevel`
+				// again, so a parse the first pass skipped as unreadable would apply
+				// its stale, never-discovered level to this model.
+				if (retrySavedSuffixParse && savedSuffixIsReadableFor(defaultRoleSpec)) {
+					await retrySavedSuffixParse();
+					thinkingLevel = pickInitialThinkingLevel(model);
+					autoThinking = thinkingLevel === AUTO_THINKING;
+					effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+					const retriedModel = model;
+					if (retriedModel) {
+						effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+							autoThinking
+								? resolveProvisionalAutoLevel(retriedModel)
+								: resolveThinkingLevelForModel(retriedModel, effectiveThinkingLevel),
+						);
+					}
+				}
 			}
 
 			// Under `--reapply-config` the early session restore was skipped so the

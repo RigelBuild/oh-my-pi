@@ -685,4 +685,191 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			await session.dispose();
 		}
 	}, 20000);
+
+	test("reparses a cold saved suffix when the final retry makes it readable again", async () => {
+		// The early guard marks the saved suffix unreadable whenever the default
+		// role that won AT THAT MOMENT names the thinking knob (`…:xhigh`), and so
+		// skips the cold-catalog reparse. But the winner can still change: the
+		// discovery retry below can hand the role to an earlier candidate that
+		// names no thinking knob, and `pickInitialThinkingLevel` then starts
+		// consulting `restoredSessionThinkingLevel` again. Without redoing the
+		// reparse the stale early split applies `low` -- the tail of a literal
+		// model id -- to the new default.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, `late-models-${Bun.nanoseconds()}.yml`);
+		const vllmProvider = (models: { id: string; name: string; reasoning?: boolean }[]) => ({
+			vllm: { baseUrl: "https://vllm.example.invalid/v1", api: "openai-completions", auth: "none", models },
+		});
+		// `late-pick` is NOT here yet, so the suffixed fallback wins the first pass.
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					...vllmProvider([]),
+					fallbackvend: {
+						baseUrl: "https://fallback.example.invalid/v1",
+						api: "openai-completions",
+						auth: "none",
+						models: [{ id: "fallback", name: "Fallback" }],
+					},
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+		// The premise, measured: the first candidate's provider is refreshable, so
+		// the discovery retry runs on its behalf at all.
+		expect(modelRegistry.canRefreshProvider("vllm")).toBe(true);
+
+		const dynamicProviderExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				// Cold: the saved `router:low` is invisible, so the early parse splits
+				// it at `:low`. Discovery also publishes the first candidate, which is
+				// what changes the winner.
+				fetchDynamicModels: async () => {
+					await Bun.sleep(15);
+					await Bun.write(
+						modelsPath,
+						JSON.stringify({
+							providers: {
+								...vllmProvider([{ id: "late-pick", name: "Late Pick", reasoning: true }]),
+								fallbackvend: {
+									baseUrl: "https://fallback.example.invalid/v1",
+									api: "openai-completions",
+									auth: "none",
+									models: [{ id: "fallback", name: "Fallback" }],
+								},
+							},
+						}),
+					);
+					return [
+						{
+							id: "router:low",
+							name: "Router Low",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "vllm/late-pick,fallbackvend/fallback:xhigh");
+		const sessionFile = await writeBakedSession();
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-retry"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [dynamicProviderExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			// The premise, measured: the retry really did change the winner to the
+			// candidate that names no thinking knob.
+			expect(session.model?.id).toBe("late-pick");
+			// So the saved suffix is readable again -- and the level must not be the
+			// stale `low` split off a literal model id.
+			expect(session.thinkingLevel).not.toBe(ThinkingLevel.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("drops a provisional default the post-discovery catalog no longer lists", async () => {
+		// `tryResolveDefaultRole()` runs twice with a discovery pass between them,
+		// and that pass calls `modelRegistry.refresh()`, which RELOADS models.yml.
+		// So the model the first call adopted can be gone by the second. Returning
+		// early on the empty re-resolution left it selected, and every restore and
+		// availability fallback below is gated on `!model` -- so the resume kept a
+		// model the refreshed catalog had explicitly removed, silently.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, `withdrawn-models-${Bun.nanoseconds()}.yml`);
+		const providerEntry = (models: { id: string; name: string }[]) => ({
+			providers: {
+				vend: { baseUrl: "https://vend.example.invalid/v1", api: "openai-completions", auth: "none", models },
+			},
+		});
+		await Bun.write(modelsPath, JSON.stringify(providerEntry([{ id: "going-away", name: "Going Away" }])));
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+		// The premise, measured: the first resolution really can see it.
+		expect(modelRegistry.find("vend", "going-away")).toBeDefined();
+
+		// An earlier candidate that never resolves but IS discoverable, so the role
+		// matches at index 1 and the post-discovery retry runs at all. Rewriting
+		// models.yml from inside the fetch puts the withdrawal exactly between the
+		// two `tryResolveDefaultRole()` calls, which is the race being fixed.
+		const withdrawingExtension: ExtensionFactory = pi => {
+			pi.registerProvider("ahead-provider", {
+				baseUrl: "https://ahead.example.com/v1",
+				apiKey: "AHEAD_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					await Bun.sleep(15);
+					await Bun.write(modelsPath, JSON.stringify(providerEntry([{ id: "still-here", name: "Still Here" }])));
+					return [];
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "ahead-provider/never-there,vend/going-away");
+		const sessionFile = await writeBakedSession();
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-withdrawn"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [withdrawingExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			// The premise, measured: the refresh really did withdraw it.
+			expect(modelRegistry.find("vend", "going-away")).toBeUndefined();
+			// RED (pre-fix): the withdrawn model is still the session's model.
+			expect(session.model?.id).not.toBe("going-away");
+		} finally {
+			await session.dispose();
+		}
+	});
 });
