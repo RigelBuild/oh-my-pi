@@ -934,6 +934,12 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 	if (!payload) return message;
 	const demotesNativeComputerItems = demotesReplayedComputerItems(state.model);
 	let items: Array<Record<string, unknown>> | undefined;
+	// Call ids of the computer outputs evicted below. Their paired `computer_call`
+	// goes with them, the same rule `clampReplayedInputImages` applies: a
+	// `computer_call_output.output` accepts only a real `computer_screenshot` ref
+	// with nothing to degrade it to in place, and a call left without its output
+	// is an orphan the provider rejects.
+	const droppedComputerCallIds = new Set<string>();
 	for (let index = 0; index < payload.items.length; index++) {
 		if (!clampWanted(state)) break;
 		const item = payload.items[index];
@@ -960,6 +966,21 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 			items[index] = stripped;
 			continue;
 		}
+		// A `computer_call_output` a computer-capable model replays natively carries
+		// its screenshot in `output.image_url`, NOT an `input_image` — so
+		// `dropNativeInputImages` never touches it and the byte the accounting
+		// already charged could never be reclaimed. Evict the paired call + output,
+		// the same in-place-degrade-is-impossible path `clampReplayedInputImages`
+		// takes for a user/developer snapshot. It IS an image part on the wire, so
+		// it answers a count drop as well.
+		if (item.type === "computer_call_output") {
+			const [screenshot] = nativeInputImageParts(item);
+			if (!screenshot || !dropsNativeInputImage(screenshot, state)) continue;
+			payNativeInputImageDrop(screenshot, state);
+			if (typeof item.call_id === "string") droppedComputerCallIds.add(item.call_id);
+			items ??= [...payload.items];
+			continue;
+		}
 		// A retained `input_image` in a spliced snapshot IS an image part, so it
 		// answers a count drop as well — and must be evictable, or the count pass
 		// charges an image nothing can reclaim.
@@ -968,7 +989,12 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 		items ??= [...payload.items];
 		items[index] = dropped;
 	}
-	return items ? { ...message, providerPayload: { ...payload, items } } : message;
+	if (!items) return message;
+	const surviving =
+		droppedComputerCallIds.size > 0
+			? items.filter(item => !isDroppedComputerItem(item, droppedComputerCallIds))
+			: items;
+	return { ...message, providerPayload: { ...payload, items: surviving } };
 }
 
 /** Applies an already-computed drop allowance oldest-first across the context. */
@@ -1395,17 +1421,39 @@ export async function applyProviderImagePipeline(
  * Only the parts a snapshot REPLACES: the surviving payload and everything at
  * or after it is untouched, and a request with no such snapshot is returned as
  * is, so the common path costs one boundary scan.
+ *
+ * A pre-boundary user/developer turn also carries its native `input_image`
+ * items on `providerPayload`, which the full snapshot splices off the wire just
+ * like the generic content — but `dropUnreadableContextImages()` still walks and
+ * DECODES every one of them. Dropping the whole payload here is safe precisely
+ * because the splice discards this turn entirely: nothing on it reaches the
+ * provider, so no compaction marker or call id it holds is load-bearing.
  */
+function splicesNativeImagePayload(message: Message): boolean {
+	if (message.role !== "user" && message.role !== "developer") return false;
+	const payload = message.providerPayload;
+	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return false;
+	return payload.items.some(item => nativeInputImageParts(item).length > 0);
+}
+
 function dropSplicedOffImages(context: Context, model: Model, replaysNativeHistory: boolean): Context {
 	const wireStart = wireStartIndex(context, model, replaysNativeHistory);
 	if (wireStart === 0) return context;
 	let changed = false;
 	const messages = context.messages.map((message, index) => {
-		if (index >= wireStart || !Array.isArray(message.content)) return message;
-		const content = message.content.filter(part => part.type !== "image");
-		if (content.length === message.content.length) return message;
+		if (index >= wireStart) return message;
+		const dropsPayload = splicesNativeImagePayload(message);
+		const content = Array.isArray(message.content)
+			? message.content.filter(part => part.type !== "image")
+			: undefined;
+		const dropsContent = content !== undefined && content.length !== message.content.length;
+		if (!dropsPayload && !dropsContent) return message;
 		changed = true;
-		return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] } as Message;
+		return {
+			...message,
+			...(dropsContent && content ? { content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] } : {}),
+			...(dropsPayload ? { providerPayload: undefined } : {}),
+		} as Message;
 	});
 	return changed ? { ...context, messages } : context;
 }

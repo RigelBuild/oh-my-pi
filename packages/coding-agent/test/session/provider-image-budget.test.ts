@@ -10,6 +10,7 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -150,6 +151,30 @@ function imageData(context: Context): string[] {
 		}
 	}
 	return data;
+}
+
+/**
+ * Every `image_url` a context's replayed native payloads still carry — the
+ * population `dropUnreadableContextImages()` walks and DECODES. A `computer_call`
+ * pair or a spliced-off turn that keeps its payload here is one the decode pass
+ * will pay for.
+ */
+function nativePayloadImageUrls(context: Context): string[] {
+	const urls: string[] = [];
+	const visit = (item: unknown): void => {
+		if (!isRecord(item)) return;
+		if (item.type === "input_image" && typeof item.image_url === "string") urls.push(item.image_url);
+		if (item.type === "computer_call_output" && isRecord(item.output) && typeof item.output.image_url === "string") {
+			urls.push(item.output.image_url);
+		}
+		if (Array.isArray(item.content)) for (const part of item.content) visit(part);
+	};
+	for (const message of context.messages) {
+		const payload = "providerPayload" in message ? message.providerPayload : undefined;
+		if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) continue;
+		for (const item of payload.items) visit(item);
+	}
+	return urls;
 }
 
 /**
@@ -2054,5 +2079,138 @@ describe("computer pairing across a snapshot replacement", () => {
 		// RED (pre-fix): the call counted as paired, so the tally charged the 64-byte
 		// metadata screenshot, owed nothing, and the oversized mirror survived.
 		expect(imageData(clamped).some(data => data === bigMirror)).toBe(false);
+	});
+});
+
+describe("computer output eviction from a replayed assistant snapshot", () => {
+	it("evicts an oversized computer_call_output the assistant snapshot replays natively", async () => {
+		// A computer-capable model replays a `computer_call_output` unchanged, its
+		// screenshot in `output.image_url` rather than an `input_image`. The
+		// accounting CHARGES that screenshot, but the clamp delegated to
+		// `dropNativeInputImages()`, which only touches top-level `input_image`
+		// items or images under `content` — so the byte it charged could never be
+		// reclaimed and the oversized snapshot shipped whole, producing the 413 the
+		// clamp exists to prevent.
+		const budget = providerImageByteBudget(COMPUTER_MODEL.provider, COMPUTER_MODEL.api);
+		const over = "z".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				{
+					...assistantTurn([], 1),
+					api: COMPUTER_MODEL.api,
+					provider: COMPUTER_MODEL.provider,
+					model: COMPUTER_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: COMPUTER_MODEL.provider,
+						// `dt: true`: a plain replay append, not a full-snapshot splice, so
+						// the wire boundary stays at 0 and this pair is what travels.
+						dt: true,
+						items: [
+							{ type: "reasoning", id: "rs_keepme", summary: [] },
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "surviving-note" }] },
+							// Paired, so the output is not a repaired orphan the tally skips.
+							{
+								type: "computer_call",
+								id: "cu_0",
+								call_id: "call-0",
+								action: { type: "screenshot" },
+								pending_safety_checks: [],
+								status: "completed",
+							},
+							{
+								type: "computer_call_output",
+								call_id: "call-0",
+								output: { type: "computer_screenshot", image_url: dataUri(over) },
+							},
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL, true);
+
+		// Verify the FINAL wire shape, not just the intermediate payload: the pair
+		// is gone, so `buildResponsesInput()` puts no computer item — and no
+		// oversized screenshot — on the wire.
+		const wire = buildResponsesInput({
+			model: COMPUTER_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the byte allowance was owed but `dropNativeInputImages`
+		// never reached `output.image_url`, so the oversized screenshot travelled.
+		expect(serialized).not.toContain(over);
+		// The paired call + output are BOTH gone from the wire: an output whose
+		// screenshot cannot degrade in place is evicted with its call.
+		expect(wire.some(item => item.type === "computer_call" || item.type === "computer_call_output")).toBe(false);
+		// Real assistant history the generic content never reproduces survives the
+		// eviction — only the paired computer screenshot is gone.
+		expect(serialized).toContain("surviving-note");
+	});
+});
+
+describe("pre-boundary native payloads bypass the decode pass", () => {
+	it("strips spliced-off native input images before they reach the decode stage", async () => {
+		// A user turn BEFORE a full-snapshot boundary keeps its native `input_image`
+		// items on `providerPayload`, which the splice discards off the wire — but
+		// `dropUnreadableContextImages()` still walked and DECODED every one. A
+		// restored history with many native-image turns therefore paid unbounded
+		// image decoding per request. The images must be gone before the expensive
+		// stages run.
+		const preBoundary = ["a", "b", "c"].map(tag => dataUri(`${tag}`.repeat(4096)));
+		const onWire = "w".repeat(4096);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "restored turn" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: preBoundary.map(image_url => ({
+							type: "message",
+							role: "user",
+							content: [{ type: "input_image", image_url }],
+						})),
+					},
+				},
+				{
+					...assistantTurn([], 2),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					// No `dt`, and non-empty: reasoning plus real assistant output, so the
+					// sanitizer returns items and `buildResponsesInput()` splices the wire.
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "reasoning", id: "rs_snap", summary: [] },
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] },
+						],
+					},
+				},
+				{ role: "user", timestamp: 3, content: [image(onWire)] },
+			],
+		};
+
+		// The native payloads the decode/normalize stage actually SEES.
+		const seen: string[][] = [];
+		const normalize = async (input: Context): Promise<Context> => {
+			seen.push(nativePayloadImageUrls(input));
+			return input;
+		};
+
+		await applyProviderImagePipeline(context, OPENAI_MODEL, normalize, true);
+
+		// RED (pre-fix): all three pre-boundary native input images reached the
+		// normalize stage and were decoded, even though the splice drops them.
+		expect(seen[0]).toEqual([]);
 	});
 });
