@@ -1848,7 +1848,14 @@ export class SessionTools {
 			}
 			this.#settingGatedToolNames.set(group.setting, names);
 		}
-		const missing = [...owned].filter(name => this.#toolRegistry.has(name) && !active.includes(name));
+		// A name the user deselected through `/tools` stays inactive: availability
+		// is not selection, and re-enabling the feature must not silently override
+		// an explicit choice. Same rule the boolean-gated built-ins follow.
+		const selected = this.#runtimeSelectedToolNames;
+		const missing = Array.from(owned).filter(
+			name =>
+				this.#toolRegistry.has(name) && !active.includes(name) && (selected === undefined || selected.has(name)),
+		);
 		if (missing.length === 0) return false;
 		await this.#applyActiveToolsByName([...active, ...missing]);
 		return true;
