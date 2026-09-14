@@ -3933,11 +3933,21 @@ export class AuthStorage {
 	 * account chain reads. Deliberately the same sources in the same order, so a
 	 * report that WOULD render a real account label is never re-keyed by the
 	 * credential stamp.
+	 *
+	 * A CONFLICTING `scope.accountId` (several distinct accounts in one report)
+	 * is checked before the weaker `projectId`/account-alias/`scope.projectId`
+	 * fallbacks because it is TERMINAL in the renderer's `accountLabelOf`: once
+	 * that chain sees several accounts it refuses those fallbacks and lands on
+	 * the credential stamp or the sentinel. So the stamp must be applied whenever
+	 * the conflict exists, even alongside a `projectId` the renderer will never
+	 * consult — without it two such reports reach an unstamped sentinel, their
+	 * matching limit ids collide, and the later credential's gauges are dropped.
 	 */
 	#reportHasNoIdentity(report: UsageReport): boolean {
 		if (this.#getUsageReportMetadataValue(report, "accountId")) return false;
 		if (this.#getUsageReportMetadataValue(report, "email")) return false;
 		if (this.#getUsageReportMetadataValue(report, "orgId")) return false;
+		if (this.#hasConflictingScopeAccountId(report)) return true;
 		if (this.#getUsageReportMetadataValue(report, "projectId")) return false;
 		if (this.#getUsageReportMetadataValue(report, "account")) return false;
 		if (this.#getUsageReportMetadataValue(report, "user")) return false;
@@ -3955,6 +3965,22 @@ export class AuthStorage {
 		}
 		if (ids.size === 1) return [...ids][0];
 		return undefined;
+	}
+
+	/**
+	 * Whether the report's limits carry several distinct trimmed
+	 * `scope.accountId` values. Mirrors the metrics renderer's `CONFLICTING_SCOPE`
+	 * outcome: `#getUsageReportScopeAccountId` collapses both "none" and
+	 * "several" to `undefined`, so identity-less detection needs the conflict
+	 * distinguished from a plain absence.
+	 */
+	#hasConflictingScopeAccountId(report: UsageReport): boolean {
+		const ids = new Set<string>();
+		for (const limit of report.limits) {
+			const accountId = limit.scope.accountId?.trim();
+			if (accountId) ids.add(accountId);
+		}
+		return ids.size > 1;
 	}
 
 	#getUsageReportScopeProjectId(report: UsageReport): string | undefined {

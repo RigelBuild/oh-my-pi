@@ -48,6 +48,19 @@ describe("parseSubscriptionsConfig", () => {
 		expect(config.lookup("anthropic", "unidentified", "", "alice@example.com")?.plan).toBe("max");
 	});
 
+	it("rejects two email-only account keys that differ only in casing", () => {
+		// The `accounts` map is case-sensitive, so "Alice@Example.com" and
+		// "ALICE@example.com" pass the exact-spelling collision checks and both
+		// land on the SAME case-folded key. Report emails are lowercased, so one
+		// plan/renewal wins by property order and the other entry is unreachable.
+		// Match the loader's other duplicate-detection: fail loudly.
+		const raw = `{"accounts":{"Alice@Example.com":{"provider":"anthropic","plan":"max"},"ALICE@example.com":{"provider":"anthropic","plan":"pro"}}}`;
+
+		// RED (pre-fix): no throw; the second entry silently overwrote the first
+		// in the folded index and `lookup(... "alice@example.com")` returned "pro".
+		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/duplicates an earlier entry after case-folding/i);
+	});
+
 	it("does not case-fold a real account id through the email fallback", () => {
 		// Account ids are case-SENSITIVE, so the case-folded index must apply only
 		// to the unidentified-sentinel path: a report that recovered "ACCT-1" must

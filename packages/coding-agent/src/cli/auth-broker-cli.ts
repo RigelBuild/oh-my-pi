@@ -733,12 +733,26 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 	// Case-folded view of every configured key, for the email fallback only.
 	// Built here rather than at insert so a duplicate that differs ONLY in email
 	// casing keeps the loader's existing fail-loudly duplicate check on the
-	// stored spelling; last one wins in this view, which never shadows an exact
-	// hit above.
+	// stored spelling.
+	//
+	// The stored `accounts` map is case-SENSITIVE, so two email-only keys that
+	// differ only in casing ("Alice@Example.com" and "ALICE@example.com") both
+	// survive the exact-spelling collision checks above and land on the SAME
+	// folded key here. Report emails are lowercased (`emailLabelOf`), so one of
+	// the two configured plans/renewals would win by property order and the
+	// other entry would be silently unreachable — the same silent-omission the
+	// rest of this loader rejects loudly. Fail on the collision rather than
+	// letting the last write win.
 	const emailKeyed = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
 	for (const [key, value] of accounts) {
 		const [keyProvider = "", keyAccount = "", keyOrg = ""] = key.split("\x00");
-		emailKeyed.set(`${keyProvider}\x00${keyAccount.toLowerCase()}\x00${keyOrg}`, value);
+		const foldedKey = `${keyProvider}\x00${keyAccount.toLowerCase()}\x00${keyOrg}`;
+		if (emailKeyed.has(foldedKey)) {
+			throw new Error(
+				`subscription config ${file}: account "${keyAccount}" duplicates an earlier entry after case-folding (provider "${keyProvider}", account "${keyAccount.toLowerCase()}", org "${keyOrg}")`,
+			);
+		}
+		emailKeyed.set(foldedKey, value);
 	}
 
 	return {

@@ -119,6 +119,55 @@ describe("AuthStorage identity-less usage reports", () => {
 		}
 	}, 20_000);
 
+	it("stamps a conflicting-scope report that also carries a projectId", async () => {
+		// A report whose limits carry DIFFERENT `scope.accountId` values has no
+		// single account label. The metrics renderer's `accountLabelOf` treats
+		// that conflict as terminal and refuses the `metadata.projectId` fallback,
+		// so both such reports render `account="unidentified"` — but only if they
+		// were stamped. `#reportHasNoIdentity` used to see the `projectId` and
+		// return false FIRST, leaving the conflicting-scope report unstamped, so
+		// two of them collapsed to one series and the renderer dropped the later
+		// credential's gauges. The conflict must be detected before the weaker
+		// projectId fallback so the stamp is applied whenever the conflict exists.
+		const conflictingReport = (): UsageReport => ({
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: ["acct-x", "acct-y"].map(accountId => ({
+				id: `openai-codex:${accountId}`,
+				label: "Weekly",
+				scope: { provider: "openai-codex", accountId },
+				amount: { usedFraction: 0.2, unit: "percent" },
+			})),
+			metadata: { projectId: "proj-shared" },
+		});
+		const codexRow = (id: number): StoredAuthCredential => ({
+			id,
+			provider: "openai-codex",
+			credential: { type: "api_key", key: `sk-${id}` },
+			disabledCause: null,
+		});
+		const storage = new AuthStorage(makeStore([codexRow(31), codexRow(32)]), {
+			usageProviderResolver: provider =>
+				provider === "openai-codex"
+					? ({ id: "openai-codex", fetchUsage: async () => conflictingReport() } as UsageProvider)
+					: undefined,
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.fetchUsageReports()) ?? [];
+			const codex = reports.filter(report => report.provider === "openai-codex");
+			const keys = codex.map(report => report.metadata?.credentialKey);
+
+			// RED (pre-fix): the projectId short-circuited #reportHasNoIdentity, so
+			// neither report was stamped and both were byte-identical.
+			expect(codex).toHaveLength(2);
+			expect(new Set(keys).size).toBe(2);
+			expect(keys.every(key => typeof key === "string" && key.length > 0)).toBe(true);
+		} finally {
+			storage.close();
+		}
+	}, 20_000);
+
 	it("stamps stored xai-oauth credentials, which take their own collection branch", async () => {
 		// `xai-oauth` is collected by a provider-specific branch that builds each
 		// request and `continue`s before the shared stamp, so a pool of
