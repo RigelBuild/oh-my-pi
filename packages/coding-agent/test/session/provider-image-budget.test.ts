@@ -2857,6 +2857,189 @@ describe("replayed computer screenshots reach the wire as image parts", () => {
 	});
 });
 
+describe("Codex converter matches what the budget clamps", () => {
+	// A computer-capable Codex line. `openai-codex-responses` is in the api
+	// byte-budget table (16 MB), so `over` is sized against that.
+	const CODEX_COMPUTER_MODEL = buildModel({
+		id: "gpt-6-codex-computer",
+		name: "gpt-6-codex-computer",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api/codex",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+		supportsComputerUse: true,
+	});
+
+	it("drops an emptied generation result the Codex user replay would send with invalid empty data", () => {
+		// The byte clamp empties an oversized `image_generation_call.result` to `""`
+		// in place (`clampReplayedInputImages`), relying on the replay sanitizer to
+		// then drop the now-empty item. The SHARED Responses path runs that sanitizer
+		// (`sanitizeOpenAIResponsesImageGenerationCallForReplay`); Codex's
+		// `convertMessages()` forwards user/developer history VERBATIM and never
+		// does, so it shipped the completed generation call with EMPTY image data —
+		// rejected by the API, strictly worse than omitting the image.
+		const budget = providerImageByteBudget(CODEX_MODEL.provider, CODEX_MODEL.api);
+		const over = "u".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("summary")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: CODEX_MODEL.provider,
+						// The `compaction_summary` marker replays this payload even on a
+						// cold session and rides the wire verbatim, so it doubles as the
+						// reach proof below.
+						items: [
+							{ type: "compaction_summary" },
+							{ type: "image_generation_call", id: "ig_0", status: "completed", result: over },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, CODEX_MODEL, true);
+
+		// The FINAL Codex request, converted the way it actually would be.
+		const wire = convertCodexResponsesMessages(CODEX_MODEL, clamped);
+		const serialized = JSON.stringify(wire);
+		// Prove the fixture reaches the Codex replay branch: the marker still
+		// travels verbatim, so the payload's items were replayed — the generation
+		// call is what got dropped, not the whole turn.
+		expect(serialized).toContain("compaction_summary");
+		// RED (pre-fix): the clamp emptied the result, but the Codex converter
+		// replayed the completed `image_generation_call` with `result: ""` — an item
+		// carrying invalid empty image data the API rejects.
+		expect(
+			wire.some(item => item.type === "image_generation_call" && (item.result === "" || item.result === undefined)),
+		).toBe(false);
+		// And no generation call at all survives once its result is gone.
+		expect(wire.some(item => item.type === "image_generation_call")).toBe(false);
+		expect(serialized).not.toContain(over);
+	});
+
+	it("clears the Codex converter's computer pair set at a full-snapshot splice", () => {
+		// A `computer_call` in an EARLIER replayed payload seeds the converter's
+		// `computerCallIds` with `call-old`. A `dt`-falsy full assistant snapshot
+		// then SPLICES the wire, discarding that call — the accounting matches by
+		// resetting `collectPairedComputerCallIds` / `wireStartIndex` at the same
+		// boundary. But Codex's `convertMessages()` spliced WITHOUT clearing its own
+		// `computerCallIds`, so a LATER live result reusing `call-old` (a resumed
+		// session commonly recycles a call id) was mis-routed by
+		// `appendResponsesToolResultMessages()` as a stale computer output: its real
+		// content — including an image the budget measured and clamped — was folded
+		// into a stringified assistant note and its `input_image` never traveled.
+		// The tally and the wire disagreed on that image.
+		const budget = providerImageByteBudget(CODEX_COMPUTER_MODEL.provider, CODEX_COMPUTER_MODEL.api);
+		const over = "s".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				// Earlier replayed payload carrying the `computer_call`. Its own
+				// (`dt: true`) turn is BEFORE the snapshot, so the splice removes it —
+				// but its id lingers in the converter's `computerCallIds`.
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("seed")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: CODEX_COMPUTER_MODEL.provider,
+						dt: true,
+						items: [
+							{
+								type: "computer_call",
+								id: "cu_old",
+								call_id: "call-old",
+								action: { type: "screenshot" },
+								pending_safety_checks: [],
+								status: "completed",
+							},
+						],
+					},
+				},
+				// A full-snapshot assistant payload: `dt`-falsy with real assistant
+				// output, so the sanitizer returns items and the converter SPLICES the
+				// whole accumulated wire, discarding the computer call above.
+				{
+					...assistantTurn([], 2),
+					api: CODEX_COMPUTER_MODEL.api,
+					provider: CODEX_COMPUTER_MODEL.provider,
+					model: CODEX_COMPUTER_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: CODEX_COMPUTER_MODEL.provider,
+						items: [
+							{ type: "reasoning", id: "rs_keepme", summary: [] },
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] },
+						],
+					},
+				},
+				// A live FUNCTION call reusing `call-old`, AFTER the splice. Paired to
+				// the result below so `transformMessages` keeps it here, not folded away.
+				{
+					role: "assistant",
+					timestamp: 3,
+					content: [{ type: "toolCall", id: "call-old", name: "read_file", arguments: { path: "x" } }],
+					api: CODEX_COMPUTER_MODEL.api,
+					provider: CODEX_COMPUTER_MODEL.provider,
+					model: CODEX_COMPUTER_MODEL.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+				},
+				// The reused call's real result, carrying an oversized image. This is
+				// the generic content the budget measures and clamps — and what the
+				// wire must actually send as an `input_image`.
+				{
+					role: "toolResult",
+					timestamp: 4,
+					toolCallId: "call-old",
+					toolName: "read_file",
+					content: [text("real output"), image(over)],
+					isError: false,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, CODEX_COMPUTER_MODEL, true);
+
+		// The FINAL Codex request, converted the way it actually would be.
+		const wire = convertCodexResponsesMessages(CODEX_COMPUTER_MODEL, clamped);
+		const serialized = JSON.stringify(wire);
+		// Prove the fixture reaches the splice branch: the snapshot replaced the
+		// wire, so its assistant output is present and the seed turn is gone.
+		expect(serialized).toContain("snapshot");
+		expect(serialized).not.toContain("seed");
+		// The fix: the splice cleared `call-old`, so the reused result is emitted as
+		// the `function_call_output` the budget measured — carrying the (clamped)
+		// image the wire actually sends — not folded into a stale-computer note.
+		expect(wire.some(item => item.type === "function_call_output" && item.call_id === "call-old")).toBe(true);
+		expect(serialized).not.toContain("Computer tool failed");
+		// RED (pre-fix): the stale `call-old` made the converter emit the result as
+		// a `computer_call_output` whose call no longer reaches the wire, so the
+		// request carried an unpaired output while the budget measured the generic
+		// content instead — the two disagreeing about what is actually sent.
+		expect(wire.some(item => item.type === "computer_call_output")).toBe(false);
+		const output = wire.find(item => item.type === "function_call_output" && item.call_id === "call-old") as
+			| { output?: unknown }
+			| undefined;
+		expect(JSON.stringify(output?.output)).toContain("real output");
+	});
+});
+
 describe("byte clamp applies to a text-only Responses model", () => {
 	// A text-only Responses line: no image input at all, on a provider absent
 	// from the byte-budget table so it falls to the floor (4 MB) — small enough

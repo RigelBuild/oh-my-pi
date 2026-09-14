@@ -1316,6 +1316,35 @@ function unrollCodexComputerItems(items: ResponseInput, supportsImageDetailOrigi
 	return unrolled;
 }
 
+/**
+ * Drop a replayed `image_generation_call` whose result the clamp emptied.
+ *
+ * The image-byte clamp clears an oversized generation `result` to `""` in place
+ * (`clampReplayedInputImages`), relying on the replay sanitizer to then drop the
+ * now-empty item — which the shared Responses path does through
+ * `sanitizeOpenAIResponsesImageGenerationCallForReplay`. Codex's user/developer
+ * replay forwards history VERBATIM and never runs that sanitizer, so it shipped
+ * the completed generation call with empty image data and the request was
+ * rejected — strictly worse than omitting the image. Drop exactly that item, to
+ * match the sanitizer's rule for this type without reshaping the rest of the
+ * verbatim replay (ids, compaction markers) the way the full sanitizer would.
+ */
+function dropEmptyReplayedImageGenerationCalls(items: ResponseInput): ResponseInput {
+	let filtered: ResponseInput | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]!;
+		const keep =
+			item.type !== "image_generation_call" ||
+			(typeof item.id === "string" && typeof item.result === "string" && item.result.length > 0);
+		if (keep) {
+			filtered?.push(item);
+			continue;
+		}
+		if (!filtered) filtered = items.slice(0, index);
+	}
+	return filtered ?? items;
+}
+
 function unrollCodexComputerAssistantMessage(message: AssistantMessage): AssistantMessage {
 	let changed = false;
 	const content = message.content.map(block => {
@@ -4561,7 +4590,9 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| Array<ResponseInput[number]>
 				| undefined;
 			if (historyItems) {
-				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
+				const redactedHistoryItems = dropEmptyReplayedImageGenerationCalls(
+					redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>,
+				);
 				const replayItems =
 					model.supportsComputerUse === true
 						? redactedHistoryItems
@@ -4606,6 +4637,16 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
+					// A `dt`-falsy payload is a FULL SNAPSHOT: the splice below throws away
+					// every wire item accumulated before it, so a `computer_call` from an
+					// earlier turn no longer reaches the wire. Its id must leave the pair
+					// set too — otherwise a later result carrying that stale id is emitted
+					// as a `computer_call_output` with no matching call (rejected), while
+					// the image budget instead measures and evicts the result's generic
+					// content, so the two disagree. Mirrors `convertConversationMessages()`
+					// clearing `computerCallIds` at the same splice and the accounting's
+					// `collectPairedComputerCallIds` resetting its set there.
+					if (!providerPayload?.dt) computerCallIds.clear();
 					for (const item of replayItems) {
 						if (item.type === "custom_tool_call") {
 							customCallIds.add(item.call_id);
