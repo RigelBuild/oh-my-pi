@@ -7514,21 +7514,62 @@ export class AgentSession {
 	 * The active memory backend's construction-time configuration, as a value a
 	 * refresh can compare.
 	 *
-	 * Only Hindsight builds a client from settings; the other backends take
-	 * nothing a reload could move, so they fingerprint as their id alone.
+	 * Backends that freeze settings into a live per-session state at construction
+	 * and read from that state thereafter go stale on a settings edit until
+	 * restart — the defect this keys. Hindsight builds its client, endpoint,
+	 * credentials, timeouts, auto-recall/retain cadence, and recall/retain
+	 * shaping once; Mnemopi captures its whole config (database path, recall and
+	 * retention behaviour, provider options) into `MnemopiSessionState`. Every
+	 * setting either reads must key the rebuild, not just the connection fields.
+	 *
+	 * `off` takes nothing; `local`'s startup task and `sharpshooter`'s scheduler
+	 * read their settings LIVE (holding the `Settings` reference, not a frozen
+	 * snapshot), so a reload alone moves them and there is nothing to rebuild for
+	 * — those fingerprint as their id alone.
 	 */
 	#memoryBackendConfigFingerprint(): string {
-		if (this.settings.get("memory.backend") !== "hindsight") return "";
-		const config = loadHindsightConfig(this.settings);
-		return JSON.stringify([
-			config.hindsightApiUrl,
-			config.hindsightApiToken,
-			config.requestTimeoutMs,
-			config.reflectTimeoutMs,
-			config.recallTimeoutMs,
-			config.retainTimeoutMs,
-			config.debug,
-		]);
+		const backend = this.settings.get("memory.backend");
+		if (backend === "hindsight") {
+			// `loadHindsightConfig` is a pure read of the `hindsight.*` settings
+			// (and env), so stringifying its whole result keys every field the live
+			// state was built with — including behavioural ones like `autoRecall`
+			// and `retainEveryNTurns` the old connection-only fingerprint ignored.
+			return JSON.stringify(["hindsight", loadHindsightConfig(this.settings)]);
+		}
+		if (backend === "mnemopi") {
+			// Fingerprint the raw `mnemopi.*` settings directly rather than
+			// `loadMnemopiConfig()`, whose legacy-bank scan touches the filesystem
+			// and would run on every refresh. This is exactly the set that function
+			// and `resolveMnemopiProviderOptions` read into the captured config.
+			return JSON.stringify([
+				"mnemopi",
+				this.settings.get("mnemopi.dbPath"),
+				this.settings.get("mnemopi.scoping"),
+				this.settings.get("mnemopi.bank"),
+				this.settings.get("mnemopi.llmMode"),
+				this.settings.get("mnemopi.embeddingModel"),
+				this.settings.get("mnemopi.embeddingVariant"),
+				this.settings.get("mnemopi.autoRecall"),
+				this.settings.get("mnemopi.autoRetain"),
+				this.settings.get("mnemopi.polyphonicRecall"),
+				this.settings.get("mnemopi.enhancedRecall"),
+				this.settings.get("mnemopi.proactiveLinking"),
+				this.settings.get("mnemopi.retainEveryNTurns"),
+				this.settings.get("mnemopi.recallLimit"),
+				this.settings.get("mnemopi.recallContextTurns"),
+				this.settings.get("mnemopi.recallMaxQueryChars"),
+				this.settings.get("mnemopi.injectionTokenLimit"),
+				this.settings.get("mnemopi.debug"),
+				this.settings.get("mnemopi.noEmbeddings"),
+				this.settings.get("mnemopi.embeddingApiUrl"),
+				this.settings.get("mnemopi.embeddingApiKey"),
+				this.settings.get("mnemopi.llmBaseUrl"),
+				this.settings.get("mnemopi.llmApiKey"),
+				this.settings.get("mnemopi.llmModel"),
+				this.settings.get("providers.memoryModel"),
+			]);
+		}
+		return backend ?? "";
 	}
 
 	/** Apply the backend; cwd rebinding can skip Mnemopi auto-retention while still draining writes. */
