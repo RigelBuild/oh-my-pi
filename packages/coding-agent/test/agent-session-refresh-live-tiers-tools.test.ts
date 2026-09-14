@@ -734,6 +734,67 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 		}
 	}, 20_000);
 
+	it("keeps a deselected generation tool inactive when its setting is re-enabled", async () => {
+		// Same rule as the boolean-gated built-ins, on the setting-gated GROUP path
+		// (`generate_image`/`tts`): the group's re-add consulted only the registry
+		// and the active list, so making the feature available again silently
+		// overrode an explicit `/tools` deselection.
+		const h = await makeHarness("generate_image:\n  enabled: true\n");
+		try {
+			expect(h.session.getEnabledToolNames()).toContain("generate_image");
+
+			await h.session.setActiveToolsByName(
+				h.session.getEnabledToolNames().filter(name => name !== "generate_image"),
+			);
+			expect(h.session.getEnabledToolNames()).not.toContain("generate_image");
+
+			await fs.writeFile(h.settingsPath, "generate_image:\n  enabled: false\n");
+			await h.session.refresh("settings");
+			await fs.writeFile(h.settingsPath, "generate_image:\n  enabled: true\n");
+			await h.session.refresh("settings");
+
+			// RED (pre-fix): the group re-added the name unconditionally.
+			expect(h.session.getEnabledToolNames()).not.toContain("generate_image");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("applies a refreshed fuzzy-match policy to the edit tool", async () => {
+		// `EditTool` captured the fuzzy policy in its constructor, so an on-disk
+		// edit to it could not reach an already-built tool even though the refresh
+		// reported the settings applied. Asserted through an EXECUTED edit whose
+		// outcome the policy decides: an inexact patch hunk succeeds with fuzzy
+		// matching on and fails without it.
+		const h = await makeHarness("edit:\n  mode: patch\n  fuzzyMatch: true\n");
+		try {
+			const file = path.join(h.cwd, "greet.ts");
+			const source = "function greet() {\n  return 'hello';\n}\n";
+			await fs.writeFile(file, source);
+			const tool = h.session.getToolByName("edit");
+			if (!tool) throw new Error("expected the edit tool to be registered");
+			const inexactPatch = {
+				path: file,
+				edits: [{ op: "update", diff: "@@\n function greet() {\n-  return 'hell0';\n+  return 'bye';\n }" }],
+			};
+
+			const before = await tool.execute("fuzzy-on", inexactPatch);
+			expect(before.isError).not.toBe(true);
+
+			// Restore the file, then turn the policy off on disk and refresh.
+			await fs.writeFile(file, source);
+			await fs.writeFile(h.settingsPath, "edit:\n  mode: patch\n  fuzzyMatch: false\n");
+			await h.session.refresh("settings");
+
+			// RED (pre-fix): the SAME tool object still used the startup policy, so
+			// the inexact hunk kept applying.
+			const after = await (h.session.getToolByName("edit") ?? tool).execute("fuzzy-off", inexactPatch);
+			expect(after.isError).toBe(true);
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
 	it("drops the native registry entry when a built-in gate is disabled", async () => {
 		// A retained inactive entry is indistinguishable from a user deselection to
 		// the late-registration path in `sdk.ts`, which sees an existing entry and
