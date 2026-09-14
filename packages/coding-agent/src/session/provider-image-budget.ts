@@ -574,9 +574,37 @@ function splicesWholeWire(payload: OpenAIResponsesHistoryPayload, model: Model):
 	);
 }
 
+/** Adds every replayed `computer_call`'s paired id from `items` into `ids`. */
+function addReplayedComputerCallIds(items: readonly Record<string, unknown>[], ids: Set<string>): void {
+	for (const item of items) {
+		if (item.type !== "computer_call") continue;
+		const callId = item.call_id;
+		if (typeof callId === "string") ids.add(normalizeComputerCallId(callId));
+	}
+}
+
 function collectPairedComputerCallIds(context: Context, model: Model, replaysNativeHistory: boolean): Set<string> {
 	let ids = new Set<string>();
 	for (const message of context.messages) {
+		if (message.role === "user" || message.role === "developer") {
+			// A user/developer turn's replayed payload is APPENDED to the wire, never
+			// spliced: `buildResponsesInput()` pushes its items and adds every
+			// `computer_call` among them to `computerCallIds`, so a later matching
+			// `toolResult` is emitted as a paired `computer_call_output` carrying
+			// `providerMetadata.screenshot`. Skipping this carrier — because it is
+			// not an assistant message — left the call out of the pair set, so
+			// `sendsComputerScreenshot()` charged and clamped the generic content
+			// mirror the converter throws away while the metadata copy that actually
+			// travelled stayed in place, and neither budget was relieved. Record
+			// those calls so the clamp evicts what the wire really carries. The same
+			// eligibility `buildResponsesInput()` replays on (`nativeHistory.replay`
+			// or a compaction marker).
+			if (supersedesContentWithReplay(message, model, replaysNativeHistory)) {
+				const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
+				if (payload) addReplayedComputerCallIds(payload.items, ids);
+			}
+			continue;
+		}
 		if (message.role !== "assistant") continue;
 		// A replayed payload with `dt` falsy is a FULL-SNAPSHOT replacement:
 		// `convertConversationMessages()` splices away everything built so far and
@@ -591,11 +619,7 @@ function collectPairedComputerCallIds(context: Context, model: Model, replaysNat
 		// pair set is still what travels.
 		if (payload && !payload.dt && splicesWholeWire(payload, model)) {
 			ids = new Set<string>();
-			for (const item of payload.items) {
-				if (item.type !== "computer_call") continue;
-				const callId = item.call_id;
-				if (typeof callId === "string") ids.add(normalizeComputerCallId(callId));
-			}
+			addReplayedComputerCallIds(payload.items, ids);
 			continue;
 		}
 		if (!Array.isArray(message.content)) continue;

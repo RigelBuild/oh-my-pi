@@ -2214,3 +2214,101 @@ describe("pre-boundary native payloads bypass the decode pass", () => {
 		expect(seen[0]).toEqual([]);
 	});
 });
+
+describe("computer pairing across a replayed user/developer payload", () => {
+	it("evicts a screenshot the wire pairs via a computer_call a replayed user payload carries", () => {
+		// The pairing `computer_call` lives in a REPLAYED USER payload, not an
+		// assistant snapshot. `buildResponsesInput()` appends that payload's items
+		// and adds the `computer_call` to `computerCallIds`, so a surviving
+		// `toolResult` with the same call id is emitted as a paired
+		// `computer_call_output` carrying `providerMetadata.screenshot` — the copy
+		// that actually travels. The clamp's pairing scan only walked ASSISTANT
+		// carriers, so this call was absent from the pair set:
+		// `sendsComputerScreenshot()` read false, the accounting charged and
+		// clamped only the generic content mirror the converter discards, and the
+		// oversized metadata screenshot went out whole — the 413 the clamp exists
+		// to prevent.
+		//
+		// The result survives `transformMessages()` because a live assistant tool
+		// call declares its id (an orphan result is folded into a stale-tool-result
+		// note and never reaches the converter). That live call carries NO computer
+		// `providerMetadata`, so the assistant-only scan skipped it too — the whole
+		// pairing is visible only in the replayed payload.
+		const budget = providerImageByteBudget(COMPUTER_MODEL.provider, COMPUTER_MODEL.api);
+		const over = "z".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("summary")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: COMPUTER_MODEL.provider,
+						items: [
+							{ type: "compaction", id: "cmp" },
+							// The pairing call lives HERE, on a user carrier — the path the
+							// assistant-only scan missed.
+							{
+								type: "computer_call",
+								id: "cu_0",
+								call_id: "call-0",
+								action: { type: "screenshot" },
+								pending_safety_checks: [],
+								status: "completed",
+							},
+						],
+					},
+				},
+				// A live tool call declaring `call-0`, so its result is not orphaned
+				// into a stale note. No computer `providerMetadata`, so the assistant
+				// scan does not record it — the pairing is only in the payload above.
+				{
+					...assistantTurn([], 2),
+					api: COMPUTER_MODEL.api,
+					provider: COMPUTER_MODEL.provider,
+					model: COMPUTER_MODEL.id,
+					stopReason: "toolUse",
+					content: [{ type: "toolCall", id: "call-0", name: "computer", arguments: {} }],
+				} as AssistantMessage,
+				// The result whose metadata screenshot the converter emits as the
+				// paired `computer_call_output`. Its generic content mirror never
+				// travels.
+				{
+					role: "toolResult",
+					timestamp: 3,
+					toolCallId: "call-0",
+					toolName: "computer",
+					content: [text("screenshot")],
+					isError: false,
+					providerMetadata: {
+						type: "computer",
+						acknowledgedSafetyChecks: [],
+						screenshot: { type: "computer_screenshot", image_url: dataUri(over) },
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL, true);
+
+		// The FINAL provider input, not an intermediate structure: convert the
+		// clamped context the way the request actually would.
+		const wire = buildResponsesInput({
+			model: COMPUTER_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the user-carried call was not in the pair set, so the
+		// metadata screenshot was left in place and shipped whole.
+		expect(serialized).not.toContain(over);
+		// Specifically, no `computer_call_output` still carries the oversized
+		// screenshot the mirror removal was supposed to reclaim.
+		expect(
+			wire.some(item => item.type === "computer_call_output" && JSON.stringify(item.output ?? "").includes(over)),
+		).toBe(false);
+	});
+});
