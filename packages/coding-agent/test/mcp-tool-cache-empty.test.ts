@@ -170,11 +170,9 @@ function tokenAfter(previous: number): number {
 }
 
 /**
- * A reservation that must have succeeded for the test's premise to hold.
- * `observeCatalogAt()` returns `undefined` only when a peer published a strictly
- * newer claim (an EXHAUSTED reservation), and a test asserting on ordering has
- * nothing to say in that case. A store lock still hands back a real issue-time
- * number, so it is not excluded here.
+ * `observeCatalogAt()` returns `undefined` whenever its claim never published —
+ * exhausted by a peer's strictly newer claim, or left unwritten by a store lock
+ * — and a test asserting on ordering has nothing to say in either case.
  */
 function reserved(cache: MCPToolCache, serverName: string): number {
 	const token = cache.observeCatalogAt(serverName);
@@ -715,20 +713,19 @@ describe("MCPToolCache empty-toolset guard", () => {
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
 
-	test("a store lock at reservation time keeps the request's issue-time order so a genuinely later response still wins", async () => {
-		// The SECOND-arrival ordering. An earlier request reserves and CACHES its
-		// catalog; a later request's `tools/list` then goes out while the store is
-		// briefly locked, so its claim cannot publish. A store lock is not a lost
-		// race — nothing was compared and no peer won — so `observeCatalogAt()`
-		// still hands back the request's issue-time position (a number floored
-		// above the earlier catalog), NOT a skip sentinel. When that later, newer
-		// response lands, `set()` orders the write by that number and overwrites
-		// the older catalog already on the row.
+	test("a store lock at reservation time skips the cache instead of ordering an unpublished write", async () => {
+		// A store lock is not a CAS loss, but the token it floored never reached
+		// the claim row, so it cannot order a write against a peer that never saw
+		// it. Round 2 returned that token and let the write proceed. Here the
+		// plain case: an earlier catalog is on the row, a later request's
+		// reservation hits a lock, and its response must leave that catalog
+		// standing rather than overwrite it with an unordered write. The stale
+		// catalog is the conservative outcome — the live tools still take the new
+		// response, and the next unlocked list repopulates the cache.
 		const storage = createFakeStorage();
 		const earlier = new MCPToolCache(storage);
 		const later = new MCPToolCache(storage);
 
-		// The earlier request reserves and its catalog lands FIRST.
 		const earlierToken = reserved(earlier, "litellm");
 		await earlier.set("litellm", CONFIG, [OLD_TOOL], earlierToken);
 		expect(await earlier.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
@@ -738,45 +735,51 @@ describe("MCPToolCache empty-toolset guard", () => {
 		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValueOnce("unavailable");
 		const token = later.observeCatalogAt("litellm");
 		cas.mockRestore();
-		// Still the request's real issue-time position, above the earlier catalog
-		// — not a sentinel that would force the write to skip.
-		expect(typeof token).toBe("number");
-		expect(token as number).toBeGreaterThan(earlierToken);
+		// Unreserved: an unpublished claim has no order to write with.
+		expect(token).toBeUndefined();
 
-		// The newer response arrives SECOND and overwrites the older catalog.
+		// The later response skips the cache; the earlier catalog stands.
 		await later.set("litellm", CONFIG, [NEW_TOOL], token);
-		expect(await later.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+		expect(await later.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
 	});
 
-	test("a locked older reservation cannot overwrite a later request that already reserved and persisted", async () => {
-		// The ORDERING INVERSION the reservation scheme exists to prevent. An
-		// OLDER request's `tools/list` goes out while the store is briefly locked,
-		// so its claim cannot publish. A LATER request then reserves cleanly and
-		// persists its catalog. When the older response finally arrives, it must
-		// NOT re-establish a position above the later request: a store lock does
-		// not license a fresh response-time reservation, only the older request's
-		// own issue-time token, which is BELOW the later one. So `#writeOrdered`
-		// defers to the later catalog on the row, and the persisted cache a
-		// subsequent startup reads is the LATER catalog, not the older one.
+	test("a store-locked reservation on a higher clock cannot overwrite a lower later catalog", async () => {
+		// The hazard the reviewer identified. A long-lived process holds a
+		// pre-correction clock; its `tools/list` goes out while the store is
+		// briefly locked, so its HIGH token never reaches the claim row. A
+		// process started AFTER the clock correction cannot see that unpublished
+		// token, so it reserves a strictly LOWER one and persists its newer
+		// catalog. When the older, delayed response lands carrying the higher
+		// unpublished token, `#writeOrdered` would read it as the newest and
+		// overwrite the newer catalog for the full TTL — unless a store-locked
+		// reservation, like an exhausted one, refuses to order any write.
+		//
+		// RED (round 2): the store lock returned the high token, so the older
+		// response overwrote the newer catalog and a later startup served it.
 		const storage = createFakeStorage();
 		const older = new MCPToolCache(storage);
 		const newer = new MCPToolCache(storage);
 
-		// The older request reserves FIRST but hits a store lock, so its claim
-		// never publishes.
+		// The older process reserves on the HIGH pre-correction clock and hits a
+		// store lock, so its (high) claim never publishes. The token clock is
+		// `performance.timeOrigin + performance.now()`, not `Date.now()`.
+		const clock = vi.spyOn(performance, "now").mockReturnValue(performance.now() + 10_000);
 		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValueOnce("unavailable");
 		const olderToken = older.observeCatalogAt("litellm");
 		cas.mockRestore();
-		expect(typeof olderToken).toBe("number");
+		clock.mockRestore();
+		// Unreserved: a store lock does not license ordering a write.
+		expect(olderToken).toBeUndefined();
 
-		// The newer request reserves cleanly (a strictly later issue-time token)
-		// and its catalog lands.
+		// The post-correction process reserves cleanly on the corrected (lower)
+		// clock and persists its catalog. Its token is BELOW the older process's
+		// unpublished one, which is exactly what makes the inversion possible.
 		const newerToken = reserved(newer, "litellm");
-		expect(newerToken).toBeGreaterThan(olderToken as number);
 		await newer.set("litellm", CONFIG, [NEW_TOOL], newerToken);
 		expect(await newer.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 
-		// The older response arrives LAST. It must defer to the newer catalog.
+		// The older response arrives LAST. It must skip the cache, not overwrite
+		// the newer catalog with its superseded one.
 		await older.set("litellm", CONFIG, [OLD_TOOL], olderToken);
 
 		// A subsequent startup builds a fresh cache over the same store and reads
@@ -891,11 +894,9 @@ describe("MCPToolCache empty-toolset guard", () => {
 		// One attempt, not CACHE_CLAIM_ATTEMPTS: an outage is not retried inside
 		// the claim loop — each retry would pay the full busy timeout again.
 		expect(cas).toHaveBeenCalledTimes(1);
-		// A store lock is not a lost race, so the request's issue-time token is
-		// still its genuine position: it is returned as a number, not a skip
-		// sentinel, so a later `set()` orders the write by it (and `#writeOrdered`
-		// defers to any newer request that reserved since).
-		expect(typeof token).toBe("number");
+		// Its token never published, so — like an exhausted reservation — it does
+		// not order a write: `undefined`, and a later `set()` skips the cache.
+		expect(token).toBeUndefined();
 		cas.mockRestore();
 	});
 
