@@ -120,13 +120,45 @@ describe("/mcp refresh error rendering normalizes transport-controlled errors", 
 	it("bounds the complete error row including its label prefix", async () => {
 		// Truncating only the payload and then prepending "Failed to refresh MCP
 		// tools: " left the row wider than the cap by the label's own width. The
-		// per-server rows are indented by the renderer, not by this string, so the
-		// cap correctly applies to the sanitized content there.
+		// The per-server rows are indented by these same call sites, so their
+		// indentation comes out of the same budget — see the tests below.
 		const thrown = makeHarness([{ name: "warmup", ok: true }], new Error(LONG_ERROR));
 		await thrown.controller.handle("/mcp refresh");
 		const errorRow = thrown.errored() ?? "";
 		expect(errorRow).toContain("Failed to refresh MCP tools:");
 		expect(visibleWidth(errorRow.trimEnd())).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+	});
+
+	it("counts the row indentation against the width cap", async () => {
+		// `#formatRefreshFailureRow` spent the whole budget, then the call site
+		// prepended four spaces (two in the all-failed branch) — so the row's own
+		// visible width came out over the cap by the indent and could overflow.
+		//
+		// The transcript component pads every line it renders by one column, so
+		// that frame column is stripped before measuring: the cap governs the row
+		// this controller produces, not the frame around it.
+		const partial = makeHarness([
+			{ name: "healthy", ok: true },
+			{ name: "warmup", ok: false, error: LONG_ERROR },
+		]);
+		await partial.controller.handle("/mcp refresh");
+		const indentedRow = (
+			partial
+				.rendered()
+				.split("\n")
+				.find(line => line.includes("warmup:")) ?? ""
+		).replace(/^ /, "");
+		expect(indentedRow).toMatch(/^ {4}warmup:/);
+		// RED (pre-fix): 114 — the cap plus the four-space indent.
+		expect(visibleWidth(indentedRow.trimEnd())).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+
+		// `showError` is not rendered through the component, so it carries no pad.
+		const all = makeHarness([{ name: "warmup", ok: false, error: LONG_ERROR }]);
+		await all.controller.handle("/mcp refresh");
+		const allRow = (all.errored() ?? "").split("\n").find(line => line.includes("warmup:")) ?? "";
+		expect(allRow).toMatch(/^ {2}warmup:/);
+		// RED (pre-fix): 112 — the cap plus the two-space indent.
+		expect(visibleWidth(allRow.trimEnd())).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
 	});
 
 	it("all-failed branch also normalizes each server error", async () => {
