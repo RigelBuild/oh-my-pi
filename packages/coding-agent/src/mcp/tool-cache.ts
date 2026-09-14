@@ -264,16 +264,14 @@ export class MCPToolCache {
 	 * The claim goes in its OWN row ({@link CLAIM_PREFIX}), never on the
 	 * catalog's: see {@link MCPToolClaimPayload}.
 	 *
-	 * Returns `undefined` ONLY when the claim EXHAUSTED {@link CACHE_CLAIM_ATTEMPTS}
-	 * — every CAS lost to a peer publishing a strictly newer claim, so the token
-	 * this floored ABOVE those winners is not the request's true position and must
-	 * never order a write. A store that could not even compare (a brief
-	 * `SQLITE_BUSY`) is NOT that case: nothing was compared and no peer won, so the
-	 * issue-time token this already computed is still the request's real position.
-	 * It is returned as-is, and `set()` orders the eventual write by it through
-	 * {@link MCPToolCache.#writeOrdered} — which defers to any later request that
-	 * has since published a claim or catalog above it, so a delayed response can
-	 * never re-floor above a newer one.
+	 * Returns `undefined` when the claim never PUBLISHED — either it exhausted
+	 * {@link CACHE_CLAIM_ATTEMPTS} (every CAS lost to a peer's strictly newer
+	 * claim) or the store could not compare at all (a brief `SQLITE_BUSY`). In
+	 * both cases the token this floored was never written to the claim row, so a
+	 * peer cannot floor above it, and an unpublished token cannot order a write
+	 * against a process that never saw it. `set()` treats `undefined` as
+	 * unreserved and skips the persisted catalog — the live tools are
+	 * unaffected, and the next successful request repopulates the cache.
 	 *
 	 * Publishing is a CAS, and a lost race is re-driven rather than ignored.
 	 * Losing means a peer's claim landed between this read and this write, so
@@ -309,22 +307,11 @@ export class MCPToolCache {
 				nonblocking: true,
 			});
 			if (outcome === "written") return claimed;
-			// A locked or unwritable database is not a CAS loss: nothing was
-			// compared, so re-reading and retrying learns nothing and each attempt
-			// pays the full `busy_timeout` synchronously on this thread (5s
-			// interactive). Stop attempting — but the token this ALREADY floored
-			// above the rows it read is the request's genuine issue-time position,
-			// and unlike an exhausted reservation no peer published a strictly
-			// newer claim to invalidate it. Return it: `set()` orders the eventual
-			// write by it through `#writeOrdered`, which defers to any later
-			// request that has since published a claim or catalog above it, so a
-			// delayed response can never re-floor above a newer one. Its claim row
-			// never published, so peers cannot floor above it — but absent a
-			// backward wall-clock step every later request reads a strictly larger
-			// clock and a row this write can only have raised, so `claimed` is
-			// below theirs by construction; the `#writeOrdered` comparison is what
-			// makes that hold.
-			if (outcome === "unavailable") return claimed;
+			// A store lock is not a CAS loss, but its token never published
+			// either, so it cannot order a write any more than an exhausted one
+			// can (see below). Retrying only pays the full `busy_timeout`
+			// synchronously (5s interactive) to learn nothing, so stop and skip.
+			if (outcome === "unavailable") return undefined;
 		}
 		// Out of attempts: nothing this request computed was ever published.
 		// Returning it anyway is not safe in the direction the old comment here
@@ -445,19 +432,19 @@ export class MCPToolCache {
 		// An OMITTED token means "no request to anchor on" (an out-of-band
 		// invalidation, or a test) and samples now. A supplied token is the
 		// outcome `observeCatalogAt()` handed the caller BEFORE its `tools/list`:
-		// a number is that request's issue-time position (a live reservation, or
-		// one a transient store lock left unpublished but still correctly floored),
-		// and `undefined` an EXHAUSTED reservation — a peer published a strictly
-		// newer claim, so the token this request floored is not its true position
-		// and must never order a write.
+		// a number is that request's issue-time position (a published reservation),
+		// and `undefined` a reservation that never published — exhausted (a peer's
+		// strictly newer claim) or left unwritten by a store lock. Either way the
+		// token this request floored was never visible to a peer, so it cannot
+		// order a write and must skip the cache.
 		const reservation = observed.length === 1 ? observed[0] : "omitted";
 		const writeToken = typeof reservation === "number" ? reservation : undefined;
-		// An exhausted reservation must not touch the cache: it has no established
-		// order. It still OBSERVED the server, and later than anything already in
-		// flight here, so record a barrier before skipping. Returning without it
-		// left an earlier request free to pass `isCurrent()` and `#writeOrdered()`
-		// (which inspects the catalog row, never the claim) and persist its
-		// superseded catalog for 30 days.
+		// A reservation that never published must not touch the cache: it has no
+		// established order. It still OBSERVED the server, and later than anything
+		// already in flight here, so record a barrier before skipping. Returning
+		// without it left an earlier request free to pass `isCurrent()` and
+		// `#writeOrdered()` (which inspects the catalog row, never the claim) and
+		// persist its superseded catalog for 30 days.
 		//
 		// The barrier must DOMINATE every already-issued request, not merely read
 		// the clock. A backward step puts the current reading below a token an
