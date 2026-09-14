@@ -31,6 +31,18 @@ const IMAGE_OMISSION_NOTICE: TextContent = {
 };
 
 /**
+ * A native Responses assistant message the replay sanitizer counts as
+ * replayable output. Appended to a full-snapshot payload whose only such output
+ * the byte clamp just cleared, so `buildResponsesInput()` still splices the wire
+ * on it instead of resurrecting the superseded pre-snapshot history.
+ */
+const REPLAYED_IMAGE_OMISSION_ITEM: Record<string, unknown> = {
+	type: "message",
+	role: "assistant",
+	content: [{ type: "output_text", text: IMAGE_OMISSION_NOTICE.text }],
+};
+
+/**
  * The single traversal both budgets are derived from, so the population each
  * one enforces can never drift apart.
  *
@@ -263,6 +275,12 @@ function replayableHistoryPayload(
 /** The replayable base64 of `item`, or `undefined` when it carries none. */
 function replayedImageResult(item: Record<string, unknown>): string | undefined {
 	if (item.type !== "image_generation_call") return undefined;
+	// Match `sanitizeOpenAIResponsesImageGenerationCallForReplay`: an item with no
+	// valid string `id` is dropped before the request is built, so its result
+	// never reaches the wire and must not be charged — otherwise the byte clamp
+	// evicts a LIVE image to make room for bytes the converter then discards, and
+	// the request ends with neither.
+	if (typeof item.id !== "string") return undefined;
 	const result = item.result;
 	return typeof result === "string" && result.length > 0 ? result : undefined;
 }
@@ -551,13 +569,13 @@ function wireStartIndex(context: Context, model: Model, replaysNativeHistory: bo
 		const message = context.messages[index];
 		if (message?.role !== "assistant") continue;
 		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
-		if (payload && !payload.dt && splicesWholeWire(payload, model)) start = index;
+		if (payload && !payload.dt && splicesItems(payload.items, model)) start = index;
 	}
 	return start;
 }
 
 /**
- * Whether a `dt`-falsy payload really replaces the wire.
+ * Whether a `dt`-falsy payload's replay items really replace the wire.
  *
  * `convertConversationMessages()` splices only when the sanitizer returns items:
  * a hidden-empty payload (reasoning plus an empty assistant message) sanitizes
@@ -566,9 +584,9 @@ function wireStartIndex(context: Context, model: Model, replaysNativeHistory: bo
  * BOTH budgets while they still travelled — which is a 413 that no drop is ever
  * owed for.
  */
-function splicesWholeWire(payload: OpenAIResponsesHistoryPayload, model: Model): boolean {
+function splicesItems(items: readonly Record<string, unknown>[], model: Model): boolean {
 	return (
-		sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(payload.items, {
+		sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(items as Array<Record<string, unknown>>, {
 			supportsComputerUse: model.supportsComputerUse === true,
 		}) !== undefined
 	);
@@ -617,7 +635,7 @@ function collectPairedComputerCallIds(context: Context, model: Model, replaysNat
 		// The same survival check the boundary uses: a hidden-empty payload
 		// sanitizes to `undefined`, so the splice never runs and the accumulated
 		// pair set is still what travels.
-		if (payload && !payload.dt && splicesWholeWire(payload, model)) {
+		if (payload && !payload.dt && splicesItems(payload.items, model)) {
 			ids = new Set<string>();
 			addReplayedComputerCallIds(payload.items, ids);
 			continue;
@@ -1014,10 +1032,21 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 		items[index] = dropped;
 	}
 	if (!items) return message;
-	const surviving =
+	let surviving =
 		droppedComputerCallIds.size > 0
 			? items.filter(item => !isDroppedComputerItem(item, droppedComputerCallIds))
 			: items;
+	// A full-snapshot payload (`dt` falsy) splices the whole wire only while the
+	// replay sanitizer still returns output. When its ONLY replayable output was
+	// an oversized `image_generation_call` we just emptied, the sanitizer now
+	// returns `undefined`: `buildResponsesInput()` stops treating it as a snapshot
+	// and does not splice, resurrecting the superseded pre-snapshot history that
+	// `dropSplicedOffImages()` already stripped — the request loses the snapshot
+	// AND regains stale context. Retain a replayable omission item so the splice
+	// still runs.
+	if (!payload.dt && splicesItems(payload.items, state.model) && !splicesItems(surviving, state.model)) {
+		surviving = [...surviving, REPLAYED_IMAGE_OMISSION_ITEM];
+	}
 	return { ...message, providerPayload: { ...payload, items: surviving } };
 }
 
@@ -1082,12 +1111,26 @@ export const PROVIDER_IMAGE_COUNT_DECODE_SLACK = 1;
  *  after it, sees final byte counts. */
 export function clampProviderContextImageCount(context: Context, model: Model, replaysNativeHistory = true): Context {
 	if (!model.input.includes("image")) return context;
-	const admissible = providerImageBudget(model.provider) * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK);
+	return clampImageCountToCap(
+		context,
+		model,
+		replaysNativeHistory,
+		providerImageBudget(model.provider) * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK),
+	);
+}
+
+/**
+ * Drops oldest image parts until the count fits `cap`, ignoring bytes. The count
+ * pass runs it against a slack multiple of the provider cap; the pipeline runs
+ * it again against the EXACT cap once the decode and size passes have settled
+ * the final count, so decoration only ever uploads images the request can send.
+ */
+function clampImageCountToCap(context: Context, model: Model, replaysNativeHistory: boolean, cap: number): Context {
 	// A replayed generation result is not an image part, so it never reaches this
 	// tally — but a replayed `input_image` IS one, so this pass needs the same
 	// replay decision the byte pass gets. Hard-coding it let a payload the request
 	// would not send justify dropping generic images it WOULD.
-	const countDrops = collectImageStats(context, undefined, replaysNativeHistory, model).total - admissible;
+	const countDrops = collectImageStats(context, undefined, replaysNativeHistory, model).total - cap;
 	if (countDrops <= 0) return context;
 	return applyImageClamp(context, {
 		remainingDrops: countDrops,
@@ -1405,11 +1448,15 @@ export async function dropUnreadableContextImages(context: Context, model: Model
  *    landing first could cut the count to 20 and stop the downscale running at
  *    all. Running it here is safe: an already-small image is returned
  *    untouched, so the provider's own later call is a no-op.
- * 5. Byte budget LAST, over the images that actually travel. Clamping earlier
- *    charged an undecodable image against the budget and evicted an older VALID
- *    one to fit it, and the unreadable pass then replaced the corrupt image too
- *    — so a request lost every image where the readable one would have fit
- *    alone.
+ * 5. The EXACT count cap, now that the decode and size passes have settled which
+ *    images survive. Decoration (step 6) uploads a blob for every image it sees,
+ *    so the count must be at its final value BEFORE it runs or a request holding
+ *    up to 2x the cap publishes blobs the byte-budget clamp then discards.
+ * 6. Decoration, then the byte budget LAST, over the images that actually
+ *    travel. Clamping bytes earlier charged an undecodable image against the
+ *    budget and evicted an older VALID one to fit it, and the unreadable pass
+ *    then replaced the corrupt image too — so a request lost every image where
+ *    the readable one would have fit alone.
  */
 export async function applyProviderImagePipeline(
 	context: Context,
@@ -1429,6 +1476,16 @@ export async function applyProviderImagePipeline(
 	transformed = await normalizeForModel(transformed, model);
 	transformed = await dropUnreadableContextImages(transformed, model);
 	transformed = await applyProviderSizePass(transformed, model);
+	// Enforce the EXACT count cap before decoration. The first count pass kept a
+	// slack multiple so the decode pass could consume the overage out of images
+	// that fail it; those passes have now run, so the survivors are final. A
+	// request holding between 1x and 2x the cap still carries every survivor here,
+	// and decoration uploads/publishes each one — so without this clamp a blob for
+	// every one of 180 valid images is created when only 90 can be sent. Bytes
+	// stay for the post-decoration clamp: a reference carries none, so byte
+	// accounting is only correct once decoration has settled which images travel
+	// inline.
+	transformed = clampImageCountToCap(transformed, model, replaysNativeHistory, providerImageBudget(model.provider));
 	// Decoration BEFORE the byte budget. A successful blob upload turns inline
 	// base64 into a provider file or a URL, and a reference puts no bytes on the
 	// wire — so clamping first charged bytes the request was about to stop

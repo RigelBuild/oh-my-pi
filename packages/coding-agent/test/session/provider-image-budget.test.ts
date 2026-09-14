@@ -2312,3 +2312,163 @@ describe("computer pairing across a replayed user/developer payload", () => {
 		).toBe(false);
 	});
 });
+
+describe("byte clamp preserves what actually reaches the wire", () => {
+	it("keeps a full snapshot splicing after its last replayable result is cleared", async () => {
+		// A `dt`-falsy FULL snapshot whose only replayable output is an oversized
+		// `image_generation_call` (plus reasoning). Clearing its result for the
+		// byte budget makes `sanitizeOpenAIResponsesAssistantHistoryItemsForReplay`
+		// return `undefined`, so `buildResponsesInput()` stops treating the payload
+		// as a snapshot and does not splice — resurrecting the superseded
+		// pre-snapshot user turn AND losing the snapshot. A replayable omission item
+		// keeps the splice semantics intact.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+		const over = "o".repeat(budget + 1);
+		const stale = "STALE_PRE_SNAPSHOT_CONTEXT_MARKER";
+		const context: Context = {
+			messages: [
+				// Superseded pre-snapshot history the splice is supposed to discard.
+				{ role: "user", timestamp: 1, content: [text(stale)] },
+				{
+					...assistantTurn([], 2),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						// No `dt`: a full-snapshot replacement. Reasoning plus one oversized
+						// generation result — the only replayable output.
+						items: [
+							{ type: "reasoning", id: "rs_snap", summary: [] },
+							{ type: "image_generation_call", id: "ig_0", status: "completed", result: over },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would.
+		const wire = buildResponsesInput({
+			model: OPENAI_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): clearing the result stopped the payload splicing, so the
+		// pre-snapshot user turn came back onto the wire.
+		expect(serialized).not.toContain(stale);
+		// The oversized result is gone either way.
+		expect(serialized).not.toContain(over);
+		// The splice still ran: the retained omission item stands in for the snapshot.
+		expect(serialized).toContain("[image omitted: provider image limit]");
+	});
+
+	it("clamps the final image count before decoration uploads blobs", async () => {
+		// Anthropic's count cap is 90; the preliminary count pass keeps up to a
+		// slack multiple (180) so the decode pass can consume the overage. With
+		// 135 valid images (between 1x and 2x the cap) every one survives to
+		// decoration, which uploads/publishes a blob for each — so without an exact
+		// count clamp ahead of decoration, 135 blobs are created when only 90 can
+		// be sent.
+		const budget = providerImageBudget(ANTHROPIC_MODEL.provider);
+		const admissible = budget * (1 + PROVIDER_IMAGE_COUNT_DECODE_SLACK);
+		const total = Math.floor(budget * 1.5);
+		// Between 1x and 2x the cap: the count pass keeps all of them.
+		expect(total).toBeGreaterThan(budget);
+		expect(total).toBeLessThanOrEqual(admissible);
+		// A real, decodable PNG so the unreadable pass keeps it an image all the way
+		// to decoration; a junk string would be rewritten to a text notice first.
+		const png = Buffer.from(largeDecodablePng(8)).toString("base64");
+		const context: Context = {
+			messages: Array.from({ length: total }, (_unused, index) => ({
+				role: "user" as const,
+				content: [image(png)],
+				timestamp: index,
+			})),
+		};
+
+		// The count of images the decoration stage is handed to upload.
+		let uploaded = 0;
+		const decorate = async (decorating: Context): Promise<Context> => {
+			for (const message of decorating.messages) {
+				if (!Array.isArray(message.content)) continue;
+				for (const part of message.content) if (part.type === "image") uploaded++;
+			}
+			return {
+				...decorating,
+				messages: decorating.messages.map(message => {
+					if (message.role !== "user" || !Array.isArray(message.content)) return message;
+					return {
+						...message,
+						content: message.content.map(part =>
+							part.type === "image" ? { ...part, data: "", url: "https://blobs.example/x.png" } : part,
+						),
+					};
+				}),
+			};
+		};
+
+		await applyProviderImagePipeline(context, ANTHROPIC_MODEL, async ctx => ctx, true, decorate);
+
+		// RED (pre-fix): decoration ran before the exact clamp, so it uploaded every
+		// one of the 135 survivors instead of the 90 the request can carry.
+		expect(uploaded).toBe(budget);
+	});
+
+	it("does not let a malformed generation result evict a live image", async () => {
+		// An incremental payload holds an `image_generation_call` with a nonempty
+		// result but no valid string `id`. The Responses sanitizer drops it before
+		// the request is built, so its bytes never reach the wire — but the tally
+		// charged them. An older live image plus that dead result exceeds the byte
+		// budget, so the oldest-first clamp deleted the LIVE image and the converter
+		// then dropped the malformed result: the request ended with neither.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+		const live = "L".repeat(Math.floor(budget * 0.7));
+		const dead = "D".repeat(Math.floor(budget * 0.7));
+		const context: Context = {
+			messages: [
+				// The older live image: on its own it fits the byte budget.
+				{ role: "user", timestamp: 1, content: [image(live)] },
+				{
+					...assistantTurn([], 2),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						// Incremental append, so the live image stays on the wire.
+						dt: true,
+						items: [
+							{ type: "reasoning", id: "rs_keepme", summary: [] },
+							// Malformed: a nonempty result but NO `id`, so the sanitizer drops it.
+							{ type: "image_generation_call", status: "completed", result: dead },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		const wire = buildResponsesInput({
+			model: OPENAI_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the dead result was charged, the live image was evicted to
+		// fit it, and the converter then dropped the malformed result — so the wire
+		// carried neither.
+		expect(serialized).toContain(live);
+		// The malformed result never reaches the wire regardless.
+		expect(serialized).not.toContain(dead);
+	});
+});
