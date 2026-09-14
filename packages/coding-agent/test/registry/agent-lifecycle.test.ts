@@ -1704,6 +1704,76 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("Handoff-Failed")?.status).toBe("parked");
 	});
 
+	// Two top-level sessions share the global lifecycle. Restarting session A must
+	// touch ONLY A's ownership chain: B's adopted child must not be drained,
+	// parked, or stale-marked, because B is still live and its reviver still
+	// closes over B's live dependencies. An unscoped parkAll() snapshotted EVERY
+	// adopted id, so A's recycle parked B's child and marked its reviver stale —
+	// a later revival then rejected (no factory) or rebuilt it through A's
+	// replacement factory, both wrong.
+	//
+	// RED (pre-fix): B's child is parked and its retained reviver is invoked with
+	// its reviverStale flag set, so this reads it as parked after A's recycle.
+	it("scopes a recycle's parking to the restarting parent's ownership chain", async () => {
+		// A's child, owned by top-level id "SessionA".
+		const aChild = registry.register({
+			id: "A-child",
+			displayName: "task",
+			kind: "sub",
+			parentId: "SessionA",
+			session: makeSessionStub().session,
+			sessionFile: "/tmp/A-child.jsonl",
+			status: "idle",
+		});
+		lifecycle.adopt("A-child", { idleTtlMs: 0, revive: async () => makeSessionStub().session }, aChild);
+
+		// B's child, owned by the OTHER live top-level id "SessionB". Its reviver
+		// stays valid across A's recycle, so a later revival returns THIS session.
+		const bReplacement = makeSessionStub();
+		const bChild = registry.register({
+			id: "B-child",
+			displayName: "task",
+			kind: "sub",
+			parentId: "SessionB",
+			session: makeSessionStub().session,
+			sessionFile: "/tmp/B-child.jsonl",
+			status: "idle",
+		});
+		let bReviverRuns = 0;
+		lifecycle.adopt(
+			"B-child",
+			{
+				idleTtlMs: 0,
+				revive: async () => {
+					bReviverRuns++;
+					return bReplacement.session;
+				},
+			},
+			bChild,
+		);
+
+		// Recycle A only.
+		const release = await lifecycle.parkAll(undefined, "SessionA");
+		try {
+			// A's child was parked, as the recycle intends.
+			expect(registry.get("A-child")?.status).toBe("parked");
+			expect(registry.get("A-child")?.session).toBeNull();
+			// B's child is UNTOUCHED: still idle, still live, never drained/parked.
+			expect(registry.get("B-child")?.status).toBe("idle");
+			expect(registry.get("B-child")?.session).not.toBeNull();
+		} finally {
+			release();
+		}
+
+		// And B's reviver was NOT marked stale: a park + revive of B's child comes
+		// back through its OWN reviver, not refused for a missing factory. If A's
+		// recycle had stale-marked it, ensureLive would throw (no factory installed).
+		await lifecycle.park("B-child");
+		expect(registry.get("B-child")?.status).toBe("parked");
+		expect(await lifecycle.ensureLive("B-child")).toBe(bReplacement.session);
+		expect(bReviverRuns).toBe(1);
+	});
+
 	// Two overlapping recycles, and the failure belongs to the one the waiter
 	// never gets a reference to. A release DELETES its entry before resolving,
 	// so an outcome kept on the entry is readable only by a waiter that already

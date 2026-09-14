@@ -372,6 +372,32 @@ export class AgentLifecycleManager {
 	}
 
 	/**
+	 * Whether adopted `id` belongs to top-level `ownerId`'s ownership chain —
+	 * i.e. walking `parentId` up from the adopted ref reaches `ownerId`. Used to
+	 * scope a recycle's parking to the restarting parent: with two callback-
+	 * enabled top-level sessions sharing the global lifecycle, session A's
+	 * recycle must not park, drain, or stale-mark session B's children.
+	 *
+	 * `undefined` ownerId means "no scoping" — every adoption qualifies, the
+	 * process-teardown behavior. The walk is bounded by a seen-set against a
+	 * cyclic `parentId` chain and stops at `MAIN_AGENT_ID`, which no scoped
+	 * recycle owns (the top-level session's own id is its `ownerId`, never
+	 * `Main` unless it IS Main).
+	 */
+	#isOwnedBy(id: string, ownerId: string | undefined): boolean {
+		if (ownerId === undefined) return true;
+		let current: string | undefined = id;
+		const seen = new Set<string>();
+		while (current && !seen.has(current)) {
+			if (current === ownerId) return true;
+			seen.add(current);
+			const ref: AgentRef | undefined = this.#adopted.get(current)?.ref ?? this.#registry.get(current);
+			current = ref?.parentId;
+		}
+		return false;
+	}
+
+	/**
 	 * Dispose the live session, detach it from the registry, and mark the
 	 * agent `parked`. No-op unless the id is adopted and live.
 	 *
@@ -623,7 +649,7 @@ export class AgentLifecycleManager {
 	 * left to be parked, because the parent is already refusing new work and a
 	 * permanent wedge is worse than one aborted turn.
 	 */
-	async #drainRunningAdoptions(deadlineAt: number): Promise<void> {
+	async #drainRunningAdoptions(deadlineAt: number, ownerId?: string): Promise<void> {
 		// Looped, not a single pass, for the same reason the re-read below exists
 		// one scope in: a pass that observes nothing running still spends a
 		// microtask, and an `ensureLive()` that already handed back an idle child
@@ -635,22 +661,26 @@ export class AgentLifecycleManager {
 		// mid-request. Bounded by the same deadline as everything else here, and
 		// each pass either observes a distinct turn ending or finds nothing.
 		while (Date.now() < deadlineAt) {
-			if (await this.#drainRunningAdoptionsOnce(deadlineAt)) continue;
+			if (await this.#drainRunningAdoptionsOnce(deadlineAt, ownerId)) continue;
 			// A pass that found nothing running still spent a microtask, so yield
 			// once and re-read before committing: that is the whole window, and a
 			// continuation dispatching in it is what this loop exists to catch.
 			await Promise.resolve();
-			if (!this.#hasRunningAdoption()) return;
+			if (!this.#hasRunningAdoption(ownerId)) return;
 		}
 	}
 
-	#hasRunningAdoption(): boolean {
-		return [...this.#adopted.keys()].some(id => this.#registry.get(id)?.status === "running");
+	#hasRunningAdoption(ownerId?: string): boolean {
+		return [...this.#adopted.keys()].some(
+			id => this.#isOwnedBy(id, ownerId) && this.#registry.get(id)?.status === "running",
+		);
 	}
 
 	/** One drain pass. Returns whether anything was running (so a re-read is worth a pass). */
-	async #drainRunningAdoptionsOnce(deadlineAt: number): Promise<boolean> {
-		const running = [...this.#adopted.keys()].filter(id => this.#registry.get(id)?.status === "running");
+	async #drainRunningAdoptionsOnce(deadlineAt: number, ownerId?: string): Promise<boolean> {
+		const running = [...this.#adopted.keys()].filter(
+			id => this.#isOwnedBy(id, ownerId) && this.#registry.get(id)?.status === "running",
+		);
 		if (running.length === 0) return false;
 		const remaining = new Set(running);
 		const settled = Promise.withResolvers<void>();
@@ -934,7 +964,10 @@ export class AgentLifecycleManager {
 	 * own way out (the parking phase's own `catch`) is also a failure by the same
 	 * reasoning — it never reached a handoff at all.
 	 */
-	async parkAll(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<ParkingBarrierRelease> {
+	async parkAll(
+		deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS,
+		ownerId?: string,
+	): Promise<ParkingBarrierRelease> {
 		const resolvers = Promise.withResolvers<void>();
 		const barrier: ParkingBarrier = { promise: resolvers.promise };
 		// Added before the first await so an ensureLive() in the same tick — the
@@ -983,7 +1016,10 @@ export class AgentLifecycleManager {
 			// `#revive` consults before attaching — which turns it into a clean
 			// failure for its waiter instead of exactly the live child this barrier
 			// promises to exclude.
-			const pending = [...this.#revivals.values()];
+			// Scope the pre-pass to the recycling parent's chain: a revival for
+			// another live top-level session's child must neither be waited on nor
+			// fenced by this recycle.
+			const pending = [...this.#revivals.values()].filter(revival => this.#isOwnedBy(revival.ref.id, ownerId));
 			const inflight = pending.map(revival => revival.promise);
 			if (inflight.length > 0) {
 				const settled = Promise.allSettled(inflight).then(() => {});
@@ -1018,7 +1054,7 @@ export class AgentLifecycleManager {
 			// The wait is event-driven off the registry's own `status_changed`, not
 			// polled: `running` → `idle` is exactly the transition that ends a turn,
 			// and the same event the TTL timer re-arms on.
-			await this.#drainRunningAdoptions(deadlineAt);
+			await this.#drainRunningAdoptions(deadlineAt, ownerId);
 
 			// `#revivals` is intentionally NOT consulted here: `ensureLive()` deletes
 			// each entry in its own `finally`, and the pre-pass above settled every
@@ -1027,7 +1063,9 @@ export class AgentLifecycleManager {
 			// in flight past the deadline was fenced above, so it fails rather than
 			// attaching behind this snapshot — blocking here instead is the wedge
 			// the deadline exists to prevent.
-			const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
+			const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])].filter(id =>
+				this.#isOwnedBy(id, ownerId),
+			);
 			await Promise.all(
 				ids.map(async id => {
 					const park = this.park(id);
@@ -1061,7 +1099,7 @@ export class AgentLifecycleManager {
 			// miss exactly that record. Nothing can adopt after this point — the
 			// barrier blocks revival until the caller releases, and an abandoned
 			// revival is fenced and refuses to attach.
-			this.#markRevivedDependenciesStale();
+			this.#markRevivedDependenciesStale(ownerId);
 		} catch (error) {
 			release();
 			throw error;
@@ -1071,18 +1109,21 @@ export class AgentLifecycleManager {
 
 	/**
 	 * Mark every adoption's retained reviver as belonging to a parent that is
-	 * being replaced. Covers EVERY adoption this manager holds, not just the ids
-	 * {@link parkAll} snapshotted: an adoption whose ref is already `parked`
-	 * (its TTL expired earlier) still carries the same recycling parent's
-	 * closure, and a live-session record parked by this call carries it too. A
-	 * cleared flag is never re-set here — {@link #resolveAndRevive} clears it
-	 * only after a factory reviver replaced the closure, and that replacement
-	 * belongs to the parent that installed the factory, which a later recycle
-	 * marks in its own turn.
+	 * being replaced. Covers EVERY adoption in the recycling parent's ownership
+	 * chain, not just the ids {@link parkAll} snapshotted: an adoption whose ref
+	 * is already `parked` (its TTL expired earlier) still carries the same
+	 * recycling parent's closure, and a live-session record parked by this call
+	 * carries it too. A cleared flag is never re-set here —
+	 * {@link #resolveAndRevive} clears it only after a factory reviver replaced
+	 * the closure, and that replacement belongs to the parent that installed the
+	 * factory, which a later recycle marks in its own turn.
+	 *
+	 * Scoped to `ownerId`: another live top-level session's children keep their
+	 * own valid revivers, so a recycle of one parent never strands the other's.
 	 */
-	#markRevivedDependenciesStale(): void {
-		for (const adopted of this.#adopted.values()) {
-			if (adopted.revive) adopted.reviverStale = true;
+	#markRevivedDependenciesStale(ownerId: string | undefined): void {
+		for (const [id, adopted] of this.#adopted) {
+			if (adopted.revive && this.#isOwnedBy(id, ownerId)) adopted.reviverStale = true;
 		}
 	}
 

@@ -31,6 +31,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as persistedRevive from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { mockFetch } from "./helpers/fetch-mock";
@@ -854,6 +855,7 @@ describe("restart reconstruction reattach", () => {
 			id: "Sub",
 			displayName: "task",
 			kind: "sub",
+			parentId: "Main",
 			session: subSession,
 			sessionFile: subSessionFile,
 			status: "idle",
@@ -932,6 +934,126 @@ describe("restart reconstruction reattach", () => {
 		}
 	});
 
+	// The recycle marks every retained child reviver stale, so after a restart a
+	// parked child can ONLY come back through a persisted-subagent reviver factory
+	// the REPLACEMENT parent installs. `main.ts` installs that factory for the
+	// stock CLI, but the CLI never enables restart; an ordinary SDK host following
+	// the documented `createAgentSession` reconstruction installs none, so without
+	// the SDK path installing it, `ensureLive()` rejects the parked child forever
+	// and the host has to wire undocumented internals to recover it.
+	//
+	// This drives a REAL SDK restart — the reconstruction callback rebuilds only
+	// through `createAgentSession`, never touching the lifecycle factory — and
+	// asserts the child revives afterward. The factory is spied to return a
+	// trivial reviver so the assertion is "a factory was installed and used", not
+	// a full cold-revive of a persisted transcript; its call count proves the SDK
+	// path installed it.
+	//
+	// RED (pre-fix): the replacement never installs a factory, so ensureLive("Sub")
+	// throws "no persisted-subagent reviver factory is installed".
+	it("installs a replacement reviver factory so a parked child revives after an SDK restart", async () => {
+		using tempDir = TempDir.createSync("@pi-restart-factory-");
+		const marker = Bun.nanoseconds().toString(36);
+		const api = `restart-factory-${marker}`;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("managed-primary", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+
+		const registry = AgentRegistry.global();
+		const lifecycle = AgentLifecycleManager.global();
+
+		// The trivial reviver the SPIED factory hands back — proves the factory
+		// was both installed AND consulted, without cold-reviving a real transcript.
+		let revivedSession: AgentSession | undefined;
+		const factorySpy = vi
+			.spyOn(persistedRevive, "createPersistedSubagentReviverFactory")
+			.mockReturnValue(async () => async () => {
+				revivedSession = { dispose: async () => {} } as unknown as AgentSession;
+				return revivedSession;
+			});
+
+		// An idle adopted subagent, exactly as the executor hands one over.
+		const subSessionFile = tempDir.join("sub-agent.jsonl");
+		await fs.writeFile(subSessionFile, "");
+		const subSession = { dispose: async () => {} } as unknown as AgentSession;
+		const subRef = registry.register({
+			id: "Sub",
+			displayName: "task",
+			kind: "sub",
+			parentId: "Main",
+			session: subSession,
+			sessionFile: subSessionFile,
+			status: "idle",
+		});
+		lifecycle.adopt("Sub", { idleTtlMs: 0, revive: async () => subSession }, subRef);
+
+		let reopenedManager: SessionManager | undefined;
+		let replacement: AgentSession | undefined;
+		const onRestartRequested = async ({ sessionFile }: { sessionId: string; sessionFile: string }) => {
+			reopenedManager = await SessionManager.open(sessionFile, tempDir.path());
+			const rebuilt = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager: reopenedManager,
+				authStorage,
+				modelRegistry,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				model: buildLocalModel(api),
+				disableExtensionDiscovery: true,
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				// The replacement is itself restartable — the same opt-in that makes
+				// the SDK path install the factory.
+				onRestartRequested: async () => {},
+			});
+			replacement = rebuilt.session;
+		};
+
+		const sessionManager = SessionManager.create(tempDir.path());
+		const { session: parent } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model: buildLocalModel(api),
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			onRestartRequested,
+		});
+		await sessionManager.ensureOnDisk();
+		await sessionManager.flush();
+
+		try {
+			const result = await parent.requestRestart();
+			expect(result.ok).toBe(true);
+			if (!replacement) throw new Error("Expected the restart callback to build a replacement session");
+
+			// The replacement installed a factory on the SAME global lifecycle: the
+			// parked child revives through it rather than being rejected.
+			expect(AgentLifecycleManager.global()).toBe(lifecycle);
+			expect(registry.get("Sub")?.status).toBe("parked");
+			const revived = await lifecycle.ensureLive("Sub");
+			if (!revivedSession) throw new Error("Expected the factory's reviver to have produced a session");
+			expect(revived).toBe(revivedSession);
+			// The factory the reviver came from was the one the SDK path installed.
+			expect(factorySpy).toHaveBeenCalled();
+		} finally {
+			await replacement?.dispose();
+			await reopenedManager?.close();
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
+
 	// The other half of the recycle's revival ordering. The case above proves the
 	// adopted ref SURVIVES; this proves a waiter cannot revive it too early.
 	//
@@ -978,21 +1100,12 @@ describe("restart reconstruction reattach", () => {
 			id: "Sub",
 			displayName: "task",
 			kind: "sub",
+			parentId: "Main",
 			session: subSession,
 			sessionFile: subSessionFile,
 			status: "idle",
 		});
 		lifecycle.adopt("Sub", { idleTtlMs: 0, revive: async () => subSession }, subRef);
-		// The replacement parent's factory is the route back across a recycle (the
-		// spawn-time closure above belongs to the parent being disposed), so the
-		// ordering probe lives in the reviver it produces.
-		lifecycle.setPersistedSubagentReviverFactory(
-			async () => async () => {
-				order.push("revived");
-				return revivedSession;
-			},
-			0,
-		);
 
 		let replacement: AgentSession | undefined;
 		let reopenedManager: SessionManager | undefined;
@@ -1012,8 +1125,18 @@ describe("restart reconstruction reattach", () => {
 				skipPythonPreflight: true,
 			});
 			replacement = rebuilt.session;
-			// The replacement now exists: this is the first instant at which a
-			// revived child has a live parent to borrow shared resources from.
+			// The replacement parent installs its factory — the route back across a
+			// recycle, since the spawn-time closure belongs to the disposed parent.
+			// The ordering probe lives in the reviver it produces.
+			lifecycle.setPersistedSubagentReviverFactory(
+				async () => async () => {
+					order.push("revived");
+					return revivedSession;
+				},
+				0,
+			);
+			// The replacement now exists and owns the revival factory: the first
+			// instant a revived child has a live parent to borrow resources from.
 			order.push("reattached");
 		};
 
@@ -1283,6 +1406,7 @@ describe("restart reconstruction reattach", () => {
 			id: "Sub",
 			displayName: "task",
 			kind: "sub",
+			parentId: "Main",
 			session: subSession,
 			sessionFile: subSessionFile,
 			status: "idle",

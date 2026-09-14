@@ -1087,6 +1087,72 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 		expect(session.isDisposed).toBe(true);
 	});
 
+	// The finding this whole window mechanism exists for: a handler that fires
+	// requestRestart() FIRE-AND-FORGET and then keeps doing async work is still
+	// using the live runtime. Releasing its window at the moment requestRestart()
+	// is INVOKED — rather than when the caller subscribes to the returned promise
+	// — lets the recycle observe zero in-flight prompts and dispose the session
+	// out from under the still-running handler. Invocation is not completion: only
+	// a subscription proves the caller is awaiting the outcome, so an unsubscribed
+	// restart must keep the window held until the handler exits.
+	//
+	// RED (pre-fix): requestRestart() released the window synchronously, so
+	// dispose ran while the handler was still parked on its post-restart work.
+	it("keeps the window held for a fire-and-forget restart while its handler keeps working", async () => {
+		const handlerEntered = Promise.withResolvers<void>();
+		const releaseHandler = Promise.withResolvers<void>();
+		let sessionAliveDuringWork: boolean | undefined;
+		let restart: Promise<RequestRestartResult> | undefined;
+		const extensionRunner = {
+			hasHandlers: () => false,
+			emit: async () => undefined,
+			emitBeforeAgentStart: async () => undefined,
+			getCommand: (name: string) =>
+				name === "recycle"
+					? {
+							name: "recycle",
+							description: "fires a restart, then keeps working without awaiting it",
+							handler: async () => {
+								// Fire-and-forget: the handler never awaits the promise, so
+								// its window is not released on subscription. Captured only so
+								// the test can await the recycle's completion deterministically
+								// AFTER the handler exits — capturing is not subscribing.
+								restart = session.requestRestart();
+								handlerEntered.resolve();
+								await releaseHandler.promise;
+								// The handler is still using the live session here; if the
+								// recycle disposed under it this reads the disposed state.
+								sessionAliveDuringWork = !session.isDisposed;
+							},
+						}
+					: undefined,
+			createCommandContext: () => ({}),
+			runScoped: <T>(run: () => T): T => run(),
+			emitError: () => {},
+		} as unknown as ExtensionRunner;
+		await buildLiveSession(undefined, extensionRunner);
+
+		const prompt = session.prompt("/recycle");
+		await handlerEntered.promise;
+
+		// Give the barrier every chance to (wrongly) flush and dispose while the
+		// handler is still parked on its own async work.
+		await drainEventLoop();
+		expect(session.isDisposed).toBe(false);
+
+		// The handler finishes on a still-live session, and only THEN does the
+		// window retire and the recycle proceed.
+		releaseHandler.resolve();
+		expect(await prompt).toBe(false);
+		expect(sessionAliveDuringWork).toBe(true);
+		// Await the recycle itself (not a fixed drain budget) so the terminal
+		// disposal check is load-independent: the handler has exited, so the window
+		// is retired and the restart can now settle.
+		if (!restart) throw new Error("Expected the handler to have captured its restart promise");
+		expect(await restart).toEqual({ ok: true });
+		expect(session.isDisposed).toBe(true);
+	});
+
 	// The residual hazard in the release above: the window is published on an
 	// AsyncLocalStorage store, and that store outlives the handler. A detached
 	// descendant the handler started — a timer, or a floating promise it never
