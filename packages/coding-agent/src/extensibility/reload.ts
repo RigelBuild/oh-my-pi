@@ -233,14 +233,10 @@ export async function reloadSkillsAndRules(options: ReloadSkillsAndRulesOptions)
 	// whose file still existed, regardless of what this pass actually bucketed.
 	const publishedTtsrRules = options.ttsrManager.getRules().filter(rule => ttsrRuleNames.has(rule.name));
 	const activeRules = [...rulebookRules, ...alwaysApplyRules, ...publishedTtsrRules];
-	// Publish both process-global snapshots together, gated at the swap point.
-	// Every disk scan above (`loadSkills`, `loadCapability`) is an `await`, so a
-	// caller disposed DURING discovery reaches here anyway; a fence at the call
-	// site ran before this function and cannot see that disposal. Re-checking
-	// `shouldAbort` immediately before the swaps — which are synchronous, so no
-	// suspension separates the check from either — abandons the publication so a
-	// dead session never overwrites the roster a live one already published. The
-	// caller's session-local state below still takes the fresh roster.
+	// Gated at the swap point, not the call site: every scan above is an `await`,
+	// so a caller disposed during discovery reaches here anyway. The check and
+	// the swaps are adjacent and synchronous, so no future await can separate
+	// them. Session-local state below still takes the fresh roster.
 	if (publishGlobals && !options.shouldAbort?.()) {
 		setActiveSkills(skills);
 		setActiveRules(activeRules);
