@@ -62,7 +62,7 @@ function collectImageStats(
 ): { total: number; inlineSizes: number[] } {
 	let total = 0;
 	const inlineSizes: number[] = [];
-	const pairedComputerCallIds = collectPairedComputerCallIds(context);
+	const pairedComputerCallIds = collectPairedComputerCallIds(context, countModel, replaysNativeHistory);
 	for (const message of context.messages) {
 		if (message.role === "assistant") {
 			// An assistant's generic `content` images are display-only, but its
@@ -527,10 +527,28 @@ function serializesDemotedScreenshotNote(model: Model): boolean {
  * is emitted for an assistant tool call whose `providerMetadata.type` is
  * `"computer"`, so that is what pairs a later result's screenshot.
  */
-function collectPairedComputerCallIds(context: Context): Set<string> {
-	const ids = new Set<string>();
+function collectPairedComputerCallIds(context: Context, model: Model, replaysNativeHistory: boolean): Set<string> {
+	let ids = new Set<string>();
 	for (const message of context.messages) {
-		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		if (message.role !== "assistant") continue;
+		// A replayed payload with `dt` falsy is a FULL-SNAPSHOT replacement:
+		// `convertConversationMessages()` splices away everything built so far and
+		// clears its pair set, so an earlier generic computer call is simply not on
+		// the wire. Recording it anyway made `sendsComputerScreenshot()` charge the
+		// metadata copy, and under byte-only pressure the clamp cleared that
+		// metadata while the generic mirror it left behind is what actually
+		// travelled — so the drop reclaimed nothing and the request still 413'd.
+		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
+		if (payload && !payload.dt) {
+			ids = new Set<string>();
+			for (const item of payload.items) {
+				if (item.type !== "computer_call") continue;
+				const callId = item.call_id;
+				if (typeof callId === "string") ids.add(normalizeComputerCallId(callId));
+			}
+			continue;
+		}
+		if (!Array.isArray(message.content)) continue;
 		for (const block of message.content) {
 			if (block.type !== "toolCall") continue;
 			if (block.providerMetadata?.type !== "computer") continue;
@@ -951,7 +969,9 @@ export function clampProviderContextImageCount(context: Context, model: Model, r
 		remainingInlineDrops: 0,
 		model,
 		replaysNativeHistory,
-		pairedComputerCallIds: collectPairedComputerCallIds(context),
+		// Same set the accounting used: a clamp deciding pairing differently from
+		// the tally clears metadata whose mirror then travels instead.
+		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 	});
 }
 
@@ -982,7 +1002,9 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 		remainingInlineDrops: inlineDrops,
 		model,
 		replaysNativeHistory,
-		pairedComputerCallIds: collectPairedComputerCallIds(context),
+		// Same set the accounting used: a clamp deciding pairing differently from
+		// the tally clears metadata whose mirror then travels instead.
+		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 	});
 }
 

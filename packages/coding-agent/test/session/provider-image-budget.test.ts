@@ -1781,3 +1781,55 @@ describe("replayed assistant payload byte accounting", () => {
 		expect(serialized).not.toContain(big);
 	});
 });
+
+describe("computer pairing across a snapshot replacement", () => {
+	it("charges the mirror of a computer call a full snapshot splices away", async () => {
+		// `buildResponsesInput()` treats a `dt`-falsy assistant payload as a full
+		// SNAPSHOT: it splices away every message built so far and clears its
+		// computer-call pair set, so the generic computer call below is not on the
+		// wire. Recording it anyway made `sendsComputerScreenshot()` charge the
+		// METADATA copy — which for an unpaired result never travels — instead of
+		// the generic content mirror the converter actually sends. With the mirror
+		// the oversized half, the tally read a tiny screenshot, owed no drop, and
+		// the request still went out over the byte limit.
+		const tinyScreenshot = "t".repeat(64);
+		const bigMirror = "m".repeat(providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api) + 1);
+		const unpairedResult: ToolResultMessage = {
+			role: "toolResult",
+			timestamp: 2,
+			toolCallId: "call-spliced",
+			toolName: "computer",
+			content: [text("screenshot"), image(bigMirror)],
+			isError: false,
+			providerMetadata: {
+				type: "computer",
+				acknowledgedSafetyChecks: [],
+				screenshot: { type: "computer_screenshot", image_url: dataUri(tinyScreenshot) },
+			},
+		};
+		const context: Context = {
+			messages: [
+				computerCallMessage("call-spliced"),
+				unpairedResult,
+				{
+					...assistantTurn([], 3),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						// No `dt`: the splice that takes the call above off the wire.
+						items: [{ type: "reasoning", id: "rs_keepme", summary: [] }],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// RED (pre-fix): the call counted as paired, so the tally charged the 64-byte
+		// metadata screenshot, owed nothing, and the oversized mirror survived.
+		expect(imageData(clamped).some(data => data === bigMirror)).toBe(false);
+	});
+});
