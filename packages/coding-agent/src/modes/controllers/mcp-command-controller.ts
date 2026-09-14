@@ -5,7 +5,7 @@
  */
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import { clearCache as clearFsCache } from "../../capability/fs";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
@@ -56,7 +56,7 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../mcp/types";
-import { shortenEmbeddedPaths, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { sanitizeDisplayWarning, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { urlHyperlinkAlways } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
@@ -2202,17 +2202,13 @@ export class MCPCommandController {
 
 	/**
 	 * Normalize a transport-controlled error string for a single bounded TUI
-	 * row: collapse newlines to spaces, strip control chars, replace tabs, and
-	 * cap width. Shared by the per-server failure rows and the final rebind
-	 * catch so both apply identical normalization.
+	 * row via the shared display-warning sanitizer: collapse newlines to spaces,
+	 * strip control chars, replace tabs, shorten embedded home paths, and cap
+	 * width. `reservedWidth` charges a caller's own prefix/indent to the budget.
+	 * Shared by the per-server failure rows and the final rebind catch.
 	 */
 	#sanitizeRefreshErrorText(text: string, reservedWidth = 0): string {
-		// `shortenEmbeddedPaths` runs BEFORE the cap so the width budget is spent
-		// on the text that will actually print, rather than being consumed by a
-		// home prefix that is about to be replaced. Same pipeline order as
-		// `sanitizeMcpStatusText`, which renders the connection-status rows.
-		const normalized = shortenEmbeddedPaths(replaceTabs(sanitizeText(text.replace(/[\r\n]+/g, " "))));
-		return truncateToWidth(normalized, Math.max(1, TRUNCATE_LENGTHS.LINE - reservedWidth));
+		return sanitizeDisplayWarning(text, { maxWidth: TRUNCATE_LENGTHS.LINE, reservedWidth });
 	}
 
 	/**
