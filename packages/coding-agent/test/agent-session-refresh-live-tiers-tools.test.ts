@@ -1680,3 +1680,96 @@ describe("createAgentSession resume: a historical role-less cycle pin survives a
 		}
 	});
 });
+
+// A session resumed with NO prior `service_tier_change` receipt but an explicit
+// `--openai-service-tier` must initialize the OTHER families as settings-tracking,
+// exactly as a fresh session does. Pre-fix the resume path reused the "carry
+// provenance from the receipt" fallback, which with no receipt supplied an EMPTY
+// tracking list — freezing Anthropic and Google alongside the intentional OpenAI
+// pin, so a later `tier.anthropic` edit could never reach the live request.
+describe("createAgentSession resume: an unrecorded tier family keeps following settings", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("re-derives a tier.anthropic edit after resuming with only --openai-service-tier", async () => {
+		const tempDir = TempDir.createSync("@pi-refresh-tier-unrecorded-");
+		const cwd = tempDir.path();
+		const anthropicModel = bundledAnthropic("claude-sonnet-4-5");
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const settingsPath = path.join(cwd, "config.yml");
+		// Anthropic starts unset, so moving it later is a real transition.
+		await fs.writeFile(settingsPath, "tier:\n  anthropic: none\n");
+
+		// A prior transcript with a real exchange but NO service_tier_change:
+		// this is the "no prior receipt" case, distinct from a legacy receipt.
+		const prior = SessionManager.create(cwd, path.join(cwd, "prior"));
+		prior.appendMessage({ role: "user", content: "earlier turn", timestamp: Date.now() });
+		prior.appendMessage({
+			role: "assistant",
+			provider: "anthropic",
+			model: anthropicModel.id,
+			content: [{ type: "text", text: "earlier reply" }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			api: "anthropic-messages",
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const sessionFile = prior.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		expect(prior.getBranch().some(entry => entry.type === "service_tier_change")).toBe(false);
+		await prior.close();
+
+		const sessionManager = await SessionManager.open(sessionFile, path.join(cwd, "prior"));
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			sessionManager,
+			authStorage,
+			modelRegistry,
+			settings: await Settings.loadIsolated({
+				cwd,
+				agentDir: cwd,
+				overrides: { "compaction.enabled": false },
+			}),
+			model: anthropicModel,
+			// Pins OpenAI alone; the other families have no receipt provenance.
+			openAIServiceTier: "flex",
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			skills: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+
+		try {
+			expect(session.serviceTierByFamily.anthropic).toBeUndefined();
+
+			await fs.writeFile(settingsPath, "tier:\n  anthropic: priority\n");
+			const result = await session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// Pre-fix: the resume receipt marked NO family as tracking, so Anthropic
+			// was read as pinned and the reload could not move it.
+			expect(session.serviceTierByFamily.anthropic).toBe("priority");
+			// The intentional OpenAI pin still stands.
+			expect(session.serviceTierByFamily.openai).toBe("flex");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+			await tempDir.remove();
+		}
+	});
+});
