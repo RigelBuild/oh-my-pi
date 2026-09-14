@@ -585,11 +585,16 @@ class SubscriptionReleasePromise<T> extends Promise<T> {
 	#onFirstSubscribe: (() => void) | undefined;
 
 	static wrap<T>(inner: Promise<T>, onFirstSubscribe: () => void): SubscriptionReleasePromise<T> {
-		const wrapped = new SubscriptionReleasePromise<T>((resolve, reject) => {
-			inner.then(resolve, reject);
-		});
-		wrapped.#onFirstSubscribe = onFirstSubscribe;
-		return wrapped;
+		// `withResolvers()` constructs through `this`, so `promise` is a real
+		// SubscriptionReleasePromise at runtime; the lib type only knows `Promise`.
+		const { promise, resolve, reject } = this.withResolvers<T>() as {
+			promise: SubscriptionReleasePromise<T>;
+			resolve: (value: T | PromiseLike<T>) => void;
+			reject: (reason?: unknown) => void;
+		};
+		inner.then(resolve, reject);
+		promise.#onFirstSubscribe = onFirstSubscribe;
+		return promise;
 	}
 
 	// oxlint-disable-next-line unicorn/no-thenable -- the subscription hook is the whole point; see requestRestart()
