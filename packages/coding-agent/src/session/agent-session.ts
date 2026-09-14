@@ -2641,6 +2641,22 @@ export class AgentSession {
 	}
 
 	/**
+	 * Re-arms the interactive idle-compaction timer after a reload changes an
+	 * idle setting. Wired by the host because the timer lives in the interactive
+	 * `EventController`, which the headless session cannot reach — the same path
+	 * the settings SELECTOR calls for `compaction.idleEnabled`/
+	 * `idleThresholdTokens`/`idleTimeoutSeconds`. An armed callback holds the old
+	 * threshold/timeout and never re-checks `idleEnabled`, and enabling from off
+	 * arms nothing, so a reload alone could compact after a disable or fail to
+	 * compact until another turn ends.
+	 */
+	#reconcileIdleCompaction: (() => void) | undefined;
+
+	setReconcileIdleCompaction(reconciler: (() => void) | null): void {
+		this.#reconcileIdleCompaction = reconciler ?? undefined;
+	}
+
+	/**
 	 * Re-anchor mode state to the session a branch just minted. Branching mints a
 	 * new session id/file (see {@link SessionManager.createBranchedSession}), so
 	 * without this the interactive-mode reconciler keeps the pre-branch vibe owner
@@ -6053,6 +6069,17 @@ export class AgentSession {
 				// built from `secrets.yml`, which this refresh also re-reads, so the
 				// rebuild below is keyed on the flag OR the file's content moving.
 				secretsEnabled: this.settings.get("secrets.enabled"),
+				// The interactive idle-compaction timer copies these three into an
+				// armed `setTimeout` and never re-reads them, so a reload that moved
+				// any one left the armed callback on the old threshold/timeout and
+				// blind to a disable — the settings selector re-arms for exactly
+				// these keys. Captured so the re-arm below stays a no-op for an
+				// unrelated edit.
+				idleCompaction: [
+					this.settings.get("compaction.idleEnabled"),
+					this.settings.get("compaction.idleThresholdTokens"),
+					this.settings.get("compaction.idleTimeoutSeconds"),
+				],
 			};
 			// The search/image implementations read MODULE-level state that
 			// `applyProviderGlobalsFromSettings` installs at startup, never
@@ -6379,6 +6406,22 @@ export class AgentSession {
 					])
 				) {
 					initializeWithSettings(this.settings);
+				}
+				// Re-arm the interactive idle-compaction timer through the same path
+				// the settings selector uses for these keys. `refreshIdleCompactionTimer`
+				// cancels the armed callback and reschedules from the reloaded values,
+				// so a threshold/timeout edit takes effect, a disable stops a pending
+				// compaction, and an enable-from-off arms a timer the reload otherwise
+				// left absent. Gated on a real value change, like the provider gates
+				// above, so an unrelated settings edit is a no-op.
+				if (
+					!Bun.deepEquals(previousSubsystems.idleCompaction, [
+						this.settings.get("compaction.idleEnabled"),
+						this.settings.get("compaction.idleThresholdTokens"),
+						this.settings.get("compaction.idleTimeoutSeconds"),
+					])
+				) {
+					this.#reconcileIdleCompaction?.();
 				}
 				// Same class as the provider globals above: `lsp.shared` is copied
 				// into module state that `getOrCreateClient` reads when it cold-starts
