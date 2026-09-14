@@ -1073,11 +1073,9 @@ export class MCPManager {
 					const value = task.tracked.value;
 					if (!value) continue;
 					const { connection, serverTools, applyTicket } = value;
-					// A `disconnectServer`/`disconnectAll` during the 250 ms race
-					// removes this connection and clears the apply-ticket counter, so
-					// the ticket guard below no longer refuses a still-outstanding
-					// response. Re-check identity, as the background and reconnect
-					// apply paths do, before restoring a disconnected server's roster.
+					// A disconnect during the race clears the apply ticket too, so the
+					// guard below no longer refuses this outstanding response. Re-check
+					// identity, as the background and reconnect apply paths do.
 					if (this.#connections.get(name) !== connection) continue;
 					connectedServers.add(name);
 					// Same ordering decision the background handler makes. A
