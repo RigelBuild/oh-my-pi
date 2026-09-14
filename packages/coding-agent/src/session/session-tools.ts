@@ -2097,15 +2097,25 @@ export class SessionTools {
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
 
-		// Connected manager tools become active immediately. Extension-owned MCP
-		// tools retain their prior selection while both sets share one registry.
+		// A NEWLY connected manager tool becomes active immediately. One that was
+		// already here keeps its prior selection, like the extension-owned set
+		// below: re-adding every manager tool unconditionally silently re-enabled
+		// a tool the user had turned off through `/tools`, because a refresh runs
+		// for reasons that have nothing to do with MCP — any settings edit reaches
+		// here, and `reconcileProjectConfigFilter()` self-guards on no-change.
+		const previousActiveMcpToolNameSet = new Set(previousActiveMcpToolNames);
+		const selectedManagerToolNames = Array.from(this.#mcpManagerToolNames).filter(
+			name => !previousMcpManagerToolNames.has(name) || previousActiveMcpToolNameSet.has(name),
+		);
+		// Extension-owned MCP tools retain their prior selection while both sets
+		// share one registry.
 		const retainedActiveExtensionToolNames = previousActiveMcpToolNames.filter(
 			name => this.#extensionMcpTools.has(name) && this.#toolRegistry.has(name),
 		);
 		const nextActive = [
 			...new Set([
 				...this.#getActiveNonMCPToolNames(),
-				...this.#mcpManagerToolNames,
+				...selectedManagerToolNames,
 				...retainedActiveExtensionToolNames,
 			]),
 		];
