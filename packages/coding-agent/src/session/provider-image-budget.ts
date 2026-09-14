@@ -185,7 +185,14 @@ function replayedPayloadByteSizes(
 	if (!payload) return [];
 	const sizes: number[] = [];
 	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
-	for (const item of payload.items) {
+	// A `computer_call_output` whose `computer_call` does not precede it is an
+	// orphan `repairOrphanResponsesToolOutputs()` rewrites into a 16 KB-capped
+	// assistant note before the wire — so its screenshot never travels and must
+	// not be charged, the same exclusion the user/developer replay path applies.
+	const repairedOrphans = repairedOrphanItemIndices(payload.items, model);
+	for (let index = 0; index < payload.items.length; index++) {
+		if (repairedOrphans.has(index)) continue;
+		const item = payload.items[index];
 		const result = replayedImageResult(item);
 		if (result !== undefined) {
 			sizes.push(result.length);
@@ -234,7 +241,13 @@ function replayedAssistantInputImages(
 	if (!payload) return [];
 	const sizes: number[] = [];
 	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
-	for (const item of payload.items) {
+	// A `computer_call_output` the converter repairs into an assistant note puts
+	// no image part on the wire — same exclusion the byte path and the
+	// user/developer replay path apply.
+	const repairedOrphans = repairedOrphanItemIndices(payload.items, model);
+	for (let index = 0; index < payload.items.length; index++) {
+		if (repairedOrphans.has(index)) continue;
+		const item = payload.items[index];
 		// Demoted to assistant text by the converter, so it holds no image part —
 		// the same exclusion the user/developer replay path applies.
 		if (demotesNativeComputerItems && isReplayedComputerItem(item)) continue;
@@ -361,12 +374,23 @@ function replayedInputImages(
  * Whether this model's converter rewrites REPLAYED native computer items into
  * assistant text.
  *
- * `adaptResponsesReplayItemsForModel()` does this for every Responses route
+ * `adaptResponsesReplayItemsForModel()` does this for the SHARED
+ * `buildResponsesInput()` adapter (`openai-responses` / `azure-openai-responses`)
  * whenever `supportsComputerUse` is not true, so the item's screenshot travels
  * as text and consumes no image slot on either budget.
+ *
+ * NOT Codex. `openai-codex-responses` is a Responses route but replays through
+ * its own `convertMessages()`, never that shared adapter: it runs
+ * `unrollCodexComputerItems()` instead, which turns every `computer_call_output`
+ * into a user `input_image` (from `output.image_url` OR `output.file_id`) — an
+ * image part on the wire. Treating Codex as demoting therefore charged zero
+ * count debt for real screenshots, so a history of more than the cap's worth of
+ * URL/file-backed screenshots went out over the provider image limit.
  */
 function demotesReplayedComputerItems(model: Model): boolean {
-	return replaysOpenAIResponsesNativeHistory(model) && model.supportsComputerUse !== true;
+	return (
+		(model.api === "openai-responses" || model.api === "azure-openai-responses") && model.supportsComputerUse !== true
+	);
 }
 
 /** A replayed native computer call or its output. */
@@ -384,10 +408,19 @@ function isReplayedComputerItem(item: Record<string, unknown> | undefined): bool
  * for bytes that were already gone. Only the two routes that pass
  * `repairOrphanOutputs: true` do this; the Codex route replays the orphan
  * unchanged, so there its bytes are real.
+ *
+ * Empty on a DEMOTING model. `buildResponsesInput()` runs
+ * `adaptResponsesReplayItemsForModel()` per message FIRST — turning every
+ * replayed `computer_call_output` into an untruncated assistant note — and only
+ * then `repairOrphanResponsesToolOutputs()`, which by that point sees a
+ * `message`, not a `computer_call_output`, and leaves it alone. So a demoted
+ * orphan's full bytes DO travel and must be charged: {@link replayedPayloadByteSizes}
+ * and {@link replayedInputImages} record them through the demoted channel.
  */
 function repairedOrphanItemIndices(items: readonly Record<string, unknown>[], model: Model): ReadonlySet<number> {
 	const repaired = new Set<number>();
 	if (model.api !== "openai-responses" && model.api !== "azure-openai-responses") return repaired;
+	if (demotesReplayedComputerItems(model)) return repaired;
 	const precedingCalls = new Set<string>();
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index];
@@ -430,15 +463,26 @@ function hasCompactionMarker(items: ReadonlyArray<Record<string, unknown> | unde
 /**
  * The replayed image parts of an item: `input_image` at the top level or nested
  * in `content`, plus a `computer_call_output`'s screenshot `output`, which
- * `buildResponsesInput()` replays unchanged and which carries its `image_url` in
+ * `buildResponsesInput()` replays unchanged and which carries its screenshot in
  * its own position rather than inside an `input_image`.
+ *
+ * A computer screenshot travels as either an inline `output.image_url` data URI
+ * OR a server-side `output.file_id` reference. Both are sent as an image input —
+ * `buildResponsesInput()` replays the whole output unchanged on a
+ * computer-capable model, and Codex's `unrollCodexComputerItems()` rewrites
+ * either shape into an `input_image` — so both consume the per-request image
+ * COUNT. Recognizing only `image_url` left a file-backed screenshot in neither
+ * the tally nor the eviction path, so enough of them busted the count cap with
+ * no drop ever owed. Its bytes are 0: `inlineImageFromDataUri` reads nothing
+ * from a `file_id`, so it pays only the count, like any reference.
  */
 function nativeInputImageParts(item: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
 	if (!item) return [];
 	if (item.type === "input_image") return [item];
 	if (item.type === "computer_call_output") {
 		const output = item.output;
-		return isRecord(output) && typeof output.image_url === "string" ? [output] : [];
+		if (!isRecord(output)) return [];
+		return typeof output.image_url === "string" || typeof output.file_id === "string" ? [output] : [];
 	}
 	if (!Array.isArray(item.content)) return [];
 	return item.content.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "input_image");
@@ -982,8 +1026,14 @@ function clampAssistantMessage(message: AssistantMessage, state: ImageClampState
 	// with nothing to degrade it to in place, and a call left without its output
 	// is an orphan the provider rejects.
 	const droppedComputerCallIds = new Set<string>();
+	// A `computer_call_output` the converter repairs into an assistant note puts
+	// no bytes and no image part on the wire, so the accounting never charged it —
+	// evicting it here would spend an allowance a real image needs. Same skip the
+	// accounting and the user/developer eviction path apply.
+	const repairedOrphans = repairedOrphanItemIndices(payload.items, state.model);
 	for (let index = 0; index < payload.items.length; index++) {
 		if (!clampWanted(state)) break;
+		if (repairedOrphans.has(index)) continue;
 		const item = payload.items[index];
 		if (!item) continue;
 		// A generation result carries bytes but no image part, so it answers only

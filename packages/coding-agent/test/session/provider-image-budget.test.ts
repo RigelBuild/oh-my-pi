@@ -11,6 +11,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { willReplayOpenAIResponsesNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -2470,5 +2471,198 @@ describe("byte clamp preserves what actually reaches the wire", () => {
 		expect(serialized).toContain(live);
 		// The malformed result never reaches the wire regardless.
 		expect(serialized).not.toContain(dead);
+	});
+});
+
+describe("replayed computer screenshots reach the wire as image parts", () => {
+	// A Codex line whose provider is absent from the budget table, so it falls to
+	// the strict floor (5) — small enough to bust with a handful of screenshots.
+	const CODEX_SMALL_MODEL = buildModel({
+		id: "gpt-6-codex-cli",
+		name: "gpt-6-codex-cli",
+		api: "openai-codex-responses",
+		provider: "codex-small",
+		baseUrl: "https://chatgpt.com/backend-api/codex",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+		supportsComputerUse: false,
+	});
+
+	// A computer-capable Responses line on an unbudgeted provider, so its
+	// per-request image cap is the strict floor (5) too.
+	const COMPUTER_SMALL_MODEL = buildModel({
+		id: "gpt-6-computer",
+		name: "gpt-6-computer",
+		api: "openai-responses",
+		provider: "resp-small",
+		baseUrl: "https://api.openai.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+		supportsComputerUse: true,
+	});
+
+	/** `input_image` parts a converted Codex request carries, however nested. */
+	function codexInputImageCount(wire: readonly unknown[]): number {
+		let count = 0;
+		for (const item of wire) {
+			if (!isRecord(item) || !Array.isArray(item.content)) continue;
+			for (const part of item.content) if (isRecord(part) && part.type === "input_image") count++;
+		}
+		return count;
+	}
+
+	it("counts Codex-replayed computer screenshots so a history over the cap is evicted", () => {
+		// Codex is a Responses route but does NOT demote replayed computer items:
+		// its own `convertMessages()` runs `unrollCodexComputerItems()`, turning
+		// every `computer_call_output` into a user `input_image`. The demotion
+		// predicate wrongly treated Codex as demoting, so these screenshots accrued
+		// ZERO count debt and a history of more than the cap's worth went over the
+		// provider image limit.
+		const cap = providerImageBudget(CODEX_SMALL_MODEL.provider);
+		const over = cap + 2;
+		const items: Array<Record<string, unknown>> = [{ type: "compaction", id: "cmp" }];
+		for (let index = 0; index < over; index++) {
+			items.push({
+				type: "computer_call_output",
+				call_id: `call-${index}`,
+				// A server-resolved URL: no inline bytes, so ONLY the count binds.
+				output: { type: "computer_screenshot", image_url: `https://shots.example/${index}.png` },
+			});
+		}
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("restored codex history")],
+					providerPayload: { type: "openaiResponsesHistory", provider: CODEX_SMALL_MODEL.provider, items },
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, CODEX_SMALL_MODEL, true);
+
+		// The FINAL converted Codex input, the shape the request actually sends.
+		const wire = convertCodexResponsesMessages(CODEX_SMALL_MODEL, clamped);
+		// RED (pre-fix): every screenshot was excluded from the count, so none were
+		// evicted and the unrolled request carried all `over` image parts.
+		expect(codexInputImageCount(wire)).toBe(cap);
+	});
+
+	it("recognizes a file-backed native computer screenshot as an image part", () => {
+		// A computer-capable model replays `computer_call_output` unchanged. When
+		// its screenshot uses the supported `file_id` form instead of `image_url`,
+		// the native-image-parts helper returned nothing — so file-backed
+		// screenshots entered neither the tally nor the eviction path and a history
+		// over the cap shipped whole.
+		const cap = providerImageBudget(COMPUTER_SMALL_MODEL.provider);
+		const over = cap + 2;
+		const items: Array<Record<string, unknown>> = [{ type: "compaction", id: "cmp" }];
+		for (let index = 0; index < over; index++) {
+			// Paired call + output, so the output is not a repaired orphan the tally skips.
+			items.push({
+				type: "computer_call",
+				id: `cu_${index}`,
+				call_id: `call-${index}`,
+				action: { type: "screenshot" },
+				pending_safety_checks: [],
+				status: "completed",
+			});
+			items.push({
+				type: "computer_call_output",
+				call_id: `call-${index}`,
+				// The server-side FILE form, not `image_url`.
+				output: { type: "computer_screenshot", file_id: `file-${index}` },
+			});
+		}
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("restored history")],
+					providerPayload: { type: "openaiResponsesHistory", provider: COMPUTER_SMALL_MODEL.provider, items },
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_SMALL_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would.
+		const wire = buildResponsesInput({
+			model: COMPUTER_SMALL_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const screenshots = wire.filter(item => item.type === "computer_call_output").length;
+		// RED (pre-fix): file-backed screenshots were invisible to the count, so
+		// none were evicted and every one reached the wire.
+		expect(screenshots).toBe(cap);
+	});
+
+	it("excludes an assistant-payload orphan screenshot before charging its bytes", async () => {
+		// The assistant replay path tallied every `computer_call_output` without
+		// applying the orphan-repair skip the user/developer path uses. For a warm
+		// incremental assistant payload holding an orphan screenshot, the converter
+		// replaces it with a 16 KB-capped note — yet the loop charged the orphan's
+		// full data URI first, so an older VALID image could be evicted.
+		const budget = providerImageByteBudget(COMPUTER_MODEL.provider, COMPUTER_MODEL.api);
+		const valid = "V".repeat(Math.floor(budget * 0.7));
+		const orphan = "O".repeat(Math.floor(budget * 0.9));
+		const context: Context = {
+			messages: [
+				// The older valid image: on its own it fits the byte budget.
+				{ role: "user", timestamp: 1, content: [image(valid)] },
+				{
+					...assistantTurn([], 2),
+					api: COMPUTER_MODEL.api,
+					provider: COMPUTER_MODEL.provider,
+					model: COMPUTER_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: COMPUTER_MODEL.provider,
+						// Incremental append, so the older user image stays on the wire.
+						dt: true,
+						items: [
+							{ type: "reasoning", id: "rs_keepme", summary: [] },
+							// Orphan: no preceding `computer_call`, so the converter repairs it
+							// into a truncated note and its screenshot never travels.
+							{
+								type: "computer_call_output",
+								call_id: "gone",
+								output: { type: "computer_screenshot", image_url: dataUri(orphan) },
+							},
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL, true);
+
+		const wire = buildResponsesInput({
+			model: COMPUTER_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the orphan's full data URI was charged, the older valid
+		// image was evicted to fit it, and the converter then truncated the orphan —
+		// so the wire carried neither.
+		expect(serialized).toContain(valid);
+		// The orphan's oversized screenshot never reaches the wire regardless.
+		expect(serialized).not.toContain(orphan);
 	});
 });
