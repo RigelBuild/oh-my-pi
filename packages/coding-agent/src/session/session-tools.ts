@@ -165,6 +165,14 @@ interface SessionToolsOptions {
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
+	/**
+	 * Allocates the `xd://` state for a session that started with `tools.xdev`
+	 * FALSE, so a later false->true refresh can mount. Supplied by sdk.ts, which
+	 * owns the startup gates (`restrictToolNames`, an explicit tool list) the
+	 * initial allocation honors — an invocation that was never allowed xd://
+	 * returns undefined here rather than gaining it on a refresh.
+	 */
+	createXdevState?: () => XdevState | undefined;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Builds one boolean-gated built-in on demand, for a false->true refresh. */
 	createBooleanGatedTool?: (name: string) => Promise<AgentTool | null>;
@@ -276,6 +284,7 @@ export class SessionTools {
 	#mcpManagerToolNames = new Set<string>();
 	#extensionMcpTools = new Map<string, AgentTool>();
 	#xdev: XdevState | undefined;
+	readonly #createXdevState: (() => XdevState | undefined) | undefined;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	/**
@@ -398,6 +407,7 @@ export class SessionTools {
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
+		this.#createXdevState = options.createXdevState;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
 		}
@@ -591,6 +601,21 @@ export class SessionTools {
 	 * invocation-vs-settings split every gated tool follows.
 	 */
 	async applyReloadedXdevPresentation(): Promise<boolean> {
+		// A session that started with the setting FALSE has no state to reconcile,
+		// so the presentation stayed top-level while the refresh reported the new
+		// value applied. Allocate it on the transition — through the host factory,
+		// which applies the same startup gates, so an invocation that was never
+		// allowed xd:// still gets nothing.
+		if (!this.#xdev && this.#host.settings.get("tools.xdev")) {
+			const created = this.#createXdevState?.();
+			if (created) {
+				if (created.tools !== this.#toolRegistry) {
+					throw new Error("xd:// state must reference the canonical session tool map");
+				}
+				created.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+				this.#xdev = created;
+			}
+		}
 		if (!this.#xdev) return false;
 		// Reapplying the same selection is enough: `#applyActiveToolsByName`
 		// recomputes the mount set from the live setting on every apply, so this
