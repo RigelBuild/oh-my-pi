@@ -221,6 +221,8 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "./thinking";
+import { checkPythonKernelAvailability } from "./eval/py/kernel";
+import { resolveEvalBackends } from "./tools/eval-backends";
 import {
 	BashTool,
 	BUILTIN_TOOLS,
@@ -4259,6 +4261,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createBooleanGatedTool: async (name: string) => {
 				const factory = BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS];
 				if (!factory) return null;
+				// `eval` is the one gated built-in whose availability is a PROBE, not
+				// a setting. With both backends off at startup nothing probed, so a
+				// later `eval.py` edit reached here with reachability unknown — and
+				// activating on that advertised `eval` on a machine with no usable
+				// kernel, where a fresh session under the same settings omits it. Run
+				// the same check `createTools` runs, under the same condition.
+				if (name === "eval" && options.skipPythonPreflight !== true) {
+					const backends = resolveEvalBackends(toolSession);
+					if (!backends.js && backends.python) {
+						const availability = await checkPythonKernelAvailability(
+							toolSession.cwd,
+							settings.get("python.interpreter")?.trim() || undefined,
+						);
+						if (!availability.ok) {
+							logger.warn("Refusing to activate eval: Python kernel unavailable and JS backend disabled", {
+								reason: availability.reason,
+							});
+							return null;
+						}
+					}
+				}
 				const built = await factory(toolSession);
 				return built ? wrapToolWithMetaNotice(built) : null;
 			},

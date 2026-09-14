@@ -18,7 +18,7 @@
  *     it is either startup's settings-derived receipt (swappable) or an older
  *     Ctrl+P cycle pin (must be preserved).
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi, spyOn } from "bun:test";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -31,6 +31,7 @@ import { isSharedLspEnabled } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import * as pyKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -77,6 +78,8 @@ async function makeHarness(
 		/** Spawn depth, for the depth-dependent halves of the compound gates. */
 		taskDepth?: number;
 		enableMCP?: boolean;
+		/** Run the REAL Python preflight, for the probe-on-activation path. */
+		pythonPreflight?: boolean;
 	},
 ): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-refresh-live-tiers-tools-");
@@ -112,7 +115,7 @@ async function makeHarness(
 		slashCommands: [],
 		enableMCP: options?.enableMCP ?? false,
 		enableLsp: options?.enableLsp ?? false,
-		skipPythonPreflight: true,
+		skipPythonPreflight: options?.pythonPreflight !== true,
 		customTools: options?.customTools,
 		toolNames: options?.toolNames,
 		taskDepth: options?.taskDepth,
@@ -593,6 +596,38 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 			await h.dispose();
 		}
 	}, 20_000);
+
+	it("probes Python before activating eval that a refresh enabled", async () => {
+		// With both backends off at startup nothing probes, so reachability is
+		// UNKNOWN — not available. Recording the skipped probe as success let this
+		// refresh advertise and activate `eval` on a machine with no usable kernel,
+		// where a fresh session under the same settings omits it.
+		//
+		// The probe is spied rather than made to fail for real:
+		// `checkPythonKernelAvailability` short-circuits to `ok: true` under
+		// `bun test`, so a genuinely broken interpreter is unobservable here.
+		const probe = spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({
+			ok: false,
+			reason: "test: no kernel",
+		});
+		const h = await makeHarness("eval:\n  py: false\n  js: false\n", { pythonPreflight: true });
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("eval");
+
+			await fs.writeFile(h.settingsPath, "eval:\n  py: true\n  js: false\n");
+			const result = await h.session.refresh("settings");
+
+			expect(result.settingsChanged).toBe(true);
+			// The reconcile asked, rather than trusting the skipped startup probe.
+			expect(probe).toHaveBeenCalled();
+			// RED (pre-fix): no probe ran and eval activated with no reachable
+			// kernel, so calls failed only at execution time.
+			expect(h.session.getEnabledToolNames()).not.toContain("eval");
+		} finally {
+			probe.mockRestore();
+			await h.dispose();
+		}
+	}, 30_000);
 
 	it("keeps an explicit tier pin through a settings refresh that moves the file", async () => {
 		// The pin's value EQUALS what the file configured, so inferring provenance
