@@ -76,7 +76,7 @@ type ToolLoadResult = {
 	 */
 	applyTicket: number;
 	/** Catalog ordering token, claimed with the ticket before the request. */
-	observedAt: number | "unavailable" | undefined;
+	observedAt: number | undefined;
 };
 
 interface AuthRefreshableMCPTransport extends MCPTransport {
@@ -1591,16 +1591,14 @@ export class MCPManager {
 	/**
 	 * The ordering token for a `tools/list` about to be issued for `serverName`.
 	 *
-	 * With a cache, the claim's result is returned VERBATIM — including
-	 * `undefined` (the reservation exhausted) and `"unavailable"` (the store was
-	 * briefly locked). Falling back to a fresh reading there would replace a
-	 * deliberate skip sentinel with an unreserved token, and `MCPToolCache.set()`
-	 * would then persist a write whose order was never established, or lose the
-	 * lock signal it uses to retry the reservation once the response is in hand.
-	 * Only the cache-less case samples: with nothing to write, the token is just
-	 * the caller's own bookkeeping.
+	 * With a cache, the claim's result is returned VERBATIM — including the
+	 * `undefined` that means "could not reserve". Falling back to a fresh
+	 * reading there would replace a deliberate skip sentinel with an unreserved
+	 * token, and `MCPToolCache.set()` would then persist a write whose order was
+	 * never established. Only the cache-less case samples: with nothing to
+	 * write, the token is just the caller's own bookkeeping.
 	 */
-	#claimCatalogOrder(serverName: string): number | "unavailable" | undefined {
+	#claimCatalogOrder(serverName: string): number | undefined {
 		const cache = this.toolCache;
 		return cache ? cache.observeCatalogAt(serverName) : toolCatalogObservedAt();
 	}

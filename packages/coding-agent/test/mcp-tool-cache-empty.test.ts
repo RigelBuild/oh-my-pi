@@ -171,13 +171,14 @@ function tokenAfter(previous: number): number {
 
 /**
  * A reservation that must have succeeded for the test's premise to hold.
- * `observeCatalogAt()` returns `undefined` (exhausted) or `"unavailable"` (the
- * store was briefly locked) when it could not publish its claim, and a test
- * asserting on ordering has nothing to say in either case.
+ * `observeCatalogAt()` returns `undefined` only when a peer published a strictly
+ * newer claim (an EXHAUSTED reservation), and a test asserting on ordering has
+ * nothing to say in that case. A store lock still hands back a real issue-time
+ * number, so it is not excluded here.
  */
 function reserved(cache: MCPToolCache, serverName: string): number {
 	const token = cache.observeCatalogAt(serverName);
-	if (typeof token !== "number") throw new Error(`claim for ${serverName} was not reserved`);
+	if (token === undefined) throw new Error(`claim for ${serverName} was not reserved`);
 	return token;
 }
 
@@ -714,40 +715,74 @@ describe("MCPToolCache empty-toolset guard", () => {
 		expect(await cache.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
 
-	test("a transient lock at reservation time retries once the newer response is in hand", async () => {
-		// The SECOND-arrival ordering the first-arrival barrier cannot cover. An
-		// earlier request already reserved and CACHED its catalog; a later
-		// request's `tools/list` then goes out while the store is briefly locked,
-		// so its reservation comes back `"unavailable"` (not exhausted — no peer
-		// won, the DB was just busy). When that later, NEWER response finally
-		// lands, the older write is already on the row: skipping the cache and
-		// only advancing the in-process barrier cannot undo a write that has
-		// already landed, so the stale catalog would stand for the full 30-day
-		// TTL and a later startup would install it. The lock has cleared by the
-		// time the response is in hand, so `set()` retries the reservation and
-		// persists the newer catalog over the older one.
+	test("a store lock at reservation time keeps the request's issue-time order so a genuinely later response still wins", async () => {
+		// The SECOND-arrival ordering. An earlier request reserves and CACHES its
+		// catalog; a later request's `tools/list` then goes out while the store is
+		// briefly locked, so its claim cannot publish. A store lock is not a lost
+		// race — nothing was compared and no peer won — so `observeCatalogAt()`
+		// still hands back the request's issue-time position (a number floored
+		// above the earlier catalog), NOT a skip sentinel. When that later, newer
+		// response lands, `set()` orders the write by that number and overwrites
+		// the older catalog already on the row.
 		const storage = createFakeStorage();
 		const earlier = new MCPToolCache(storage);
 		const later = new MCPToolCache(storage);
 
 		// The earlier request reserves and its catalog lands FIRST.
-		await earlier.set("litellm", CONFIG, [OLD_TOOL], reserved(earlier, "litellm"));
+		const earlierToken = reserved(earlier, "litellm");
+		await earlier.set("litellm", CONFIG, [OLD_TOOL], earlierToken);
 		expect(await earlier.get("litellm", CONFIG)).toEqual([OLD_TOOL]);
 
 		// The later request's `tools/list` goes out while the store is briefly
-		// locked, so its reservation cannot compare and reports `"unavailable"`.
+		// locked, so its claim cannot publish and the CAS reports `unavailable`.
 		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValueOnce("unavailable");
 		const token = later.observeCatalogAt("litellm");
 		cas.mockRestore();
-		// Distinct from an exhausted reservation, which returns `undefined`.
-		expect(token).toBe("unavailable");
+		// Still the request's real issue-time position, above the earlier catalog
+		// — not a sentinel that would force the write to skip.
+		expect(typeof token).toBe("number");
+		expect(token as number).toBeGreaterThan(earlierToken);
 
-		// The lock has cleared by the time the newer response arrives SECOND.
-		// `set()` must retry the reservation and write the newer catalog over the
-		// older one already on the row — not skip and leave the stale catalog.
+		// The newer response arrives SECOND and overwrites the older catalog.
 		await later.set("litellm", CONFIG, [NEW_TOOL], token);
-
 		expect(await later.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+	});
+
+	test("a locked older reservation cannot overwrite a later request that already reserved and persisted", async () => {
+		// The ORDERING INVERSION the reservation scheme exists to prevent. An
+		// OLDER request's `tools/list` goes out while the store is briefly locked,
+		// so its claim cannot publish. A LATER request then reserves cleanly and
+		// persists its catalog. When the older response finally arrives, it must
+		// NOT re-establish a position above the later request: a store lock does
+		// not license a fresh response-time reservation, only the older request's
+		// own issue-time token, which is BELOW the later one. So `#writeOrdered`
+		// defers to the later catalog on the row, and the persisted cache a
+		// subsequent startup reads is the LATER catalog, not the older one.
+		const storage = createFakeStorage();
+		const older = new MCPToolCache(storage);
+		const newer = new MCPToolCache(storage);
+
+		// The older request reserves FIRST but hits a store lock, so its claim
+		// never publishes.
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValueOnce("unavailable");
+		const olderToken = older.observeCatalogAt("litellm");
+		cas.mockRestore();
+		expect(typeof olderToken).toBe("number");
+
+		// The newer request reserves cleanly (a strictly later issue-time token)
+		// and its catalog lands.
+		const newerToken = reserved(newer, "litellm");
+		expect(newerToken).toBeGreaterThan(olderToken as number);
+		await newer.set("litellm", CONFIG, [NEW_TOOL], newerToken);
+		expect(await newer.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
+
+		// The older response arrives LAST. It must defer to the newer catalog.
+		await older.set("litellm", CONFIG, [OLD_TOOL], olderToken);
+
+		// A subsequent startup builds a fresh cache over the same store and reads
+		// the LATER catalog, never the older one resurrected for the full TTL.
+		const startup = new MCPToolCache(storage);
+		expect(await startup.get("litellm", CONFIG)).toEqual([NEW_TOOL]);
 	});
 
 	// A tombstone's ordering must outlive the CATALOG TTL, because an MCP request
@@ -856,10 +891,11 @@ describe("MCPToolCache empty-toolset guard", () => {
 		// One attempt, not CACHE_CLAIM_ATTEMPTS: an outage is not retried inside
 		// the claim loop — each retry would pay the full busy timeout again.
 		expect(cas).toHaveBeenCalledTimes(1);
-		// Reported apart from an exhausted reservation (`undefined`): no peer won,
-		// so a response carrying this back can retry the claim once the lock
-		// clears rather than being forced to skip the cache outright.
-		expect(token).toBe("unavailable");
+		// A store lock is not a lost race, so the request's issue-time token is
+		// still its genuine position: it is returned as a number, not a skip
+		// sentinel, so a later `set()` orders the write by it (and `#writeOrdered`
+		// defers to any newer request that reserved since).
+		expect(typeof token).toBe("number");
 		cas.mockRestore();
 	});
 
