@@ -13,7 +13,11 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { prepareAnthropicManyImageContext } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { getOpenAIResponsesHistoryPayload, normalizeResponsesToolCallId } from "@oh-my-pi/pi-ai/utils";
+import {
+	getOpenAIResponsesHistoryPayload,
+	normalizeResponsesToolCallId,
+	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -547,9 +551,27 @@ function wireStartIndex(context: Context, model: Model, replaysNativeHistory: bo
 		const message = context.messages[index];
 		if (message?.role !== "assistant") continue;
 		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
-		if (payload && !payload.dt) start = index;
+		if (payload && !payload.dt && splicesWholeWire(payload, model)) start = index;
 	}
 	return start;
+}
+
+/**
+ * Whether a `dt`-falsy payload really replaces the wire.
+ *
+ * `convertConversationMessages()` splices only when the sanitizer returns items:
+ * a hidden-empty payload (reasoning plus an empty assistant message) sanitizes
+ * to `undefined`, the splice never runs, and the earlier history stays on the
+ * wire. Advancing the boundary on such a payload excluded those images from
+ * BOTH budgets while they still travelled — which is a 413 that no drop is ever
+ * owed for.
+ */
+function splicesWholeWire(payload: OpenAIResponsesHistoryPayload, model: Model): boolean {
+	return (
+		sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(payload.items, {
+			supportsComputerUse: model.supportsComputerUse === true,
+		}) !== undefined
+	);
 }
 
 function collectPairedComputerCallIds(context: Context, model: Model, replaysNativeHistory: boolean): Set<string> {
@@ -564,7 +586,10 @@ function collectPairedComputerCallIds(context: Context, model: Model, replaysNat
 		// metadata while the generic mirror it left behind is what actually
 		// travelled — so the drop reclaimed nothing and the request still 413'd.
 		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
-		if (payload && !payload.dt) {
+		// The same survival check the boundary uses: a hidden-empty payload
+		// sanitizes to `undefined`, so the splice never runs and the accumulated
+		// pair set is still what travels.
+		if (payload && !payload.dt && splicesWholeWire(payload, model)) {
 			ids = new Set<string>();
 			for (const item of payload.items) {
 				if (item.type !== "computer_call") continue;
@@ -708,15 +733,20 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 		// metadata alone therefore reclaimed nothing — the same bytes travelled as
 		// the mirror. Drop the mirror in the same edit, unpaid: its bytes were
 		// charged once, through the metadata.
-		const mirrored = clampContent(message.content, {
-			...state,
-			remainingDrops: 0,
-			remainingInlineDrops: Number.POSITIVE_INFINITY,
-		});
+		// Unconditionally, not through `clampContent`: blob decoration may have
+		// attached a supported URL or provider-file reference to the mirror, which
+		// `clampContent` classifies as non-inline and leaves alone under
+		// `remainingDrops: 0`. Clearing the metadata below then reroutes the result
+		// through the generic image converter, creating an image part the tally
+		// deliberately did not count — so the request goes over the COUNT cap
+		// instead of the byte one. The mirror's bytes were charged once, through
+		// the metadata, so removing it here is unpaid whatever its reference shape.
+		const mirrored = message.content.filter(part => part.type !== "image");
+		const mirrorChanged = mirrored.length !== message.content.length;
 		return {
 			...message,
 			providerMetadata: undefined,
-			content: mirrored && mirrored.length > 0 ? mirrored : (mirrored ?? message.content),
+			content: mirrorChanged && mirrored.length === 0 ? [IMAGE_OMISSION_NOTICE] : mirrored,
 		};
 	}
 	// Dropping the metadata screenshot already removes this result's only wire
@@ -760,6 +790,7 @@ function clampReplayedInputImages(
 	// `computer_screenshot` ref, so there is nothing to degrade it to in place —
 	// and a call left behind without its output is an orphan the provider rejects.
 	const droppedComputerCallIds = new Set<string>();
+	const demotesNativeComputerItems = demotesReplayedComputerItems(state.model);
 	const repairedOrphans = repairedOrphanItemIndices(payload.items, state.model);
 	for (let index = 0; index < payload.items.length; index++) {
 		if (!clampWanted(state)) break;
@@ -767,8 +798,21 @@ function clampReplayedInputImages(
 		const item = payload.items[index];
 		if (item?.type === "computer_call_output") {
 			const [screenshot] = nativeInputImageParts(item);
-			if (!screenshot || !dropsNativeInputImage(screenshot, state)) continue;
-			payNativeInputImageDrop(screenshot, state);
+			if (!screenshot) continue;
+			// On a model that DEMOTES replayed computer items the converter
+			// stringifies this output into assistant text, so it puts no image part
+			// on the wire and the accounting deliberately leaves it out of the count
+			// tally. Paying a count drop for it therefore reclaims nothing the count
+			// cap measures, while spending an allowance a later real image needs —
+			// so the request can stay over the cap. Bytes only, like the assistant
+			// path, which already splits the two for the same reason.
+			if (demotesNativeComputerItems) {
+				if (state.remainingInlineDrops <= 0 || !isInlineNativeImage(screenshot)) continue;
+				state.remainingInlineDrops--;
+			} else {
+				if (!dropsNativeInputImage(screenshot, state)) continue;
+				payNativeInputImageDrop(screenshot, state);
+			}
 			if (typeof item.call_id === "string") droppedComputerCallIds.add(item.call_id);
 			items ??= [...payload.items];
 			continue;
@@ -1325,6 +1369,13 @@ export async function applyProviderImagePipeline(
 	decorate?: (context: Context, model: Model) => Promise<Context>,
 ): Promise<Context> {
 	let transformed = clampProviderContextImageCount(context, model, replaysNativeHistory);
+	// Strip the image DATA a full snapshot splices off the wire before the
+	// expensive stages run. `normalizeForModel()`, `dropUnreadableContextImages()`
+	// and the provider size pass all traverse the whole context, so without this
+	// every pre-snapshot image is decoded and re-encoded on each request even
+	// though none of them can reach the provider — which is the image-processing
+	// bound the count pass exists to hold.
+	transformed = dropSplicedOffImages(transformed, model, replaysNativeHistory);
 	transformed = await normalizeForModel(transformed, model);
 	transformed = await dropUnreadableContextImages(transformed, model);
 	transformed = await applyProviderSizePass(transformed, model);
@@ -1336,6 +1387,27 @@ export async function applyProviderImagePipeline(
 	// consumes it, which is why the two budgets are tallied separately.
 	if (decorate) transformed = await decorate(transformed, model);
 	return clampProviderContextImages(transformed, model, replaysNativeHistory);
+}
+
+/**
+ * Replaces the image parts of messages a full snapshot splices off the wire.
+ *
+ * Only the parts a snapshot REPLACES: the surviving payload and everything at
+ * or after it is untouched, and a request with no such snapshot is returned as
+ * is, so the common path costs one boundary scan.
+ */
+function dropSplicedOffImages(context: Context, model: Model, replaysNativeHistory: boolean): Context {
+	const wireStart = wireStartIndex(context, model, replaysNativeHistory);
+	if (wireStart === 0) return context;
+	let changed = false;
+	const messages = context.messages.map((message, index) => {
+		if (index >= wireStart || !Array.isArray(message.content)) return message;
+		const content = message.content.filter(part => part.type !== "image");
+		if (content.length === message.content.length) return message;
+		changed = true;
+		return { ...message, content: content.length > 0 ? content : [IMAGE_OMISSION_NOTICE] } as Message;
+	});
+	return changed ? { ...context, messages } : context;
 }
 
 /**

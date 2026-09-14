@@ -1757,6 +1757,55 @@ describe("replayed assistant payload byte accounting", () => {
 		expect(remaining).toBe(false);
 	});
 
+	it("does not spend a count drop on a demoted computer item", async () => {
+		// The converter stringifies a demoted computer output into assistant text,
+		// so it puts no image PART on the wire -- which is why the accounting
+		// leaves it out of the count tally. The clamp still paid a COUNT drop for
+		// it, which reclaims nothing the count cap measures and spends the
+		// allowance a real image needs, so the built request stays over the cap.
+		const small = "s".repeat(64);
+		const admissible = providerImageBudget(VISION_ONLY_MODEL.provider) * 2;
+		// One image over the admissible count, so exactly one count drop is owed.
+		const liveImages = admissible + 1;
+		// The demoted item comes FIRST: the clamp evicts oldest-first, so this is
+		// the ordering in which it reaches the demoted screenshot while a count
+		// drop is still owed.
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [{ type: "text", text: "restored turn" }],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: VISION_ONLY_MODEL.provider,
+						items: [
+							{ type: "message", role: "user", content: [{ type: "input_text", text: "compaction" }] },
+							// Paired, so it is not excluded as a repaired orphan.
+							{ type: "computer_call", call_id: "call-0", action: { type: "screenshot" } },
+							{
+								type: "computer_call_output",
+								call_id: "call-0",
+								output: { type: "computer_screenshot", image_url: dataUri(small) },
+							},
+						],
+					},
+				},
+				{
+					role: "user",
+					timestamp: 2,
+					content: Array.from({ length: liveImages }, () => image(small)),
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImageCount(context, VISION_ONLY_MODEL, true);
+
+		// RED (pre-fix): the demoted screenshot absorbed the only count drop, so
+		// every live image survived and the request stayed one over the cap.
+		expect(imageData(clamped).length).toBe(liveImages - 1);
+	});
+
 	it("spends a byte drop on the oversized item, not an earlier small one", async () => {
 		// The clamp evicts in the payload's OWN item order, so a size sequence
 		// built as "all generation results, then all input images" could size the
@@ -1819,6 +1868,130 @@ describe("computer pairing across a snapshot replacement", () => {
 		expect(imageData(clamped)).toContain(over);
 	});
 
+	it("keeps spliced-off images out of the expensive pipeline stages", async () => {
+		// The count pass stops DROPPING pre-snapshot images, but
+		// `normalizeForModel()`, `dropUnreadableContextImages()` and the provider
+		// size pass all traversed the original full context afterward -- so images
+		// that cannot reach the wire were still decoded and re-encoded on every
+		// request, defeating the bound the count pass exists to hold.
+		const spliced = "p".repeat(4096);
+		const onWire = "w".repeat(4096);
+		const context: Context = {
+			messages: [
+				{ role: "user", timestamp: 1, content: [image(spliced)] },
+				{
+					...assistantTurn([], 2),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "reasoning", id: "rs_snap", summary: [] },
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] },
+						],
+					},
+				},
+				{ role: "user", timestamp: 3, content: [image(onWire)] },
+			],
+		};
+
+		// What the expensive stages actually SEE.
+		const seen: string[][] = [];
+		const normalize = async (input: Context): Promise<Context> => {
+			seen.push(imageData(input));
+			return input;
+		};
+
+		await applyProviderImagePipeline(context, OPENAI_MODEL, normalize, true);
+
+		// RED (pre-fix): the pre-snapshot image reached the normalize stage.
+		expect(seen[0]).toEqual([onWire]);
+	});
+
+	it("removes a reference-backed screenshot mirror when redacting the metadata", async () => {
+		// Clearing `providerMetadata` CHANGES THE ROUTE: the result stops being a
+		// computer result, so the converter sends the generic content mirror
+		// instead. When blob decoration has attached a provider-file reference to
+		// that mirror, `clampContent` classifies it as non-inline and the cloned
+		// `remainingDrops: 0` state left it in place -- creating an image part the
+		// tally deliberately did not count, which puts the request over the COUNT
+		// cap while the byte drop was being paid.
+		// The metadata screenshot is the oversized half: its bytes are what the
+		// demotion charges, so a byte drop is genuinely owed and the redaction
+		// branch runs.
+		const overScreenshot = "t".repeat(providerImageByteBudget(VISION_ONLY_MODEL.provider, VISION_ONLY_MODEL.api) + 1);
+		const referencedMirror: ImageContent = {
+			...image("v".repeat(64)),
+			// Reference-backed: carries no inline bytes for this api.
+			providerFile: { provider: "openai", id: "file-mirror" },
+		};
+		const context: Context = {
+			messages: [
+				computerCallMessage("call-demoted"),
+				{
+					role: "toolResult",
+					timestamp: 4,
+					toolCallId: "call-demoted",
+					toolName: "computer",
+					content: [text("screenshot"), referencedMirror],
+					isError: false,
+					providerMetadata: {
+						type: "computer",
+						acknowledgedSafetyChecks: [],
+						screenshot: { type: "computer_screenshot", image_url: dataUri(overScreenshot) },
+					},
+				},
+			],
+		};
+
+		// `supportsComputerUse: false`, so this result is demoted to assistant text.
+		const clamped = clampProviderContextImages(context, VISION_ONLY_MODEL, true);
+
+		// RED (pre-fix): the reference-backed mirror survived the redaction, so the
+		// route change handed the converter an uncounted image part.
+		const result = clamped.messages.find(message => message.role === "toolResult");
+		expect(JSON.stringify(result)).not.toContain("file-mirror");
+	});
+
+	it("keeps charging history a hidden-empty payload does not splice away", async () => {
+		// A `dt`-falsy payload only REPLACES the wire when the sanitizer returns
+		// items. Reasoning plus an empty assistant message sanitizes to
+		// `undefined`, so `buildResponsesInput()` never splices and the earlier
+		// history still travels -- but the boundary advanced past it anyway,
+		// excluding those images from both budgets. Nothing was ever owed a drop,
+		// so the oversized request went out and 413'd.
+		const over = "o".repeat(providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api) + 1);
+		const context: Context = {
+			messages: [
+				{ role: "user", timestamp: 1, content: [image(over)] },
+				{
+					...assistantTurn([], 2),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						// No `dt`, but hidden-empty: reasoning plus an assistant message
+						// with no non-whitespace output. The sanitizer returns `undefined`.
+						items: [
+							{ type: "reasoning", id: "rs_hidden", summary: [] },
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "" }] },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// RED (pre-fix): the boundary skipped the user image, so no drop was owed
+		// and the oversized image travelled whole.
+		expect(imageData(clamped).join("")).not.toContain(over);
+	});
+
 	it("charges the mirror of a computer call a full snapshot splices away", async () => {
 		// `buildResponsesInput()` treats a `dt`-falsy assistant payload as a full
 		// SNAPSHOT: it splices away every message built so far and clears its
@@ -1858,7 +2031,18 @@ describe("computer pairing across a snapshot replacement", () => {
 						type: "openaiResponsesHistory",
 						provider: OPENAI_MODEL.provider,
 						// No `dt`: the splice that takes the call above off the wire.
-						items: [{ type: "reasoning", id: "rs_keepme", summary: [] }],
+						// A reasoning item alone would NOT splice -- the sanitizer returns
+						// `undefined` for a hidden-empty payload and the converter keeps
+						// the accumulated wire -- so the payload carries real assistant
+						// output too.
+						items: [
+							{ type: "reasoning", id: "rs_keepme", summary: [] },
+							{
+								type: "message",
+								role: "assistant",
+								content: [{ type: "output_text", text: "snapshot" }],
+							},
+						],
 					},
 				},
 				unpairedResult,
