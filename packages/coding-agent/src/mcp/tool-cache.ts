@@ -669,7 +669,15 @@ export class MCPToolCache {
 			}
 
 			const expiresAtSec = Math.floor((Date.now() + args.ttlMs) / 1000);
-			const outcome = this.storage.setCacheIfMatches(key, persistedNow, serialized, expiresAtSec);
+			// Nonblocking for the same reason the claim is: without it a peer
+			// process holding the write lock makes this CAS wait out the store's
+			// full interactive `busy_timeout` (5s) synchronously before reporting
+			// `unavailable` — and a successful `tools/list` from each of several
+			// servers hits this path in turn, freezing the TUI event loop for the
+			// sum. The cache is best-effort, so declining beats stalling.
+			const outcome = this.storage.setCacheIfMatches(key, persistedNow, serialized, expiresAtSec, {
+				nonblocking: true,
+			});
 			if (outcome === "written") return;
 			// Same distinction as the claim loop, and it matters more here: this
 			// loop allows 64 attempts, so spinning on a held write lock would block

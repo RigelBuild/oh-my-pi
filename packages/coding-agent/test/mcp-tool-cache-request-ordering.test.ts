@@ -210,6 +210,50 @@ describe("MCP tool cache request-time ordering token", () => {
 		expect(payload.tools.map(tool => tool.name)).toEqual(["fresh_tool"]);
 	});
 
+	it("never blocks the event loop on a peer's write lock", async () => {
+		// Every CAS this cache issues must be nonblocking. Without the option the
+		// store waits out its full interactive `busy_timeout` (5s) synchronously
+		// before reporting `unavailable`, and a successful `tools/list` from each
+		// of several servers hits this path in turn -- freezing the TUI event loop
+		// for the sum, for a cache that is explicitly best-effort.
+		const rows = new Map<string, string>();
+		const casOptions: Array<{ nonblocking?: boolean } | undefined> = [];
+		const storage = {
+			getCache: (key: string): string | null => rows.get(key) ?? null,
+			setCache: (key: string, value: string): void => {
+				rows.set(key, value);
+			},
+			setCacheIfMatches: (
+				key: string,
+				expected: string | null,
+				value: string,
+				_expiresAtSec: number,
+				options?: { nonblocking?: boolean },
+			): CasOutcome => {
+				casOptions.push(options);
+				if ((rows.get(key) ?? null) !== expected) return "mismatch";
+				rows.set(key, value);
+				return "written";
+			},
+		} as unknown as AgentStorage;
+
+		const cache = new MCPToolCache(storage);
+		const observedAt = cache.observeCatalogAt("peer-locked");
+		// The catalog write, and then the empty-toolset tombstone.
+		await cache.set(
+			"peer-locked",
+			stdioConfig(),
+			[{ name: "a_tool", description: "", inputSchema: { type: "object" as const } }],
+			observedAt,
+		);
+		await cache.set("peer-locked", stdioConfig(), [], cache.observeCatalogAt("peer-locked"));
+
+		// RED (pre-fix): only the claim reservation passed the option, so the
+		// catalog and tombstone writes could each stall for the busy timeout.
+		expect(casOptions.length).toBeGreaterThan(2);
+		expect(casOptions.every(options => options?.nonblocking === true)).toBe(true);
+	});
+
 	it("suppresses an older in-flight write after a reservation failure", async () => {
 		// A reservation failure skips its own write, but the response still
 		// OBSERVED the server later than anything already in flight. Returning
