@@ -9,9 +9,9 @@
 
 ### Fixed
 
-- MCP tools no longer stay missing for a whole session after a server's warmup lists none, keep showing tools a server has retired, or get stuck on a stale tool list from an out-of-order server response ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- MCP tools no longer stay missing for a whole session after a server's warmup lists none, keep showing tools a server has retired, or get stuck on a stale tool list from an out-of-order server response, and a `/mcp reload` during a reconnect no longer restores the disconnected server's tools ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - A locked or unwritable MCP tool-cache database no longer freezes the event loop while the cache retries to write it ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
-- A `/mcp refresh` that overlaps a server's initial tool load no longer leaves the session on the older tool roster ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- A `/mcp refresh` that overlaps a server's initial tool load no longer leaves the session on the older tool roster, and `/status` no longer reports the superseded tool count for that server ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 
 ## [18.2.1] - 2026-09-15
 
