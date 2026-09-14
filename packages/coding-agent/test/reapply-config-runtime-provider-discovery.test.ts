@@ -295,6 +295,60 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 		expect(resumed.model?.id).toBe(bakedModel.id);
 	});
 
+	it("adopts a later candidate when a bare default list item did not resolve", async () => {
+		// `default,anthropic/<real-id>`: the bare `default` is a concrete selector
+		// inside a LIST — `resolveModelRoleValue` reserves the self-reference
+		// meaning for the whole unsplit value only. This suite's auth store holds
+		// no cursor key, so the bundled `cursor/default` is unavailable and the
+		// bare `default` falls through; the resolver correctly matches the later
+		// Anthropic candidate. The self-alias scan must NOT reclassify the
+		// unmatched bare `default` as a reached self alias — doing so made
+		// `--reapply-config` retain the baked session model instead of adopting
+		// the configured fallback.
+		dynamicFetches = 0;
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const fallback = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay(`default,${modelValue(fallback)}`);
+
+		const resumed = await resume(sessionFile, settings);
+
+		// RED (pre-fix): the unmatched bare `default` counted as a reached self
+		// alias, so `hasConfigDefaultRole` returned false and the baked model was
+		// kept instead of the resolved Anthropic fallback.
+		expect(resumed.model?.provider).toBe(fallback.provider);
+		expect(resumed.model?.id).toBe(fallback.id);
+	});
+
+	it("discovers a cold provider named with different casing than the candidate's", async () => {
+		// `<PROVIDER-UPPERCASED>/model,anthropic/<fallback>`: the higher-priority
+		// candidate names the cold runtime provider but in a DIFFERENT case than it
+		// was registered (`reapply-runtime-gw`). The static pass matches the
+		// already-available anthropic fallback at index 1, leaving the cold
+		// candidate ahead of the match. The discovery filter extracts its provider
+		// and asks `canRefreshProvider`, which does exact map/set lookups while
+		// model resolution is case-insensitive — so the uppercased spelling was
+		// judged non-refreshable, the retry skipped, and the lower-priority
+		// fallback kept. Normalizing the provider before the check restores the
+		// discovery pass, which resolves the candidate case-insensitively.
+		dynamicFetches = 0;
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const fallback = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		const settings = await loadOverlay(`${RUNTIME_PROVIDER.toUpperCase()}/${RUNTIME_MODEL},${modelValue(fallback)}`);
+
+		const resumed = await resume(sessionFile, settings);
+
+		// RED (pre-fix): `canRefreshProvider("REAPPLY-RUNTIME-GW")` missed the
+		// lowercase-keyed manager, so discovery never ran and the resume kept the
+		// anthropic fallback.
+		expect(dynamicFetches).toBeGreaterThan(0);
+		expect(resumed.model?.provider).toBe(RUNTIME_PROVIDER);
+		expect(resumed.model?.id).toBe(RUNTIME_MODEL);
+	});
+
 	// A non-UI resume starts online runtime discovery eagerly, so by the time the
 	// cold-cache fallback runs, a pass over the very same runtime manager is
 	// already in flight. The fallback must reuse that pass rather than launch a

@@ -66,6 +66,7 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
+	DEFAULT_MODEL_ROLE,
 	formatModelSelectorValue,
 	formatModelString,
 	formatModelStringWithRouting,
@@ -1603,6 +1604,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// the list shape is the second instance. Reuses the resolver's own
 	// normalizer so the split cannot drift from how the value is parsed.
 	const defaultRolePatterns = normalizeModelPatternList(normalizedDefaultRole);
+	// The bare `default` sentinel is BOTH the self-alias spelling and a real
+	// model id (`cursor/default`). `resolveModelRoleValue` reserves the
+	// self-reference meaning only for the whole unsplit role value, so a bare
+	// `default` sitting INSIDE a list is matched like any other concrete
+	// selector — and one that did not win is a candidate that fell through, not
+	// a self alias the fallback reached. Only a bare `default` standing ALONE is
+	// the genuine self-reference. The other spellings (`*`, `@default`,
+	// `pi/default`) name the role circularly in any position, so this narrows to
+	// the bare `default` inside a multi-item list.
+	const isListItemConcreteDefault = (pattern: string): boolean =>
+		pattern === DEFAULT_MODEL_ROLE && defaultRolePatterns.length > 1;
 	// Or a self-alias-only list that nonetheless RESOLVED. The sentinel that
 	// makes `default` name no model is applied to the whole unsplit role value,
 	// so a `default` sitting inside a list is matched like any other selector —
@@ -1716,6 +1728,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this level". But `default` can match a real `cursor/default` DIRECTLY,
 			// and that is a genuine adoption, not an alias stop.
 			if (index === matchedIndex && spec.matchedPattern === pattern) break;
+			// A bare `default` inside a LIST is a concrete selector, not a self
+			// reference: `resolveModelRoleValue` reserves the self-reference meaning
+			// for the whole unsplit value only. So a bare `default` list item that
+			// did NOT win is a candidate that fell through — treating it as a
+			// reached self alias made `--reapply-config` retain the baked session
+			// model instead of adopting the later candidate that actually resolved.
+			// A single bare `default` value keeps its self-reference meaning
+			// (`isListItemConcreteDefault` is false at length 1).
+			if (isListItemConcreteDefault(pattern)) continue;
 			const alias = parseDefaultModelRoleSelfAlias(pattern);
 			if (alias) return alias;
 		}
@@ -3207,7 +3228,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// A wildcard or bare-id pattern names no provider, so any refresh
 						// could supply it — keep the old behaviour there.
 						if (!provider || provider === candidate || provider.includes("*")) return true;
-						if (modelRegistry.canRefreshProvider(provider)) return true;
+						// Normalize before the refreshability check: `canRefreshProvider`
+						// does exact map/set lookups, while normal model resolution is
+						// case-insensitive (the registry keys every provider lookup through
+						// `provider.trim().toLowerCase()`). Without this a candidate
+						// differing only in provider CASING from a cold provider —
+						// `Dynamic/new` against a provider registered as `dynamic` — was
+						// judged non-refreshable, the discovery retry skipped, and a
+						// lower-priority fallback adopted.
+						if (modelRegistry.canRefreshProvider(provider.trim().toLowerCase())) return true;
 						expandedIndex++;
 					}
 				}
