@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `/mcp refresh` to re-fetch tools from connected MCP servers without reconnecting ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
 
@@ -13,6 +14,9 @@
 
 ### Fixed
 
+- MCP tools no longer stay missing for a whole session after a server's warmup lists none, keep showing tools a server has retired, or get stuck on a stale tool list from an out-of-order server response ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- A locked or unwritable MCP tool-cache database no longer freezes the event loop while the cache retries to write it ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- A `/mcp refresh` that overlaps a server's initial tool load no longer leaves the session on the older tool roster ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
 ## [18.1.21] - 2026-09-14
@@ -29,13 +33,8 @@
 
 ### Added
 
-- Added `/mcp refresh` to re-fetch tools from connected MCP servers without reconnecting ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
-
 ### Fixed
 
-- Fixed MCP tools staying empty for the whole session when a server listed no tools during its warmup window, stale tools surviving after a server retired them, and an out-of-order `tools/list` response — or one from a process whose clock predates a backward system-time correction — caching a retired tool list for up to 30 days ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
-- A held SQLite write lock no longer freezes the event loop while the MCP tool cache retries: a conditional cache write now reports an operational failure separately from a genuine compare-and-swap loss, so a locked or unwritable database is abandoned (the cache is best-effort) instead of being retried up to 4 times for a claim and 64 times for a catalog write, each attempt paying the full `busy_timeout` ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
-- A `/mcp refresh` that overlaps a server's initial `tools/list` can no longer leave the session on the older roster: the two requests run concurrently (the refresh single-flight does not cover an initial load), and whichever response is applied second is now refused if a later request already wrote the registry — previously a delayed initial response overwrote the newer catalog permanently, since a non-empty stale result schedules no recovery ([#10222](https://github.com/can1357/oh-my-pi/pull/10222) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 ## [18.1.20] - 2026-09-13
 
 ### Added
