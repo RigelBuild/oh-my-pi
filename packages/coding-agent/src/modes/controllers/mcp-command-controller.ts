@@ -56,7 +56,7 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../mcp/types";
-import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { shortenEmbeddedPaths, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { urlHyperlinkAlways } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
@@ -2204,7 +2204,12 @@ export class MCPCommandController {
 	 * catch so both apply identical normalization.
 	 */
 	#sanitizeRefreshErrorText(text: string): string {
-		return replaceTabs(truncateToWidth(sanitizeText(text.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE));
+		// `shortenEmbeddedPaths` runs BEFORE the cap so the width budget is spent
+		// on the text that will actually print, rather than being consumed by a
+		// home prefix that is about to be replaced. Same pipeline order as
+		// `sanitizeMcpStatusText`, which renders the connection-status rows.
+		const normalized = shortenEmbeddedPaths(replaceTabs(sanitizeText(text.replace(/[\r\n]+/g, " "))));
+		return truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE);
 	}
 
 	/**
