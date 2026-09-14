@@ -118,6 +118,54 @@ describe("MCP tool-apply race after teardown", () => {
 		}
 	}, 10_000);
 
+	it("does not restore the roster from an initial list that settles after disconnectServer", async () => {
+		// The FOREGROUND apply in `connectServers` (the 250 ms startup race). A
+		// `disconnectServer` lands while the initial `tools/list` is still in
+		// flight: it removes the connection but leaves the apply-ticket counter,
+		// so the ticket guard still passes and the fulfilled task restored the
+		// disconnected server's roster. The identity re-check must refuse it.
+		const manager = new MCPManager(process.cwd());
+		manager.setEmptyToolsetRetryScheduleForTests("0");
+
+		const conn = fakeConnection("server");
+		const initialListing = Promise.withResolvers<MCPToolDefinition[]>();
+		const listStarted = Promise.withResolvers<void>();
+
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(conn);
+		// The initial list parks on a gate with `conn` already registered, so a
+		// `disconnectServer` can tear it down while the list is outstanding.
+		vi.spyOn(mcpClient, "listTools").mockImplementation(async (connection: MCPServerConnection) => {
+			listStarted.resolve();
+			const tools = await initialListing.promise;
+			connection.tools = tools;
+			return tools;
+		});
+
+		try {
+			// Fire the connect; it parks at the startup race awaiting the gated list.
+			const connecting = manager.connectServers({ server: CONFIG }, {});
+			await listStarted.promise;
+			expect(manager.getConnection("server")).toBe(conn);
+
+			// The server is disconnected while its initial list is still in flight.
+			await manager.disconnectServer("server");
+			expect(manager.getConnection("server")).toBeUndefined();
+
+			// The stale response now fulfills within the same race window. The
+			// foreground apply sees a fulfilled task, but its connection is gone.
+			initialListing.resolve([TOOL_A, TOOL_B]);
+			await connecting;
+
+			// The disconnected server's tools must NOT come back.
+			expect(manager.getTools()).toEqual([]);
+			expect(manager.getConnectedServers()).toEqual([]);
+			expect(manager.getConnectionStatus("server")).toBe("disconnected");
+		} finally {
+			initialListing.resolve([]);
+			await manager.disconnectAll();
+		}
+	}, 10_000);
+
 	it("restores conn.tools to the winning roster when a delayed initial list loses to a refresh", async () => {
 		const manager = new MCPManager(process.cwd());
 		manager.setEmptyToolsetRetryScheduleForTests("0");
