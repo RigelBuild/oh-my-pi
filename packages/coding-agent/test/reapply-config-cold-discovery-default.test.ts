@@ -282,4 +282,28 @@ describe("--reapply-config cold-discovery configured default", () => {
 		expect(resumed.model?.provider).toBe("ollama");
 		expect(resumed.model?.id).toBe(DISCOVERED_MODEL);
 	});
+
+	it("discovers a cold FIRST link of the matched alias's own chain, not the later link it matched", async () => {
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const laterCandidate = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		// `default: "@slow"` where `slow` expands to an ordered chain whose FIRST
+		// link is a cold discovery-backed model and whose SECOND is already
+		// available. The static pass matches the second link, but the match's RAW
+		// index stays 0 (the single `@slow` entry). A guard scanning only raw
+		// patterns AHEAD of index 0 stops before the unresolved first link, skips
+		// discovery, and keeps the lower-priority anthropic fallback — even though
+		// a refresh would have made `ollama/phi3` selectable. The guard must bound
+		// the scan inside the matched alias by the EXPANDED match position instead.
+		const settings = await loadOverlayRoles({
+			default: "@slow",
+			slow: `ollama/${DISCOVERED_MODEL},${modelValue(laterCandidate)}`,
+		});
+
+		const resumed = await resume(sessionFile, settings);
+
+		expect(resumed.model?.provider).toBe("ollama");
+		expect(resumed.model?.id).toBe(DISCOVERED_MODEL);
+	});
 });

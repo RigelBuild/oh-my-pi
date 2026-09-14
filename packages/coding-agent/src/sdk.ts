@@ -3158,15 +3158,39 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// help. Only the candidates AHEAD of the match are still wanted, and only
 			// those naming a provider a scoped refresh could populate.
 			const unresolvedCandidateCanDiscover = (): boolean => {
-				const matchedIndex = defaultRoleSpec.model
+				// Between-pattern ordering uses the RAW index: an earlier alias that
+				// expands to several candidates shifts every later expanded position,
+				// so a top-level comparison against `defaultRolePatterns` must use the
+				// raw index the match reports.
+				const matchedRawIndex = defaultRoleSpec.model
 					? (defaultRoleSpec.matchedRawPatternIndex ?? defaultRoleSpec.matchedPatternIndex ?? 0)
 					: defaultRolePatterns.length;
+				// But a SINGLE raw alias can itself expand to an ordered chain and
+				// match a LATER link in it: `default: "@slow"` with
+				// `slow: "dynamic/new,anthropic/fallback"` matches the second
+				// expansion while its raw index stays 0. Scanning only raw patterns
+				// AHEAD of that index then stops before the unresolved first link, so
+				// discovery never runs and the resume keeps the lower-priority
+				// fallback. Within the matched raw alias, bound the scan by the
+				// EXPANDED match position instead. `matchedPatternIndex` counts the
+				// flattened expansions in the exact order this loop reproduces them
+				// raw pattern by raw pattern (both flow through
+				// `resolveConfiguredModelPatternOrigins` with a fresh visited set per
+				// raw entry), so the running count aligns with it.
+				const matchedExpandedIndex = defaultRoleSpec.model
+					? (defaultRoleSpec.matchedPatternIndex ?? 0)
+					: Number.POSITIVE_INFINITY;
+				let expandedIndex = 0;
 				for (const [index, pattern] of defaultRolePatterns.entries()) {
-					if (index >= matchedIndex) break;
+					if (index > matchedRawIndex) break;
 					// A self alias can become a real model when a late provider registers
 					// one matching its spelling (`default,@default` against Cursor), so
-					// discovery is genuinely wanted for it.
-					if (isDefaultModelRoleSelfAlias(pattern)) return true;
+					// discovery is genuinely wanted for it — unless the match itself
+					// landed on this alias, in which case nothing earlier remains.
+					if (isDefaultModelRoleSelfAlias(pattern)) {
+						if (index >= matchedRawIndex) break;
+						return true;
+					}
 					// A legacy/`@` role alias (`pi/slow`, `@smol`) is NOT a provider:
 					// its prefix (`pi`) would read as one, be judged non-refreshable,
 					// and skip the discovery pass that would have resolved the role's
@@ -3175,11 +3199,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// does, then judge each EXPANDED provider. Plain `provider/id` and
 					// bare-id patterns pass through the expansion unchanged.
 					for (const candidate of resolveConfiguredModelPatterns([pattern], settings)) {
+						// Reached the expansion the match came from: everything at or past
+						// it is the match or a lower-priority fallback, so no unresolved
+						// candidate ahead of the match remains to discover.
+						if (expandedIndex >= matchedExpandedIndex) return false;
 						const provider = candidate.split("/")[0];
 						// A wildcard or bare-id pattern names no provider, so any refresh
 						// could supply it — keep the old behaviour there.
 						if (!provider || provider === candidate || provider.includes("*")) return true;
 						if (modelRegistry.canRefreshProvider(provider)) return true;
+						expandedIndex++;
 					}
 				}
 				return false;
