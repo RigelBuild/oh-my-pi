@@ -2155,7 +2155,7 @@ export class MCPCommandController {
 				// is recovery, so a silent all-failure strands the user).
 				this.ctx.showError(
 					`Failed to refresh MCP tools from all ${outcomes.length} connected servers:\n${failed
-						.map(outcome => `  ${this.#formatRefreshFailureRow(outcome)}`)
+						.map(outcome => this.#formatRefreshFailureRow(outcome, "  "))
 						.join("\n")}`,
 				);
 				return;
@@ -2170,7 +2170,7 @@ export class MCPCommandController {
 			if (failed.length > 0) {
 				lines.push(theme.fg("warning", `  ${failed.length} server(s) failed to refresh:`));
 				for (const outcome of failed) {
-					lines.push(theme.fg("warning", `    ${this.#formatRefreshFailureRow(outcome)}`));
+					lines.push(theme.fg("warning", this.#formatRefreshFailureRow(outcome, "    ")));
 				}
 			}
 			lines.push("");
@@ -2192,8 +2192,12 @@ export class MCPCommandController {
 	 * or overflow the row just as an unsanitized error did. Matches the sibling
 	 * render pipeline in command-controller.ts.
 	 */
-	#formatRefreshFailureRow(outcome: { name: string; error: string }): string {
-		return this.#sanitizeRefreshErrorText(`${outcome.name}: ${outcome.error}`);
+	#formatRefreshFailureRow(outcome: { name: string; error: string }, indent = ""): string {
+		// The indent is part of the printed row, so it comes out of the SAME width
+		// budget: capping the payload and then prepending spaces left the visible
+		// row wider than the cap by the indent's own width — the very error this
+		// helper's own prefix rule exists to prevent.
+		return `${indent}${this.#sanitizeRefreshErrorText(`${outcome.name}: ${outcome.error}`, indent.length)}`;
 	}
 
 	/**
@@ -2202,13 +2206,13 @@ export class MCPCommandController {
 	 * cap width. Shared by the per-server failure rows and the final rebind
 	 * catch so both apply identical normalization.
 	 */
-	#sanitizeRefreshErrorText(text: string): string {
+	#sanitizeRefreshErrorText(text: string, reservedWidth = 0): string {
 		// `shortenEmbeddedPaths` runs BEFORE the cap so the width budget is spent
 		// on the text that will actually print, rather than being consumed by a
 		// home prefix that is about to be replaced. Same pipeline order as
 		// `sanitizeMcpStatusText`, which renders the connection-status rows.
 		const normalized = shortenEmbeddedPaths(replaceTabs(sanitizeText(text.replace(/[\r\n]+/g, " "))));
-		return truncateToWidth(normalized, TRUNCATE_LENGTHS.LINE);
+		return truncateToWidth(normalized, Math.max(1, TRUNCATE_LENGTHS.LINE - reservedWidth));
 	}
 
 	/**
