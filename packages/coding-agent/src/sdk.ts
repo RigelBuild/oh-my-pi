@@ -4007,19 +4007,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// families alongside the intentional OpenAI pin, where no subsequent
 				// refresh could detect an offline `tier.*` edit.
 				//
-				// CARRIED from the restored receipt rather than re-derived: only the
-				// flag's own family changes provenance here, and re-deriving would
-				// hand tracking back to a family an earlier `/fast` or selector had
-				// deliberately pinned.
+				// CARRIED from the restored receipt rather than re-derived, WHEN a
+				// receipt exists: only the flag's own family changes provenance
+				// here, and re-deriving would hand tracking back to a family an
+				// earlier `/fast` or selector had deliberately pinned. A legacy
+				// receipt with no provenance stays fully pinned (empty list), the
+				// same reading `model-controls` gives it.
 				//
-				// A host RESOLVER overrides the carry for the same reason it does on
-				// the fresh-session path: it is evaluated against the final model and
-				// its answer is the intended tier set, so no family may keep
+				// With NO prior receipt, there is no provenance to carry, so the
+				// empty fallback would freeze Anthropic and Google alongside the
+				// intentional OpenAI pin — a later `tier.anthropic`/`tier.google`
+				// edit could never be picked up. Initialize the other families as
+				// settings-tracking instead, exactly as the fresh-session branch
+				// below does, so only the `--openai-service-tier` pin is fixed.
+				//
+				// A host RESOLVER overrides both for the same reason it does on
+				// the fresh-session path: it is evaluated against the final model
+				// and its answer is the intended tier set, so no family may keep
 				// following `tier.*` over it.
 				const carriedTrackingFamilies =
 					resolvedServiceTierByFamily !== undefined
 						? []
-						: (existingSession.serviceTierSettingsTrackingFamilies ?? []).filter(family => family !== "openai");
+						: hasServiceTierEntry
+							? (existingSession.serviceTierSettingsTrackingFamilies ?? []).filter(family => family !== "openai")
+							: SERVICE_TIER_FAMILIES.filter(
+									family => !(family === "openai" && options.openAIServiceTier !== undefined),
+								);
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
 					carriedTrackingFamilies,
