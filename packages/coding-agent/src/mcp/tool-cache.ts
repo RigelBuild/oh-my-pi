@@ -264,9 +264,12 @@ export class MCPToolCache {
 	 * The claim goes in its OWN row ({@link CLAIM_PREFIX}), never on the
 	 * catalog's: see {@link MCPToolClaimPayload}.
 	 *
-	 * Returns `undefined` when the claim could not be published within
-	 * {@link CACHE_CLAIM_ATTEMPTS}: an unreserved token must never order a
-	 * write, so that request skips caching rather than risking an inversion.
+	 * Returns `undefined` when the claim EXHAUSTED {@link CACHE_CLAIM_ATTEMPTS}
+	 * — every CAS lost to a peer publishing a strictly newer claim — because an
+	 * unreserved token must never order a write. Returns `"unavailable"` when the
+	 * store could not even compare (a brief `SQLITE_BUSY`): no peer won, so a
+	 * response carrying this may retry the reservation once the lock clears (see
+	 * {@link MCPToolCache.set}), whereas an exhausted reservation never may.
 	 *
 	 * Publishing is a CAS, and a lost race is re-driven rather than ignored.
 	 * Losing means a peer's claim landed between this read and this write, so
@@ -275,7 +278,7 @@ export class MCPToolCache {
 	 * which is the inversion this exists to prevent. Every loss is a peer
 	 * succeeding, so a contended server still terminates.
 	 */
-	observeCatalogAt(serverName: string): number | undefined {
+	observeCatalogAt(serverName: string): number | "unavailable" | undefined {
 		const catalog = cacheKey(serverName);
 		const claim = claimKey(serverName);
 		let claimed = 0;
@@ -305,10 +308,12 @@ export class MCPToolCache {
 			// A locked or unwritable database is not a CAS loss: nothing was
 			// compared, so re-reading and retrying learns nothing and each attempt
 			// pays the full `busy_timeout` synchronously on this thread (5s
-			// interactive). Abandon the reservation — the caller treats an
-			// unreserved request exactly like an exhausted one and simply skips the
-			// persisted catalog, leaving the live tools untouched.
-			if (outcome === "unavailable") break;
+			// interactive). Abandon the reservation for now — but report it apart
+			// from exhaustion. Nothing was published and no peer won, so a response
+			// that carries this back may retry the reservation once the lock clears
+			// (see {@link set}); an EXHAUSTED reservation, where a newer peer's
+			// claim beat every attempt, never may.
+			if (outcome === "unavailable") return "unavailable";
 		}
 		// Out of attempts: nothing this request computed was ever published.
 		// Returning it anyway is not safe in the direction the old comment here
@@ -424,31 +429,46 @@ export class MCPToolCache {
 		serverName: string,
 		config: MCPServerConfig,
 		tools: MCPToolDefinition[],
-		...observed: [] | [observedAt: number | undefined]
+		...observed: [] | [observedAt: number | "unavailable" | undefined]
 	): Promise<void> {
 		// An OMITTED token means "no request to anchor on" (an out-of-band
-		// invalidation, or a test) and samples now. An explicit `undefined` is a
-		// FAILED reservation from `observeCatalogAt()`: that write has no
-		// established order, so it must not touch the cache at all. The two cases
-		// are opposite, which is why they cannot share a `?? sampleNow()`.
-		if (observed.length === 1 && observed[0] === undefined) {
-			// Unreserved, so this response must not be cached — but it still
-			// OBSERVED the server, and later than anything already in flight here.
-			// Returning without marking that left an earlier request free to pass
-			// `isCurrent()` and `#writeOrdered()` (which inspects the catalog row,
-			// never the claim) and persist its superseded catalog for 30 days.
-			// Sampling now is sound because every earlier request's token was read
-			// before this one entered, so the mark is above all of them and below
-			// anything that enters next.
-			// The barrier must DOMINATE every already-issued request, not merely
-			// read the clock. A backward step puts the current reading below a
-			// token an earlier in-flight request already holds, and that request
-			// has not entered `set()` yet — so a clock-sampled mark leaves it free
-			// to pass `isCurrent()` and persist its superseded catalog. Every
-			// in-process token came from `observeCatalogAt`, which records its
-			// high-water mark, so stepping past that dominates all of them
-			// regardless of the clock; the reading is still folded in so the mark
-			// is never below now.
+		// invalidation, or a test) and samples now. A supplied token is the
+		// outcome `observeCatalogAt()` handed the caller BEFORE its `tools/list`:
+		// a number is a live reservation, `undefined` an EXHAUSTED one (a peer
+		// published a newer claim), and `"unavailable"` a transient store lock.
+		const reservation = observed.length === 1 ? observed[0] : "omitted";
+		let writeToken = typeof reservation === "number" ? reservation : undefined;
+		// A transient lock at reservation time is not a lost race: nothing was
+		// compared and no peer won, so the store was merely briefly busy. The
+		// response is now in hand, so retry the reservation. A success orders this
+		// newest catalog ABOVE whatever is on the row — the older catalog an
+		// earlier request already persisted can no longer outlive it, which is the
+		// second-arrival case the first-arrival barrier below cannot cover: that
+		// older write has already landed and returning here cannot undo it. A
+		// retry that now EXHAUSTS (a peer's newer claim) or is still locked falls
+		// through to the barrier-and-skip path, exactly as a first-time failure of
+		// that kind would.
+		if (reservation === "unavailable") {
+			const retried = this.observeCatalogAt(serverName);
+			writeToken = typeof retried === "number" ? retried : undefined;
+		}
+		// A supplied reservation that yielded no usable token — exhausted, or a
+		// retry that could not recover — must not touch the cache: it has no
+		// established order. It still OBSERVED the server, and later than anything
+		// already in flight here, so record a barrier before skipping. Returning
+		// without it left an earlier request free to pass `isCurrent()` and
+		// `#writeOrdered()` (which inspects the catalog row, never the claim) and
+		// persist its superseded catalog for 30 days.
+		//
+		// The barrier must DOMINATE every already-issued request, not merely read
+		// the clock. A backward step puts the current reading below a token an
+		// earlier in-flight request already holds, and that request has not
+		// entered `set()` yet — so a clock-sampled mark leaves it free to pass
+		// `isCurrent()`. Every in-process token came from `observeCatalogAt`,
+		// which records its high-water mark, so stepping past that dominates all
+		// of them regardless of the clock; the reading is still folded in so the
+		// mark is never below now.
+		if (reservation !== "omitted" && writeToken === undefined) {
 			const issuedHighWater = this.#issuedHighWater.get(serverName);
 			const unreservedAt = Math.max(
 				toolCatalogObservedAt(),
@@ -458,7 +478,7 @@ export class MCPToolCache {
 			this.#newestObserved.set(serverName, Math.max(seen ?? unreservedAt, unreservedAt));
 			return;
 		}
-		const writeStartedAt = observed[0] ?? toolCatalogObservedAt();
+		const writeStartedAt = writeToken ?? toolCatalogObservedAt();
 		// An omitted token samples now rather than coming from
 		// `observeCatalogAt()`, so fold it into the high-water mark too — a later
 		// failed reservation has to dominate it as well.
