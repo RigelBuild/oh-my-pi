@@ -114,6 +114,20 @@ describe("--reapply-config cold-discovery configured default", () => {
 		});
 	}
 
+	async function loadOverlayRoles(roles: Record<string, string>): Promise<Settings> {
+		const overlayPath = path.join(tempDir.path(), `overlay-${Bun.nanoseconds()}.yml`);
+		const body = Object.entries(roles)
+			.map(([role, value]) => `  ${role}: "${value}"`)
+			.join("\n");
+		await Bun.write(overlayPath, `modelRoles:\n${body}\n`);
+		return Settings.loadIsolated({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			inMemory: true,
+			configFiles: [overlayPath],
+		});
+	}
+
 	/**
 	 * Resume against a registry whose ollama catalog is reachable ONLY through a
 	 * discovery fetch: models.yml declares the provider with no static models and
@@ -241,6 +255,27 @@ describe("--reapply-config cold-discovery configured default", () => {
 		// already available: the early pass adopts index 1, which leaves `model`
 		// non-null and would otherwise skip the retry entirely.
 		const settings = await loadOverlay(`ollama/${DISCOVERED_MODEL},${modelValue(laterCandidate)}`);
+
+		const resumed = await resume(sessionFile, settings);
+
+		expect(resumed.model?.provider).toBe("ollama");
+		expect(resumed.model?.id).toBe(DISCOVERED_MODEL);
+	});
+
+	it("expands a legacy role alias before filtering discovery, so a cold role model still discovers", async () => {
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const laterCandidate = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		// `pi/slow,anthropic/<real-id>`: the higher-priority entry is a LEGACY role
+		// alias whose `slow` role points at a cold discovery-backed model. Splitting
+		// the raw `pi/slow` reads `pi` as a provider — `canRefreshProvider("pi")` is
+		// false — so the guard skipped the discovery pass that would have resolved
+		// the alias, and the resume kept the later already-available fallback.
+		const settings = await loadOverlayRoles({
+			default: `pi/slow,${modelValue(laterCandidate)}`,
+			slow: `ollama/${DISCOVERED_MODEL}`,
+		});
 
 		const resumed = await resume(sessionFile, settings);
 

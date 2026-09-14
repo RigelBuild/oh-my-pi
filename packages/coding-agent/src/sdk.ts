@@ -3167,11 +3167,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// one matching its spelling (`default,@default` against Cursor), so
 					// discovery is genuinely wanted for it.
 					if (isDefaultModelRoleSelfAlias(pattern)) return true;
-					const provider = pattern.split("/")[0];
-					// A wildcard or bare-id pattern names no provider, so any refresh
-					// could supply it — keep the old behaviour there.
-					if (!provider || provider === pattern || provider.includes("*")) return true;
-					if (modelRegistry.canRefreshProvider(provider)) return true;
+					// A legacy/`@` role alias (`pi/slow`, `@smol`) is NOT a provider:
+					// its prefix (`pi`) would read as one, be judged non-refreshable,
+					// and skip the discovery pass that would have resolved the role's
+					// actual model — leaving the session on a later fallback. Expand the
+					// alias to its concrete candidates first, exactly as role resolution
+					// does, then judge each EXPANDED provider. Plain `provider/id` and
+					// bare-id patterns pass through the expansion unchanged.
+					for (const candidate of resolveConfiguredModelPatterns([pattern], settings)) {
+						const provider = candidate.split("/")[0];
+						// A wildcard or bare-id pattern names no provider, so any refresh
+						// could supply it — keep the old behaviour there.
+						if (!provider || provider === candidate || provider.includes("*")) return true;
+						if (modelRegistry.canRefreshProvider(provider)) return true;
+					}
 				}
 				return false;
 			};
