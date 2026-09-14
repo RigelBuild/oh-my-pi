@@ -1839,12 +1839,19 @@ export class SessionTools {
 				const wrapped = this.#wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
-				// A NEWLY present memory tool becomes active immediately; one that was
-				// already present keeps its prior selection. Same shape as
-				// `#applyMCPToolRefresh`, so the two read consistently: a refresh runs
-				// for reasons unrelated to memory (any settings edit reaches here), and
-				// must not override a tool the user turned off through `/tools`.
-				if (!removed.has(wrapped.name) || previouslyActiveMemoryToolNames.has(wrapped.name)) {
+				// A tool that was already present keeps its prior selection. A NEWLY
+				// present tool becomes active immediately — UNLESS an explicit
+				// `/tools` selection excludes it. Enabling a backend from `off`
+				// registers its tools for the FIRST time, so `removed` is empty and
+				// every tool reads as new; making them available must not override a
+				// narrowed active set the user chose, exactly as the boolean- and
+				// setting-gated built-in reconciles respect `#runtimeSelectedToolNames`.
+				if (previouslyActiveMemoryToolNames.has(wrapped.name)) {
+					nextActive.push(wrapped.name);
+				} else if (
+					!removed.has(wrapped.name) &&
+					(this.#runtimeSelectedToolNames === undefined || this.#runtimeSelectedToolNames.has(wrapped.name))
+				) {
 					nextActive.push(wrapped.name);
 				}
 			}
