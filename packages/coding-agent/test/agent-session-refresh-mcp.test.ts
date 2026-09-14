@@ -1085,4 +1085,64 @@ describe("AgentSession.refresh('mcp')", () => {
 		await expect(second).rejects.toThrow("Session disposed before refresh could run");
 		expect(manager.discoverAndConnect).toHaveBeenCalledTimes(1);
 	});
+
+	// The `#doRefresh` entry fence rejects a refresh whose turn arrives AFTER
+	// disposal, but a refresh already past the fence has its own window: inside
+	// `reloadMcpServers` the session calls `disconnectAll()` and then re-reads
+	// config asynchronously (`discoverAndConnect` → `loadConfigs`). A `dispose()`
+	// landing in that async gap fires teardown's single `disconnectAll()` and
+	// completes; if discovery then reconnected it would spawn MCP subprocesses
+	// onto a session whose only teardown already ran, and nothing would ever
+	// disconnect them. The `shouldAbort` gate is consulted after `loadConfigs`
+	// resolves and before `connectServers` — the exact spawn point — so no
+	// subprocess is started after `disconnectAll()`.
+	it("abandons an in-flight mcp refresh when disposal lands mid-discovery", async () => {
+		const dir = TempDir.createSync("@pi-refresh-mcp-dispose-race-");
+		const loadEntered = Promise.withResolvers<void>();
+		const releaseLoad = Promise.withResolvers<void>();
+		// A config loader that blocks INSIDE discovery, holding the refresh open
+		// in the exact async window (after `disconnectAll`, before any connect)
+		// where a concurrent dispose completes its teardown.
+		const loadConfigs = vi.fn(async () => {
+			loadEntered.resolve();
+			await releaseLoad.promise;
+			// A real stdio server config: without the abort gate `connectServers`
+			// would spawn its subprocess here, onto the just-disposed session.
+			return {
+				configs: { late: { type: "stdio" as const, command: process.execPath, args: ["--version"] } },
+				exaApiKeys: [] as string[],
+				sources: {} as Record<string, SourceMeta>,
+			} satisfies LoadMCPConfigsResult;
+		});
+		const manager = new MCPManager(dir.path(), null, loadConfigs);
+		// `connectServers` is the spawn point the gate must protect: assert it is
+		// never reached once disposal has completed its teardown. Mocked so the
+		// ablation (gate removed) records the call without spawning a subprocess.
+		const connectSpy = vi.spyOn(manager, "connectServers").mockResolvedValue({
+			tools: [],
+			errors: new Map<string, string>(),
+			connectedServers: [],
+			exaApiKeys: [],
+		});
+		const session = await makeSession(manager);
+
+		const refreshing = session.refresh("mcp");
+		// Discovery is now blocked inside `loadConfigs`, past the refresh's own
+		// `disconnectAll()`.
+		await loadEntered.promise;
+		// Teardown lands in the gap and runs its single `disconnectAll()`.
+		session.beginDispose();
+		await manager.disconnectAll();
+		// Discovery resumes and reaches the abort gate.
+		releaseLoad.resolve();
+
+		const result = await refreshing;
+		expect(result.mcp).toBe(true);
+		// Pre-fix (no gate): discovery reconnected after teardown, so
+		// `connectServers` was called once, spawning a server onto the disposed
+		// session. Post-fix: the gate returns before any connection.
+		expect(connectSpy).toHaveBeenCalledTimes(0);
+
+		await dir.remove();
+	});
 });

@@ -187,6 +187,16 @@ export interface MCPDiscoverOptions {
 	extensionRoots?: EffectiveExtensionRoots;
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
+	/**
+	 * Late abort check, consulted AFTER config load resolves and BEFORE any
+	 * connection is created. Returning `true` abandons discovery without
+	 * starting a subprocess. The reconnect path passes the owning session's
+	 * disposal state: `discoverAndConnect` opens an async gap at `loadConfigs`
+	 * during which the session can be disposed and its single `disconnectAll()`
+	 * can complete, and connecting past that point would spawn MCP subprocesses
+	 * onto a torn-down session that will never disconnect them again.
+	 */
+	shouldAbort?: () => boolean;
 }
 
 /** Handles an MCP `WWW-Authenticate` challenge and returns refreshed config. */
@@ -556,6 +566,15 @@ export class MCPManager {
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
+		// Late disposal gate. `loadConfigs` above is asynchronous, so a caller
+		// (session teardown) can dispose and run its single `disconnectAll()`
+		// while it is in flight. Connecting now would start MCP subprocesses that
+		// the completed teardown will never disconnect. Checked here, after the
+		// only async gap and before the first connection is created, so no
+		// subprocess is ever spawned after `disconnectAll()`.
+		if (options?.shouldAbort?.()) {
+			return { tools: this.#tools, errors: new Map<string, string>(), connectedServers: [], exaApiKeys };
+		}
 		const result = await this.connectServers(configs, sources, options?.onStatus);
 		result.exaApiKeys = exaApiKeys;
 		return result;

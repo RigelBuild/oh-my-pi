@@ -30,6 +30,13 @@ export interface ReloadMcpServersOptions {
 	enableProjectConfig: boolean;
 	/** `browser.enabled` — mirrors startup's browser-server filter. */
 	filterBrowser: boolean;
+	/**
+	 * Late abort check forwarded to discovery, consulted after config load and
+	 * before any connection is created. The session passes its disposal state so
+	 * a reload racing teardown cannot reconnect MCP subprocesses onto a session
+	 * whose single `disconnectAll()` has already completed.
+	 */
+	shouldAbort?: () => boolean;
 }
 
 /**
@@ -213,6 +220,7 @@ export async function reloadMcpServers(options: ReloadMcpServersOptions): Promis
 			filterExa: true,
 			filterBrowser: options.filterBrowser,
 			extensionRoots: options.extensionRoots,
+			shouldAbort: options.shouldAbort,
 		});
 		// Startup applies the credentials discovery extracted (`applyMCPEnvironment`);
 		// a refresh that skips it would filter out a newly added Exa MCP server
