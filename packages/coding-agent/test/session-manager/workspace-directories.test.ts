@@ -148,6 +148,42 @@ describe("SessionManager workspace directories", () => {
 		expect(session.getAdditionalDirectories()).toEqual([]);
 	});
 
+	it("clears settings ownership on direct removal so a manual re-add is independent", async () => {
+		// Full sequence: a settings-owned root is removed with /remove-dir, then
+		// independently re-added with /add-dir. The manual add has to have its OWN
+		// provenance — a later settings reconcile that drops the path must not
+		// revoke the re-added root.
+		const session = SessionManager.inMemory();
+		const A = path.resolve("/roots/a");
+
+		// Settings grants A at startup: seed the root and mark it settings-owned.
+		await session.setAdditionalDirectories([A]);
+		await session.setSettingsOwnedDirectories([A]);
+		expect(session.getSettingsOwnedDirectories()).toEqual([A]);
+
+		// /remove-dir A, then /add-dir A. Pre-fix: removeWorkspaceDirectory left A
+		// in the settings-owned set, so the manual re-add inherited stale
+		// settings provenance.
+		await session.removeWorkspaceDirectory(A);
+		expect(session.getSettingsOwnedDirectories()).toEqual([]);
+		await session.addWorkspaceDirectory(A);
+		expect(session.getAdditionalDirectories()).toEqual([A]);
+		expect(session.getSettingsOwnedDirectories()).toEqual([]);
+
+		// A settings reconcile that no longer names A (removed from
+		// workspace.additionalDirectories) is seeded from the live provenance.
+		// Pre-fix that provenance still claimed A, so the reconcile revoked the
+		// manually re-added root.
+		const { roots, owned } = reconcileSettingsWorkspaceRoots({
+			cwd: session.getCwd(),
+			live: session.getAdditionalDirectories(),
+			previouslyOwned: new Set(session.getSettingsOwnedDirectories()),
+			configured: [],
+		});
+		expect(roots).toEqual([A]);
+		expect([...owned]).toEqual([]);
+	});
+
 	it("setAdditionalDirectories persists the updated header on a resumed session", async () => {
 		using tempDir = TempDir.createSync("@pi-session-workspace-resume-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());

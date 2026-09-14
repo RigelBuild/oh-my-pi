@@ -7518,6 +7518,11 @@ export class AgentSession {
 		this.#tools.setSettingGatedBuiltinPermissions(names);
 	}
 
+	/** Records whether this session's construction permitted the `think` scratchpad. */
+	setThinkToolPermitted(permitted: boolean): void {
+		this.#tools.setThinkToolPermitted(permitted);
+	}
+
 	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.#tools.setThinkToolEnabled(enabled);
 	}

@@ -1911,6 +1911,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		let settingGatedBuiltinPermissions: ReadonlySet<string> = new Set();
+		let thinkToolPermitted = true;
 		// Idempotent: the controller subscribes for the session's lifetime and the
 		// reference is intentionally discarded (the listener retains it), so a
 		// second construction would double every nudge.
@@ -1946,6 +1947,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// so this cannot forward straight to it.
 			setSettingGatedBuiltinPermissions: (names: ReadonlySet<string>) => {
 				settingGatedBuiltinPermissions = names;
+			},
+			// Same shape as the gated-builtin permissions above, for the hidden
+			// `think` scratchpad: parked locally until the session exists.
+			setThinkToolPermitted: (permitted: boolean) => {
+				thinkToolPermitted = permitted;
 			},
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
@@ -4541,6 +4547,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Hand over what `createTools` recorded: it ran before this session
 		// existed, so the set was parked in a local until now.
 		session.setSettingGatedBuiltinPermissions(settingGatedBuiltinPermissions);
+		session.setThinkToolPermitted(thinkToolPermitted);
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).
