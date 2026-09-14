@@ -922,9 +922,11 @@ describe("restart reconstruction reattach", () => {
 			// is still adopted and revives on demand rather than throwing "Unknown
 			// agent". Revival goes through the replacement's factory: the recycle
 			// marked the spawn-time closure stale, since it closes over the parent
-			// this restart disposed.
+			// this restart disposed. Keyed to "Main" — the parked child's top-level
+			// owner — exactly as the real replacement keys its own factory, so it
+			// supersedes the owned slot the original parent installed at startup.
 			expect(AgentLifecycleManager.global()).toBe(lifecycle);
-			lifecycle.setPersistedSubagentReviverFactory(async () => async () => subSession, 0);
+			lifecycle.setPersistedSubagentReviverFactory(async () => async () => subSession, 0, "Main");
 			expect(await lifecycle.ensureLive("Sub")).toBe(subSession);
 		} finally {
 			await replacement?.dispose();
@@ -1134,6 +1136,7 @@ describe("restart reconstruction reattach", () => {
 					return revivedSession;
 				},
 				0,
+				"Main",
 			);
 			// The replacement now exists and owns the revival factory: the first
 			// instant a revived child has a live parent to borrow resources from.
@@ -1455,8 +1458,8 @@ describe("restart reconstruction reattach", () => {
 		// rejection before any assertion reaches it.
 		let sendOutcome: Promise<string> | undefined;
 		const realParkAll = lifecycle.parkAll.bind(lifecycle);
-		lifecycle.parkAll = async deadlineAt => {
-			const release = await realParkAll(deadlineAt);
+		lifecycle.parkAll = async (deadlineAt, ownerId) => {
+			const release = await realParkAll(deadlineAt, ownerId);
 			const racing = lifecycle.ensureLive("Sub");
 			sendOutcome = racing.then(
 				() => "resolved",
@@ -1491,10 +1494,14 @@ describe("restart reconstruction reattach", () => {
 			// reviver never is, since it closes over the parent this recycle
 			// disposed. A refusal that never lifted would strand every later send.
 			let factoryReviverRuns = 0;
-			lifecycle.setPersistedSubagentReviverFactory(async () => {
-				factoryReviverRuns++;
-				return async () => ({ dispose: async () => {} }) as unknown as AgentSession;
-			}, 0);
+			lifecycle.setPersistedSubagentReviverFactory(
+				async () => {
+					factoryReviverRuns++;
+					return async () => ({ dispose: async () => {} }) as unknown as AgentSession;
+				},
+				0,
+				"Main",
+			);
 			await expect(lifecycle.ensureLive("Sub")).resolves.toBeDefined();
 			expect(factoryReviverRuns).toBe(1);
 			// The stale closure stayed unused throughout.
