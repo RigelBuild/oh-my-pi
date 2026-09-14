@@ -58,9 +58,9 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  */
 async function drainEventLoop(turns = 400): Promise<void> {
 	for (let turn = 0; turn < turns; turn++) {
-		const { promise, resolve } = Promise.withResolvers<void>();
-		setTimeout(resolve, 0);
-		await promise;
+		// `Bun.sleep(0)` is a TIMER turn, which is the property this drain needs
+		// (see above): it yields through the poll phase, unlike `setImmediate`.
+		await Bun.sleep(0);
 	}
 }
 
@@ -181,6 +181,32 @@ describe("AgentSession restart barrier waits for in-flight prompt setup", () => 
 
 		titleGate.resolve("");
 		await drainEventLoop();
+	});
+
+	// Same shape as the title-generation case above, on the last background
+	// writer that runs with the foreground agent IDLE. Under
+	// `autolearn.autoContinue` the deferred `agent_end` of a qualifying turn
+	// starts a private capture model/tool run; `beginDispose()` aborts it and the
+	// replacement never replays that `agent_end`, so a managed-skill update
+	// already being generated is lost.
+	it("refuses restart while an auto-learn capture is running", async () => {
+		await buildLiveSession();
+
+		const captureGate = Promise.withResolvers<void>();
+		// `runAutolearnCapture` is the real entry point the deferred `agent_end`
+		// calls; parking inside it reproduces the exact window.
+		const capture = session.runAutolearnCapture(async () => {
+			await captureGate.promise;
+		});
+		await drainEventLoop();
+
+		await expect(session.requestRestart()).resolves.toEqual({ ok: false, reason: "busy" });
+
+		captureGate.resolve();
+		await capture;
+
+		// And once it settles the refusal lifts — this must be a wait, not a ban.
+		await expect(session.requestRestart()).resolves.not.toEqual({ ok: false, reason: "busy" });
 	});
 
 	// One step earlier than the buffered-result cases below: a command that is
