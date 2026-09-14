@@ -133,6 +133,16 @@ interface RevivingAgent {
  */
 interface ParkingBarrier {
 	promise: Promise<void>;
+	/**
+	 * The top-level owner whose recycle raised this barrier, or `undefined` for
+	 * an unowned process-scoped teardown. Scopes the exclusion the same way
+	 * {@link AgentLifecycleManager.parkAll} scopes its parking: an owned barrier
+	 * blocks only its own ownership chain (via {@link
+	 * AgentLifecycleManager.#isOwnedBy}), an unowned one blocks every id. Without
+	 * it session A's recycle stalls session B's unrelated `ensureLive()` calls,
+	 * none of which is parked, for A's entire reconstruction.
+	 */
+	ownerId: string | undefined;
 }
 
 export class AgentLifecycleManager {
@@ -587,7 +597,7 @@ export class AgentLifecycleManager {
 		// synchronously by `cancel()` — so a pass that awaited one cannot find the
 		// same entry again, and a pass that finds none falls straight through.
 		for (;;) {
-			if (this.#parkingBarriers.size > 0) await this.#awaitParkingBarriers();
+			if (this.#hasBarrierFor(id)) await this.#awaitParkingBarriers(id);
 
 			const park = this.#parks.get(id);
 			if (!park) break;
@@ -600,7 +610,7 @@ export class AgentLifecycleManager {
 				// while we waited. If one did, loop: waiting it out and re-reading
 				// the ref is the same treatment a revival gets, and returning a
 				// still-attached child would violate the same exclusion.
-				if (this.#parkingBarriers.size === 0) {
+				if (!this.#hasBarrierFor(id)) {
 					const kept = this.#registry.get(id)?.session;
 					if (kept) {
 						// Park cleared the idle timer; re-arm so TTL park still works.
@@ -689,8 +699,8 @@ export class AgentLifecycleManager {
 	 */
 	async #handOffRevival(id: string, revival: Promise<AgentSession>): Promise<AgentSession> {
 		const session = await revival;
-		if (this.#parkingBarriers.size === 0) return session;
-		await this.#awaitParkingBarriers();
+		if (!this.#hasBarrierFor(id)) return session;
+		await this.#awaitParkingBarriers(id);
 		const live = this.#registry.get(id);
 		// The handoff may have cancelled its park and kept this session live
 		// (`park.cancel()`), in which case there is nothing to fail over.
@@ -771,7 +781,26 @@ export class AgentLifecycleManager {
 	}
 
 	/**
-	 * Block until no all-agent parking handoff is live.
+	 * Whether any live parking handoff blocks {@link ensureLive} for `id`.
+	 *
+	 * A barrier blocks an id only when its recycling owner is on that id's
+	 * ownership chain — the same {@link #isOwnedBy} test that scopes the
+	 * parking, factory selection and failed-handoff refusal. Session A's recycle
+	 * therefore never stalls session B's `ensureLive()`: B's children borrow
+	 * nothing from A's shared resources, so making them wait out A's whole
+	 * reconstruction would freeze unrelated IRC, collaboration and hub traffic
+	 * for agents that are not even parked. An unowned (process-scoped) barrier
+	 * carries `undefined`, which {@link #isOwnedBy} treats as "owns everything".
+	 */
+	#hasBarrierFor(id: string): boolean {
+		for (const barrier of this.#parkingBarriers) {
+			if (this.#isOwnedBy(id, barrier.ownerId)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Block until no parking handoff that OWNS `id` is live.
 	 *
 	 * Loops rather than awaiting one snapshot: a release removes only its own
 	 * entry, and a fresh `parkAll()` can raise another while we are parked on an
@@ -781,26 +810,31 @@ export class AgentLifecycleManager {
 	 * caller holds the handoff — so this wait cannot make a recycle wedge that
 	 * would otherwise complete.
 	 *
-	 * Callers guard on `#parkingBarriers.size` so the common no-barrier case
-	 * costs no microtask at all. That is load-bearing for {@link ensureLive}:
-	 * `park()` yields exactly once before committing to detach, so an
-	 * ensureLive() arriving in the same tick has to reach the cancel inside that
-	 * single turn. Awaiting even an immediately-resolved promise here spends the
-	 * turn and the park detaches instead of being cancelled.
+	 * Scoped to `id`: only barriers whose recycling owner is on `id`'s ownership
+	 * chain are awaited, so a caller for one top-level session never blocks on
+	 * another session's recycle. Callers guard on {@link #hasBarrierFor} so the
+	 * common no-barrier case costs no microtask at all. That is load-bearing for
+	 * {@link ensureLive}: `park()` yields exactly once before committing to
+	 * detach, so an ensureLive() arriving in the same tick has to reach the
+	 * cancel inside that single turn. Awaiting even an immediately-resolved
+	 * promise here spends the turn and the park detaches instead of being
+	 * cancelled.
 	 *
 	 * Reports nothing. Whether a waited-out handoff ended WITHOUT a replacement
 	 * parent is read off {@link #isHandoffFailedFor} instead, because the outcome has
 	 * to survive both a barrier entry that its own release deletes and every
 	 * caller that never held that entry.
 	 */
-	async #awaitParkingBarriers(): Promise<void> {
-		while (this.#parkingBarriers.size > 0) {
+	async #awaitParkingBarriers(id: string): Promise<void> {
+		for (;;) {
 			// SNAPSHOT, not the live Set: a release drops its own entry BEFORE
 			// resolving, so an iterator over the live Set skips every barrier that
 			// releases while we are parked on an earlier one. Awaiting a snapshot
-			// makes "every barrier live at this point" the unit, and the outer
+			// makes "every barrier that owns id right now" the unit, and the outer
 			// re-read then covers only one raised after the snapshot was taken.
-			for (const barrier of [...this.#parkingBarriers]) await barrier.promise;
+			const blocking = [...this.#parkingBarriers].filter(barrier => this.#isOwnedBy(id, barrier.ownerId));
+			if (blocking.length === 0) return;
+			for (const barrier of blocking) await barrier.promise;
 		}
 	}
 
@@ -1020,7 +1054,7 @@ export class AgentLifecycleManager {
 		ownerId?: string,
 	): Promise<ParkingBarrierRelease> {
 		const resolvers = Promise.withResolvers<void>();
-		const barrier: ParkingBarrier = { promise: resolvers.promise };
+		const barrier: ParkingBarrier = { promise: resolvers.promise, ownerId };
 		// Added before the first await so an ensureLive() in the same tick — the
 		// exact racer park()'s cancel window admits — already observes it.
 		this.#parkingBarriers.add(barrier);
@@ -1232,14 +1266,15 @@ export class AgentLifecycleManager {
 		// exclude, and the session is built on resources that are going away
 		// regardless. So wait for the teardown the barrier delimits, then dispose
 		// it and fail the waiter: an `ensureLive()` retry revives cleanly against
-		// the replacement parent's manager. Waiting on every live barrier covers a
-		// second recycle raising its own while we wait on the first.
+		// the replacement parent's manager. Waiting on every barrier that owns
+		// this id covers a second recycle of the same owner raising its own while
+		// we wait on the first.
 		//
 		// The wait is safe against the barrier that fenced us because the fence is
 		// set only in the path that has ALREADY given up waiting on this promise,
 		// so `parkAll()` can never be blocked on the wait below.
 		if (fence.fenced) {
-			if (this.#parkingBarriers.size > 0) await this.#awaitParkingBarriers();
+			if (this.#hasBarrierFor(id)) await this.#awaitParkingBarriers(id);
 			await session.dispose();
 			throw new Error(
 				`Agent "${id}" revival aborted: its parent session recycled while its persisted session was reviving.`,
