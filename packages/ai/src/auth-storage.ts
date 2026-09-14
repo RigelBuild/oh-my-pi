@@ -4035,6 +4035,20 @@ export class AuthStorage {
 			}
 			return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);
 		}
+		// A credential stamp is an EXPLICIT distinct identity that
+		// #fetchUsageUncached applies precisely when the report recovered none of
+		// its own (#reportHasNoIdentity) — the conflicting-scope shape among them,
+		// where the limits name several accounts. Such a report can still carry a
+		// shared metadata.projectId or an account alias, and grouping by those
+		// would fold two genuinely distinct credentials into one group that
+		// #mergeUsageReportGroup collapses to a single credentialKey — exactly the
+		// identity the stamp exists to keep apart. Honor the stamp before the
+		// weaker fallbacks so a stamped report is never merged by a shared id.
+		// Mirrors accountLabelOf, which prefers `credential:<key>` over the same
+		// fallbacks. Unstamped reports (two users on one GCP project) are
+		// untouched: they carry no stamp and still group by project.
+		const credentialKey = this.#getUsageReportMetadataValue(report, "credentialKey");
+		if (credentialKey) return [`${report.provider}:credential:${credentialKey.toLowerCase()}`];
 		const projectId =
 			this.#getUsageReportMetadataValue(report, "projectId") ?? this.#getUsageReportScopeProjectId(report);
 		// Only add project as a fallback when no email is available — two users

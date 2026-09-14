@@ -168,6 +168,48 @@ describe("AuthStorage identity-less usage reports", () => {
 		}
 	}, 20_000);
 
+	it("keeps two stamped generic-provider reports apart despite a shared projectId", async () => {
+		// A GENERIC provider (not anthropic/openai-codex, so this exercises the
+		// general identifier path). Two credentials whose reports carry CONFLICTING
+		// `scope.accountId` values but the SAME `metadata.projectId`. The conflict
+		// makes `#reportHasNoIdentity` true, so each report is stamped with a
+		// distinct `credentialKey`. But `#getUsageReportIdentifiers`'s general path
+		// grouped BOTH by the weaker shared `project:proj-shared`, and
+		// `#mergeUsageReportGroup` kept only one `credentialKey` — folding the two
+		// stamped identities into one report the renderer then labels as a single
+		// series. The openai-codex regression above cannot catch this: the codex
+		// SPECIAL branch ignores `projectId` and returns early before the general
+		// path runs. The stamp must be honored before the projectId fallback.
+		const conflictingReport = (): UsageReport => ({
+			provider: "synthetic",
+			fetchedAt: Date.now(),
+			limits: ["acct-x", "acct-y"].map(accountId => ({
+				id: `synthetic:${accountId}`,
+				label: "Weekly",
+				scope: { provider: "synthetic", accountId },
+				amount: { usedFraction: 0.2, unit: "percent" },
+			})),
+			metadata: { projectId: "proj-shared" },
+		});
+		const storage = new AuthStorage(makeStore([apiKeyRow(51), apiKeyRow(52)]), {
+			usageProviderResolver: provider => (provider === "synthetic" ? stubProvider(conflictingReport) : undefined),
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.fetchUsageReports()) ?? [];
+			const synthetic = reports.filter(report => report.provider === "synthetic");
+			const keys = synthetic.map(report => report.metadata?.credentialKey);
+
+			// RED (pre-fix): both grouped by `synthetic:project:proj-shared`, merged
+			// to one report, so `synthetic` had length 1 and one surviving key.
+			expect(synthetic).toHaveLength(2);
+			expect(new Set(keys).size).toBe(2);
+			expect(keys.every(key => typeof key === "string" && key.length > 0)).toBe(true);
+		} finally {
+			storage.close();
+		}
+	}, 20_000);
+
 	it("stamps different-account shared-limit reports so their series stay distinct", async () => {
 		// `scope.shared` marks a limit as credential-wide for exhaustion gating —
 		// most quota providers set it — NOT that two DIFFERENT credentials observe
