@@ -4757,6 +4757,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// manager's listener set or the process-global postmortem list.
 					unsubscribeSharedTools?.();
 					unregisterSharedToolsPostmortem?.();
+					// Stop the CURRENT broker with the session. `reloadBlobBroker`
+					// only disposes the instance it RETIRES, so a session that
+					// enabled image URLs and was then disposed without another
+					// image-setting change would leak the live broker's callback
+					// server and local exposure/tunnel past teardown. Read the live
+					// binding so a broker built or swapped by a settings reload is
+					// the one torn down, and null it so a late request cannot revive
+					// a disposed session's exposure.
+					const activeBroker = blobBroker;
+					blobBroker = undefined;
+					if (activeBroker) {
+						await activeBroker
+							.dispose()
+							.catch(error =>
+								logger.warn("Failed to dispose blob broker on session dispose", { error: String(error) }),
+							);
+					}
 					for (const callback of disposeCallbacks) callback();
 					disposeCallbacks.clear();
 					// Drop refs so the process-global postmortem list doesn't retain
