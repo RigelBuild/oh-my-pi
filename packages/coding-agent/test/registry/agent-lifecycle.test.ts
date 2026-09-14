@@ -1774,6 +1774,109 @@ describe("AgentLifecycleManager", () => {
 		expect(bReviverRuns).toBe(1);
 	});
 
+	// The parking BARRIER is scoped to its owner the same way the parking,
+	// factory selection and failed-handoff refusal already are. Two restart-
+	// enabled top-level sessions share the global manager; recycling session A
+	// raises a manager-wide barrier that every `ensureLive()` waits out at its
+	// entry — so a slow or hung A reconstruction stalled IRC, collaboration and
+	// hub traffic for session B's unrelated children indefinitely, though none
+	// of them is parked. The barrier now blocks only ids on A's ownership chain.
+	//
+	// Event-gated, never time-gated: A's barrier is HELD open for the whole
+	// test (never released), so a B child that (wrongly) waited on it could only
+	// hang forever. B's `ensureLive()` resolving is the proof it did not wait;
+	// A's child staying pending under the same held barrier is the proof the
+	// barrier still works for its own owner.
+	//
+	// RED (pre-fix): `parkAll()` added an unscoped barrier and `ensureLive()`
+	// awaited every barrier, so `ensureLive("B-child")` never resolved while A's
+	// barrier was held and the awaited promise below timed out.
+	it("scopes a recycle's parking barrier to the restarting owner: an unrelated owner's ensureLive does not wait on it", async () => {
+		// A's child, owned by top-level id "SessionA". A parked ref with a
+		// reviver, so A's recycle has something to park.
+		const aChild = registry.register({
+			id: "A-child",
+			displayName: "task",
+			kind: "sub",
+			parentId: "SessionA",
+			session: makeSessionStub().session,
+			sessionFile: "/tmp/A-child.jsonl",
+			status: "idle",
+		});
+		const aReplacement = makeSessionStub();
+		lifecycle.adopt("A-child", { idleTtlMs: 0, revive: async () => aReplacement.session }, aChild);
+
+		// B's child, owned by the OTHER live top-level id "SessionB". Parked and
+		// revivable through B's own reviver, which A's recycle never touches.
+		const bReplacement = makeSessionStub();
+		const bChild = registry.register({
+			id: "B-child",
+			displayName: "task",
+			kind: "sub",
+			parentId: "SessionB",
+			session: makeSessionStub().session,
+			sessionFile: "/tmp/B-child.jsonl",
+			status: "idle",
+		});
+		let bReviverRuns = 0;
+		lifecycle.adopt(
+			"B-child",
+			{
+				idleTtlMs: 0,
+				revive: async () => {
+					bReviverRuns++;
+					return bReplacement.session;
+				},
+			},
+			bChild,
+		);
+		// Park B's child so its ensureLive() takes the revive path rather than
+		// handing back the live session.
+		await lifecycle.park("B-child");
+		expect(registry.get("B-child")?.status).toBe("parked");
+
+		// Recycle A only, and HOLD its barrier open for the rest of the test.
+		// A's recycle stale-marks A-child's captured reviver, so its later
+		// revival must go through the replacement factory A installs.
+		let aFactoryRuns = 0;
+		const release = await lifecycle.parkAll(undefined, "SessionA");
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => async () => {
+				aFactoryRuns++;
+				return aReplacement.session;
+			},
+			0,
+			"SessionA",
+		);
+		try {
+			expect(registry.get("A-child")?.status).toBe("parked");
+
+			// B's child revives WITHOUT waiting on A's held barrier. If it waited,
+			// this await would never settle (the barrier is never released here).
+			expect(await lifecycle.ensureLive("B-child")).toBe(bReplacement.session);
+			expect(bReviverRuns).toBe(1);
+
+			// A's OWN child still waits on the barrier: its ensureLive() stays
+			// pending until the barrier releases. Prove it is blocked by flushing
+			// the async chain and observing it has not settled.
+			let aSettled = false;
+			const aSend = lifecycle.ensureLive("A-child").then(session => {
+				aSettled = true;
+				return session;
+			});
+			await flushAsync();
+			expect(aSettled).toBe(false);
+			expect(aFactoryRuns).toBe(0);
+
+			// Releasing A's barrier lets A's child through its replacement factory.
+			release();
+			expect(await aSend).toBe(aReplacement.session);
+			expect(aFactoryRuns).toBe(1);
+		} finally {
+			release();
+		}
+	});
+
 	// Two restart-enabled top-level sessions coexist on the one global manager,
 	// each having installed its OWN persisted-subagent reviver factory. A cold
 	// revive of session A's child must go through A's factory — bound to A's
