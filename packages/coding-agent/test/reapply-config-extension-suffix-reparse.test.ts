@@ -512,6 +512,104 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	// learn it is a literal. Correcting `restoredSessionThinkingLevel` alone left
 	// the misread `low` in `thinkingLevel`/`effectiveThinkingLevel`, because the
 	// later recomputation is gated on `!model` and never ran.
+	test("discovers a cold provider whose casing differs from the saved selector's", async () => {
+		// `modelRegistry.find` resolves a reference case-insensitively, but
+		// `canRefreshProvider` and `refreshDiscoverableProviders` are exact
+		// map/set lookups. A saved selector spelled with different provider casing
+		// therefore skipped the discovery that proves `router:low` is a literal id,
+		// and `:low` was transferred to the config-selected model as a thinking
+		// level.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		let dynamicFetches = 0;
+		const dynamicProviderExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					dynamicFetches++;
+					return [
+						{
+							id: "router:low",
+							name: "Router Low",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+						{
+							id: "config-pick",
+							name: "Config Pick",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "runtime-provider/config-pick");
+		const sessionFile = path.join(tempDir, `cased-provider-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "cased-provider-session", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					// The provider is registered lowercase; the saved string is not.
+					model: "Runtime-Provider/router:low",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-cased-provider"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [dynamicProviderExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			// The premise, measured: the cold catalog really was fetched.
+			expect(dynamicFetches).toBeGreaterThan(0);
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("matches a pinned model whose saved selector differs only in provider casing", async () => {
 		// The caller's own `options.model` counts as literal, so an id the registry
 		// has never seen is still recognized whole. But that comparison was

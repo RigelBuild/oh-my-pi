@@ -1696,6 +1696,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	/** {@link savedSuffixIsReadable}, recomputed for a default role that changed. */
 	const savedSuffixIsReadableFor = (spec: ResolvedModelRoleValue): boolean =>
 		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
+	/**
+	 * A provider name keyed the way the registry stores it. `modelRegistry.find`
+	 * resolves a reference case-insensitively, but `canRefreshProvider` and
+	 * `refreshDiscoverableProviders` do exact map/set lookups, so a saved
+	 * selector spelled `Dynamic/router:low` would miss a provider registered
+	 * `dynamic` and skip the refresh that proves its id literal.
+	 */
+	const normalizedProviderKey = (provider: string): string => provider.trim().toLowerCase();
 	/** Case-insensitive model-reference equality, as `resolveProviderModelReference` keys them. */
 	const sameModelReference = (left: string | undefined, right: string | undefined): boolean =>
 		left !== undefined && right !== undefined && left.trim().toLowerCase() === right.trim().toLowerCase();
@@ -2722,9 +2730,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// while a scoped refresh would have fetched exactly the catalog that
 				// proves the id literal — and the split parse handed the chosen model
 				// the loser's `:low`.
-				modelRegistry.canRefreshProvider(savedParse.provider)
+				modelRegistry.canRefreshProvider(normalizedProviderKey(savedParse.provider))
 			) {
-				const savedProvider = savedParse.provider;
+				const savedProvider = normalizedProviderKey(savedParse.provider);
 				// Coalescing covers configured `discovery:` providers only
 				// (`#discoverProviderModelsCoalesced`); the runtime and built-in
 				// managers an extension registers have no in-flight map, so a
@@ -2752,9 +2760,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				!savedSuffixIsReadable &&
 				savedParse?.thinkingLevel !== undefined &&
-				modelRegistry.canRefreshProvider(savedParse.provider)
+				modelRegistry.canRefreshProvider(normalizedProviderKey(savedParse.provider))
 			) {
-				const savedProvider = savedParse.provider;
+				const savedProvider = normalizedProviderKey(savedParse.provider);
 				retrySavedSuffixParse = async (): Promise<void> => {
 					retrySavedSuffixParse = undefined;
 					await runtimeDiscoveryPromise;
