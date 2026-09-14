@@ -3372,3 +3372,135 @@ describe("incremental assistant payload computer calls pair a later screenshot",
 		).toBe(false);
 	});
 });
+
+describe("percent-encoded replayed image URIs are measured by wire size", () => {
+	it("evicts a percent-encoded native image whose wire size busts the byte budget", () => {
+		// A supported percent-encoded data URI travels VERBATIM: its `%XX` payload
+		// is ~3x the binary it encodes, while the base64 the decoder re-encodes to
+		// is only ~1.33x. Measuring the decoded base64 length undercharged it, so a
+		// 6 MiB image tallied as ~8 MiB (< the 16 MB OpenAI budget) while occupying
+		// ~18 MiB on the wire — nothing was evicted and the request still 413'd.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+		// Bytes: base64 length ~= 4/3 * N, wire (%XX) length = 3 * N. Choose N so
+		// the base64 tally fits the budget but the wire payload alone exceeds it.
+		const binaryBytes = Math.floor(budget * 0.45);
+		const percentPayload = "%00".repeat(binaryBytes);
+		const percentUri = `data:image/png,${percentPayload}`;
+		// Prove the fixture actually crosses the boundary the fix turns on.
+		const base64Len = Math.ceil(binaryBytes / 3) * 4;
+		expect(base64Len).toBeLessThan(budget);
+		expect(percentPayload.length).toBeGreaterThan(budget);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("compaction summary")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							{ type: "compaction_summary" },
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: percentUri }] },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would be
+		// — this serialized length is the observable that 413s, not any tally.
+		const wire = buildResponsesInput({
+			model: OPENAI_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// Prove the fixture reached the percent-encoded branch: the payload is still
+		// replayed and the oversized image was degraded IN PLACE to the omission
+		// notice, not the whole turn dropped.
+		expect(serialized).toContain("[image omitted: provider image limit]");
+		// RED (pre-fix): the base64 tally read ~8 MiB, under the 16 MB budget, so no
+		// drop was owed and the ~18 MiB `%XX` payload reached the wire whole.
+		expect(serialized).not.toContain(percentPayload);
+		// The final built request fits the byte budget it must not exceed.
+		expect(serialized.length).toBeLessThanOrEqual(budget);
+	});
+});
+
+describe("call ids are derived from the sanitized replay items", () => {
+	it("skips a live image result the wire orphans after an invalid function_call is dropped", () => {
+		// A warmed Responses payload holds a `function_call` with INVALID JSON
+		// arguments; a later LIVE image-bearing tool result reuses that call id. The
+		// raw scan recorded the id even though `sanitizeOpenAIResponsesHistoryItems`
+		// DROPS the call, so the accounting treated the result as PAIRED and charged
+		// its bytes — evicting an older valid image to fit them. But the converter,
+		// seeing the dropped call, folds the result into a truncated orphan note, so
+		// its image never travels: the wire carried neither. Deriving the id from
+		// the sanitized items classifies the result as the orphan it really is, so
+		// its bytes are skipped and the older valid image survives.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+		// Each fits alone; together they bust the budget, so charging the orphan
+		// owes exactly one drop that oldest-first eviction lands on the valid image.
+		const valid = "V".repeat(Math.floor(budget * 0.7));
+		const orphan = "O".repeat(Math.floor(budget * 0.9));
+		const context: Context = {
+			messages: [
+				// The older valid image: on its own it fits the byte budget.
+				{ role: "user", timestamp: 1, content: [image(valid)] },
+				// A warmed assistant payload whose `function_call` has invalid JSON
+				// arguments — the sanitizer drops it, so it pairs NOTHING on the wire.
+				{
+					...assistantTurn([], 2),
+					api: OPENAI_MODEL.api,
+					provider: OPENAI_MODEL.provider,
+					model: OPENAI_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						dt: true,
+						items: [
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "note-a" }] },
+							{ type: "function_call", call_id: "call-0", name: "read", arguments: "{not json" },
+						],
+					},
+				},
+				// The live matching result. With the call dropped, the converter
+				// truncates this to an orphan note, so its image never travels.
+				{
+					role: "toolResult",
+					timestamp: 3,
+					toolCallId: "call-0",
+					toolName: "read",
+					content: [image(orphan)],
+					isError: false,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		const wire = buildResponsesInput({
+			model: OPENAI_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// Prove the fixture reaches the branch: the invalid call is dropped from the
+		// wire, so the result is unpaired and the converter repaired it to a note.
+		expect(wire.some(item => item.type === "function_call")).toBe(false);
+		expect(serialized).not.toContain(orphan);
+		// RED (pre-fix): the raw scan recorded `call-0`, the accounting charged the
+		// orphan's bytes, and the valid image was evicted to fit a result the
+		// converter then truncated away — so the wire carried neither.
+		expect(serialized).toContain(valid);
+	});
+});

@@ -17,6 +17,7 @@ import {
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
+	sanitizeOpenAIResponsesHistoryItemsForReplay,
 } from "@oh-my-pi/pi-ai/utils";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { sanitizeMalformedToolCalls } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -175,8 +176,8 @@ function collectImageStats(
 		// mirror must not be charged in its place.
 		const demotesScreenshot = message.role === "toolResult" && demotesComputerScreenshot(message, countModel);
 		if (demotesScreenshot && byteModel !== undefined) {
-			const screenshot = inlineComputerScreenshot(message.providerMetadata);
-			if (screenshot !== undefined) inlineSizes.push(screenshot.length);
+			const size = inlineComputerScreenshotWireSize(message.providerMetadata);
+			if (size > 0) inlineSizes.push(size);
 		}
 		if (sendsScreenshot) {
 			// One image part, whether or not a content mirror exists: a history
@@ -185,8 +186,8 @@ function collectImageStats(
 			// to the content loop left a long replay uncounted and un-evictable.
 			total++;
 			if (byteModel !== undefined) {
-				const screenshot = inlineComputerScreenshot(message.providerMetadata);
-				if (screenshot !== undefined) inlineSizes.push(screenshot.length);
+				const size = inlineComputerScreenshotWireSize(message.providerMetadata);
+				if (size > 0) inlineSizes.push(size);
 			}
 		}
 		// A replayed `input_image` is sent as an ordinary Responses image input, so
@@ -269,13 +270,13 @@ function replayedPayloadByteSizes(
 		// charged (to `sizes`) while the count (`inputSizes`) is not.
 		if (demotesNativeComputerItems && isReplayedComputerItem(item)) {
 			for (const part of nativeInputImageParts(item)) {
-				const size = inlineImageFromDataUri(part.image_url)?.data.length ?? 0;
+				const size = nativeImageUrlWireSize(part.image_url);
 				if (size > 0) sizes.push(size);
 			}
 			continue;
 		}
 		for (const part of nativeInputImageParts(item)) {
-			const size = inlineImageFromDataUri(part.image_url)?.data.length ?? 0;
+			const size = nativeImageUrlWireSize(part.image_url);
 			inputSizes?.push(size);
 			if (size > 0) sizes.push(size);
 		}
@@ -435,13 +436,13 @@ function replayedInputImages(
 			// zero. Recorded through the demoted channel below, which charges
 			// bytes without a count.
 			for (const part of nativeInputImageParts(payload.items[index])) {
-				const size = inlineImageFromDataUri(part.image_url)?.data.length ?? 0;
+				const size = nativeImageUrlWireSize(part.image_url);
 				if (size > 0) demotedSizes.push(size);
 			}
 			continue;
 		}
 		for (const part of nativeInputImageParts(payload.items[index])) {
-			sizes.push(inlineImageFromDataUri(part.image_url)?.data.length ?? 0);
+			sizes.push(nativeImageUrlWireSize(part.image_url));
 		}
 	}
 	return sizes;
@@ -525,12 +526,28 @@ function repairedOrphanItemIndices(
 }
 
 /**
- * Adds the RAW wire tool-call id of every replayed call in `items` to `calls`,
- * keyed by kind exactly as `repairOrphanResponsesToolOutputs()` pairs. A demoting
- * model rewrites replayed `computer_call`s into notes before the wire, so its
- * computer calls pair nothing — `includeComputer` gates them out there.
+ * The payload items as the converter actually replays them: sanitized exactly
+ * as `buildResponsesInput()` does before it pairs call ids. A `function_call`
+ * with invalid JSON arguments (and an `item_reference`, or an invalid
+ * `image_generation_call`) is dropped here, so an id collected off the raw
+ * payload paired a result the converter then folds into a truncated orphan note
+ * — charging bytes that never reach the wire. Deriving every id from this view
+ * keeps the accounting's pairing identical to the wire's, for all call kinds.
  */
-function addReplayedWireCallIdsRaw(
+function sanitizedReplayItems(items: readonly Record<string, unknown>[], model: Model): Array<Record<string, unknown>> {
+	return sanitizeOpenAIResponsesHistoryItemsForReplay(items as Array<Record<string, unknown>>, {
+		supportsComputerUse: model.supportsComputerUse === true,
+	}) as unknown as Array<Record<string, unknown>>;
+}
+
+/**
+ * Adds the wire tool-call id of every replayed call in `items` to `calls`, keyed
+ * by kind exactly as `repairOrphanResponsesToolOutputs()` pairs. Pass items from
+ * {@link sanitizedReplayItems} so a call the sanitizer dropped records nothing. A
+ * demoting model rewrites replayed `computer_call`s into notes before the wire,
+ * so its computer calls pair nothing — `includeComputer` gates them out there.
+ */
+function addReplayedWireCallIds(
 	items: readonly Record<string, unknown>[],
 	calls: Set<string>,
 	includeComputer: boolean,
@@ -590,7 +607,7 @@ function collectRepairedOrphanIndices(
 			const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
 			if (!payload) continue;
 			indicesByMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
-			addReplayedWireCallIdsRaw(payload.items, preceding, !demoting);
+			addReplayedWireCallIds(sanitizedReplayItems(payload.items, model), preceding, !demoting);
 			continue;
 		}
 		if (message.role === "assistant") {
@@ -600,7 +617,7 @@ function collectRepairedOrphanIndices(
 				// before it precede nothing. Its own calls seed the new prefix.
 				if (!payload.dt && splicesItems(payload.items, model)) preceding = new Set<string>();
 				indicesByMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
-				addReplayedWireCallIdsRaw(payload.items, preceding, !demoting);
+				addReplayedWireCallIds(sanitizedReplayItems(payload.items, model), preceding, !demoting);
 				continue;
 			}
 			// No replayed payload: the converter renders this turn from its blocks, so
@@ -685,6 +702,25 @@ function nativeInputImageParts(item: Record<string, unknown> | undefined): Array
 	}
 	if (!Array.isArray(item.content)) return [];
 	return item.content.filter((part): part is Record<string, unknown> => isRecord(part) && part.type === "input_image");
+}
+
+/**
+ * Wire byte length of the inline payload a native `image_url` carries, or 0 for
+ * a reference (`https:`, `file_id`) or non-inline URL.
+ *
+ * `buildResponsesInput()` replays a native `input_image` / `computer_call_output`
+ * VERBATIM, so the string that actually reaches the wire — and 413s — is the
+ * URI's own payload. A base64 data URI travels as its base64 body, but a
+ * supported percent-encoded data URI travels as `%XX` text that is ~3x the
+ * decoded bytes. Measuring `inlineImageFromDataUri().data.length` charged the
+ * base64 the decoder RE-ENCODES those escapes to (~1.33x), so 6 MiB of binary
+ * tallied as ~8 MiB while occupying ~18 MiB on the wire: nothing was evicted and
+ * the request still 413'd. Measure the payload as it is sent.
+ */
+function nativeImageUrlWireSize(imageUrl: unknown): number {
+	if (typeof imageUrl !== "string" || inlineImageFromDataUri(imageUrl) === undefined) return 0;
+	const comma = imageUrl.indexOf(",");
+	return comma < 0 ? 0 : imageUrl.length - comma - 1;
 }
 
 /**
@@ -862,7 +898,7 @@ function collectPairedComputerCallIds(context: Context, model: Model, replaysNat
 			// or a compaction marker).
 			if (supersedesContentWithReplay(message, model, replaysNativeHistory)) {
 				const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
-				if (payload) addReplayedComputerCallIds(payload.items, ids);
+				if (payload) addReplayedComputerCallIds(sanitizedReplayItems(payload.items, model), ids);
 			}
 			continue;
 		}
@@ -880,7 +916,7 @@ function collectPairedComputerCallIds(context: Context, model: Model, replaysNat
 		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
 		if (payload) {
 			if (!payload.dt && splicesItems(payload.items, model)) ids = new Set<string>();
-			addReplayedComputerCallIds(payload.items, ids);
+			addReplayedComputerCallIds(sanitizedReplayItems(payload.items, model), ids);
 			continue;
 		}
 		if (!Array.isArray(message.content)) continue;
@@ -912,6 +948,12 @@ function inlineComputerScreenshot(metadata: ToolResultProviderMetadata | undefin
 	if (metadata?.type !== "computer") return undefined;
 	const image = inlineImageFromDataUri(metadata.screenshot.image_url);
 	return image && image.data.length > 0 ? image.data : undefined;
+}
+
+/** Wire byte length of a replayed computer screenshot's inline payload, or 0. */
+function inlineComputerScreenshotWireSize(metadata: ToolResultProviderMetadata | undefined): number {
+	if (metadata?.type !== "computer") return 0;
+	return nativeImageUrlWireSize(metadata.screenshot.image_url);
 }
 
 /** Count of oldest images to drop so the surviving image payload fits `byteLimit`. */
