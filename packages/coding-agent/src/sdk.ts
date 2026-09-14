@@ -3153,6 +3153,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const resolvedDefaultModel = reResolvedRoleSpec.model;
 				model = resolvedDefaultModel;
 				adoptedDefaultRoleModel = true;
+				// The early bare-resume restore is now overruled: this config default
+				// resolved and replaced the model it had restored. Its conclusion —
+				// `restoredSessionModelIndex`, set when the baked model looked like the
+				// only survivor — is a PROVISIONAL first-pass verdict the new winner
+				// invalidates. Left set, the user-visible notice below reads it as
+				// "config default did not resolve; kept the session's ..." even though
+				// the session DID switch to the config model. Re-settle it to unset so
+				// the notice takes the `configDefaultResolved` branch instead.
+				restoredSessionModelIndex = -1;
 				modelFallbackMessage = undefined;
 				// Recompute the thinking level against the now-real model.
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,

@@ -1183,4 +1183,118 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			await session.dispose();
 		}
 	}, 20000);
+
+	test("does not claim the config default failed when a late default won the adoption", async () => {
+		// Sibling of the flip test above, on the user-visible NOTICE. The early
+		// bare-resume restore (adoption reads false against `default,@default`
+		// before the extension loads) restores the baked `custom/router` and sets
+		// `restoredSessionModelIndex = 0`. When the extension registers a literal
+		// `default`, the config default resolves and REPLACES the model -- the
+		// session DID switch. But the stale index-0 marker made the notice take
+		// the "restored a saved model" branch and report
+		// `config default "default,@default" did not resolve; kept the session's
+		// custom/router`, contradicting the model the session actually runs. The
+		// marker must be re-settled when the config model wins.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, `notice-models-${Bun.nanoseconds()}.yml`);
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					custom: {
+						baseUrl: "https://custom.example.invalid/v1",
+						api: "openai-completions",
+						auth: "none",
+						models: [{ id: "router", name: "Router" }],
+					},
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+		// The premise, measured: the bare `custom/router` is visible early (so the
+		// early restore adopts it and seeds index 0), while the `default` model the
+		// config resolves to is NOT -- it arrives with the extension.
+		expect(modelRegistry.find("custom", "router")).toBeDefined();
+		expect(modelRegistry.find("custom", "default")).toBeUndefined();
+
+		const augmentCustom: ExtensionFactory = pi => {
+			pi.registerProvider("custom", {
+				baseUrl: "https://custom.example.invalid/v1",
+				apiKey: "CUSTOM_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "default",
+						name: "Late Default",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "default,@default");
+
+		const sessionFile = path.join(tempDir, `notice-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "notice-session", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: "custom/router",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-notice"));
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [augmentCustom],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			// The premise, measured: the adoption really did flip to the late config
+			// `default`, not the baked `custom/router`.
+			expect(session.model?.provider).toBe("custom");
+			expect(session.model?.id).toBe("default");
+			// RED (pre-fix): the stale index-0 marker made the notice claim the
+			// config default failed and the session kept its baked model.
+			expect(modelFallbackMessage ?? "").not.toContain("did not resolve");
+			expect(modelFallbackMessage ?? "").not.toContain("kept the session");
+			// GREEN: the notice reports the config model the session actually adopted.
+			expect(modelFallbackMessage).toContain("resumed on custom/default from config");
+		} finally {
+			await session.dispose();
+		}
+	}, 20000);
 });
