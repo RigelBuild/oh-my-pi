@@ -100,7 +100,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
-import { reset as resetCapabilities } from "../capability";
+import { initializeWithSettings, reset as resetCapabilities } from "../capability";
 import { type Rule, setActiveRules } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -6066,6 +6066,18 @@ export class AgentSession {
 				this.settings.get("providers.webSearchExclude"),
 				this.settings.get("providers.imageOrder"),
 			];
+			// The whole-provider and foreign-user-source gates live in MODULE-level
+			// sets in `capability/index.ts` that `initializeWithSettings` populated
+			// at startup; capability discovery filters on those sets, never on
+			// `settings.get(...)` at scan time. A reload alone updates only the
+			// `Settings` instance, so an external `disabledProviders`/
+			// `enabledProviders` edit plus `/refresh` kept the roster and MCP scans
+			// below loading a newly disabled provider (or omitting a newly enabled
+			// user source). Captured for the same change-gating reason as the
+			// globals above: the interactive selector and ACP/state-manager toggles
+			// persist straight into these settings, so re-syncing an unmoved value
+			// is a no-op and never clobbers a session-local selection.
+			const previousProviderGates = [this.settings.get("disabledProviders"), this.settings.get("enabledProviders")];
 			// The three `tier.*` settings are copied into `ModelControls`'s private
 			// per-family map at startup, and `agent.serviceTierResolver` reads that
 			// map — not the settings — on every request. Captured as the CONFIGURED
@@ -6350,6 +6362,23 @@ export class AgentSession {
 					])
 				) {
 					applyProviderGlobalsFromSettings(this.settings);
+				}
+				// Re-sync the module-level provider gates the roster and MCP scans
+				// below filter on. `initializeWithSettings` is the same path startup
+				// uses to populate them from settings; re-running it re-reads the
+				// now-reloaded `disabledProviders`/`enabledProviders` and rebuilds
+				// both sets, so rediscovery stops loading a newly disabled provider
+				// and picks up a newly enabled user source. `resetCapabilities()`
+				// above cleared only the filesystem cache, not these sets. Gated on a
+				// real value change so an unrelated settings edit leaves the gates
+				// untouched.
+				if (
+					!Bun.deepEquals(previousProviderGates, [
+						this.settings.get("disabledProviders"),
+						this.settings.get("enabledProviders"),
+					])
+				) {
+					initializeWithSettings(this.settings);
 				}
 				// Same class as the provider globals above: `lsp.shared` is copied
 				// into module state that `getOrCreateClient` reads when it cold-starts
