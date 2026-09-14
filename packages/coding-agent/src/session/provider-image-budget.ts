@@ -116,7 +116,11 @@ function collectImageStats(
 	// though its own payload starts the known-call set empty. Precomputed once so
 	// every accounting pass and the clamp share one verdict — see
 	// `collectRepairedOrphanIndices`.
-	const repairedOrphansByMessage = collectRepairedOrphanIndices(context, countModel, replaysNativeHistory);
+	const { indicesByMessage: repairedOrphansByMessage, orphanToolResults } = collectRepairedOrphanIndices(
+		context,
+		countModel,
+		replaysNativeHistory,
+	);
 	// Everything before a full-snapshot replacement is spliced off the wire, so
 	// it owes neither budget — see `wireStartIndex`.
 	const wireStart = wireStartIndex(context, countModel, replaysNativeHistory);
@@ -153,6 +157,12 @@ function collectImageStats(
 		// `sanitizeMalformedToolCalls()` before any converter runs, so its image
 		// bytes never travel and must not be charged.
 		if (droppedByToolCallSanitization(message, survivingResults)) continue;
+		// A non-computer tool result whose paired call never reaches the wire is
+		// truncated to a 16 KB assistant note by `repairOrphanResponsesToolOutputs()`
+		// (or the strict-pairing fold), so its image bytes never travel and must not
+		// be charged — the same orphan verdict the payload path applies. See
+		// `collectRepairedOrphanIndices`.
+		if (message.role === "toolResult" && orphanToolResults.has(message)) continue;
 		// A computer result's metadata screenshot REPLACES its generic content on
 		// the wire — `appendResponsesToolResultMessages()` sends the metadata copy
 		// as the `computer_call_output.output` and never looks at the content. So
@@ -498,43 +508,69 @@ function repairedOrphanItemIndices(
 		const item = items[index];
 		const callId = typeof item?.call_id === "string" ? item.call_id : undefined;
 		if (!callId) continue;
-		if (item.type === "computer_call") precedingCalls.add(callId);
-		else if (item.type === "computer_call_output" && !precedingCalls.has(callId)) repaired.add(index);
+		if (item.type === "computer_call") precedingCalls.add(`computer::${callId}`);
+		else if (item.type === "computer_call_output" && !precedingCalls.has(`computer::${callId}`)) repaired.add(index);
 	}
 	return repaired;
 }
 
-/** Adds the RAW wire call id of every replayed `computer_call` in `items` to `calls`. */
-function addReplayedComputerCallIdsRaw(items: readonly Record<string, unknown>[], calls: Set<string>): void {
+/**
+ * Adds the RAW wire tool-call id of every replayed call in `items` to `calls`,
+ * keyed by kind exactly as `repairOrphanResponsesToolOutputs()` pairs. A demoting
+ * model rewrites replayed `computer_call`s into notes before the wire, so its
+ * computer calls pair nothing — `includeComputer` gates them out there.
+ */
+function addReplayedWireCallIdsRaw(
+	items: readonly Record<string, unknown>[],
+	calls: Set<string>,
+	includeComputer: boolean,
+): void {
 	for (const item of items) {
-		if (item.type !== "computer_call") continue;
-		if (typeof item.call_id === "string") calls.add(item.call_id);
+		if (typeof item.call_id !== "string") continue;
+		if (item.type === "function_call") calls.add(`function::${item.call_id}`);
+		else if (item.type === "custom_tool_call") calls.add(`custom::${item.call_id}`);
+		else if (includeComputer && item.type === "computer_call") calls.add(`computer::${item.call_id}`);
 	}
 }
 
 /**
- * Each replaying message's {@link repairedOrphanItemIndices}, computed with the
- * `computer_call`s every earlier WIRE-BOUND message contributes — so the orphan
- * verdict matches what `buildResponsesInput()` concludes over the whole input,
- * not a payload in isolation.
+ * Both orphan verdicts the accounting and the clamp share, computed in one
+ * message walk so they can never drift from what `buildResponsesInput()`
+ * concludes over the whole assembled input.
  *
- * Preceding calls RESET at a `dt`-falsy full-snapshot splice, exactly where
- * `convertConversationMessages()` throws away everything before it: a call the
- * splice discards precedes nothing (mirrors `collectPairedComputerCallIds`).
- * Only wire-bound carriers contribute — a replayed user/developer payload
- * (`supersedesContentWithReplay`), a replayed assistant payload, and a live
- * assistant computer tool call, which converts to a `computer_call` on the wire.
+ * `indicesByMessage`: per replaying message, the `computer_call_output` indices
+ * `repairOrphanResponsesToolOutputs()` rewrites into a note (never on a demoting
+ * model, which turns every replayed computer item into a note first).
+ *
+ * `orphanToolResults`: live non-computer tool results whose paired call never
+ * reaches the wire — a locally-rejected call, or a call a full snapshot spliced
+ * away — so the converter truncates the result to a 16 KB assistant note and its
+ * image bytes never travel. Computer results are excluded: they ride the
+ * screenshot paths, whose demoted note is untruncated.
+ *
+ * Preceding calls are keyed by kind (`function`/`custom`/`computer`) and RESET at
+ * a `dt`-falsy full-snapshot splice, exactly where `convertConversationMessages()`
+ * discards everything before it. Only wire-bound carriers contribute: a replayed
+ * user/developer payload, a replayed assistant payload, and a live assistant tool
+ * call (a computer call only when the model is not demoting).
  */
+interface RepairedOrphanVerdicts {
+	indicesByMessage: ReadonlyMap<Message, ReadonlySet<number>>;
+	orphanToolResults: ReadonlySet<Message>;
+}
+
 function collectRepairedOrphanIndices(
 	context: Context,
 	model: Model,
 	replaysNativeHistory: boolean,
-): ReadonlyMap<Message, ReadonlySet<number>> {
-	const perMessage = new Map<Message, ReadonlySet<number>>();
-	// The same short-circuits `repairedOrphanItemIndices` applies: only the routes
-	// that repair orphans, and never a demoting model.
-	if (model.api !== "openai-responses" && model.api !== "azure-openai-responses") return perMessage;
-	if (demotesReplayedComputerItems(model)) return perMessage;
+): RepairedOrphanVerdicts {
+	const indicesByMessage = new Map<Message, ReadonlySet<number>>();
+	const orphanToolResults = new Set<Message>();
+	// Only the routes that repair orphan outputs; both pass `repairOrphanOutputs`.
+	if (model.api !== "openai-responses" && model.api !== "azure-openai-responses") {
+		return { indicesByMessage, orphanToolResults };
+	}
+	const demoting = demotesReplayedComputerItems(model);
 	let preceding = new Set<string>();
 	for (const message of context.messages) {
 		if (message.role === "user" || message.role === "developer") {
@@ -543,32 +579,46 @@ function collectRepairedOrphanIndices(
 			if (!supersedesContentWithReplay(message, model, replaysNativeHistory)) continue;
 			const payload = getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
 			if (!payload) continue;
-			perMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
-			addReplayedComputerCallIdsRaw(payload.items, preceding);
+			indicesByMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
+			addReplayedWireCallIdsRaw(payload.items, preceding, !demoting);
 			continue;
 		}
-		if (message.role !== "assistant") continue;
-		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
-		if (payload) {
-			// A `dt`-falsy payload that really splices replaces the wire, so calls
-			// before it precede nothing. Its own calls seed the new prefix.
-			if (!payload.dt && splicesItems(payload.items, model)) preceding = new Set<string>();
-			perMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
-			addReplayedComputerCallIdsRaw(payload.items, preceding);
+		if (message.role === "assistant") {
+			const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
+			if (payload) {
+				// A `dt`-falsy payload that really splices replaces the wire, so calls
+				// before it precede nothing. Its own calls seed the new prefix.
+				if (!payload.dt && splicesItems(payload.items, model)) preceding = new Set<string>();
+				indicesByMessage.set(message, repairedOrphanItemIndices(payload.items, model, preceding));
+				addReplayedWireCallIdsRaw(payload.items, preceding, !demoting);
+				continue;
+			}
+			// No replayed payload: the converter renders this turn from its blocks, so
+			// a live tool call becomes a wire call (its id normalized). A computer call
+			// on a demoting model becomes a note instead, so it pairs nothing.
+			if (!Array.isArray(message.content)) continue;
+			for (const block of message.content) {
+				if (block.type !== "toolCall") continue;
+				const callId = normalizeResponsesToolCallId(block.id).callId;
+				if (block.providerMetadata?.type === "computer") {
+					if (!demoting) preceding.add(`computer::${callId}`);
+				} else {
+					preceding.add(`${block.customWireName ? "custom" : "function"}::${callId}`);
+				}
+			}
 			continue;
 		}
-		// No replayed payload: the converter renders this turn from its blocks, so
-		// a live computer tool call becomes a `computer_call` on the wire (its id
-		// normalized). A replayed payload above suppresses content conversion, so
-		// these are counted only when nothing replayed.
-		if (!Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if (block.type !== "toolCall") continue;
-			if (block.providerMetadata?.type !== "computer") continue;
-			preceding.add(normalizeComputerCallId(block.id));
+		if (message.role === "toolResult") {
+			// A computer result travels through the screenshot paths, never as an
+			// orphan-repaired note here.
+			if (message.providerMetadata?.type === "computer") continue;
+			const callId = normalizeResponsesToolCallId(message.toolCallId).callId;
+			if (!preceding.has(`function::${callId}`) && !preceding.has(`custom::${callId}`)) {
+				orphanToolResults.add(message);
+			}
 		}
 	}
-	return perMessage;
+	return { indicesByMessage, orphanToolResults };
 }
 
 /** The API routes whose converters replay an `openaiResponsesHistory` payload. */
@@ -807,19 +857,19 @@ function collectPairedComputerCallIds(context: Context, model: Model, replaysNat
 			continue;
 		}
 		if (message.role !== "assistant") continue;
-		// A replayed payload with `dt` falsy is a FULL-SNAPSHOT replacement:
-		// `convertConversationMessages()` splices away everything built so far and
-		// clears its pair set, so an earlier generic computer call is simply not on
-		// the wire. Recording it anyway made `sendsComputerScreenshot()` charge the
-		// metadata copy, and under byte-only pressure the clamp cleared that
-		// metadata while the generic mirror it left behind is what actually
-		// travelled — so the drop reclaimed nothing and the request still 413'd.
+		// A replayed payload's items are what reach the wire — the converter records
+		// their `computer_call`s and SKIPS this turn's generic content. A `dt`-falsy
+		// payload that really splices is a full-snapshot replacement, where
+		// `convertConversationMessages()` clears the accumulated pair set first (a
+		// hidden-empty payload sanitizes to `undefined`, so the splice never runs and
+		// the accumulated set still travels). An incremental `dt: true` payload only
+		// appends, but its `computer_call`s still pair a later result's screenshot —
+		// recording only the splice case left them unpaired, so a metadata screenshot
+		// went untallied and an oversized one slipped the clamp. Mirrors
+		// `collectRepairedOrphanIndices`.
 		const payload = replayableHistoryPayload(message, model, replaysNativeHistory);
-		// The same survival check the boundary uses: a hidden-empty payload
-		// sanitizes to `undefined`, so the splice never runs and the accumulated
-		// pair set is still what travels.
-		if (payload && !payload.dt && splicesItems(payload.items, model)) {
-			ids = new Set<string>();
+		if (payload) {
+			if (!payload.dt && splicesItems(payload.items, model)) ids = new Set<string>();
 			addReplayedComputerCallIds(payload.items, ids);
 			continue;
 		}
@@ -891,6 +941,12 @@ interface ImageClampState {
 	 * `survivingToolResults`.
 	 */
 	survivingToolResults: ReadonlySet<Message>;
+	/**
+	 * Live non-computer tool results the converter truncates to a note because
+	 * their paired call never reaches the wire — see `collectRepairedOrphanIndices`.
+	 * Their images never travel, so the clamp must not evict them.
+	 */
+	orphanToolResults: ReadonlySet<Message>;
 }
 
 /**
@@ -993,10 +1049,16 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageClampSta
 	if (sendsComputerScreenshot(message, state.model, state.pairedComputerCallIds)) {
 		if (!clampComputerScreenshot(message, state)) return message;
 
-		const clampedContent = clampContent(message.content, { ...state, remainingInlineDrops: 0 });
+		// Clearing `providerMetadata` reroutes this result through the generic
+		// converter, which builds its output — and, when the call is unpaired, its
+		// fallback note — from `content`. The mirrored screenshot was charged once
+		// through the metadata, so drop the image blocks here unpaid while RETAINING
+		// the tool's text; replacing the whole content with the omission notice would
+		// silently lose that text.
+		const retained = message.content.filter(part => part.type !== "image");
 		return {
 			...message,
-			content: clampedContent && clampedContent.length > 0 ? clampedContent : [IMAGE_OMISSION_NOTICE],
+			content: retained.length > 0 ? retained : [IMAGE_OMISSION_NOTICE],
 			providerMetadata: undefined,
 		};
 	}
@@ -1279,10 +1341,15 @@ function applyImageClamp(context: Context, state: ImageClampState): Context {
 			case "developer":
 				return clampDeveloperMessage(message, state);
 			case "toolResult":
-				// A result the malformed-tool-call sanitizer drops never reaches the
-				// wire, so the accounting did not charge it — evicting its image here
-				// would spend an allowance a live image needs.
-				if (droppedByToolCallSanitization(message, state.survivingToolResults)) return message;
+				// A result the malformed-tool-call sanitizer drops, or a non-computer
+				// orphan the converter truncates to a note, never sends its image — so
+				// evicting it here would spend an allowance a live image needs.
+				if (
+					droppedByToolCallSanitization(message, state.survivingToolResults) ||
+					state.orphanToolResults.has(message)
+				) {
+					return message;
+				}
 				return clampToolResultMessage(message, state);
 			case "assistant":
 				// Generic assistant images are display artifacts the request never
@@ -1352,6 +1419,7 @@ function clampImageCountToCap(context: Context, model: Model, replaysNativeHisto
 	// would not send justify dropping generic images it WOULD.
 	const countDrops = collectImageStats(context, undefined, replaysNativeHistory, model).total - cap;
 	if (countDrops <= 0) return context;
+	const orphanVerdicts = collectRepairedOrphanIndices(context, model, replaysNativeHistory);
 	return applyImageClamp(context, {
 		remainingDrops: countDrops,
 		remainingInlineDrops: 0,
@@ -1361,7 +1429,8 @@ function clampImageCountToCap(context: Context, model: Model, replaysNativeHisto
 		// the tally clears metadata whose mirror then travels instead.
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
-		repairedOrphansByMessage: collectRepairedOrphanIndices(context, model, replaysNativeHistory),
+		repairedOrphansByMessage: orphanVerdicts.indicesByMessage,
+		orphanToolResults: orphanVerdicts.orphanToolResults,
 		survivingToolResults: survivingToolResults(context),
 	});
 }
@@ -1392,6 +1461,7 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 	const countDrops = acceptsImages ? Math.max(0, total - providerImageBudget(model.provider)) : 0;
 	const inlineDrops = imageDropCountForBytes(inlineSizes, providerImageByteBudget(model.provider, model.api));
 	if (countDrops === 0 && inlineDrops === 0) return context;
+	const orphanVerdicts = collectRepairedOrphanIndices(context, model, replaysNativeHistory);
 
 	// The two budgets are tracked as SEPARATE remaining constraints rather than
 	// collapsed with max(): a reference-backed drop satisfies the count cap but
@@ -1409,7 +1479,8 @@ export function clampProviderContextImages(context: Context, model: Model, repla
 		// the tally clears metadata whose mirror then travels instead.
 		pairedComputerCallIds: collectPairedComputerCallIds(context, model, replaysNativeHistory),
 		wireStartIndex: wireStartIndex(context, model, replaysNativeHistory),
-		repairedOrphansByMessage: collectRepairedOrphanIndices(context, model, replaysNativeHistory),
+		repairedOrphansByMessage: orphanVerdicts.indicesByMessage,
+		orphanToolResults: orphanVerdicts.orphanToolResults,
 		survivingToolResults: survivingToolResults(context),
 	});
 }

@@ -2944,3 +2944,197 @@ describe("byte accounting excludes results dropped by message sanitization", () 
 		expect(validSurvives).toBe(true);
 	});
 });
+
+describe("byte accounting excludes orphan tool results the converter repairs", () => {
+	it("keeps an older valid image an image-bearing orphan tool result should never have evicted", async () => {
+		// A Responses history holds an image-bearing `toolResult` whose paired
+		// tool call never reaches the wire (a locally-rejected call). The converter
+		// folds that orphan output into a 16 KB-capped assistant note via
+		// `repairOrphanResponsesToolOutputs()`, so its image never travels — but the
+		// accounting charged its full bytes, and under byte pressure the drop that
+		// bought room for a payload already gone evicted an older VALID image.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+		// Each fits alone; together they bust the budget, so charging the orphan
+		// owes exactly one drop that oldest-first eviction lands on the valid image.
+		const valid = "V".repeat(Math.floor(budget * 0.7));
+		const orphan = "O".repeat(Math.floor(budget * 0.9));
+		const context: Context = {
+			messages: [
+				// The older valid image: on its own it fits the byte budget.
+				{ role: "user", timestamp: 1, content: [image(valid)] },
+				// An orphan tool result: no assistant tool call precedes it, so the
+				// converter truncates it to a note and its image never travels.
+				{
+					role: "toolResult",
+					timestamp: 2,
+					toolCallId: "call-rejected",
+					toolName: "read",
+					content: [image(orphan)],
+					isError: false,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would.
+		const wire = buildResponsesInput({
+			model: OPENAI_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the orphan's bytes were charged, the valid image was
+		// evicted to fit them, and the converter then truncated the orphan away —
+		// so the wire carried neither.
+		expect(serialized).toContain(valid);
+		// The orphan's oversized image never reaches the wire regardless.
+		expect(serialized).not.toContain(orphan);
+	});
+});
+
+describe("preserving text when a native computer screenshot is removed", () => {
+	it("keeps a computer result's text after byte pressure evicts its screenshot", async () => {
+		// A paired computer result carries BOTH the mirrored screenshot and useful
+		// text. Byte-only pressure clears its metadata; clearing it reroutes the
+		// result through the generic converter, whose fallback note is built from
+		// the result's content. Replacing the whole content with the omission
+		// notice therefore lost the tool's text silently — retain the non-image
+		// content instead.
+		const budget = providerImageByteBudget(COMPUTER_MODEL.provider, COMPUTER_MODEL.api);
+		const shot = "s".repeat(budget + 1);
+		const mirror = "m".repeat(64);
+		const context: Context = {
+			messages: [
+				computerCallMessage("call-shot"),
+				{
+					role: "toolResult",
+					timestamp: 2,
+					toolCallId: "call-shot",
+					toolName: "computer",
+					content: [text("important tool output"), image(mirror)],
+					isError: false,
+					providerMetadata: {
+						type: "computer",
+						acknowledgedSafetyChecks: [],
+						screenshot: { type: "computer_screenshot", image_url: dataUri(shot) },
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would.
+		const wire = buildResponsesInput({
+			model: COMPUTER_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// The oversized screenshot was evicted regardless.
+		expect(serialized).not.toContain(shot);
+		// RED (pre-fix): the fallback replaced the whole content with the omission
+		// notice, so the demoted note carried it in place of the real output.
+		expect(serialized).toContain("important tool output");
+	});
+});
+
+describe("incremental assistant payload computer calls pair a later screenshot", () => {
+	it("evicts an oversized screenshot paired by an incremental assistant payload call", async () => {
+		// A `dt: true` assistant payload APPENDS its `computer_call` to the wire and
+		// `buildResponsesInput()` records it in the pair set — but the pairing scan
+		// recorded payload calls only for a full-snapshot splice and otherwise read
+		// this turn's (empty) generic content. So the later result's metadata
+		// screenshot looked unpaired, went untallied, and its oversized bytes slipped
+		// the clamp onto the wire.
+		//
+		// The pairing `computer_call` rides the incremental payload. A separate live
+		// assistant tool call declares the same id so the matching result survives
+		// `transformMessages()` (an orphan result is folded into a stale note and
+		// never reaches the converter) — that live call carries no computer
+		// `providerMetadata`, so the pairing is visible ONLY in the replayed payload.
+		const budget = providerImageByteBudget(COMPUTER_MODEL.provider, COMPUTER_MODEL.api);
+		const shot = "s".repeat(budget + 1);
+		const context: Context = {
+			messages: [
+				{
+					...assistantTurn([], 1),
+					api: COMPUTER_MODEL.api,
+					provider: COMPUTER_MODEL.provider,
+					model: COMPUTER_MODEL.id,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: COMPUTER_MODEL.provider,
+						// Incremental append: the call rides the payload, NOT generic content.
+						dt: true,
+						items: [
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "surviving-note" }] },
+							{
+								type: "computer_call",
+								id: "cu_0",
+								call_id: "call-0",
+								action: { type: "screenshot" },
+								pending_safety_checks: [],
+								status: "completed",
+							},
+						],
+					},
+				},
+				// A live tool call declaring `call-0`, so its result is not orphaned
+				// into a stale note. No computer `providerMetadata`, so the pairing is
+				// only in the payload above.
+				{
+					...assistantTurn([], 2),
+					api: COMPUTER_MODEL.api,
+					provider: COMPUTER_MODEL.provider,
+					model: COMPUTER_MODEL.id,
+					stopReason: "toolUse",
+					content: [{ type: "toolCall", id: "call-0", name: "computer", arguments: {} }],
+				} as AssistantMessage,
+				// The matching result: a history parsed back from a
+				// `computer_call_output` carries `content: []`, so the metadata is the
+				// only representation there is to tally.
+				{
+					role: "toolResult",
+					timestamp: 3,
+					toolCallId: "call-0",
+					toolName: "computer",
+					content: [],
+					isError: false,
+					providerMetadata: {
+						type: "computer",
+						acknowledgedSafetyChecks: [],
+						screenshot: { type: "computer_screenshot", image_url: dataUri(shot) },
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, COMPUTER_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would.
+		const wire = buildResponsesInput({
+			model: COMPUTER_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const serialized = JSON.stringify(wire);
+		// RED (pre-fix): the screenshot looked unpaired, was never tallied, no drop
+		// was owed, and its oversized data URI reached the wire whole.
+		expect(serialized).not.toContain(shot);
+		// No `computer_call_output` still carries the oversized screenshot.
+		expect(
+			wire.some(item => item.type === "computer_call_output" && JSON.stringify(item.output ?? "").includes(shot)),
+		).toBe(false);
+	});
+});
