@@ -2389,6 +2389,91 @@ describe("AgentSession holds an agent-initiated send until the requested compact
 		expect(order.indexOf("prompt:done")).toBeGreaterThan(order.indexOf("rewrite:summary"));
 	}, 15_000);
 
+	it("releases the barrier claim and delivers the terminal end when preprocessing rejects after parking", async () => {
+		// The claim on the compaction barrier is taken at the FIRST park in
+		// `prompt()`, BEFORE image normalization and the vision-description call.
+		// `#promptWithMessage`'s finally — the only release before this fix — is
+		// reached only after all of that preprocessing succeeds. So an image-bearing
+		// prompt that parks during a requested compaction, then whose preprocessing
+		// REJECTS on resume, left the claim and the downgraded terminal `agent_end`
+		// outstanding: no successor turn ever starts, and an RPC/ACP subscriber
+		// reading `agent_end` as the idle signal waits forever. The fix releases the
+		// claim from every pre-dispatch exit, so the stashed end is restored exactly
+		// once and the session reports idle.
+		const order: string[] = [];
+		let terminalEnds = 0;
+		const summaryStarted = Promise.withResolvers<void>();
+		const summaryGate = Promise.withResolvers<void>();
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			summaryStarted.resolve();
+			await summaryGate.promise;
+			order.push("rewrite:summary");
+			return {
+				summary: "compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+		// Fail preprocessing for the image-bearing prompt only. The compaction-
+		// requesting prompt below carries no images, so it never enters here.
+		const normalizeError = new Error("normalization failed");
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			if (!images?.length) return images;
+			order.push("normalize:reject");
+			throw normalizeError;
+		});
+
+		const session = await createHarnessWithRealCompaction();
+		session.subscribe(event => {
+			if (event.type === "agent_end" && event.isTerminal !== false) terminalEnds++;
+		});
+
+		// Fire-and-forget: this schedules the requested compaction, whose gated
+		// summary keeps the rewrite in flight.
+		const primary = session.prompt("do the thing then compact");
+		await summaryStarted.promise;
+		// Idle on every predicate the caller can see, mid-rewrite.
+		expect(session.isStreaming).toBe(false);
+
+		// Issue the image prompt now, while `#requestedCompaction` is set: it parks
+		// at the FIRST barrier and takes a claim + the downgrade taken on its behalf.
+		const image = {
+			type: "image" as const,
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+			mimeType: "image/png" as const,
+		};
+		let rejected: unknown;
+		const imagePrompt = session.prompt("describe this", { images: [image] }).catch(error => {
+			rejected = error;
+		});
+		await Bun.sleep(0);
+		// Still parked: preprocessing has not run because the barrier has not cleared.
+		expect(order).not.toContain("normalize:reject");
+
+		// Release the rewrite: the compaction finalizer downgrades the terminal end
+		// (the parked prompt is a waiter) and stashes it, then the image prompt
+		// unparks and its normalization rejects.
+		summaryGate.resolve();
+		await imagePrompt;
+		await primary;
+
+		// The image prompt really did reject in preprocessing...
+		expect(rejected).toBe(normalizeError);
+		expect(order).toContain("normalize:reject");
+
+		// ...and the released claim restored the downgraded terminal `agent_end`.
+		// Pre-fix the stash is never released, so this stays 0 and an RPC/ACP
+		// subscriber never learns the session went idle; post-fix the finally
+		// re-emits it exactly once.
+		expect(terminalEnds).toBeGreaterThan(0);
+		// And the session genuinely reaches idle — `waitForIdle()` awaits the real
+		// settle promise, which hangs pre-fix (caught by this test's timeout) and
+		// resolves immediately post-fix.
+		await session.waitForIdle();
+	}, 15_000);
+
 	it("holds a handoff until the rewrite finishes", async () => {
 		// `handoff()` delegated straight to maintenance, unlike the fork/branch/
 		// shake routes beside it. A requested compaction driven by a yield-queue
