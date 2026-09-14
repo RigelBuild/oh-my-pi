@@ -390,4 +390,38 @@ describe("--reapply-config configured default fallback order", () => {
 
 		expect(resumed.model?.id).toBe(bakedModel.id);
 	});
+
+	it("compares the winning candidate's position in the configured pattern space", async () => {
+		// `spec.matchedPatternIndex` indexes the EXPANDED pattern list, while the
+		// self-alias scan walks the configured one. An earlier role alias that
+		// expands to several candidates therefore shifts every later position, so
+		// a win at expanded index 2 read the raw pattern at index 1 as "reached" —
+		// and `--reapply-config` kept the baked model plus the alias's `:low`
+		// even though the alias never won.
+		const bakedModel = anthropicModel("claude-opus-4-1");
+		const winner = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(bakedModel));
+
+		// `slow` expands to two missing candidates then the available winner, so
+		// the winner sits at expanded index 2 while `@slow` is raw index 0 and the
+		// trailing alias is raw index 1.
+		const overlayPath = path.join(tempDir.path(), `overlay-expand-${Bun.nanoseconds()}.yml`);
+		await Bun.write(
+			overlayPath,
+			`modelRoles:\n  slow: "missing-a/model,missing-b/model,${modelValue(winner)}"\n  default: "@slow,*:low"\n`,
+		);
+		const settings = await Settings.loadIsolated({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			inMemory: true,
+			configFiles: [overlayPath],
+		});
+
+		const resumed = await resume(sessionFile, settings, true);
+
+		// RED (pre-fix): the trailing `*:low` counted as reached, so the baked
+		// model was retained at low effort instead of adopting `@slow`'s winner.
+		expect(resumed.model?.provider).toBe(winner.provider);
+		expect(resumed.model?.id).toBe(winner.id);
+	});
 });

@@ -1092,6 +1092,27 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(smolModel.id);
 	});
 
+	it("does not enable a config tier when switching to a session that baked none", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const defaultRoleValue = modelValue(model);
+		// A target session that recorded no service_tier_change of its own.
+		const targetSessionFile = await writeRoleModelSession(defaultRoleValue, defaultRoleValue, "default");
+
+		const created = await createSession({
+			initialModel: model,
+			modelRoles: { default: defaultRoleValue },
+			persist: true,
+		});
+		// A paid tier configured AFTER that session existed.
+		created.settings.override("tier.openai", "priority");
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+
+		// A bare `/resume` runs the target as baked; the later config tier must not
+		// silently take effect.
+		expect(created.session.serviceTierByFamily.openai).toBeUndefined();
+	});
+
 	it("restores the last active role model during startup resume", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const smolModel = getAnthropicModelOrThrow("claude-sonnet-4-6");

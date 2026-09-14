@@ -1360,11 +1360,26 @@ export function resolveConfiguredModelPatterns(
 	value: string | string[] | undefined,
 	settings?: ModelRoleLookup,
 ): string[] {
+	return resolveConfiguredModelPatternOrigins(value, settings).map(entry => entry.pattern);
+}
+
+/**
+ * As {@link resolveConfiguredModelPatterns}, but each expanded pattern keeps the
+ * index of the RAW pattern it came from.
+ *
+ * An alias expands to several candidates, so a position in the expanded list is
+ * not a position in the configured list. A caller comparing a match's index
+ * against the raw patterns therefore read a later raw entry as "reached" once an
+ * earlier alias expanded to more than one candidate.
+ */
+export function resolveConfiguredModelPatternOrigins(
+	value: string | string[] | undefined,
+	settings?: ModelRoleLookup,
+): Array<{ pattern: string; rawIndex: number }> {
 	const patterns = normalizeModelPatternList(value);
-	return patterns.flatMap(pattern => {
-		const resolved = resolveConfiguredRolePattern(pattern, settings);
-		return resolved ?? [];
-	});
+	return patterns.flatMap((pattern, rawIndex) =>
+		(resolveConfiguredRolePattern(pattern, settings) ?? []).map(resolved => ({ pattern: resolved, rawIndex })),
+	);
 }
 export interface AgentModelPatternResolutionOptions {
 	/** Highest-priority request selector, when supplied by a caller. */
@@ -1605,6 +1620,19 @@ export interface ResolvedModelRoleValue {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** matchedPatternIndex identifies the first configured pattern that matched an available model. */
 	matchedPatternIndex?: number;
+	/**
+	 * Index of the RAW configured pattern the match came from. Differs from
+	 * `matchedPatternIndex` whenever an earlier alias expanded to several
+	 * candidates, so a caller comparing positions against the configured list
+	 * must use this one.
+	 */
+	matchedRawPatternIndex?: number;
+	/**
+	 * The expanded pattern that matched. An alias expands circularly, so this can
+	 * differ from the raw entry at `matchedRawPatternIndex` — which tells a caller
+	 * whether the raw entry itself won or only supplied the expansion that did.
+	 */
+	matchedPattern?: string;
 	explicitThinkingLevel: boolean;
 	warning: string | undefined;
 }
@@ -1623,8 +1651,12 @@ export function resolveModelRoleValue(
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
-	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.roleLookup ?? options?.settings);
-	if (!effectivePatterns || effectivePatterns.length === 0) {
+	const effectivePatternOrigins = resolveConfiguredModelPatternOrigins(
+		normalized,
+		options?.roleLookup ?? options?.settings,
+	);
+	const effectivePatterns = effectivePatternOrigins.map(entry => entry.pattern);
+	if (effectivePatterns.length === 0) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
@@ -1640,6 +1672,8 @@ export function resolveModelRoleValue(
 			return {
 				model: resolved.model,
 				matchedPatternIndex: patternIndex,
+				matchedRawPatternIndex: effectivePatternOrigins[patternIndex]?.rawIndex,
+				matchedPattern: effectivePattern,
 				thinkingLevel: resolved.explicitThinkingLevel
 					? resolved.thinkingLevel === AUTO_THINKING
 						? AUTO_THINKING

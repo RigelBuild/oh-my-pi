@@ -1673,9 +1673,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Treating any later match as proof that no alias was reached adopted the
 	// lower-priority model and dropped the alias's level.
 	const reachedSelfAlias = (spec: ResolvedModelRoleValue): { level?: ConfiguredThinkingLevel } | undefined => {
-		const matchedIndex = spec.model ? (spec.matchedPatternIndex ?? 0) : defaultRolePatterns.length;
+		// The RAW index: `matchedPatternIndex` counts the EXPANDED patterns, and an
+		// earlier alias expanding to several candidates shifts every later
+		// position — so comparing it against `defaultRolePatterns` read a raw
+		// entry as reached when an expanded sibling had won instead.
+		const matchedIndex = spec.model
+			? (spec.matchedRawPatternIndex ?? spec.matchedPatternIndex ?? 0)
+			: defaultRolePatterns.length;
 		for (const [index, pattern] of defaultRolePatterns.entries()) {
-			if (index >= matchedIndex) break;
+			if (index > matchedIndex) break;
+			// The winner's OWN raw entry counts only when its EXPANSION is what
+			// matched, not the entry itself. A self alias expands circularly, so a
+			// concrete model reached through `*:low` came from the alias the
+			// fallback stopped at — and an alias means "keep the session's model at
+			// this level". But `default` can match a real `cursor/default` DIRECTLY,
+			// and that is a genuine adoption, not an alias stop.
+			if (index === matchedIndex && spec.matchedPattern === pattern) break;
 			const alias = parseDefaultModelRoleSelfAlias(pattern);
 			if (alias) return alias;
 		}
@@ -2618,7 +2631,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				parseModelString(savedSessionModelString, {
 					allowMaxSuffix: true,
 					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+					// The caller's own model counts as literal. An SDK caller can supply
+					// a `options.model` the registry has never heard of, so a
+					// registry-only predicate failed to recognize its id whole and split
+					// a trailing effort name (`custom/router:low`) off as persisted
+					// thinking — forcing the explicit model to a level the saved string
+					// never encoded.
+					isLiteralModelId: (provider, id) =>
+						modelRegistry.find(provider, id) !== undefined ||
+						(options.model?.provider === provider && options.model.id === id),
 				});
 			let savedParse = reparseSavedSuffix();
 			// Registration alone is not visibility. A dynamic-only provider — an
@@ -3075,7 +3096,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// those naming a provider a scoped refresh could populate.
 			const unresolvedCandidateCanDiscover = (): boolean => {
 				const matchedIndex = defaultRoleSpec.model
-					? (defaultRoleSpec.matchedPatternIndex ?? 0)
+					? (defaultRoleSpec.matchedRawPatternIndex ?? defaultRoleSpec.matchedPatternIndex ?? 0)
 					: defaultRolePatterns.length;
 				for (const [index, pattern] of defaultRolePatterns.entries()) {
 					if (index >= matchedIndex) break;
