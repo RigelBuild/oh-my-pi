@@ -1043,4 +1043,46 @@ describe("AgentSession.refresh('mcp')", () => {
 
 		await dir.remove();
 	});
+
+	// Two SDK callers overlap `refresh('mcp')`. `refresh()` serializes them onto
+	// `#refreshTail`, so the second stays queued behind the first. If disposal
+	// begins while the first runs, teardown fires its single `disconnectAll()`
+	// and never drains the tail — so before the fix the queued refresh started
+	// afterward and called `discoverAndConnect` again, reconnecting MCP
+	// subprocesses onto an already-disposed session that would never disconnect
+	// them again. The fence rejects any refresh work that reaches `#doRefresh`
+	// after `beginDispose()`.
+	it("rejects a queued refresh once disposal begins", async () => {
+		const manager = fakeManager();
+		// Hold the FIRST refresh open inside discoverAndConnect so the second
+		// caller is still queued on the tail when disposal begins.
+		const firstEntered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		let calls = 0;
+		manager.discoverAndConnect = vi.fn(async (_options?: unknown) => {
+			calls += 1;
+			if (calls === 1) {
+				firstEntered.resolve();
+				await releaseFirst.promise;
+			}
+			return { tools: [], errors: new Map<string, string>(), connectedServers: [], exaApiKeys: [] };
+		});
+		const session = await makeSession(manager as unknown as MCPManager);
+
+		const first = session.refresh("mcp");
+		await firstEntered.promise;
+		// Second caller queues behind the in-flight first.
+		const second = session.refresh("mcp");
+		// Disposal begins while the first refresh is still active.
+		session.beginDispose();
+		// Let the first finish and the queued second reach `#doRefresh`.
+		releaseFirst.resolve();
+
+		expect((await first).mcp).toBe(true);
+		// Pre-fix: the queued refresh ran, calling discoverAndConnect a SECOND
+		// time and reconnecting onto the disposed session. Post-fix it rejects
+		// before any surface is touched.
+		await expect(second).rejects.toThrow("Session disposed before refresh could run");
+		expect(manager.discoverAndConnect).toHaveBeenCalledTimes(1);
+	});
 });
