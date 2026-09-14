@@ -21,6 +21,21 @@ const UMANS_MODEL = buildModel({
 	maxTokens: 4096,
 });
 
+/** Anthropic proper: its image budget (90) leaves a >20-image request intact,
+ *  which is what arms `prepareAnthropicManyImageContext()`'s many-image path. */
+const ANTHROPIC_MANY_IMAGE_MODEL = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "claude-sonnet-4-5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+});
+
 /**
  * Distinct payloads: `unreadableImageReason` memoizes on a content hash, so
  * repeating one image would collapse every decode into a single cache hit and
@@ -93,6 +108,69 @@ function runPipeline(context: Context): Promise<Context> {
 afterEach(() => {
 	// Namespace spy, restored per test so no other suite sees a patched decoder.
 	spyOn(imageLoading, "imageDecodeFailureReason").mockRestore();
+});
+
+describe("provider sizing follows decoration", () => {
+	it("never re-encodes an image decoration turned into a reference", async () => {
+		// `resizeAnthropicManyImageContent()` skips a block carrying `url` or an
+		// anthropic `providerFile`, so an image decoration has already turned into
+		// a reference costs nothing to "size". Running the size pass BEFORE
+		// decoration decoded and lossily re-encoded every survivor first — work
+		// whose output is then discarded when the block stops carrying base64 at
+		// all. The gate is over 20 images, so this history clears it.
+		const count = 24;
+		// OVER `ANTHROPIC_MANY_IMAGE_MAX_DIMENSION` (2000): the resize pass returns
+		// a smaller image untouched, so an under-cap fixture never reaches the
+		// branch this test is about.
+		const originals = await Promise.all(Array.from({ length: count }, (_, index) => makeRedPng(2400 + index)));
+		const context: Context = { messages: originals.map((data, index) => userImage(data, index)) };
+
+		// Decoration stands in for a successful blob upload: every image becomes a
+		// URL reference, which is exactly the shape the resize pass skips.
+		const decorate = (ctx: Context): Promise<Context> => {
+			const messages = ctx.messages.map(message => {
+				if (!Array.isArray(message.content)) return message;
+				return {
+					...message,
+					content: message.content.map(part =>
+						part.type === "image" ? { ...part, url: `https://blob.example/${part.data.length}` } : part,
+					),
+				} as (typeof ctx.messages)[number];
+			});
+			return Promise.resolve({ ...ctx, messages });
+		};
+
+		const out = await applyProviderImagePipeline(
+			context,
+			ANTHROPIC_MANY_IMAGE_MODEL,
+			imageLoading.normalizeProviderContextImagesForModel,
+			true,
+			decorate,
+		);
+
+		// The observable: every referenced block still carries its ORIGINAL bytes.
+		// A size pass that ran before decoration would have replaced them with a
+		// smaller re-encode, losing quality for an image that sends no base64.
+		// The observable: a referenced block still carries its ORIGINAL pixels.
+		// Sizing before decoration downscaled every survivor to
+		// `ANTHROPIC_MANY_IMAGE_MAX_DIMENSION` (2000) and re-encoded it — a decode,
+		// a resize and a quality loss spent on an image that then travelled as a
+		// URL carrying no base64 at all.
+		const survivors = imageData(out);
+		expect(survivors.length).toBeGreaterThan(0);
+		const dimensions = await Promise.all(
+			survivors.map(data => new Bun.Image(Buffer.from(data, "base64")).metadata()),
+		);
+		console.log(
+			"OBS widths=",
+			dimensions.slice(0, 4).map(d => d.width),
+			"n=",
+			dimensions.length,
+		);
+		for (const { width } of dimensions) {
+			expect(width).toBeGreaterThan(2000);
+		}
+	});
 });
 
 describe("count cap precedes the decode pass", () => {

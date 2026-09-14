@@ -1757,16 +1757,15 @@ export async function dropUnreadableContextImages(context: Context, model: Model
  *    will really receive. Anthropic downscales every image in a many-image
  *    request to 2000px, which can shrink the wire payload a lot — measuring
  *    before it evicted the oldest images of a request that would have fit once
- *    resized. It also gates on having MORE than 20 images, so a byte clamp
- *    landing first could cut the count to 20 and stop the downscale running at
- *    all. Running it here is safe: an already-small image is returned
- *    untouched, so the provider's own later call is a no-op.
- * 5. The EXACT count cap, now that the decode and size passes have settled which
- *    images survive. Decoration (step 6) uploads a blob for every image it sees,
- *    so the count must be at its final value BEFORE it runs or a request holding
+ *    resized.
+ * 5. The EXACT count cap, now that the decode pass has settled which images
+ *    survive. Decoration (step 6) uploads a blob for every image it sees, so
+ *    the count must be at its final value BEFORE it runs or a request holding
  *    up to 2x the cap publishes blobs the byte-budget clamp then discards.
- * 6. Decoration, then the byte budget LAST, over the images that actually
- *    travel. Clamping bytes earlier charged an undecodable image against the
+ * 6. Decoration, then the provider SIZE pass over what is still inline, then
+ *    the byte budget LAST, over the images that actually travel. Sizing after
+ *    decoration keeps a decode and lossy re-encode off every image that became
+ *    a reference and puts no base64 on the wire at all. Clamping bytes earlier charged an undecodable image against the
  *    budget and evicted an older VALID one to fit it, and the unreadable pass
  *    then replaced the corrupt image too — so a request lost every image where
  *    the readable one would have fit alone.
@@ -1788,7 +1787,6 @@ export async function applyProviderImagePipeline(
 	transformed = dropSplicedOffImages(transformed, model, replaysNativeHistory);
 	transformed = await normalizeForModel(transformed, model);
 	transformed = await dropUnreadableContextImages(transformed, model);
-	transformed = await applyProviderSizePass(transformed, model);
 	// Enforce the EXACT count cap before decoration. The first count pass kept a
 	// slack multiple so the decode pass could consume the overage out of images
 	// that fail it; those passes have now run, so the survivors are final. A
@@ -1806,6 +1804,16 @@ export async function applyProviderImagePipeline(
 	// count cap is unaffected either way: a reference is still an image part and
 	// consumes it, which is why the two budgets are tallied separately.
 	if (decorate) transformed = await decorate(transformed, model);
+	// Provider sizing runs AFTER decoration, over what is still INLINE. An image
+	// decoration turned into a URL or provider file puts no base64 on the wire,
+	// and `resizeAnthropicManyImageContent()` skips a referenced block anyway —
+	// so sizing first decoded and lossily re-encoded survivors that were about to
+	// stop being bytes at all. The count cap above is unaffected: it is already
+	// exact, and an already-small image is returned untouched, so the provider's
+	// own later call stays a no-op. If a reference is later abandoned, the
+	// fallback path re-inlines it through `applyProviderImageByteBudget()`, which
+	// runs this same size pass over the re-inlined bytes.
+	transformed = await applyProviderSizePass(transformed, model);
 	return clampProviderContextImages(transformed, model, replaysNativeHistory);
 }
 
