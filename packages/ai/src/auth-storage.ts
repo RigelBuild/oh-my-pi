@@ -3544,22 +3544,24 @@ export class AuthStorage {
 			// from `/metrics`. The stored row id is stable across restarts and
 			// across an OAuth refresh, and is never derived from token material.
 			// Stamped ONLY when the report recovered no identity of its own, so no
-			// series that can already be attributed is re-keyed — AND only when the
-			// report is not a declared shared pool. A provider that marks every
-			// limit `scope.shared` (charm-hyper's account-wide credit balance) is
-			// telling consumers its several keys observe ONE pool and must be
-			// COLLAPSED, not summed. Stamping each such key with a distinct
-			// credentialKey would defeat that: the renderer would expose one
-			// account balance as several accounts, and because the Prometheus
-			// exposition never re-emits `scope.shared`, nothing downstream could
-			// recognize the duplicates afterward. Leaving the shared report
-			// unstamped lets those identical label sets collapse in `add()`.
-			if (
-				report &&
-				request.credentialId !== undefined &&
-				this.#reportHasNoIdentity(report) &&
-				!this.#reportIsSharedPool(report)
-			) {
+			// series that can already be attributed is re-keyed.
+			//
+			// `scope.shared` is deliberately NOT consulted. It marks a limit as
+			// credential-wide — exhaustion gating counts it against the whole
+			// credential rather than one model family — which most quota providers
+			// set; it does NOT assert that two DIFFERENT credentials observe the
+			// SAME pool. No field in a report proves that today: charm-hyper's
+			// balance is account-wide, but its endpoint exposes no account id to
+			// group keys by, and that very absence is why it marks the limit
+			// shared. Suppressing the stamp on every all-shared report would
+			// therefore also collapse two different accounts' identity-less
+			// reports into one series and silently drop the later one — the loss
+			// this stamp exists to prevent. The two error directions are not
+			// symmetric: stamping a genuine single-account multi-key pool renders
+			// its one balance as several `credential:<id>` series — visible, and
+			// diagnosable as the known multi-key case — while suppressing it drops
+			// an account with no trace. Prefer the visible error; always stamp.
+			if (report && request.credentialId !== undefined && this.#reportHasNoIdentity(report)) {
 				report.metadata = { ...report.metadata, credentialKey: String(request.credentialId) };
 			}
 			if (report && params.credential.orgId !== undefined) {
@@ -3995,20 +3997,6 @@ export class AuthStorage {
 			if (accountId) ids.add(accountId);
 		}
 		return ids.size > 1;
-	}
-
-	/**
-	 * Whether the report is a provider-declared shared pool: EVERY limit carries
-	 * `scope.shared === true`. Such a provider (charm-hyper) issues several keys
-	 * per account that all observe one account-wide balance, and its contract is
-	 * that consumers COLLAPSE those identical reports rather than treat each key
-	 * as its own account. The per-credential `credentialKey` stamp is exactly
-	 * what would break that collapse, so it is suppressed here. A report with no
-	 * limits is not a shared pool — there is nothing to collapse and nothing to
-	 * assert the contract.
-	 */
-	#reportIsSharedPool(report: UsageReport): boolean {
-		return report.limits.length > 0 && report.limits.every(limit => limit.scope.shared === true);
 	}
 
 	#getUsageReportScopeProjectId(report: UsageReport): string | undefined {

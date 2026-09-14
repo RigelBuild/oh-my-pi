@@ -168,54 +168,53 @@ describe("AuthStorage identity-less usage reports", () => {
 		}
 	}, 20_000);
 
-	it("does not stamp a shared-pool report, so its several keys collapse to one account", async () => {
-		// charm-hyper sells a prepaid credit balance that is ACCOUNT-WIDE, not
-		// per-key: it issues several keys per account that all observe one pool, so
-		// it marks every limit `scope.shared` and its contract says consumers must
-		// COLLAPSE those identical reports, not treat each key as its own account.
-		// The identity-less credential stamp is what would break that collapse:
-		// stamping each key with a distinct credentialKey exposes one balance as
-		// several accounts, and the Prometheus exposition never re-emits
-		// `scope.shared`, so nothing downstream could recognize the duplicates
-		// afterward. Such a report must stay UNSTAMPED so the byte-identical label
-		// sets collapse in the renderer.
-		const sharedReport = (): UsageReport => ({
-			provider: "charm-hyper",
+	it("stamps different-account shared-limit reports so their series stay distinct", async () => {
+		// `scope.shared` marks a limit as credential-wide for exhaustion gating —
+		// most quota providers set it — NOT that two DIFFERENT credentials observe
+		// the SAME pool. synthetic marks BOTH its limits shared (a 5h request
+		// window and a 7d credit window), yet each API key may belong to a
+		// different account, and the endpoint carries no account identity to prove
+		// otherwise. Two such reports are byte-identical, so without a per-credential
+		// stamp they collapse in the renderer and the later account is silently
+		// dropped. Suppressing the stamp merely because every limit is shared
+		// reintroduces exactly that loss, so the stamp must survive an all-shared
+		// report.
+		const sharedLimitsReport = (): UsageReport => ({
+			provider: "synthetic",
 			fetchedAt: Date.now(),
 			limits: [
 				{
-					id: "charm-hyper:credits",
-					label: "Credit balance",
-					scope: { provider: "charm-hyper", windowId: "balance", shared: true },
-					amount: { remaining: 94, unit: "credits" },
+					id: "synthetic:requests:5h",
+					label: "Synthetic Requests",
+					scope: { provider: "synthetic", windowId: "5h", shared: true },
+					amount: { usedFraction: 0.25, unit: "requests" },
+				},
+				{
+					id: "synthetic:usd:7d",
+					label: "Synthetic Credits",
+					scope: { provider: "synthetic", windowId: "7d", shared: true },
+					amount: { usedFraction: 0.5, unit: "usd" },
 				},
 			],
-			metadata: { endpoint: "https://example.invalid/credits" },
+			metadata: { endpoint: "https://example.invalid/quotas" },
 		});
-		const charmRow = (id: number): StoredAuthCredential => ({
-			id,
-			provider: "charm-hyper",
-			credential: { type: "api_key", key: `sk-${id}` },
-			disabledCause: null,
-		});
-		const storage = new AuthStorage(makeStore([charmRow(41), charmRow(42)]), {
-			usageProviderResolver: provider =>
-				provider === "charm-hyper"
-					? ({ id: "charm-hyper", fetchUsage: async () => sharedReport() } as UsageProvider)
-					: undefined,
+		const storage = new AuthStorage(makeStore([apiKeyRow(41), apiKeyRow(42)]), {
+			usageProviderResolver: provider => (provider === "synthetic" ? stubProvider(sharedLimitsReport) : undefined),
 		});
 		await storage.reload();
 		try {
 			const reports = (await storage.fetchUsageReports()) ?? [];
-			const charm = reports.filter(report => report.provider === "charm-hyper");
-			const keys = charm.map(report => report.metadata?.credentialKey);
+			const synthetic = reports.filter(report => report.provider === "synthetic");
+			const keys = synthetic.map(report => report.metadata?.credentialKey);
 
-			// GREEN: neither shared-pool report is stamped, so both stay identical
-			// and the renderer collapses them into one account-wide series.
-			// RED (pre-fix): the identity-less stamp keyed each by its row id, so the
-			// two keys were distinct and one pool rendered as two accounts.
-			expect(charm).toHaveLength(2);
-			expect(keys.every(key => key === undefined)).toBe(true);
+			// GREEN: each all-shared identity-less report is still stamped, so the
+			// two accounts render distinct series.
+			// RED (over-corrected tip): the all-shared predicate suppressed the
+			// stamp, both reports were byte-identical, and the renderer collapsed
+			// them — dropping the second account.
+			expect(synthetic).toHaveLength(2);
+			expect(new Set(keys).size).toBe(2);
+			expect(keys.every(key => typeof key === "string" && key.length > 0)).toBe(true);
 		} finally {
 			storage.close();
 		}
