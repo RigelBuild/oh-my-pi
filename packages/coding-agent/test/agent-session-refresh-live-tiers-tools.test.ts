@@ -1430,6 +1430,52 @@ describe("AgentSession refresh('settings'): setting-gated tool sets", () => {
 	});
 });
 
+// `externalThinking` false->true reconciles the hidden `think` scratchpad live.
+// The enable path must respect the SAME construction permission the boolean-
+// gated built-ins do: a restricted session that was granted `refresh` but never
+// `think` may not gain the scratchpad, while an unrestricted session still does.
+describe("AgentSession refresh('settings'): external-thinking tool permission", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("gains think when an unrestricted session flips externalThinking on", async () => {
+		const h = await makeHarness("externalThinking: false\n");
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("think");
+
+			await fs.writeFile(h.settingsPath, "externalThinking: true\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			expect(h.session.getEnabledToolNames()).toContain("think");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+
+	it("refuses think for a restricted session granted refresh but not think", async () => {
+		// The invocation half stays narrow: a RESTRICTED list owns its active set,
+		// so no settings edit may widen it. Startup deliberately does not auto-add
+		// `think` under `restrictToolNames`, so the false->true flip must not.
+		const h = await makeHarness("externalThinking: false\n", {
+			toolNames: ["read", "grep", "refresh"],
+			restrictToolNames: true,
+		});
+		try {
+			expect(h.session.getEnabledToolNames()).not.toContain("think");
+
+			await fs.writeFile(h.settingsPath, "externalThinking: true\n");
+			expect((await h.session.refresh("settings")).settingsChanged).toBe(true);
+
+			// RED (pre-fix): the enable path unconditionally built and activated
+			// `think`, widening the restricted allowlist.
+			expect(h.session.getEnabledToolNames()).not.toContain("think");
+		} finally {
+			await h.dispose();
+		}
+	}, 20_000);
+});
+
 // A role-less, unflagged `model_change` is genuinely ambiguous: both startup's
 // settings-derived receipt and an older Ctrl+P cycle pin wrote that exact shape,
 // and the field that would separate them is the one neither writer set. Their

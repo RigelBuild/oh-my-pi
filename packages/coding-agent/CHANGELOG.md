@@ -15,18 +15,6 @@
 
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
-## [18.1.21] - 2026-09-14
-
-### Fixed
-
-- Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
-- Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
-- Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
-- Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
-- First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
-- Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
-- Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
-
 ### Fixed
 
 - Fixed the in-session `refresh` so an MCP refresh keeps extension-declared servers and reloads `.mcp.json` from the session's current directory after a `/move` (instead of respawning the previous project's servers), a settings refresh that changes browser prelude enablement reconciles browser MCP servers against that same current directory instead of loading and spawning the previous project's, a rules refresh (including TTSR) reaches running descendant sessions without a subagent's agent-scoped roster replacing the process-global skills/rules snapshot, a startup that supplied a model but no thinking level leaves the level following `defaultThinkingLevel` so a later settings refresh can still move it, reloaded generation and prompt-affecting settings reach the live agent, and a settings refresh discloses that it may reconnect MCP servers ([#10288](https://github.com/can1357/oh-my-pi/pull/10288) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
@@ -45,6 +33,21 @@
 - Fixed a TTSR rule that was disabled while `ttsr.enabled` was off staying resolvable through `rule://` and present in the session snapshot until TTSR was turned back on; a refresh now republishes only the registrations the rule manager actually consumed — to the session's own rule snapshot as well as the process-wide one, so the `rule://` resolution that tools like `read` thread through the session array agrees with the reported count. Because a disabled manager consumes nothing, a session running with TTSR disabled therefore holds exactly the rule set a freshly disabled session would — no duplicated rulebook entry, and no condition-only rule kept addressable — whether the disable arrived through a full refresh or a settings-only one ([#10288](https://github.com/can1357/oh-my-pi/pull/10288) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Fixed `/refresh settings` overwriting an explicit thinking-level selection that happened to match the level already active; because the selection changed no effective effort it recorded no pin, so a later configured-default move replaced the user's choice. Selecting only a MODEL no longer pins thinking either: when the newly selected model carried its own default thinking level, applying it was recorded as an explicit thinking choice, so a later `defaultThinkingLevel` edit plus `/refresh settings` could no longer move the level even though the user had chosen only a model. A per-family service tier that `/refresh settings` updates now also survives switching sessions away and back, or restarting and resuming, instead of reverting to its pre-refresh value once another family had been set with `/fast` or the settings selector. A resumed session whose last model pick came from an older build's model cycling — which recorded no role on the transition — likewise no longer has that pick replaced by the configured default: a role-less transition written after the session's first message is read as the user's, while one preceding every message is the startup receipt and still follows settings. `/refresh` also sanitizes an invalid scope argument before echoing it, so a pasted or ACP-supplied value carrying ANSI escapes, control bytes, or an oversized payload can no longer corrupt the terminal The same omission is closed on the paths that reach the selection indirectly: picking a model role, starting a new session, and a session-only `/switch provider/model:<level>` all record an explicitly supplied suffix as a pin, so a level matching the one already active is no longer re-derived by a later configured-default move (a prewalk or plan-yolo switch carries a configured level, not a user selection, and keeps following settings). ([#10288](https://github.com/can1357/oh-my-pi/pull/10288) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - Fixed `/refresh settings` overwriting an explicit thinking-level selection that happened to match the level already active; because the selection changed no effective effort it recorded no pin, so a later configured-default move replaced the user's choice. Selecting only a MODEL no longer pins thinking either: when the newly selected model carried its own default thinking level, applying it was recorded as an explicit thinking choice, so a later `defaultThinkingLevel` edit plus `/refresh settings` could no longer move the level even though the user had chosen only a model. A per-family service tier that `/refresh settings` updates now also survives switching sessions away and back, or restarting and resuming, instead of reverting to its pre-refresh value once another family had been set with `/fast` or the settings selector. A resumed session whose last model pick came from an older build's model cycling — which recorded no role on the transition — likewise no longer has that pick replaced by the configured default: a role-less transition written after the session's first message is read as the user's, while one preceding every message is the startup receipt and still follows settings. `/refresh` also sanitizes an invalid scope argument before echoing it, so a pasted or ACP-supplied value carrying ANSI escapes, control bytes, or an oversized payload can no longer corrupt the terminal ([#10288](https://github.com/can1357/oh-my-pi/pull/10288) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
+## [18.1.21] - 2026-09-14
+
+### Fixed
+
+- Native background security scans now accept provider-owned AWS authentication for Amazon Bedrock and Bedrock Mantle without requiring a stored OAuth account ([#12013](https://github.com/can1357/oh-my-pi/issues/12013)).
+- Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
+- Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
+- Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
+- First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
+- Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
+- Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
+### Fixed
+
 ## [18.1.20] - 2026-09-13
 
 ### Added

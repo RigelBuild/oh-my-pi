@@ -2058,11 +2058,20 @@ export class SessionManager {
 		if (this.#fallbackRuntimeOnly) {
 			return resolved;
 		}
+		// A root that is gone cannot still be settings-owned; leaving the name
+		// behind would let a later removal from `workspace.additionalDirectories`
+		// re-revoke a directory a subsequent manual `/add-dir` re-added, because
+		// the reconcile would still see it as settings-granted.
+		this.#settingsOwnedDirectories = this.#settingsOwnedDirectories.filter(dir =>
+			this.#additionalDirectories.includes(dir),
+		);
 		if (this.#additionalDirectories.length === 0) {
 			this.#header.additionalDirectories = undefined;
 		} else {
 			this.#header.additionalDirectories = this.#additionalDirectories;
 		}
+		this.#header.settingsOwnedDirectories =
+			this.#settingsOwnedDirectories.length > 0 ? [...this.#settingsOwnedDirectories] : undefined;
 		await this.#persistWorkspaceDirectoriesChange();
 		return resolved;
 	}

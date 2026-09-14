@@ -355,6 +355,15 @@ export class SessionTools {
 	 * and must never be added by a settings refresh.
 	 */
 	#settingGatedBuiltinPermissions: ReadonlySet<string> = new Set();
+	/**
+	 * Whether this session's construction PERMITTED the `think` scratchpad, which
+	 * is not the same as whether its startup settings enabled it. Startup omits
+	 * `think` from a restricted tool list unless it is explicitly named, so a
+	 * `false->true` `externalThinking` refresh must respect that permission — the
+	 * same distinction `#settingGatedBuiltinPermissions` draws for the boolean-
+	 * gated built-ins. Default `true`: an unrestricted session always permits it.
+	 */
+	#thinkToolPermitted = true;
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
 	#setDeviceOnlyWrite: SessionToolsOptions["setDeviceOnlyWrite"];
@@ -1694,6 +1703,21 @@ export class SessionTools {
 				}
 				return true;
 			}
+			// Construction PERMISSION, exactly as `#applyBooleanGatedBuiltins`
+			// consults `#settingGatedBuiltinPermissions`: a restricted session that
+			// was granted `refresh` but never `think` must not gain the scratchpad
+			// when `externalThinking` flips false->true, because startup
+			// deliberately did not auto-add it. Only build/activate what this
+			// invocation was allowed to have.
+			if (!this.#thinkToolPermitted) return false;
+			// Availability, not selection. A `/tools` deselection is recorded in
+			// `#runtimeSelectedToolNames`; re-enabling the setting only makes the
+			// tool available again and must not override that explicit choice.
+			// Absent any explicit selection the set is undefined and the setting
+			// decides, as before. Same rule the boolean-gated built-ins follow.
+			if (this.#runtimeSelectedToolNames !== undefined && !this.#runtimeSelectedToolNames.has("think")) {
+				return false;
+			}
 			if (!this.#toolRegistry.has("think")) {
 				const tool = await this.#createThinkTool?.();
 				if (tool?.name !== "think") return false;
@@ -1820,6 +1844,11 @@ export class SessionTools {
 	/** Records which boolean-gated built-ins this session's construction allowed. */
 	setSettingGatedBuiltinPermissions(names: ReadonlySet<string>): void {
 		this.#settingGatedBuiltinPermissions = names;
+	}
+
+	/** Records whether this session's construction permitted the `think` scratchpad. */
+	setThinkToolPermitted(permitted: boolean): void {
+		this.#thinkToolPermitted = permitted;
 	}
 
 	async #applySettingGatedToolGroup(group: SettingGatedToolGroup): Promise<boolean> {

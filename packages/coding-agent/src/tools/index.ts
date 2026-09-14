@@ -315,6 +315,13 @@ export interface ToolSession {
 	 * widening a restricted tool list.
 	 */
 	setSettingGatedBuiltinPermissions?: (names: ReadonlySet<string>) => void;
+	/**
+	 * Records whether this invocation permits the `think` scratchpad, so a later
+	 * `externalThinking` false->true refresh can build it without widening a
+	 * restricted tool list that never named it. Parallels
+	 * {@link setSettingGatedBuiltinPermissions} for the hidden `think` tool.
+	 */
+	setThinkToolPermitted?: (permitted: boolean) => void;
 	/** Canonical map containing every registered tool exactly once. */
 	toolRegistry?: Map<string, Tool>;
 	/** `xd://` presentation state backed by {@link toolRegistry}. */
@@ -894,6 +901,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			permitted.add(name);
 		}
 		session.setSettingGatedBuiltinPermissions(permitted);
+	}
+
+	// `think` (hidden) is force-added for an unrestricted session but withheld
+	// from a restricted tool list unless it is explicitly named — startup never
+	// auto-adds it under `restrictToolNames`. Record that invocation permission
+	// so a later `externalThinking` false->true refresh honours it rather than
+	// widening the restricted allowlist. Same distinction the setting-gated
+	// built-in permissions draw, kept for the hidden scratchpad.
+	if (session.setThinkToolPermitted) {
+		session.setThinkToolPermitted(!restrictToolNames || requestedTools?.includes("think") === true);
 	}
 
 	const activeToolNames = new Set(baseEntries.map(([name]) => name));
