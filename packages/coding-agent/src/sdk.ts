@@ -1697,13 +1697,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const savedSuffixIsReadableFor = (spec: ResolvedModelRoleValue): boolean =>
 		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
 	/**
-	 * A provider name keyed the way the registry stores it. `modelRegistry.find`
-	 * resolves a reference case-insensitively, but `canRefreshProvider` and
-	 * `refreshDiscoverableProviders` do exact map/set lookups, so a saved
-	 * selector spelled `Dynamic/router:low` would miss a provider registered
-	 * `dynamic` and skip the refresh that proves its id literal.
+	 * A saved selector's provider, resolved to the key the registry actually
+	 * stores. `modelRegistry.find` resolves a reference case-insensitively, but
+	 * `canRefreshProvider` and `refreshDiscoverableProviders` do exact map/set
+	 * lookups against the registered spelling — which the runtime managers an
+	 * extension registers, and a models.yml `discovery:` entry, keep verbatim
+	 * (a mixed-case `MyGateway`), while built-ins are canonical lowercase. So a
+	 * saved `Dynamic/router:low` against a `dynamic` provider must fold DOWN,
+	 * and a `MyGateway/router:low` against a mixed-case `MyGateway` must NOT —
+	 * lowercasing both makes the exact lookup miss the second. `resolveProviderKey`
+	 * returns whichever the registry holds, the same resolution `find` relies on.
 	 */
-	const normalizedProviderKey = (provider: string): string => provider.trim().toLowerCase();
+	const registeredProviderKey = (provider: string): string => modelRegistry.resolveProviderKey(provider);
 	/** Case-insensitive model-reference equality, as `resolveProviderModelReference` keys them. */
 	const sameModelReference = (left: string | undefined, right: string | undefined): boolean =>
 		left !== undefined && right !== undefined && left.trim().toLowerCase() === right.trim().toLowerCase();
@@ -2741,9 +2746,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// while a scoped refresh would have fetched exactly the catalog that
 				// proves the id literal — and the split parse handed the chosen model
 				// the loser's `:low`.
-				modelRegistry.canRefreshProvider(normalizedProviderKey(savedParse.provider))
+				modelRegistry.canRefreshProvider(registeredProviderKey(savedParse.provider))
 			) {
-				const savedProvider = normalizedProviderKey(savedParse.provider);
+				const savedProvider = registeredProviderKey(savedParse.provider);
 				// Coalescing covers configured `discovery:` providers only
 				// (`#discoverProviderModelsCoalesced`); the runtime and built-in
 				// managers an extension registers have no in-flight map, so a
@@ -2771,9 +2776,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				!savedSuffixIsReadable &&
 				savedParse?.thinkingLevel !== undefined &&
-				modelRegistry.canRefreshProvider(normalizedProviderKey(savedParse.provider))
+				modelRegistry.canRefreshProvider(registeredProviderKey(savedParse.provider))
 			) {
-				const savedProvider = normalizedProviderKey(savedParse.provider);
+				const savedProvider = registeredProviderKey(savedParse.provider);
 				retrySavedSuffixParse = async (): Promise<void> => {
 					retrySavedSuffixParse = undefined;
 					await runtimeDiscoveryPromise;
@@ -3264,15 +3269,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// A wildcard or bare-id pattern names no provider, so any refresh
 						// could supply it — keep the old behaviour there.
 						if (!provider || provider === candidate || provider.includes("*")) return true;
-						// Normalize before the refreshability check: `canRefreshProvider`
-						// does exact map/set lookups, while normal model resolution is
-						// case-insensitive (the registry keys every provider lookup through
-						// `provider.trim().toLowerCase()`). Without this a candidate
-						// differing only in provider CASING from a cold provider —
-						// `Dynamic/new` against a provider registered as `dynamic` — was
-						// judged non-refreshable, the discovery retry skipped, and a
-						// lower-priority fallback adopted.
-						if (modelRegistry.canRefreshProvider(provider.trim().toLowerCase())) return true;
+						// Resolve to the registered key before the refreshability check:
+						// `canRefreshProvider` does exact map/set lookups, while normal
+						// model resolution is case-insensitive. A candidate differing only
+						// in provider CASING from a cold provider — `Dynamic/new` against a
+						// provider registered `dynamic` — was judged non-refreshable, the
+						// discovery retry skipped, and a lower-priority fallback adopted.
+						// `resolveProviderKey` returns the stored spelling, so a mixed-case
+						// `MyGateway` registration resolves as itself rather than being
+						// force-lowercased into a miss.
+						if (modelRegistry.canRefreshProvider(modelRegistry.resolveProviderKey(provider))) return true;
 						expandedIndex++;
 					}
 				}

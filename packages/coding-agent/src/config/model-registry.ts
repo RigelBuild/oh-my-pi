@@ -826,7 +826,13 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		this.#providerLookupSnapshots.delete(providerName);
+		// `#providerLookupSnapshots` is keyed by the folded provider spelling
+		// (`#modelsForProviderLookup` stores under `provider.trim().toLowerCase()`),
+		// so a mixed-case registration (`MyGateway`) would otherwise leave its cold,
+		// pre-discovery snapshot behind under the lowercase key while this deleted a
+		// key that never existed — and the post-refresh `find` kept returning the
+		// empty catalog.
+		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
 	/**
@@ -2457,6 +2463,38 @@ export class ModelRegistry {
 		return (
 			REFRESHABLE_BUILT_IN_PROVIDER_IDS[providerId] === true && this.#createProviderAvailabilityCheck()(providerId)
 		);
+	}
+
+	/**
+	 * The provider's key as the registry actually stores it, resolved from a
+	 * possibly differently-cased spelling.
+	 *
+	 * `find` resolves a model reference case-insensitively, but
+	 * {@link canRefreshProvider} and {@link refreshDiscoverableProviders} do
+	 * exact map/set lookups keyed by the registered spelling — the runtime
+	 * managers an extension registers, and a models.yml `discovery:` entry,
+	 * preserve whatever case they were registered with, while built-ins are
+	 * canonical lowercase. So a saved selector spelled `Dynamic/router:low`
+	 * against a `dynamic` provider AND a `MyGateway/...` selector against a
+	 * mixed-case-registered `MyGateway` are both wrong to force to either raw or
+	 * lowercase: fold the input the same way `resolveProviderModelReference`
+	 * keys every provider (`trim().toLowerCase()`) and return the registered key
+	 * that folds to it. Falls back to the trimmed input when nothing matches, so
+	 * a genuinely unknown provider stays a no-op at the refreshability check.
+	 */
+	resolveProviderKey(provider: string): string {
+		const normalized = provider.trim().toLowerCase();
+		if (!normalized) return provider.trim();
+		for (const key of this.#runtimeModelManagers.keys()) {
+			if (key.toLowerCase() === normalized) return key;
+		}
+		for (const discoverable of this.#discoverableProviders) {
+			if (discoverable.provider.toLowerCase() === normalized) return discoverable.provider;
+		}
+		for (const key of this.#knownStaticProviders()) {
+			if (key.toLowerCase() === normalized) return key;
+		}
+		return provider.trim();
 	}
 
 	/**

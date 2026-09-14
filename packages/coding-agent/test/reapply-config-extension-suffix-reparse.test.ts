@@ -610,6 +610,110 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	});
 
+	// The counterpart the lowercase test above cannot catch: a provider whose
+	// REGISTERED identity is itself mixed-case (`MyGateway`). Forcing the parsed
+	// provider to lowercase — the fix the lowercase case needed — makes the exact
+	// `canRefreshProvider`/`refreshDiscoverableProviders` lookups MISS a manager
+	// keyed `MyGateway`, so the cold catalog is never fetched, the config default
+	// never resolves, and the saved `:low` stays misparsed and rides onto the
+	// adopted model. Resolving the parsed provider to the registry's own stored
+	// key instead is right for both.
+	test("discovers a cold provider registered with mixed-case identity", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		let dynamicFetches = 0;
+		const dynamicProviderExtension: ExtensionFactory = pi => {
+			// Registered with a mixed-case key the registry preserves verbatim.
+			pi.registerProvider("MyGateway", {
+				baseUrl: "https://gateway.example.com/v1",
+				apiKey: "GATEWAY_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					dynamicFetches++;
+					return [
+						{
+							id: "router:low",
+							name: "Router Low",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+						{
+							id: "config-pick",
+							name: "Config Pick",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "MyGateway/config-pick");
+		const sessionFile = path.join(tempDir, `mixed-case-provider-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "mixed-case-provider-session", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					// The saved string carries the provider's true mixed-case spelling;
+					// lowercasing it would miss the manager keyed `MyGateway`.
+					model: "MyGateway/router:low",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-mixed-case-provider"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [dynamicProviderExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			// The premise, measured: lowercasing the provider would have skipped the
+			// scoped refresh entirely, so a fetched catalog proves the resolved key hit.
+			expect(dynamicFetches).toBeGreaterThan(0);
+			expect(session.model?.provider).toBe("MyGateway");
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("matches a pinned model whose saved selector differs only in provider casing", async () => {
 		// The caller's own `options.model` counts as literal, so an id the registry
 		// has never seen is still recognized whole. But that comparison was
