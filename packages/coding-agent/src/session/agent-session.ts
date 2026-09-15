@@ -414,6 +414,11 @@ class AgentStartPolicyChangedError extends Error {
 	}
 }
 
+// Match the longest provider request deadline: the restart turn's own advisor
+// review must complete so its note is preserved before the recycle. A failed or
+// quota-paused review releases the wait early (reviewInFlight clears), so this
+// bound is only reached by a request still genuinely in flight.
+const RESTART_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
 	new_context: true,
@@ -6301,6 +6306,24 @@ export class AgentSession {
 				await this.#waitForModelMutationIdle();
 				await this.#waitForSessionTransitionIdle();
 				await this.waitForIdle();
+			}
+			// The turn that requested this restart ran its own `onPrimaryTurnEnd`
+			// as it settled above, queueing an advisor review that outlives the now
+			// idle primary (default `advisor.syncBacklog: "off"`). That review is
+			// invisible to the primary-agent waits, so `#hasUnpersistedInput()`
+			// below would see it through `hasActiveReviews` and refuse this recycle
+			// as busy forever — a retry only queues another. Let it COMPLETE with
+			// its note preserved (force preserve-only routing so the finished note
+			// lands as a durable card the flush persists, never a hidden turn on the
+			// dying session), then restore routing for the refusal paths that leave
+			// the session live. A user-initiated review already in flight when the
+			// restart was requested is caught by the pre-latch busy check instead,
+			// so this only drains the recycle's own turn.
+			const restoreAdvisorRouting = this.#advisors.beginPreserveOnlyAdvisorDrain();
+			try {
+				await this.waitForAdvisorCatchup(RESTART_ADVISOR_DRAIN_TIMEOUT_MS);
+			} finally {
+				restoreAdvisorRouting();
 			}
 			// Re-check the quiescence gate: input queued *during* the wait (a
 			// host/extension steer/follow-up that calls agent.steer directly, so

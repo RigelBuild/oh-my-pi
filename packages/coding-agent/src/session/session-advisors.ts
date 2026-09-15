@@ -563,12 +563,19 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Settles every advisor's in-flight prompt, for a caller about to tear the
-	 * runtime down. `stopRuntime()` aborts instead, which discards an accepted
-	 * review and the note it was producing.
+	 * Force preserve-only routing for a live caller that must let the current
+	 * review COMPLETE (keeping its note) rather than tear it down — the restart
+	 * recycle draining its own turn's review. Returns a restore that reinstates
+	 * the prior routing, for the paths that leave the session live (a refused
+	 * recycle). `stopRuntime()`/`drainAndDetachRecorders()` abort the prompt
+	 * instead, which discards an accepted review and the note it was producing.
 	 */
-	async drainActiveReviews(): Promise<void> {
-		await Promise.all(this.#advisors.map(advisor => advisor.runtime.pauseForSessionTransition()));
+	beginPreserveOnlyAdvisorDrain(): () => void {
+		const previous = this.#preserveAdvisorAdvice;
+		this.#preserveAdvisorAdvice = true;
+		return () => {
+			this.#preserveAdvisorAdvice = previous;
+		};
 	}
 
 	/** Stops every advisor runtime and starts recorder shutdown. */
