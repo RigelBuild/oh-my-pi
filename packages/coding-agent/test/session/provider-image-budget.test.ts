@@ -2526,6 +2526,76 @@ describe("byte clamp preserves what actually reaches the wire", () => {
 	});
 });
 
+describe("replayed user byte sizes follow payload order", () => {
+	it("evicts the oversized input image when a small generation result precedes it", () => {
+		// A user/developer replay payload puts an OLDER small `image_generation_call`
+		// BEFORE a NEWER oversized `input_image`. The old size-collection pushed
+		// every input-image size before every generation-result size, so the tally
+		// read [large, small] while `clampReplayedInputImages` evicts in payload
+		// order [small, large]: `imageDropCountForBytes` sized one drop against the
+		// large item, the clamp spent it on the small generation result, and the
+		// large image stayed on the wire — still over budget and still 413ing.
+		const budget = providerImageByteBudget(OPENAI_MODEL.provider, OPENAI_MODEL.api);
+		// The large input alone busts the budget, so it MUST be the item evicted;
+		// the small result fits alone. Together they owe a drop the old tally spent
+		// on the wrong item.
+		const large = "L".repeat(budget + 1);
+		const small = "s".repeat(Math.floor(budget * 0.5));
+		// Prove the sizing is adversarial: the large busts alone, the small fits.
+		expect(large.length).toBeGreaterThan(budget);
+		expect(small.length).toBeLessThanOrEqual(budget);
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					timestamp: 1,
+					content: [text("summary")],
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: OPENAI_MODEL.provider,
+						items: [
+							// A `compaction_summary` marker replays this payload even on a
+							// cold session, like the oversized restored replacement this
+							// accounts for.
+							{ type: "compaction_summary" },
+							// OLDER, small: a byte-only generation result, no image part.
+							{ type: "image_generation_call", id: "ig_0", status: "completed", result: small },
+							// NEWER, oversized: an ordinary image input part.
+							{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUri(large) }] },
+						],
+					},
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_MODEL, true);
+
+		// The FINAL provider input, converted the way the request actually would be
+		// — this serialized length is the observable that 413s, not any tally.
+		const wire = buildResponsesInput({
+			model: OPENAI_MODEL,
+			context: clamped,
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		const serialized = JSON.stringify(wire);
+		// Prove the fixture reached the user/developer replay branch: the payload is
+		// still replayed (the oversized input was degraded IN PLACE to the omission
+		// notice) rather than the whole turn dropped.
+		expect(serialized).toContain("[image omitted: provider image limit]");
+		// RED (pre-fix): the tally owed one drop sized against the large item, the
+		// clamp spent it on the small generation result, and the oversized input
+		// image reached the wire whole.
+		expect(serialized).not.toContain(large);
+		// The small result is evicted too — oldest-first eviction cannot keep it and
+		// drop only the newer large one.
+		expect(serialized).not.toContain(small);
+		// The final built request fits the byte budget it must not exceed.
+		expect(serialized.length).toBeLessThanOrEqual(budget);
+	});
+});
+
 describe("replayed computer screenshots reach the wire as image parts", () => {
 	// A Codex line whose provider is absent from the budget table, so it falls to
 	// the strict floor (5) — small enough to bust with a handful of screenshots.

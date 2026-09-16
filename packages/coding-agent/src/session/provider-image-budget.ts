@@ -190,26 +190,20 @@ function collectImageStats(
 				if (size > 0) inlineSizes.push(size);
 			}
 		}
-		// A replayed `input_image` is sent as an ordinary Responses image input, so
-		// it consumes the provider's per-request image COUNT as well as bytes —
-		// unlike a replayed `image_generation_call` result, which is an assistant
-		// output item rather than an input part.
-		// A demoted replay item's bytes reach the wire as assistant TEXT, so they
-		// owe bytes but no image slot — kept out of `replayed` so the count stays
-		// right, and pushed into `inlineSizes` so the byte clamp can see them.
-		const demotedReplaySizes: number[] = [];
-		const replayed = replayedInputImages(
+		// A replayed `input_image` consumes the image COUNT as well as bytes; a
+		// generation result or demoted computer item reaches the wire as bytes with
+		// no image slot. `replayedInputs` gets the input parts for the count; the
+		// returned byte sequence is in payload order, matching the clamp's eviction.
+		const replayedInputs: number[] = [];
+		const replayedBytes = replayedInputImages(
 			message,
 			byteModel ?? countModel,
 			replaysNativeHistory,
 			repairedOrphansByMessage.get(message) ?? NO_REPAIRED_ORPHANS,
-			demotedReplaySizes,
+			replayedInputs,
 		);
-		total += replayed.length;
-		if (byteModel !== undefined) {
-			for (const size of replayed) if (size > 0) inlineSizes.push(size);
-			for (const size of demotedReplaySizes) inlineSizes.push(size);
-		}
+		total += replayedInputs.length;
+		if (byteModel !== undefined) for (const size of replayedBytes) inlineSizes.push(size);
 		if (!Array.isArray(message.content)) continue;
 		// A replayed turn's generic content NEVER travels: `convertConversationMessages()`
 		// pushes the replay items and `continue`s past `msg.content` entirely. Charging
@@ -366,8 +360,9 @@ function replayedImageResult(item: Record<string, unknown>): string | undefined 
 }
 
 /**
- * Base64 sizes of the inline `input_image` parts this turn's replayed native
- * history carries.
+ * Every byte-carrying entry of a replayed user/developer native payload, in the
+ * payload's OWN item order — which is the order {@link clampReplayedInputImages}
+ * evicts in.
  *
  * A remote-compaction replacement can retain `input_image` items whose bytes
  * exist ONLY inside a user/developer `providerPayload`:
@@ -377,16 +372,23 @@ function replayedImageResult(item: Record<string, unknown>): string | undefined 
  * `message.content` alone therefore read zero while megabytes travelled, and a
  * resumed session kept failing with 413 because no drop was ever owed.
  *
- * Returns one size per image part — 0 for a reference-backed one, which counts
- * against the per-request image cap while carrying no inline bytes.
+ * Input images, generation results and demoted computer items interleave, so
+ * this returns ONE sequence in item order — matching the assistant path's
+ * {@link replayedPayloadByteSizes}. Collecting inputs and byte-only entries in
+ * two separate passes ordered the sizes differently from the eviction, so a drop
+ * sized against a late large input was spent on an early small generation result
+ * and the request stayed over the byte limit.
+ *
+ * `inputSizes`, when supplied, receives the `input_image` entries alone — one
+ * per part, 0 for a reference-backed one — since those are the ones that also
+ * consume the image COUNT.
  */
 function replayedInputImages(
 	message: Message,
 	model: Model,
 	replaysNativeHistory: boolean,
 	repairedOrphans: ReadonlySet<number>,
-	/** Sizes of bytes that travel as TEXT: charged to the byte budget, never counted. */
-	demotedSizes: number[] = [],
+	inputSizes?: number[],
 ): number[] {
 	if (message.role !== "user" && message.role !== "developer") return [];
 	// Only a Responses-family route consumes native history at all. Switching to a
@@ -402,47 +404,41 @@ function replayedInputImages(
 	// is exactly the oversized remote-compaction replacement this accounts for,
 	// so skipping it on a cold resume let the very first request bust the cap.
 	if (!replaysNativeHistory && !hasCompactionMarker(payload.items)) return [];
-	// One entry per image PART, whatever it carries. An HTTPS- or file-backed
-	// `input_image` is still sent as an image input and still consumes the count
-	// cap, so recording only the inline ones left a payload of references
-	// uncounted and un-evictable; its size is 0 and the byte tally skips it.
 	const sizes: number[] = [];
-	// A cross-message-aware orphan set, precomputed by {@link collectRepairedOrphanIndices}.
 	const demotesNativeComputerItems = demotesReplayedComputerItems(model);
 	for (let index = 0; index < payload.items.length; index++) {
 		if (repairedOrphans.has(index)) continue;
 		// A generation result carries bytes but no image PART: the user/developer
 		// replay converter sends it verbatim, exactly as the assistant snapshot
-		// does. It is a BYTE-only charge, so it rides the demoted channel — charged
-		// to the byte budget, never counted against the image cap. See
-		// {@link replayedImageResult} and the assistant path's `replayedPayloadByteSizes`.
+		// does. Charged to the byte budget, never counted against the image cap.
+		// See {@link replayedImageResult} and {@link replayedPayloadByteSizes}.
 		const result = replayedImageResult(payload.items[index]);
 		if (result !== undefined) {
-			demotedSizes.push(result.length);
+			sizes.push(result.length);
 			continue;
 		}
 		// `adaptResponsesReplayItemsForModel()` rewrites a replayed
 		// `computer_call`/`computer_call_output` into a short assistant TEXT
 		// message when the model does not support computer use, so its screenshot
-		// reaches the wire as text and occupies no image part at all. Exposing it
-		// here incremented the count, and with more than the cap's worth of
-		// URL/file-backed screenshots the count-only clamp evicted real
-		// call/output pairs for a request that carries zero image parts.
+		// reaches the wire as text and occupies no image part at all. The
+		// converter stringifies the WHOLE item, base64 data URI included, so its
+		// bytes still travel — charged here without a count.
 		if (demotesNativeComputerItems && isReplayedComputerItem(payload.items[index])) {
-			// No image slot — but the bytes still travel. The converter stringifies
-			// the WHOLE item into an untruncated assistant text message, base64
-			// data URI included, so skipping it entirely let several restored
-			// screenshots blow the request-size limit while the byte clamp saw
-			// zero. Recorded through the demoted channel below, which charges
-			// bytes without a count.
 			for (const part of nativeInputImageParts(payload.items[index])) {
 				const size = nativeImageUrlWireSize(part.image_url);
-				if (size > 0) demotedSizes.push(size);
+				if (size > 0) sizes.push(size);
 			}
 			continue;
 		}
+		// One count entry per image PART, whatever it carries. An HTTPS- or
+		// file-backed `input_image` is still sent as an image input and still
+		// consumes the count cap, so recording only the inline ones left a payload
+		// of references uncounted and un-evictable; its size is 0 and the byte
+		// sequence skips it.
 		for (const part of nativeInputImageParts(payload.items[index])) {
-			sizes.push(nativeImageUrlWireSize(part.image_url));
+			const size = nativeImageUrlWireSize(part.image_url);
+			inputSizes?.push(size);
+			if (size > 0) sizes.push(size);
 		}
 	}
 	return sizes;
