@@ -905,7 +905,7 @@ describe("searchExa: EXA_API_KEY vs the session's MCP-discovered key", () => {
 				return new Response(
 					JSON.stringify({
 						jsonrpc: "2.0",
-						id: "1",
+						id: parsePostedMcpRequest(init?.body).id,
 						result: { content: [{ type: "text", text: JSON.stringify(makeMockExaResponse()) }] },
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },

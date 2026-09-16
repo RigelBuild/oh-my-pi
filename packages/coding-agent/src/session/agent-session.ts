@@ -407,7 +407,7 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
-import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { SessionTools, type SessionToolsHost, type SystemPromptPreparation } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -5997,6 +5997,11 @@ export class AgentSession {
 		return this.#tools.runToolRegistryMutation(mutation, signal);
 	}
 
+	/** Builds the agent-start prompt, joining any pending registry rebuild. */
+	buildSystemPromptForAgentStart(promptText: string, isCurrent?: () => boolean): Promise<SystemPromptPreparation> {
+		return this.#tools.buildSystemPromptForAgentStart(promptText, isCurrent ?? (() => true));
+	}
+
 	/** Names of every registered tool. */
 	getAllToolNames(): string[] {
 		return this.#tools.getAllToolNames();
@@ -8819,7 +8824,7 @@ export class AgentSession {
 			await this.#memory.transition;
 			if (!isCurrent()) return cancelled;
 			const sourceBase = this.#tools.baseSystemPrompt;
-			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent);
+			const basePreparation = await this.buildSystemPromptForAgentStart(prompt, isCurrent);
 			if (!isCurrent()) return cancelled;
 			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
 			if (!isCurrent()) return cancelled;

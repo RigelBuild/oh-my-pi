@@ -701,6 +701,10 @@ export class TtsrManager {
 	 * rejected conditional rules through its normal fallback path.
 	 */
 	replaceRules(rules: readonly Rule[]): Set<string> {
+		// While TTSR is disabled every `addRule` is refused, so the replacement
+		// registers nothing and clearing would shed the registrations and
+		// injection records `reconfigure` promises survive an enabled flip.
+		if (!this.#settings.enabled) return new Set();
 		const replacement = new TtsrManager(this.#settings);
 		for (const rule of rules) {
 			replacement.addRule(rule);

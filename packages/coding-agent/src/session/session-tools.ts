@@ -186,7 +186,7 @@ interface SessionToolsOptions {
 	skillsReloadable?: boolean;
 }
 
-interface SystemPromptPreparation {
+export interface SystemPromptPreparation {
 	systemPrompt: string[];
 	/** Publish staged state at validated delivery; false declines the prepared turn without mutation. */
 	commit?(): boolean;

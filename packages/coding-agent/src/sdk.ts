@@ -3380,7 +3380,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 				rulebookRules = buckets.rulebookRules;
 				alwaysApplyRules = buckets.alwaysApplyRules;
-				const nextActiveRules = [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()];
+				// Publish only the registrations this pass CONSUMED. A rule retained
+				// across `ttsr.enabled: false` and then gated off is still registered,
+				// so spreading the manager unfiltered republishes it here.
+				const publishedTtsrRules = ttsrManager.getRules().filter(rule => buckets.ttsrRuleNames.has(rule.name));
+				const nextActiveRules = [...rulebookRules, ...alwaysApplyRules, ...publishedTtsrRules];
 				// Refresh the session-local snapshots too: `rule://` resolution reads
 				// `toolSession.activeRules` and spawned subagents inherit `toolSession.rules`,
 				// so leaving the construction-time arrays would advertise a new `rule://<name>`
