@@ -24,6 +24,14 @@ describe("bundled agent parsing", () => {
 		expect(plan?.thinkingLevel).toBeUndefined();
 	});
 
+	it("pins the task agent to a provider-valid medium thinking effort", () => {
+		const task = getBundledAgent("task");
+
+		expect(task).toBeDefined();
+		expect(task?.model).toEqual(["pi/task"]);
+		expect(task?.thinkingLevel).toBe(Effort.Medium);
+	});
+
 	// Issue #4761: with `modelRoles.slow: ...:xhigh`, the role's explicit effort
 	// suffix must survive agent-pattern expansion and model resolution for the
 	// bundled agents routed at that role. The executor picks
