@@ -1854,24 +1854,8 @@ describe("Codex-style Abort Handling", () => {
 });
 
 describe("Responses composite ids replayed into a non-Anthropic target", () => {
-	// A Responses-origin composite call (`callId|itemId`) replayed into a
-	// NON-Anthropic target, with a sanitizing normalizeToolCallId injected
-	// directly. The sibling cross-provider cases above all target Anthropic,
-	// which takes the normalizeAnthropicTargetToolCallId branch; this one drives
-	// the model-agnostic `!isSameModel && normalizeToolCallId` branch instead.
-	//
-	// The injected normalizer rewrites every char outside [a-zA-Z0-9_-], so
-	// `call_X|fc_A` becomes `call_X_fc_A` — deliberately NOT what a real
-	// openai-completions replay would emit (that one splits on `|` and keeps the
-	// call half, yielding `call_X`). Keeping the whole id is the stronger
-	// assertion: the emitted `call_X_fc_A` differs from the bare call component,
-	// so pairing a result whose item half differs proves the full normalized id
-	// was carried onto it, not merely its prefix. The model here is just a
-	// non-Anthropic vehicle for that branch.
-	//
-	// If the result does not follow the call onto the emitted id, the call reads
-	// as unanswered and a synthetic "No result provided" stub is back-filled
-	// beside the real result.
+	// The injected sanitizer exercises model-agnostic cross-provider normalization.
+	// Differing composite halves verify pairing without a synthetic stub.
 	const openaiTarget: Model<"openai-completions"> = buildModel({
 		api: "openai-completions",
 		provider: "openai",
