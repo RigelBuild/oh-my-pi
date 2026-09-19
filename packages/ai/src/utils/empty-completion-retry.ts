@@ -184,6 +184,30 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			flush();
+			// Exhausted empty retries must fail loudly instead of delivering a
+			// benign zero-token stop that can wedge the agent loop.
+			if (
+				policy.retryEmptyCompletion === true &&
+				options?.acceptEmptyResponse !== true &&
+				!committed &&
+				emptyRetries >= MAX_EMPTY_COMPLETION_RETRIES &&
+				completedMessage !== undefined &&
+				completedMessage.stopReason === "stop" &&
+				completedMessage.stopDetails?.type !== "pause_turn" &&
+				!completedMessage.errorMessage &&
+				(completedMessage.usage?.output ?? 0) <= 1 &&
+				!hasVisibleAssistantContent(completedMessage)
+			) {
+				const errored: AssistantMessage = {
+					...completedMessage,
+					stopReason: "error",
+					errorMessage:
+						"Provider returned an empty completion (no content, 0 generated tokens) " +
+						`after ${MAX_EMPTY_COMPLETION_RETRIES + 1} attempts.`,
+				};
+				outer.push({ type: "error", reason: "error", error: errored });
+				return;
+			}
 			if (terminal) {
 				outer.push(terminal);
 			} else if (!outer.done) {
