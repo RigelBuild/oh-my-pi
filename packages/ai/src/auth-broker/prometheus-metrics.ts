@@ -1,17 +1,3 @@
-/**
- * Prometheus text-exposition renderer for the auth-broker `/metrics` endpoint
- * (SEA-1242). Pure `UsageReport[] -> string`: no I/O and no metrics library, so
- * it stays dependency-free on the broker and unit-testable in isolation.
- *
- * Emits the `llm_usage_*` gauge family the sealed LLM-usage dashboard binds to.
- * Those names are the cross-repo contract — the dashboard exprs use them
- * verbatim, so the renderer must not rename a family. The label set is bounded:
- * {provider, account, email, limit_id, window} (+ unit on the raw-amount
- * families). `email` is exported to Grafana Cloud by design (Matt's call) so the
- * six subscription accounts are human-readable on the dashboard. Windows are
- * rows, never hardcoded tiers, so a new limit window appears as a new series
- * with zero renderer change.
- */
 import type { UsageLimit, UsageReport, UsageStatus } from "../usage";
 import { resolveUsedFraction } from "../usage";
 
@@ -21,20 +7,6 @@ export const PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8
 /** Sentinel account label when a report carries no stable account id. */
 export const UNIDENTIFIED_ACCOUNT = "unidentified";
 
-/**
- * Stable, opaque account label derived from report data alone (SEA-1242 OQ4).
- *
- * The renderer sees only the {@link UsageReport}, never the credential, so the
- * label must come from the report. `accountId` placement is inconsistent across
- * providers: Codex sets `metadata.accountId` (and `scope.accountId` on its
- * additional limits); Claude's profile path sets `metadata.accountId`; Claude's
- * ratelimit-header path carries none. So check `metadata.accountId`, then fall
- * back to any `limit.scope.accountId`, else the `unidentified` sentinel. Stays
- * the opaque stable id because it is the series/join key the dashboard joins on
- * — the human-readable address rides as its own `email` label. Never a report
- * ordinal (unstable under the null-filtered report fan-out — a dropped
- * credential would remap every later account).
- */
 export function accountLabelOf(report: UsageReport): string {
 	const metaId = report.metadata?.accountId;
 	if (typeof metaId === "string" && metaId.length > 0) return metaId;
@@ -45,19 +17,6 @@ export function accountLabelOf(report: UsageReport): string {
 	return UNIDENTIFIED_ACCOUNT;
 }
 
-/**
- * Human-readable account email label, read from `report.metadata?.email`.
- *
- * `metadata` is untyped (`Record<string, unknown>`), so type-guard it; a missing
- * or non-string value emits `email=""` rather than dropping the label, since an
- * inconsistent label set across samples of one family fails the scrape at parse.
- * Canonicalized here (trim + lowercase) because the providers disagree: the
- * Codex path normalizes through `normalizeEmail` (trim + lowercase), while the
- * Claude payload path only trims and never case-folds. `email` is part of every
- * `llm_usage_*` series identity, so a case or whitespace divergence would split
- * one account into two timeseries. Exported to Grafana Cloud by design (Matt's
- * call).
- */
 export function emailLabelOf(report: UsageReport): string {
 	const email = report.metadata?.email;
 	if (typeof email === "string") return email.trim().toLowerCase();
@@ -104,14 +63,6 @@ interface MetricFamily {
 	readonly samples: Sample[];
 }
 
-/**
- * Static subscription-config lookup injected into {@link renderUsageMetrics}
- * (SEA-1242 Layer 1). It carries both a per-account lookup (plan + renewal
- * clock, keyed by the opaque `{provider, account}` identity) and the per-plan
- * table (capacity weight + monthly price). Plan strings arrive raw; the
- * renderer canonicalizes them via {@link canonicalizePlan} so a config plan and
- * a Codex-derived `planType` collapse to one series.
- */
 export interface SubscriptionLookup {
 	/** Per-account facts, or `undefined` when the account is not configured. */
 	lookup(provider: string, account: string): { plan?: string; renewsAtSeconds?: number } | undefined;
@@ -119,13 +70,6 @@ export interface SubscriptionLookup {
 	plans: ReadonlyArray<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }>;
 }
 
-/**
- * Canonicalize a plan string the same way the storage layer's `getUsagePlanType`
- * does (`auth-storage.ts` trim / lowercase / whitespace-and-hyphen-to-`_` /
- * strip leading `chatgpt_`), so a config-declared plan and a Codex-derived
- * `planType` produce the identical `plan` label and the `on(provider, plan)`
- * join matches.
- */
 function canonicalizePlan(plan: string): string {
 	const normalized = plan.trim().toLowerCase().replace(/[\s-]+/g, "_");
 	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
@@ -156,15 +100,6 @@ export function nextRenewalSeconds(anchorSec: number, nowSec: number): number {
 	}
 }
 
-/**
- * Render usage reports as Prometheus text. `opts.accountLabel` and
- * `opts.emailLabel` are injectable for tests; they default to
- * {@link accountLabelOf} and {@link emailLabelOf}. `opts.subscriptions` supplies
- * the four `llm_subscription_*` families (SEA-1242 Layer 1); it defaults to an
- * empty lookup so an absent config yields byte-identical output. Returns an
- * empty string when there are no samples (the endpoint still answers 200 — an
- * absent series set is the signal the dashboard's expected-accounts panel reads).
- */
 export function renderUsageMetrics(
 	reports: readonly UsageReport[],
 	opts: {
@@ -283,16 +218,6 @@ export function renderUsageMetrics(
 			add("llm_usage_reset_credits_available", perAccount, report.resetCredits.availableCount);
 		}
 
-		// SEA-1242 Layer 1: per-account subscription info + renewal clock. Look
-		// the account up by its opaque {provider, account} identity. The config
-		// `plan` is the source for Claude and the override for Codex; when it is
-		// absent the Codex-parsed `metadata.planType` is the default. Both are
-		// canonicalized identically so the `on(provider, plan)` join matches the
-		// per-plan table below. `add()` no-ops on `undefined`, so a missing plan
-		// or renewal date is skipped and a lookup miss emits neither.
-		// `renewsAtSeconds` is an ANCHOR bill date rolled forward whole calendar
-		// months to the next occurrence at-or-after scrape time (see
-		// nextRenewalSeconds), so the gauge never reports a past renewal.
 		const subscription = subscriptions.lookup(provider, account);
 		if (subscription) {
 			const rawPlan = subscription.plan ?? report.metadata?.planType;
@@ -321,10 +246,6 @@ export function renderUsageMetrics(
 		}
 	}
 
-	// SEA-1242 Layer 1: per-plan facts, emitted EXACTLY once per {provider, plan}
-	// outside the per-report loop. Emitting inside the loop would produce one
-	// duplicate per account on the plan and break the `group_left` join. Plan
-	// labels are canonicalized to match the info series' `plan` label.
 	for (const { provider, plan, capacityWeight, monthlyPriceUsd } of subscriptions.plans) {
 		const planLabels: readonly Label[] = [
 			["provider", provider],

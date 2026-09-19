@@ -116,8 +116,6 @@ describe("renderUsageMetrics", () => {
 		expect(out).toContain(
 			'llm_usage_report_fetched_at_seconds{provider="anthropic",account="acct-claude-1",email="a@example.com"} 1700000000',
 		);
-		// Email is exported by design: the account UUID is opaque, so the email
-		// label is what makes a subscription account legible on the dashboard.
 		expect(out).toContain('email="a@example.com"');
 		expect(out).toContain('email="c@example.com"');
 	});
@@ -290,9 +288,6 @@ describe("renderUsageMetrics", () => {
 	});
 
 	test("every emitted line is a comment or a sample, even when the email holds a newline", () => {
-		// The note path once concatenated raw label values, so a newline in the
-		// email emitted a second physical line that is neither a `#` comment nor
-		// a valid sample — the whole scrape fails at parse, not just this series.
 		const report: UsageReport = {
 			provider: "openai-codex",
 			fetchedAt: 1_700_000_000_000,
@@ -412,8 +407,6 @@ describe("renderUsageMetrics", () => {
 		expect(out).toContain(
 			'llm_subscription_info{provider="openai-codex",account="acct-codex-9",email="c@example.com",plan="pro"} 1',
 		);
-		// A configured account WITHOUT renewsAtSeconds must emit no renewal gauge
-		// (undefined stays undefined through the roll-forward callsite).
 		expect(out).not.toContain('llm_subscription_renews_at_seconds{provider="openai-codex"');
 	});
 
