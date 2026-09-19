@@ -94,14 +94,64 @@ async function spawnDisposableExecutable(args: string[] = []): Promise<Disposabl
 }
 
 describe("pickElectronTarget", () => {
+	// This hook LAUNCHES a real Chromium, so it carries its own bound rather than
+	// inheriting one. An unbounded hook takes whatever `--timeout` the harness
+	// supplies: 5s under a bare `bun test`, but 30_000 under `scripts/ci-test-ts.ts`
+	// (which appends `--timeout=${testTimeoutMs()}`) — so in CI it sat at exactly
+	// the same 30s the browser tool's own budget used, the same coincidence the
+	// test bodies had, in the one place no `it()` bound covers. It surfaced as
+	// "a beforeEach/afterEach hook timed out" naming no deadline at all.
+	//
+	// The bound is explicit so the hook is never silently governed by a harness
+	// flag. It is NOT sized to clear the launch's ceiling, because there is no
+	// ceiling to clear: the launch's phases are additive, two of its segments
+	// have no deadline, and each restated "real ceiling" here has been falsified
+	// by the next measurement — ~30s, then ~120s, then ~238s. Sizing a test bound
+	// to outbid that estimate is how this file drifted toward asserting nothing
+	// but "eventually finishes"; the arithmetic is deliberately gone.
+	//
+	// So the bound answers a different question: how long may a hook hold the
+	// runner before failing is more useful than waiting? 180s. Past that the
+	// launch is wedged behind a segment with no deadline, and more waiting buys
+	// nothing.
+	//
+	// Separately, `scripts/ci-test-ts.ts`'s watchdog (`chunkTimeoutMs`, 600_000)
+	// SIGKILLs the whole chunk it spawns — up to `chunkSize` (10) files — so its
+	// failure names no individual test. (The runner does distinguish it from an
+	// OOM kill: `describeChunkFailure`, ci-test-ts.ts:518-525, reports a watchdog
+	// kill and a bare 137 as different failures, because the fix differs.)
+	//
+	// These bounds do not and cannot make a chunk fit under that window: at the
+	// 30s harness default every test AND every hook in a chunk gets its own 30s,
+	// so a chunk's admitted time runs from ~840s on the smallest of this bucket's
+	// chunks to far more on the largest — all already past 600s before a single
+	// browser bound is counted. What the budget buys is that a SINGLE wedged
+	// launch fails as a named timeout at 180s instead of anonymously whenever the
+	// chunk's watchdog window runs out.
+	//
+	// Giving the launch a caller-reachable bound is a src change (RIG-3406),
+	// which also carries the phase table and measurements; the launch mechanism
+	// is written out once on browser-prelude-facade.test.ts's `browser.open`.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	});
+	}, 180_000);
 
+	// Bounded for the same reason as the hook above, and sized for the worst-case
+	// teardown — which is the WEDGED-Chromium path, not the normal cost.
+	// `releaseBrowser(…, { kill: true })` spends up to a 5s close timeout
+	// (HEADLESS_CLOSE_TIMEOUT_MS, registry.ts) and then, ONLY in that timeout's
+	// catch, a ~2.5s graceful tree kill (2000ms grace + 500ms hard-kill,
+	// attach.ts): ~7.5s when Chromium is wedged, already over a bare
+	// `bun test`'s 5s default, while a healthy close pays neither in full.
+	// Then an UNBOUNDED recursive profile removal (`removeUserDataDir`,
+	// registry.ts) runs on every platform; its bounded retry loop (40 x 50ms ~ 2s,
+	// `shouldRetryRemove`, utils/src/temp.ts) is win32-only and does not run at
+	// all elsewhere, so off Windows the removal is a single `fs.rm`. 30_000's
+	// margin over the ~7.5s absorbs that removal — the one component that can grow.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	});
+	}, 30_000);
 
 	test("uses discovered CDP page targets when browser.pages is empty", async () => {
 		const page = fakePage({ url: "https://www.google.com/", title: "Google" });
@@ -210,6 +260,16 @@ describe("pickElectronTarget", () => {
 		}
 	}, 10_000);
 
+	// These `kind: "spawned"` acquisitions are the one real-acquisition shape in
+	// this file that is NOT `CHROMIUM_AVAILABLE`-gated, so they run on every
+	// runner. They are deliberately out of the deadline audit: the spawned
+	// executable is a disposable `bun --eval`, not Chromium, so none of the launch
+	// phases apply — no WS-endpoint wait, no CDP handshake, no page target. What
+	// 10_000 has to cover is a bun spawn plus one loopback fetch (~100ms here),
+	// and no operation inside carries a bound near it, so there is nothing to
+	// separate. Add a Chromium launch to either and this bound is wrong: it then
+	// inherits the unbounded launch exposure described on the hook above, and
+	// belongs on that hook's bound instead.
 	test("launches an isolated user-data-dir beside a running executable", async () => {
 		const existing = await spawnDisposableExecutable();
 		const { promise: launched, resolve: markLaunched } = Promise.withResolvers<void>();
@@ -271,10 +331,21 @@ describe("pickElectronTarget", () => {
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			try {
+				// Explicit budget, strictly below the `it()` bound: the implicit default
+				// is 30s (`clampTimeout`), which equalled the old test bound and left the
+				// tool and runner deadlines expiring together. Rationale in full:
+				// browser-prelude-facade.test.ts, the `browser.open` call — with one
+				// difference: this site passes `app.cdp_url`, so it ATTACHES to an
+				// already-running browser rather than launching one. No launch ceiling
+				// applies, and the 45s genuinely governs the whole open. The attach path
+				// carries its own bound — `waitForCdp`'s 5s on the `connected` branch
+				// (registry.ts:200; the file's other sites use different bounds) — clear
+				// of the 45s, so the two do not coincide.
 				await invokeBrowser({
 					action: "open",
 					name: tabName,
 					url: requested,
+					timeout: 45,
 					app: { cdp_url: `http://${endpoint.host}` },
 				});
 				opened = true;
@@ -288,7 +359,7 @@ describe("pickElectronTarget", () => {
 				if (opened) await invokeBrowser({ action: "close", name: tabName });
 			}
 		},
-		30_000,
+		90_000,
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
