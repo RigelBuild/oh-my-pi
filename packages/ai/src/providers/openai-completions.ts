@@ -2083,6 +2083,7 @@ export function convertMessages(
 	}
 
 	let lastRole: string | null = null;
+	let lastDroppedThinkingText: string | undefined;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -2386,6 +2387,9 @@ export function convertMessages(
 				assistantMsg.content = ".";
 			}
 			if (!hasContent && !assistantMsg.tool_calls && !hasReasoningField) {
+				if (nonEmptyThinkingBlocks.length > 0) {
+					lastDroppedThinkingText = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
+				}
 				continue;
 			}
 			params.push(assistantMsg);
@@ -2478,6 +2482,11 @@ export function convertMessages(
 				: msg.role;
 	}
 
+	const hasNonSystemOrDeveloperParam = params.some(m => m.role !== "system" && m.role !== "developer");
+	if (!hasNonSystemOrDeveloperParam && lastDroppedThinkingText) {
+		const demoted = renderDemotedThinking(model.id, lastDroppedThinkingText);
+		if (demoted.length > 0) params.push({ role: "assistant", content: demoted });
+	}
 	return params;
 }
 
