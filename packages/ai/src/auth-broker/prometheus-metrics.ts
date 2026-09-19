@@ -71,7 +71,10 @@ export interface SubscriptionLookup {
 }
 
 function canonicalizePlan(plan: string): string {
-	const normalized = plan.trim().toLowerCase().replace(/[\s-]+/g, "_");
+	const normalized = plan
+		.trim()
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
 	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
 }
 

@@ -418,7 +418,10 @@ describe("renderUsageMetrics", () => {
 	});
 
 	test("two accounts on one plan emit exactly one weight and one price series", () => {
-		const second: UsageReport = { ...claudeReport(), metadata: { accountId: "acct-claude-2", email: "b@example.com" } };
+		const second: UsageReport = {
+			...claudeReport(),
+			metadata: { accountId: "acct-claude-2", email: "b@example.com" },
+		};
 		const subscriptions = {
 			lookup: (provider: string, account: string) =>
 				provider === "anthropic" && (account === "acct-claude-1" || account === "acct-claude-2")

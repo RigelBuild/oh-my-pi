@@ -56,24 +56,24 @@ export interface AuthBrokerServerOptions {
 	storage: AuthStorage;
 	/** Listen address; accepts `host:port` or just `port`. */
 	bind?: string;
-  /** Accept any of these bearer tokens. Empty disables auth (loopback only). */
-  bearerTokens: string[];
-  /** Scrape-scoped read-only tokens accepted only for GET /metrics. */
-  metricsTokens?: string[];
-  /** Static subscription data rendered as llm_subscription_* families. */
-  subscriptions?: SubscriptionLookup;
-  /** Broker version string surfaced on `/v1/healthz`. */
-  version?: string;
-  /** Refresh credentials expiring within this window. Default 5 min. */
-  refreshSkewMs?: number;
-  /** Background refresh cadence. Default 60s. */
-  refreshIntervalMs?: number;
-  /** Disable the background refresher (e.g. for tests). */
-  disableRefresher?: boolean;
-  /** Override SSE keepalive cadence. */
-  streamKeepaliveMs?: number;
-  /** Override cross-process SQLite change polling. */
-  externalChangePollMs?: number;
+	/** Accept any of these bearer tokens. Empty disables auth (loopback only). */
+	bearerTokens: string[];
+	/** Scrape-scoped read-only tokens accepted only for GET /metrics. */
+	metricsTokens?: string[];
+	/** Static subscription data rendered as llm_subscription_* families. */
+	subscriptions?: SubscriptionLookup;
+	/** Broker version string surfaced on `/v1/healthz`. */
+	version?: string;
+	/** Refresh credentials expiring within this window. Default 5 min. */
+	refreshSkewMs?: number;
+	/** Background refresh cadence. Default 60s. */
+	refreshIntervalMs?: number;
+	/** Disable the background refresher (e.g. for tests). */
+	disableRefresher?: boolean;
+	/** Override SSE keepalive cadence. */
+	streamKeepaliveMs?: number;
+	/** Override cross-process SQLite change polling. */
+	externalChangePollMs?: number;
 }
 
 export interface AuthBrokerServerHandle {
@@ -680,6 +680,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					} catch {
 						return empty(503);
 					}
+				}
+				if (req.method === "GET" && pathname === "/v1/healthz") {
+					const body: HealthzResponse = version === undefined ? { ok: true } : { ok: true, version };
+					return json(200, body);
 				}
 				if (!isAuthorized(req, tokens)) {
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
