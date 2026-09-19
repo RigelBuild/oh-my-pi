@@ -138,6 +138,7 @@ describe("AgentSession model persistence", () => {
 	async function createStartupResumeSession(
 		targetSessionFile: string,
 		settings: Settings = Settings.isolated(),
+		extraOptions?: { reapplyConfig?: boolean; model?: Model<Api> },
 	): Promise<CreateAgentSessionResult> {
 		const sessionManager = await SessionManager.open(targetSessionFile, path.join(tempDir.path(), "startup"));
 		const result = await createAgentSession({
@@ -155,10 +156,159 @@ describe("AgentSession model persistence", () => {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
+			reapplyConfig: extraOptions?.reapplyConfig,
+			model: extraOptions?.model,
 		});
 		session = result.session;
 		return result;
 	}
+	async function loadOverlaySettings(overlayModelRoles: Record<string, string | null>): Promise<Settings> {
+		const overlayPath = path.join(tempDir.path(), `overlay-${Bun.nanoseconds()}.yml`);
+		const roleLines = Object.entries(overlayModelRoles)
+			.map(([role, value]) => `  ${role}: ${value === null ? "null" : value}`)
+			.join("\n");
+		await Bun.write(overlayPath, `modelRoles:\n${roleLines}\n`);
+		return Settings.loadIsolated({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			inMemory: true,
+			configFiles: [overlayPath],
+		});
+	}
+
+	async function writeThinkingModelSession(modelValueStr: string, bakedThinking: string): Promise<string> {
+		const targetSessionFile = path.join(tempDir.path(), `target-thinking-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "target-session", timestamp, cwd: tempDir.path() },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: modelValueStr,
+					role: "default",
+				},
+				{
+					type: "thinking_level_change",
+					id: "thinking",
+					parentId: "default-model",
+					timestamp,
+					thinkingLevel: bakedThinking,
+					configured: bakedThinking,
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		return targetSessionFile;
+	}
+
+	it("adopts the config default model over the baked session model on resume with reapplyConfig", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const overlayModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const targetSessionFile = await writeRoleModelSession(modelValue(bakedModel), modelValue(bakedModel), "default");
+
+		const settings = await loadOverlaySettings({ default: modelValue(overlayModel) });
+		expect(settings.getModelRoleProvenance("default")).toBe("overlay");
+
+		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
+
+		expect(result.session.model?.id).toBe(overlayModel.id);
+	});
+
+	it("restores the baked session model on a bare resume without reapplyConfig", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const overlayModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const targetSessionFile = await writeRoleModelSession(modelValue(bakedModel), modelValue(bakedModel), "default");
+
+		const settings = await loadOverlaySettings({ default: modelValue(overlayModel) });
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model?.id).toBe(bakedModel.id);
+	});
+
+	it("adopts the config default thinking level over the baked session level on resume with reapplyConfig", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeThinkingModelSession(modelValue(model), Effort.Medium);
+
+		const settings = await loadOverlaySettings({ default: `${modelValue(model)}:xhigh` });
+
+		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
+
+		expect(result.session.model?.id).toBe(model.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.XHigh);
+	});
+
+	it("restores the baked session thinking level on a bare resume without reapplyConfig", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeThinkingModelSession(modelValue(model), Effort.Medium);
+
+		const settings = await loadOverlaySettings({ default: `${modelValue(model)}:xhigh` });
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model?.id).toBe(model.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.Medium);
+	});
+
+	async function loadOverlaySettingsRaw(overlayYaml: string): Promise<Settings> {
+		const overlayPath = path.join(tempDir.path(), `overlay-raw-${Bun.nanoseconds()}.yml`);
+		await Bun.write(overlayPath, overlayYaml);
+		return Settings.loadIsolated({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			inMemory: true,
+			configFiles: [overlayPath],
+		});
+	}
+
+	async function writeServiceTierSession(modelValueStr: string, tier: string): Promise<string> {
+		const targetSessionFile = path.join(tempDir.path(), `target-tier-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "target-session", timestamp, cwd: tempDir.path() },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: modelValueStr,
+					role: "default",
+				},
+				{
+					type: "service_tier_change",
+					id: "tier",
+					parentId: "default-model",
+					timestamp,
+					serviceTier: { openai: tier },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		return targetSessionFile;
+	}
+
+	it("adopts configured service tier on reapply and preserves it on bare resume", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeServiceTierSession(modelValue(model), "priority");
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: ${modelValue(model)}\ntier:\n  openai: flex\n`,
+		);
+
+		const reapplied = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
+		expect(reapplied.session.serviceTierByFamily.openai).toBe("flex");
+
+		const bare = await createStartupResumeSession(targetSessionFile, settings);
+		expect(bare.session.serviceTierByFamily.openai).toBe("priority");
+	});
+
 	it("switches the active model without persisting by default", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
