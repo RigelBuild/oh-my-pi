@@ -7,6 +7,7 @@
 - Removed support for the env parameter in the bash tool
 
 ### Fixed
+- Added `--reapply-config` to explicitly adopt the current config model, thinking level, and service tier when resuming a session; bare resume keeps restoring the session's saved values.
 
 - Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
