@@ -12,9 +12,8 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
-import { parseBind } from "../utils/parse-bind";
 import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
-import { PROMETHEUS_CONTENT_TYPE, renderUsageMetrics, type SubscriptionLookup } from "./prometheus-metrics";
+import { parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	ClientUsageReportRequest,
@@ -58,10 +57,6 @@ export interface AuthBrokerServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty disables auth (loopback only). */
 	bearerTokens: string[];
-	/** Scrape-scoped read-only tokens accepted only for GET /metrics. */
-	metricsTokens?: string[];
-	/** Static subscription data rendered as llm_subscription_* families. */
-	subscriptions?: SubscriptionLookup;
 	/** Broker version string surfaced on `/v1/healthz`. */
 	version?: string;
 	/** Refresh credentials expiring within this window. Default 5 min. */
@@ -70,9 +65,16 @@ export interface AuthBrokerServerOptions {
 	refreshIntervalMs?: number;
 	/** Disable the background refresher (e.g. for tests). */
 	disableRefresher?: boolean;
-	/** Override SSE keepalive cadence. */
+	/**
+	 * Override SSE keepalive cadence in milliseconds for `/v1/snapshot/stream`.
+	 * Internal-only — tests use a short interval so they can assert heartbeats
+	 * without long sleeps. Default {@link DEFAULT_STREAM_KEEPALIVE_MS}.
+	 */
 	streamKeepaliveMs?: number;
-	/** Override cross-process SQLite change polling. */
+	/**
+	 * Override cross-process SQLite change polling in milliseconds.
+	 * Internal-only — tests use a short interval. Default 250ms.
+	 */
 	externalChangePollMs?: number;
 }
 
@@ -646,7 +648,6 @@ function serveSnapshotStream(
 export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_BROKER_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
-	const metricsTokens = new Set<string>([...opts.bearerTokens, ...(opts.metricsTokens ?? [])]);
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 	const externalChangePollMs = opts.externalChangePollMs ?? DEFAULT_EXTERNAL_CHANGE_POLL_MS;
@@ -671,18 +672,8 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 			const peer =
 				req.headers.get("x-forwarded-for")?.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown";
 			try {
-				if (req.method === "GET" && pathname === "/metrics") {
-					if (!isAuthorized(req, metricsTokens)) return json(401, { error: "unauthorized" });
-					try {
-						const reports = (await opts.storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
-						const body = renderUsageMetrics(reports, { subscriptions: opts.subscriptions });
-						return new Response(body, { status: 200, headers: { "Content-Type": PROMETHEUS_CONTENT_TYPE } });
-					} catch {
-						return empty(503);
-					}
-				}
 				if (req.method === "GET" && pathname === "/v1/healthz") {
-					const body: HealthzResponse = version === undefined ? { ok: true } : { ok: true, version };
+					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
 				}
 				if (!isAuthorized(req, tokens)) {
