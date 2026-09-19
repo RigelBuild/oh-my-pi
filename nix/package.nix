@@ -6,6 +6,7 @@
   cmake,
   darwin,
   lib,
+  libiconv,
   libopus,
   libpulseaudio,
   makeBinaryWrapper,
@@ -159,6 +160,13 @@ stdenv.mkDerivation {
         "packages/natives/native/${platform.addon}"
     ''}
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # Darwin's system libiconv is available through libSystem; rewrite the
+      # Nix store install name before signing so the embedded addon remains
+      # runnable outside the Nix build environment.
+      install_name_tool -change \
+        ${libiconv}/lib/libiconv.2.dylib \
+        /usr/lib/libiconv.2.dylib \
+        "packages/natives/native/${platform.addon}"
       # arm64 Darwin requires even locally-built Mach-O addons to carry an
       # ad-hoc signature. Sign before Bun archives the file.
       signIfRequired "packages/natives/native/${platform.addon}"
