@@ -131,7 +131,21 @@ describe("ollama tool forcing", () => {
 		let requestBody: OllamaRequestBody | undefined;
 		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
 			requestBody = JSON.parse(String(init?.body ?? "{}")) as OllamaRequestBody;
-			return new Response(`${JSON.stringify({ done: true })}\n`, {
+			// A realistic forced tool-call response. This fixture IS load-bearing:
+			// `streamOllama` wraps `streamOllamaOnce` with `retryEmptyCompletion`, so
+			// a bare `{done:true}` is a degenerate empty completion that gets retried
+			// to the cap and then fails closed with an `error` terminal — the `done`
+			// assertion below fails without a real tool call here.
+			const chunk = {
+				message: {
+					role: "assistant",
+					content: "",
+					tool_calls: [{ type: "function", function: { name: "write", arguments: { path: "README.md" } } }],
+				},
+				done: true,
+				done_reason: "tool_calls",
+			};
+			return new Response(`${JSON.stringify(chunk)}\n`, {
 				status: 200,
 				headers: { "Content-Type": "application/x-ndjson" },
 			});
