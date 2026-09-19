@@ -1,6 +1,45 @@
 # Fork re-sync: reset to upstream v18.1.10 + reduced curated re-lay
 
-Status: Frozen (PR #35). Reconciled 2026-09-04 after execution — see the note below.
+Status: Frozen (PR #35). Two post-freeze notes follow, newest first: the task
+state (2026-09-05), then the execution reconciliation (2026-09-04).
+
+> **Task state (2026-09-05).** The T1-T8 checkboxes further down are the FROZEN
+> contract as written and are deliberately left untouched; this note is the
+> authoritative record of what has actually executed. Read it first — several of
+> those boxes are stale-unchecked, and a reader who spot-checks one box will
+> generalize wrongly (some are stale, others are correctly unchecked).
+>
+> Verified against `origin/main` = `08e04cecbc` this session:
+>
+> - **T1 (force-push reset): DONE.** Main sits on upstream `ddde7db10a`
+>   (v18.1.10) with exactly four fork commits on top. The record's own
+>   predicted tell confirms it: `v18.0.3` (`fdedd3c7f829`) is no longer an
+>   ancestor of main. **Do not re-run the runbook.**
+> - **T2 (CI re-lay): DONE in substance** — this record is present at main and
+>   the CI rework landed as #36 (`c66d76c364`).
+> - **T3 (release machinery): NOT landed.** `scripts/rigel-scope-rename.ts` is
+>   absent at main. This is why the fork release is still uncut at `v18.0.3`:
+>   the publish path itself has not been restored.
+> - **T4 (memtools): NOT landed.**
+> - **T5 (Prometheus /metrics): NOT landed, and now tracked as RIG-3358**
+>   (owner: forge). `prometheus-metrics.ts` is absent at main. ⚠ Acceptance is
+>   WIRING, not file existence: `packages/coding-agent/src/cli/auth-broker-cli.ts`
+>   survived the reset **present but stripped** (33,743 B, zero metrics hits, vs
+>   38,693 B in the orion subtree), so `metricsTokens` is unpopulated and every
+>   scrape 401s while builds and tests stay green.
+> - **Tool-call-id pairing (`9670d742ef`, #7): correctly DROPPED — do not
+>   re-lay.** Already satisfied at main (`toolCallPairingKey`, 15 hits in
+>   `packages/ai/src/providers/transform-messages.ts`) via the upstreamed twin
+>   `7bf5230c0d`. Re-laying would regress upstream follow-ups `243303d91d` /
+>   `3a710cd0f7`.
+> - **T6a-T6d:** #34 merged (`08e04cecbc`); the remaining PR dispositions are
+>   tracked on their own issues.
+>
+> The live plan for the un-landed items is `docs/fork-overlay.md` (RIG-3144),
+> which supersedes the one-off re-lay model: T3/T4/T5 become overlay rows
+> carried on a single branch across resets rather than individual main commits.
+
+---
 
 > **Reconciliation note (2026-09-04, post-execution).** This record froze via PR
 > #35 as the reset-and-re-lay contract. Between the freeze and the reset, upstream
