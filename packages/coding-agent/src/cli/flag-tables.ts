@@ -307,7 +307,6 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--prewalk",
 	"--no-prewalk",
 	"--plan-yolo",
-	"--reapply-config",
 	"--print",
 	"--print-thoughts",
 	"--no-extensions",

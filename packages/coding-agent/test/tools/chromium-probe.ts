@@ -1,53 +1,31 @@
 import * as fs from "node:fs/promises";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 
-const VERSION_PROBE_TIMEOUT_MS = 10_000;
-
-/** Run Chromium resolution and execution under one deadline. */
-export async function chromiumCanLaunch(
-	resolve: () => Promise<string | undefined> = ensureChromiumExecutable,
-	timeoutMs = VERSION_PROBE_TIMEOUT_MS,
-): Promise<boolean> {
-	const deadline = AbortSignal.timeout(timeoutMs);
-	let settled = false;
+/**
+ * Whether the Chromium puppeteer resolves can actually execute on this host.
+ * CI runners without Chrome's system libraries (libnspr4 & co.) hold the
+ * downloaded binary but cannot exec it — probe with --version and skip
+ * instead of failing.
+ */
+async function chromiumCanLaunch(): Promise<boolean> {
 	try {
-		return await Promise.race([
-			probeExecutable(resolve, deadline).then(
-				verdict => {
-					settled = true;
-					return verdict;
-				},
-				error => {
-					settled = true;
-					throw error;
-				},
-			),
-			new Promise<boolean>(resolveRace => {
-				deadline.addEventListener("abort", () => {
-					if (settled) return;
-					console.error(
-						`chromium-probe: no answer within ${timeoutMs}ms; treating Chromium as unavailable and SKIPPING the browser suites`,
-					);
-					resolveRace(false);
-				});
-			}),
-		]);
+		const executable = await ensureChromiumExecutable();
+		if (!executable) return false;
+		// Only Linux runs the exec probe. Elsewhere the resolved candidate is a
+		// GUI application path, and running it is the hazard
+		// `isChromiumExecutable()` already refuses for the same reason (#8445): a
+		// GUI `chrome.exe --version` prints nothing to a detached stdout and does
+		// not exit, so this spawnSync never returns and every importing suite
+		// hangs during module evaluation. Check the file instead, so a stale
+		// PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
+		// back unvalidated — still skips the suites rather than failing them at
+		// launch.
+		if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
+		const probe = Bun.spawnSync([executable, "--version"], { stdout: "ignore", stderr: "ignore" });
+		return probe.exitCode === 0;
 	} catch {
 		return false;
 	}
-}
-
-async function probeExecutable(resolve: () => Promise<string | undefined>, signal: AbortSignal): Promise<boolean> {
-	const executable = await resolve();
-	if (!executable) return false;
-	if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
-	const probe = Bun.spawn([executable, "--version"], {
-		stdout: "ignore",
-		stderr: "ignore",
-		signal,
-		killSignal: "SIGKILL",
-	});
-	return (await probe.exited) === 0;
 }
 
 let probe: Promise<boolean> | undefined;
