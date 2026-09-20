@@ -110,6 +110,21 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
 	});
+
+	test("keeps Antigravity 3.8 Flash provider-qualified beside duplicate bare IDs", () => {
+		const models = getBundledModels("google-antigravity");
+		const flash = models.find(model => model.id === "gemini-3.8-flash");
+		if (!flash) throw new Error("expected bundled Antigravity 3.8 Flash");
+		expect(flash.provider).toBe("google-antigravity");
+		expect(flash.thinking?.effortRouting).toEqual({
+			minimal: "gemini-3.8-flash-low",
+			low: "gemini-3.8-flash-low",
+			medium: "gemini-3.8-flash-medium",
+			high: "gemini-3.8-flash-high",
+		});
+		const index = indexModelsByRequestId(models, new Set(["google-antigravity"]));
+		expect(index.get("google-antigravity/gemini-3.8-flash")).toBe(flash);
+	});
 });
 
 describe("createSerializedRebuilder", () => {

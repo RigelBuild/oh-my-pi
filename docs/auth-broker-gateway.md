@@ -124,11 +124,21 @@ Capability-dependent responses include `Vary: OMP-Auth-Broker-Capabilities` so i
 - **definitive failures** (`invalid_grant`, `invalid_token`, `revoked`, unauthorized refresh-token, 401/403 not from a network blip) — credentials are passed to `AuthStorage.disableCredentialById(id, cause)` so the next snapshot pull surfaces a clean delete on the client;
 - **transient failures** (timeout / ECONNREFUSED / fetch failed) — left in place for the next sweep.
 
+### Antigravity OAuth identity and refresh
+
+Antigravity credentials use the Google OAuth userinfo `id` as their stable
+`accountId` (the email address is display metadata only). The broker preserves
+the stored account ID, project ID, and email when a refresh succeeds but the
+userinfo request is temporarily unavailable. A refreshed non-empty account ID
+that differs from the stored non-empty ID is rejected as a credential
+validation failure; no part of that refreshed token state is persisted. This
+prevents a transient identity mix-up from re-keying a subscription account.
+
 ## auth-gateway
 
 ### CLI
 
-```
+```text
 omp auth-gateway serve   [--bind=host:port] [--no-auth]
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]

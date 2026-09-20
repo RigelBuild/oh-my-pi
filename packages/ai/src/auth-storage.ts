@@ -5863,6 +5863,17 @@ export class AuthStorage {
 				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
 			}
 			if (!result) return undefined;
+			if (
+				provider === "google-antigravity" &&
+				selection.credential.accountId &&
+				result.newCredentials.accountId &&
+				selection.credential.accountId !== result.newCredentials.accountId
+			) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
+			}
 			const updated: OAuthCredential = {
 				type: "oauth",
 				access: result.newCredentials.access,
@@ -7297,6 +7308,12 @@ export class AuthStorage {
 					}
 				}
 				throw error;
+			}
+			if (provider === "google-antigravity" && attempted.accountId && refreshed.accountId && attempted.accountId !== refreshed.accountId) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
 			}
 			const updated: OAuthCredential = {
 				type: "oauth",

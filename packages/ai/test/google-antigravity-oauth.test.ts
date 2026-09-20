@@ -219,4 +219,42 @@ describe("Antigravity OAuth project discovery", () => {
 		await expect(discoverAntigravityProject()).rejects.toThrow("loadCodeAssist failed: 201 Created: created");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
+ 
+  it("preserves stored identity when refresh userinfo is unavailable", async () => {
+    const result = await googleAntigravityProjectHook(
+      { access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 60_000 },
+      {
+        provider: "google-antigravity",
+        phase: "refresh",
+        raw: {},
+        fetch,
+        stored: {
+          access: "old-access",
+          refresh: "old-refresh",
+          expires: 0,
+          accountId: "account-123",
+          email: "user@example.test",
+          projectId: "project-123",
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+    expect(result.access).toBe("fresh-access");
+  });
+
+  it("rejects a refreshed credential whose account identity conflicts", async () => {
+    await expect(
+      googleAntigravityProjectHook(
+        { access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 60_000, accountId: "account-new" },
+        {
+          provider: "google-antigravity",
+          phase: "refresh",
+          raw: {},
+          fetch,
+          stored: { access: "old-access", refresh: "old-refresh", expires: 0, accountId: "account-old", projectId: "project-123" },
+        },
+      ),
+    ).rejects.toThrow("account identity conflicts");
+  });
 });

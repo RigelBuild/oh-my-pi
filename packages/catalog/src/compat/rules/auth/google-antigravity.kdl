@@ -17,11 +17,11 @@ auth "google-antigravity" {
 			refresh "refresh_token"
 			expires "seconds" path="expires_in" skew-ms=300000
 		}
-		userinfo url="https://www.googleapis.com/oauth2/v1/userinfo?alt=json" email="email"
+		userinfo url="https://www.googleapis.com/oauth2/v1/userinfo?alt=json" email="email" account-id="id"
 		after-exchange hook="google-antigravity-project"
 	}
 	refresh {
-		require "projectId"
+		userinfo url="https://www.googleapis.com/oauth2/v1/userinfo?alt=json" email="email" account-id="id"
 		after-refresh hook="google-antigravity-project"
 	}
 	api-key-format "structured"
