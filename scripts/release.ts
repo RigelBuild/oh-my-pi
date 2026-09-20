@@ -38,6 +38,36 @@ export function validateExplicitVersion(version: string): string | null {
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
 }
+export function isTransientGhError(message: string): boolean {
+	return /\bHTTP 50[234]\b|server error|connection reset|econnreset|timed out|i\/o timeout|\btimeout\b|deadline exceeded|etimedout/i.test(
+		message,
+	);
+}
+
+function errorText(error: unknown): string {
+	if (typeof error !== "object" || error === null) return String(error);
+	const record = error as { message?: unknown; stderr?: unknown; stdout?: unknown };
+	return [record.message, record.stderr, record.stdout]
+		.filter(value => value != null)
+		.map(String)
+		.join("\n");
+}
+
+export async function runWithTransientRetry<T>(
+	attempt: () => Promise<T>,
+	options?: { maxRetries?: number; sleep?: (ms: number) => Promise<void> },
+): Promise<T> {
+	const maxRetries = options?.maxRetries ?? 5;
+	const sleep = options?.sleep ?? Bun.sleep;
+	for (let retry = 0; ; retry++) {
+		try {
+			return await attempt();
+		} catch (error) {
+			if (retry >= maxRetries || !isTransientGhError(errorText(error))) throw error;
+			await sleep(Math.min(1000 * 2 ** retry, 30_000));
+		}
+	}
+}
 
 // =============================================================================
 // Shared functions
@@ -48,7 +78,9 @@ async function watchCI(): Promise<boolean> {
 	console.log(`  Commit: ${commitSha.slice(0, 8)}`);
 
 	while (true) {
-		const runsOutput = await $`gh run list --commit ${commitSha} --json databaseId,status,conclusion,name`.text();
+		const runsOutput = await runWithTransientRetry(() =>
+			$`gh run list --commit ${commitSha} --json databaseId,status,conclusion,name`.text(),
+		);
 		const runs: Array<{ databaseId: number; status: string; conclusion: string | null; name: string }> =
 			JSON.parse(runsOutput);
 
@@ -217,6 +249,38 @@ export function bumpCanaryVersion(current: string): string {
 	}
 	return `${major}.${minor}.${patch + 1}-canary.1`;
 }
+export function resolveReleaseVersion(versionOrBump: string, latestTag: string): { version: string; note: string } {
+	if (versionOrBump === "major" || versionOrBump === "minor" || versionOrBump === "patch") {
+		if (!latestTag)
+			throw new Error(`cannot ${versionOrBump}-bump with no prior v* tag; pass an explicit version first.`);
+		const version = bumpVersion(latestTag, versionOrBump);
+		return { version, note: `Bumping ${versionOrBump} version from ${latestTag} -> ${version}` };
+	}
+	if (versionOrBump === "canary") {
+		if (!latestTag)
+			throw new Error("cannot cut a canary with no prior v* tag; release an explicit base version first.");
+		const version = bumpCanaryVersion(latestTag);
+		return { version, note: `Bumping canary version from ${latestTag} -> ${version}` };
+	}
+	if (latestTag && compareVersions(versionOrBump, latestTag) <= 0)
+		throw new Error(`Version ${versionOrBump} must be greater than latest tag ${latestTag}`);
+	return {
+		version: versionOrBump,
+		note: latestTag
+			? `Version ${versionOrBump} > ${latestTag}`
+			: `First release: no prior v* tag; releasing ${versionOrBump}`,
+	};
+}
+
+export function applyPackageVersion(content: string, version: string): string {
+	return content.replace(/"version": "[^"]+"/g, `"version": "${version}"`);
+}
+export function applyCargoWorkspaceVersion(content: string, version: string): string {
+	return content.replace(/^version = "[^"]+"/gm, `version = "${version}"`);
+}
+export function applyNativesSentinel(content: string, sentinelName: string): string {
+	return content.replace(/__piNativesV[A-Za-z0-9_]+/g, sentinelName);
+}
 
 async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
@@ -262,21 +326,17 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
 
-	const latestTag = (await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).text()).trim();
-	let version = versionOrBump;
-	if (version === "major" || version === "minor" || version === "patch") {
-		version = bumpVersion(latestTag, version);
-		console.log(`Bumping ${versionOrBump} version from ${latestTag} -> ${version}`);
-	} else if (version === "canary") {
-		version = bumpCanaryVersion(latestTag);
-		console.log(`Bumping canary version from ${latestTag} -> ${version}`);
-	}
-
-	if (compareVersions(version, latestTag) <= 0) {
-		console.error(`Error: Version ${version} must be greater than latest tag ${latestTag}`);
+	const describe = await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).quiet().nothrow();
+	const latestTag = describe.exitCode === 0 ? describe.text().trim() : "";
+	let version: string;
+	try {
+		const resolved = resolveReleaseVersion(versionOrBump, latestTag);
+		version = resolved.version;
+		console.log(`  ${resolved.note}\n`);
+	} catch (error) {
+		console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
 		process.exit(1);
 	}
-	console.log(`  Version ${version} > ${latestTag}\n`);
 
 	// 2. Update package versions
 	console.log(`Updating package versions to ${version}…`);
@@ -292,8 +352,9 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		}
 		publicPkgPaths.push(pkgPath);
 	}
-
-	await $`sd '"version": "[^"]+"' ${`"version": "${version}"`} ${publicPkgPaths}`;
+	for (const pkgPath of publicPkgPaths) {
+		await Bun.write(pkgPath, applyPackageVersion(await Bun.file(pkgPath).text(), version));
+	}
 
 	// Verify
 	console.log("  Verifying versions:");
@@ -312,7 +373,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 
 	// 3. Update Rust workspace version
 	console.log(`Updating Rust workspace version to ${version}…`);
-	await $`sd '^version = "[^"]+"' ${`version = "${version}"`} Cargo.toml`;
+	await Bun.write("Cargo.toml", applyCargoWorkspaceVersion(await Bun.file("Cargo.toml").text(), version));
 
 	// Verify
 	const cargoToml = await Bun.file("Cargo.toml").text();
@@ -349,7 +410,9 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		"packages/natives/native/index.d.ts",
 		"packages/natives/native/index.js",
 	];
-	await $`sd '__piNativesV[A-Za-z0-9_]+' ${sentinelName} ${sentinelFiles}`;
+	for (const sentinelPath of sentinelFiles) {
+		await Bun.write(sentinelPath, applyNativesSentinel(await Bun.file(sentinelPath).text(), sentinelName));
+	}
 	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();
 	if (!libRs.includes(`js_name = "${sentinelName}"`)) {
 		console.error(
