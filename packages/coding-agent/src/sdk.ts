@@ -426,8 +426,6 @@ export interface CreateAgentSessionOptions {
 	thinkingLevelCeiling?: Effort;
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
-	/** Explicitly adopt config model, thinking, and service tier on resume. */
-	reapplyConfig?: boolean;
 	/**
 	 * Per-family service tiers for this session, replacing the `tier.*` settings
 	 * and any persisted tier history. Called once the initial model is final —
@@ -1580,12 +1578,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
-	if (
-		!hasExplicitModel &&
-		!model &&
-		sessionModelStrings.length > 0 &&
-		(!options.reapplyConfig || !defaultRoleSpec.model)
-	) {
+	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
@@ -1636,12 +1629,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		let level = options.thinkingLevel;
-		if (
-			level === undefined &&
-			hasExistingSession &&
-			hasThinkingEntry &&
-			(!options.reapplyConfig || !defaultRoleSpec.explicitThinkingLevel)
-		) {
+		if (level === undefined && hasExistingSession && hasThinkingEntry) {
 			level =
 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
 				parseThinkingLevel(existingSession.thinkingLevel);
@@ -1649,12 +1637,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
 			level = restoredSessionThinkingLevel;
 		}
-		if (
-			level === undefined &&
-			!hasExplicitModel &&
-			(!hasThinkingEntry || options.reapplyConfig) &&
-			defaultRoleSpec.explicitThinkingLevel
-		) {
+		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
 			level = defaultRoleSpec.thinkingLevel;
 		}
 		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
@@ -2335,11 +2318,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (`restoredSessionModelIndex === -1`, with the settings default or
 		// downstream fallback filling `model`). Reclaim it here so resume
 		// honors the last active role in either case.
-		const sessionRetryLimit = options.reapplyConfig
-			? 0
-			: restoredSessionModelIndex >= 0
-				? restoredSessionModelIndex
-				: sessionModelStrings.length;
+		const sessionRetryLimit = restoredSessionModelIndex >= 0 ? restoredSessionModelIndex : sessionModelStrings.length;
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
@@ -3620,26 +3599,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const resolvedServiceTierByFamily = options.resolveServiceTierByFamily?.(model);
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
-			(options.reapplyConfig
-				? {
-						...(hasServiceTierEntry ? existingSession.serviceTier : {}),
-						...(settings.get("tier.openai") !== "none"
-							? { openai: buildServiceTierByFamily(settings.get("tier.openai"), "none", "none").openai }
-							: {}),
-						...(settings.get("tier.anthropic") !== "none"
-							? { anthropic: buildServiceTierByFamily("none", settings.get("tier.anthropic"), "none").anthropic }
-							: {}),
-						...(settings.get("tier.google") !== "none"
-							? { google: buildServiceTierByFamily("none", "none", settings.get("tier.google")).google }
-							: {}),
-					}
-				: hasServiceTierEntry
-					? (existingSession.serviceTier ?? {})
-					: buildServiceTierByFamily(
-							settings.get("tier.openai"),
-							settings.get("tier.anthropic"),
-							settings.get("tier.google"),
-						));
+			(hasServiceTierEntry
+				? (existingSession.serviceTier ?? {})
+				: buildServiceTierByFamily(
+						settings.get("tier.openai"),
+						settings.get("tier.anthropic"),
+						settings.get("tier.google"),
+					));
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };

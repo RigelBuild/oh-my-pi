@@ -159,11 +159,11 @@ describe("browser init deadline carry-over", () => {
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	}, 180_000);
+	});
 
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	}, 30_000);
+	});
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"counts caller time already spent before acquisition against the worker-init budget",
@@ -411,7 +411,7 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		180_000,
+		45_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps deterministic viewport emulation for hidden launches",
@@ -437,6 +437,6 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		180_000,
+		45_000,
 	);
 });

@@ -4,7 +4,6 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import {
 	__resetGlobalProxyFetch,
-	__resetProxyCache,
 	connectProxiedSocket,
 	getProxyForProvider,
 	getProxyForUrl,
@@ -99,14 +98,11 @@ function proxyEnvKeys(): Set<string> {
 }
 
 // Snapshot + clear every proxy-related env var so each test starts clean and
-// leaves nothing behind for later files.
-//
-// Reset the memoized resolver with env state so tests cannot inherit stale hits or misses.
-// The dedicated hit/miss pairs below keep this reset observable in both directions.
+// leaves nothing behind for later files. Provider-specific tests use unique
+// provider ids so the module-level resolver cache can never cross-contaminate.
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
-	__resetProxyCache();
 	saved = {};
 	for (const key of proxyEnvKeys()) {
 		saved[key] = Bun.env[key];
@@ -146,30 +142,6 @@ describe("getProxyForProvider", () => {
 
 	it("returns undefined when neither var is set", () => {
 		expect(getProxyForProvider("none-prov")).toBeUndefined();
-	});
-});
-// Dedicated hit/miss pairs keep cache reset observable in both directions.
-describe("resolver cache isolation", () => {
-	it("memoizes a resolved provider proxy within a test", () => {
-		Bun.env.PI_PROXY_CACHE_PROBE_HIT = PROXY;
-		expect(getProxyForProvider("cache-probe-hit")).toBe(PROXY);
-		delete Bun.env.PI_PROXY_CACHE_PROBE_HIT;
-		expect(getProxyForProvider("cache-probe-hit")).toBe(PROXY);
-	});
-
-	it("does not serve the hit memoized by the previous test", () => {
-		expect(getProxyForProvider("cache-probe-hit")).toBeUndefined();
-	});
-
-	it("memoizes an unresolved provider within a test", () => {
-		expect(getProxyForProvider("cache-probe-miss")).toBeUndefined();
-		Bun.env.PI_PROXY_CACHE_PROBE_MISS = PROXY;
-		expect(getProxyForProvider("cache-probe-miss")).toBeUndefined();
-	});
-
-	it("does not serve the miss memoized by the previous test", () => {
-		Bun.env.PI_PROXY_CACHE_PROBE_MISS = PROXY;
-		expect(getProxyForProvider("cache-probe-miss")).toBe(PROXY);
 	});
 });
 

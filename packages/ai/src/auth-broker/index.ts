@@ -5,4 +5,3 @@ export * from "./remote-store";
 export * from "./server";
 export * from "./snapshot-cache";
 export * from "./types";
-export * from "./prometheus-metrics";

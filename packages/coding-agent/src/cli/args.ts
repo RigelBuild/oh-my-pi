@@ -32,7 +32,6 @@ export interface Args {
 	provider?: string;
 	model?: string;
 	config?: string[];
-	reapplyConfig?: boolean;
 	smol?: string;
 	slow?: string;
 	plan?: string;
@@ -265,8 +264,6 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPrewalk = true;
 		} else if (arg === "--plan-yolo") {
 			result.planYolo = true;
-		} else if (arg === "--reapply-config") {
-			result.reapplyConfig = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 		} else if (arg === "--print-thoughts") {

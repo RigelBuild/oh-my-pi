@@ -29,7 +29,6 @@ import { chromiumAvailable } from "./chromium-probe";
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 let sharedHeadless: BrowserHandle | undefined;
 
-
 function makeSession(): ToolSession {
 	return {
 		cwd: process.cwd(),
@@ -99,16 +98,14 @@ async function spawnDisposableExecutable(args: string[] = []): Promise<Disposabl
 }
 
 describe("pickElectronTarget", () => {
-	// Real Chromium launch; keep its hook timeout explicit.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	}, 180_000);
+	});
 
-	// Bound cleanup so a wedged browser reports a named hook timeout.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	}, 30_000);
+	});
 
 	test("uses discovered CDP page targets when browser.pages is empty", async () => {
 		const page = fakePage({ url: "https://www.google.com/", title: "Google" });
@@ -289,7 +286,7 @@ describe("pickElectronTarget", () => {
 		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
 		await Bun.write(target, Bun.file(process.execPath));
 		await fs.chmod(target, 0o755);
-		await Bun.write(wrapper, '#!/usr/bin/env bash\nHERE="$(dirname "$0")"\nexec -a "$0" "$HERE/chrome" "$@"\n');
+		await Bun.write(wrapper, '#!/bin/bash\nHERE="$(dirname "$0")"\nexec -a "$0" "$HERE/chrome" "$@"\n');
 		await fs.chmod(wrapper, 0o755);
 		const child = Bun.spawn(
 			[

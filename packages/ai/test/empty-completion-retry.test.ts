@@ -127,7 +127,7 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
-	it("surfaces an error after exhausting the retry cap", async () => {
+	it("delivers the empty result after exhausting the retry cap", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
 		const stream = withReplaySafeStreamRetry(
@@ -147,9 +147,8 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(attempts).toBe(MAX_EMPTY_COMPLETION_RETRIES + 1);
 		expect(waits).toHaveLength(MAX_EMPTY_COMPLETION_RETRIES);
 		expect(events.filter(e => e.type === "start")).toHaveLength(1);
-		expect(events.at(-1)?.type).toBe("error");
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBeTruthy();
+		expect(events.at(-1)?.type).toBe("done");
+		expect(result.content).toEqual([]);
 	});
 
 	it("does not retry an empty pause_turn completion", async () => {
