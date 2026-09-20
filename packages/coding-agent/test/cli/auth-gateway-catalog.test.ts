@@ -110,6 +110,16 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
 	});
+
+	test("resolves bare and qualified duplicate Gemini IDs by provider", () => {
+		const antigravity = getBundledModels("google-antigravity").find(model => model.id === "gemini-3.8-flash");
+		if (!antigravity) throw new Error("expected bundled Antigravity model");
+		const competing = { ...antigravity, provider: "google-gemini-cli" as const };
+		const index = indexModelsByRequestId([antigravity, competing], new Set(["google-antigravity", "google-gemini-cli"]));
+		expect(index.get("google-antigravity/gemini-3.8-flash")).toBe(antigravity);
+		expect(index.get("google-gemini-cli/gemini-3.8-flash")).toBe(competing);
+		expect(index.get("gemini-3.8-flash")).toBe(antigravity);
+	});
 });
 
 describe("createSerializedRebuilder", () => {

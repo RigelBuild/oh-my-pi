@@ -8,6 +8,7 @@ import * as AIError from "../../error";
 import { raceWithSignal } from "../../utils/abort";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../../utils/google-validation";
 import type { AfterExchangeHook } from "../hooks/types";
+import type { OAuthCredentials } from "./types";
 import { oauthFetch, throwIfLoginCancelled } from "./google-oauth-shared";
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
@@ -299,10 +300,30 @@ async function discoverProject(
 	}
 }
 
+/** Returns true when a refresh reports a different non-empty account identity. */
+export function hasOAuthAccountIdentityConflict(
+	stored: Pick<OAuthCredentials, "accountId"> | undefined,
+	refreshed: Pick<OAuthCredentials, "accountId">,
+): boolean {
+	return Boolean(stored?.accountId && refreshed.accountId && stored.accountId !== refreshed.accountId);
+}
+
 /** Resolves the Antigravity project after login and preserves it across refresh responses. */
 export const googleAntigravityProjectHook: AfterExchangeHook = async (credentials, context) => {
 	if (context.phase === "refresh") {
-		return context.stored?.projectId ? { ...credentials, projectId: context.stored.projectId } : credentials;
+		const stored = context.stored;
+		if (hasOAuthAccountIdentityConflict(stored, credentials)) {
+			throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+				kind: "validation",
+				provider: context.provider,
+			});
+		}
+		return {
+			...credentials,
+			...(stored?.accountId && !credentials.accountId ? { accountId: stored.accountId } : {}),
+			...(stored?.email && !credentials.email ? { email: stored.email } : {}),
+			...(stored?.projectId && !credentials.projectId ? { projectId: stored.projectId } : {}),
+		};
 	}
 	const raw = context.raw;
 	if (
