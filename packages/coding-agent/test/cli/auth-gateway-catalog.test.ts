@@ -111,19 +111,14 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
 	});
 
-	test("keeps Antigravity 3.8 Flash provider-qualified beside duplicate bare IDs", () => {
-		const models = getBundledModels("google-antigravity");
-		const flash = models.find(model => model.id === "gemini-3.8-flash");
-		if (!flash) throw new Error("expected bundled Antigravity 3.8 Flash");
-		expect(flash.provider).toBe("google-antigravity");
-		expect(flash.thinking?.effortRouting).toEqual({
-			minimal: "gemini-3.8-flash-low",
-			low: "gemini-3.8-flash-low",
-			medium: "gemini-3.8-flash-medium",
-			high: "gemini-3.8-flash-high",
-		});
-		const index = indexModelsByRequestId(models, new Set(["google-antigravity"]));
-		expect(index.get("google-antigravity/gemini-3.8-flash")).toBe(flash);
+	test("resolves bare and qualified duplicate Gemini IDs by provider", () => {
+		const antigravity = getBundledModels("google-antigravity").find(model => model.id === "gemini-3.8-flash");
+		if (!antigravity) throw new Error("expected bundled Antigravity model");
+		const competing = { ...antigravity, provider: "google-gemini-cli" as const };
+		const index = indexModelsByRequestId([antigravity, competing], new Set(["google-antigravity", "google-gemini-cli"]));
+		expect(index.get("google-antigravity/gemini-3.8-flash")).toBe(antigravity);
+		expect(index.get("google-gemini-cli/gemini-3.8-flash")).toBe(competing);
+		expect(index.get("gemini-3.8-flash")).toBe(antigravity);
 	});
 });
 

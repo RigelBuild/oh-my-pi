@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { AuthStorage, type AuthStorageOptions } from "../src/auth-storage";
 import {
 	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
 	googleAntigravityProjectHook,
@@ -257,4 +258,58 @@ describe("Antigravity OAuth project discovery", () => {
       ),
     ).rejects.toThrow("account identity conflicts");
   });
+});
+
+describe("Antigravity AuthStorage refresh persistence", () => {
+	async function makeStorage(refreshOAuthCredential: NonNullable<AuthStorageOptions["refreshOAuthCredential"]>): Promise<AuthStorage> {
+		return AuthStorage.create(":memory:", { refreshOAuthCredential });
+	}
+
+	it("persists merged identity through normal refresh", async () => {
+		const storage = await makeStorage(async credential => ({ ...credential, access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 60_000 }));
+		try {
+			await storage.set("google-antigravity", { type: "oauth", access: "old-access", refresh: "old-refresh", expires: 0, accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+			const apiKey = await storage.getApiKey("google-antigravity");
+			expect(apiKey).toContain("fresh-access");
+			expect(storage.get("google-antigravity")).toMatchObject({ access: "fresh-access", refresh: "fresh-refresh", accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("persists merged identity through forced refresh", async () => {
+		const storage = await makeStorage(async credential => ({ ...credential, access: "forced-access", refresh: "forced-refresh", expires: Date.now() + 60_000 }));
+		try {
+			await storage.set("google-antigravity", { type: "oauth", access: "old-access", refresh: "old-refresh", expires: Date.now() + 60_000, accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+			const id = storage.listStoredCredentials("google-antigravity")[0]?.id;
+			if (id === undefined) throw new Error("missing credential id");
+			expect((await storage.forceRefreshCredentialById(id)).credential).toMatchObject({ access: "forced-access", accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("keeps stored state unchanged when normal refresh reports a conflicting account", async () => {
+		const storage = await makeStorage(async credential => ({ ...credential, access: "conflicting-access", accountId: "account-other" }));
+		try {
+			await storage.set("google-antigravity", { type: "oauth", access: "old-access", refresh: "old-refresh", expires: 0, accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+			await storage.getApiKey("google-antigravity");
+			expect(storage.get("google-antigravity")).toMatchObject({ access: "old-access", accountId: "account-123" });
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("keeps stored state unchanged when forced refresh reports a conflicting account", async () => {
+		const storage = await makeStorage(async credential => ({ ...credential, access: "conflicting-access", accountId: "account-other" }));
+		try {
+			await storage.set("google-antigravity", { type: "oauth", access: "old-access", refresh: "old-refresh", expires: Date.now() + 60_000, accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+			const id = storage.listStoredCredentials("google-antigravity")[0]?.id;
+			if (id === undefined) throw new Error("missing credential id");
+			await expect(storage.forceRefreshCredentialById(id)).rejects.toThrow();
+			expect(storage.get("google-antigravity")).toMatchObject({ access: "old-access", accountId: "account-123" });
+		} finally {
+			storage.close();
+		}
+	});
 });
