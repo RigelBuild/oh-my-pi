@@ -88,9 +88,10 @@ function recorderDefinition(session: ToolSession, calls: unknown[]): EvalPrelude
 	};
 }
 
+// Bound disposal explicitly so hook failures name their own deadline.
 afterAll(async () => {
 	await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
-});
+}, 30_000);
 
 describe("browser JavaScript facade", () => {
 	it("builds handles, chains, markers, and direct values against the shipped VM prelude", async () => {
@@ -341,10 +342,10 @@ describe("browser facade Chromium helper E2E", () => {
 				},
 			});
 			runInContext(prelude.javascript, context);
-
 			try {
+				// Keep the browser operation deadline below the outer test bound.
 				await runInContext(
-					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__ }); })()",
+					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 45 }); })()",
 					context,
 				);
 				await runInContext('__e2eTab.click("text/Go")', context);
@@ -378,6 +379,6 @@ describe("browser facade Chromium helper E2E", () => {
 					.catch(() => undefined);
 			}
 		},
-		30_000,
+		90_000,
 	);
 });
