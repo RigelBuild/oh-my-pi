@@ -22,6 +22,7 @@ import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "./registry/oauth";
+import { hasOAuthAccountIdentityConflict } from "./registry/oauth/google-antigravity";
 import type {
 	OAuthAuthInfo,
 	OAuthController,
@@ -2840,7 +2841,12 @@ export class AuthStorage {
 				await leaseRenewal;
 				clearTimeout(refreshTimeout);
 			}
-			if (leaseRenewalError) throw leaseRenewalError;
+			if (hasOAuthAccountIdentityConflict(current, refreshed)) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
+			}
 
 			const merged: T = options.mergeRefreshedCredential
 				? options.mergeRefreshedCredential(current, refreshed)
@@ -5863,12 +5869,7 @@ export class AuthStorage {
 				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
 			}
 			if (!result) return undefined;
-			if (
-				provider === "google-antigravity" &&
-				selection.credential.accountId &&
-				result.newCredentials.accountId &&
-				selection.credential.accountId !== result.newCredentials.accountId
-			) {
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(selection.credential, result.newCredentials)) {
 				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
 					kind: "validation",
 					provider,
@@ -7309,7 +7310,7 @@ export class AuthStorage {
 				}
 				throw error;
 			}
-			if (provider === "google-antigravity" && attempted.accountId && refreshed.accountId && attempted.accountId !== refreshed.accountId) {
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(attempted, refreshed)) {
 				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
 					kind: "validation",
 					provider,
