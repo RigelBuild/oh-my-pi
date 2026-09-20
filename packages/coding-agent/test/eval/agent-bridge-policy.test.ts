@@ -1,3 +1,4 @@
+import { MAIN_AGENT_ID } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -825,6 +826,36 @@ describe("agent() through eval runtimes", () => {
 				output.type === "status" && output.event.op === "agent",
 		);
 		expect(displayAgentEvents.at(-1)?.event).toEqual(completed);
+	});
+
+	it("coalesces progress already available when handle.wait starts", async () => {
+		vi.useFakeTimers();
+		const session = makeSession();
+		const manager = session.asyncJobManager;
+		if (!manager) throw new Error("session has no asyncJobManager");
+		const released = Promise.withResolvers<void>();
+		const reported = Promise.withResolvers<void>();
+		const id = manager.register(
+			"task",
+			"agent",
+			async ({ reportProgress }) => {
+				await reportProgress("running", { progress: [{ index: 0, id: "A", agent: "task", status: "running" }] });
+				reported.resolve();
+				await released.promise;
+				await reportProgress("done", { progress: [{ index: 0, id: "A", agent: "task", status: "completed" }] });
+				return "done";
+			},
+			{ id: "A", agentId: "A", ownerId: MAIN_AGENT_ID },
+		);
+		await reported.promise;
+		const events: Array<{ op: string; [key: string]: unknown }> = [];
+		const waiting = runEvalWait(
+			{ items: [{ kind: "agent", id }] },
+			{ session, emitStatus: event => events.push(event) },
+		);
+		released.resolve();
+		await waiting;
+		expect(events.filter(event => event.op === "agent")).toHaveLength(1);
 	});
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
