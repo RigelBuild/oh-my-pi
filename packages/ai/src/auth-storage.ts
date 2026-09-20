@@ -2842,7 +2842,7 @@ export class AuthStorage {
 				clearTimeout(refreshTimeout);
 			}
 			if (leaseRenewalError) throw leaseRenewalError;
-			if (hasOAuthAccountIdentityConflict(current, refreshed)) {
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(current, refreshed)) {
 				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
 					kind: "validation",
 					provider,
