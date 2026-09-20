@@ -1,5 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { bumpCanaryVersion, bumpVersion, validateExplicitVersion } from "./release";
+import {
+	applyCargoWorkspaceVersion,
+	applyNativesSentinel,
+	applyPackageVersion,
+	bumpCanaryVersion,
+	bumpVersion,
+	isTransientGhError,
+	resolveReleaseVersion,
+	runWithTransientRetry,
+	validateExplicitVersion,
+} from "./release";
 
 describe("validateExplicitVersion", () => {
 	test("rejects malformed versions", () => {
@@ -63,5 +73,34 @@ describe("release version bumps", () => {
 
 	test("rejects explicit canary versions", () => {
 		expect(validateExplicitVersion("1.2.3-canary.1")).toBe(null);
+	});
+});
+
+describe("release reliability helpers", () => {
+	test("resolves an explicit first release without a tag", () => {
+		expect(resolveReleaseVersion("18.0.3", "")).toEqual({
+			version: "18.0.3",
+			note: expect.stringContaining("First release"),
+		});
+	});
+	test("rewrites release targets in process", () => {
+		expect(applyPackageVersion('{"version": "1.0.0"}', "2.0.0")).toBe('{"version": "2.0.0"}');
+		expect(applyCargoWorkspaceVersion('version = "1.0.0"\n', "2.0.0")).toBe('version = "2.0.0"\n');
+		expect(applyNativesSentinel("__piNativesV1 __piNativesV1", "__piNativesV2")).toBe("__piNativesV2 __piNativesV2");
+	});
+	test("retries transient API failures and stops on non-transient", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				async () => {
+					attempts++;
+					if (attempts < 3) throw new Error("HTTP 502");
+					return "ok";
+				},
+				{ sleep: async () => {} },
+			),
+		).resolves.toBe("ok");
+		expect(attempts).toBe(3);
+		expect(isTransientGhError("HTTP 404 Not Found")).toBe(false);
 	});
 });
