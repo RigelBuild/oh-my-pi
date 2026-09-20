@@ -912,7 +912,7 @@ export async function changelogPaths(repoRoot: string): Promise<string[]> {
 }
 
 async function changelogDiff(repoRoot: string, since: string, paths: readonly string[]): Promise<string> {
-	if (paths.length === 0) return "";
+	if (paths.length === 0 || since === "") return "";
 	return git(["diff", "--unified=0", "--no-color", "--no-ext-diff", since, "--", ...paths], repoRoot);
 }
 
