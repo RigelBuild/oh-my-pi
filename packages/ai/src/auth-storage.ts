@@ -2841,6 +2841,7 @@ export class AuthStorage {
 				await leaseRenewal;
 				clearTimeout(refreshTimeout);
 			}
+			if (leaseRenewalError) throw leaseRenewalError;
 			if (hasOAuthAccountIdentityConflict(current, refreshed)) {
 				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
 					kind: "validation",
