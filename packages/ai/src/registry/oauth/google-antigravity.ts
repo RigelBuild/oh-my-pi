@@ -302,7 +302,19 @@ async function discoverProject(
 /** Resolves the Antigravity project after login and preserves it across refresh responses. */
 export const googleAntigravityProjectHook: AfterExchangeHook = async (credentials, context) => {
 	if (context.phase === "refresh") {
-		return context.stored?.projectId ? { ...credentials, projectId: context.stored.projectId } : credentials;
+		const stored = context.stored;
+		if (stored?.accountId && credentials.accountId && stored.accountId !== credentials.accountId) {
+			throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+				kind: "validation",
+				provider: context.provider,
+			});
+		}
+		return {
+			...credentials,
+			...(stored?.accountId && !credentials.accountId ? { accountId: stored.accountId } : {}),
+			...(stored?.email && !credentials.email ? { email: stored.email } : {}),
+			...(stored?.projectId && !credentials.projectId ? { projectId: stored.projectId } : {}),
+		};
 	}
 	const raw = context.raw;
 	if (
