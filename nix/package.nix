@@ -5,6 +5,7 @@
   bun2nix,
   cmake,
   darwin,
+  lib,
   libiconv,
   libpulseaudio,
   makeBinaryWrapper,

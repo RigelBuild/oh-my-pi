@@ -6,6 +6,17 @@
 
 - Added `findDuplicateJsonKey()`, which reports the first object key repeated within one object of a JSON document. `JSON.parse` keeps only the last value for a repeated key and a `reviver` never sees the discarded one, so a loader that must reject a duplicate rather than silently adopt the last spelling has to scan the raw text; this shares that scan through the existing lexer. A key counts as a member only once its `:` arrives, and a repeat is confirmed with one `JSON.parse` of the document before it is reported, so the scan reports no duplicate for input a real parse would refuse ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 
+## [18.2.7] - 2026-09-21
+
+### Changed
+
+- Mermaid diagrams are now rendered with the native renderer, with output remaining unchanged.
+- PI_TIMING span lines now include their start offset to make unspanned gaps easier to identify.
+
+### Fixed
+
+- Fixed a startup crash when PI_TIMING profiled modules loaded via require() or TypeScript declaration assets.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
@@ -593,7 +604,7 @@
 
 ### Changed
 
-- Mermaid diagrams are now rendered to ASCII by a first-party vendored renderer (`src/vendor/mermaid-ascii`, derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
+- Mermaid diagrams are now rendered to ASCII by a first-party renderer (initially derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
 
 ### Removed
 

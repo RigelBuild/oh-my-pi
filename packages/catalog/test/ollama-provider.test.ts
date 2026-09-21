@@ -168,6 +168,7 @@ describe("ollama tool forcing", () => {
 		for await (const event of streamOllama(model, context, {
 			apiKey: "test-key",
 			toolChoice: { type: "function", name: "write" },
+			acceptEmptyResponse: true,
 			fetch: fetchMock,
 		})) {
 			eventTypes.push(event.type);
