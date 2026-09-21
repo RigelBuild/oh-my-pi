@@ -1854,7 +1854,7 @@ describe("Codex-style Abort Handling", () => {
 });
 
 describe("Responses composite ids replayed into a non-Anthropic target", () => {
-	// The injected sanitizer exercises model-agnostic cross-provider normalization.
+	// The sanitizer is deliberately injected for the model-agnostic branch; it does not represent openai-completions' production split-on-pipe normalizer.
 	// Differing composite halves verify pairing without a synthetic stub.
 	const openaiTarget: Model<"openai-completions"> = buildModel({
 		api: "openai-completions",
