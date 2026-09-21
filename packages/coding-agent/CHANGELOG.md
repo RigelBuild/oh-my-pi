@@ -59,6 +59,10 @@
 - Capped concurrent eval judge and completion requests to prevent large fan-outs from overwhelming judge and fallback models.
 - Temporarily avoids retrying judgment requests with credentials that recently failed due to authorization or billing errors.
 - Fixed image and speech fallback models disappearing after discovery and eliminated incorrect incompatibility warnings for providers without credentials.
+- Fixed resume and continue flows to hide empty sessions.
+- Fixed edit operations that could loop after empty insertions or fail on Unicode no-op and overlapping duplicate matches.
+- Fixed live subagent messages being delayed by agent discovery and roster discovery looping on dot-named transcripts.
+- Fixed llama.cpp discovery and routing for PrismML Bonsai 2 27B GGUF models, including support for cached models and the Qwen 3.8 thinking-level ladder.
 
 ## [18.2.6] - 2026-09-18
 

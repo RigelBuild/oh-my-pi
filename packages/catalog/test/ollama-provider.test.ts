@@ -168,6 +168,7 @@ describe("ollama tool forcing", () => {
 		for await (const event of streamOllama(model, context, {
 			apiKey: "test-key",
 			toolChoice: { type: "function", name: "write" },
+			// WHY: The empty mock must not exercise retry policy; this test covers request shaping.
 			acceptEmptyResponse: true,
 			fetch: fetchMock,
 		})) {
@@ -175,6 +176,7 @@ describe("ollama tool forcing", () => {
 		}
 
 		expect(eventTypes).toContain("done");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(requestBody?.tool_choice).toBe("required");
 		expect(requestBody?.tools?.map(tool => tool.function.name)).toEqual(["write"]);
 	});
