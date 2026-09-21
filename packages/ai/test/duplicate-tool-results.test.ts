@@ -197,13 +197,9 @@ describe("Duplicate Tool Results Regression", () => {
 	});
 
 	it("routes a reused tool-call id to its own result, never an earlier orphaned one", () => {
-		// Compaction folded the assistant turn that originally issued `sharedId`
-		// into a summary string, but its tool result survived as an orphan. A
-		// later turn reuses the same id, and a developer note sits between that
-		// call and its real result — forcing a pending-call flush before the real
-		// result is reached. The flush must pull THIS turn's result, not the
-		// earlier orphan's output (regression: a tool call returning an earlier,
-		// unrelated command's output).
+		// Compaction orphaned the first result; a later turn reuses the id.
+		// A developer note forces a pending-call flush before the real result.
+		// The flush must route this turn's result, not the stale orphan output.
 		const sharedId = "toolu_shared_reuse_1";
 		const messages: Message[] = [
 			{ role: "user", content: "first request", timestamp: 1 },
@@ -1850,5 +1846,89 @@ describe("Codex-style Abort Handling", () => {
 		expect(toolResults.length).toBe(1);
 		expect(toolResults[0].content).toEqual([{ type: "text", text: "Partial file content..." }]);
 		expect(toolResults[0].isError).toBe(false);
+	});
+});
+
+describe("Responses composite ids replayed into a non-Anthropic target", () => {
+	// Responses-origin composite history is replayed into OpenAI Chat Completions, engaging its split-on-pipe normalizer.
+	const openaiTarget: Model<"openai-completions"> = buildModel({
+		api: "openai-completions",
+		provider: "openai",
+		id: "gpt-4o-mini",
+		name: "GPT-4o Mini",
+		baseUrl: "https://api.openai.com/v1",
+		input: ["text"],
+		cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+		maxTokens: 8192,
+		contextWindow: 128000,
+		reasoning: false,
+	});
+
+	const responsesAssistant = (ids: string[], timestamp: number): AssistantMessage => ({
+		role: "assistant",
+		content: ids.map(id => ({ type: "toolCall", id, name: "tool_search", arguments: {} })),
+		api: "openai-responses",
+		provider: "openai",
+		model: "gpt-5-codex",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp,
+	});
+
+	const result = (id: string, text: string, timestamp: number): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: id,
+		toolName: "tool_search",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp,
+	});
+
+	const wireMessages = (messages: Message[]): ChatCompletionMessageParam[] =>
+		convertMessages(openaiTarget, { messages }, openaiTarget.compat);
+
+	const assistantIds = (messages: ChatCompletionMessageParam[]): string[] =>
+		messages
+			.filter((m): m is ChatCompletionAssistantMessageParam => m.role === "assistant" && Array.isArray(m.tool_calls))
+			.flatMap(m => m.tool_calls?.map(toolCall => toolCall.id) ?? []);
+
+	const toolResults = (messages: ChatCompletionMessageParam[]): ChatCompletionToolMessageParam[] =>
+		messages.filter((m): m is ChatCompletionToolMessageParam => m.role === "tool");
+
+	it("pairs a composite result through the production OpenAI normalizer", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "do", timestamp: 1 },
+			responsesAssistant(["call_X|fc_A"], 2),
+			result("call_X|fc_B", "the real result", 3),
+		];
+
+		const transformed = wireMessages(messages);
+		expect(assistantIds(transformed)).toEqual(["call_X"]);
+		expect(toolResults(transformed).map(message => message.tool_call_id)).toEqual(["call_X"]);
+		expect(toolResults(transformed).map(message => message.content)).toEqual(["the real result"]);
+	});
+
+	it("deduplicates reused Responses call components and rewrites each result", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "search twice", timestamp: 1 },
+			responsesAssistant(["call_REUSE|fc_A"], 2),
+			result("call_REUSE|fc_RESULT_A", "result one", 3),
+			responsesAssistant(["call_REUSE|fc_B"], 4),
+			result("call_REUSE|fc_RESULT_B", "result two", 5),
+		];
+
+		const transformed = wireMessages(messages);
+		expect(assistantIds(transformed)).toEqual(["call_REUSE", "call_REUSE_dup1"]);
+		const results = toolResults(transformed);
+		expect(results).toHaveLength(2);
+		expect(results.map(message => message.tool_call_id)).toEqual(["call_REUSE", "call_REUSE_dup1"]);
+		expect(results.map(message => message.content)).toEqual(["result one", "result two"]);
 	});
 });
