@@ -1925,4 +1925,31 @@ describe("Responses composite ids replayed into a non-Anthropic target", () => {
 		expect(results[0]!.toolCallId).toBe("call_X_fc_A");
 		expect(results[0]!.content).toEqual([{ type: "text", text: "the real result" }]);
 	});
+
+	it("pairs reused Responses call components to each turn's emitted ID", () => {
+		const sanitize = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+		const messages: Message[] = [
+			{ role: "user", content: "search twice", timestamp: 1 },
+			responsesAssistant(["call_REUSE|fc_A"], 2),
+			result("call_REUSE|fc_RESULT_A", "result one", 3),
+			responsesAssistant(["call_REUSE|fc_B"], 4),
+			result("call_REUSE|fc_RESULT_B", "result two", 5),
+		];
+
+		const transformed = transformMessages(messages, openaiTarget, id => sanitize(id));
+
+		expect(hasSyntheticStub(transformed)).toBe(false);
+		const callIds = transformed
+			.filter((m): m is AssistantMessage => m.role === "assistant")
+			.flatMap(m => m.content)
+			.filter((b): b is ToolCall => b.type === "toolCall")
+			.map(b => b.id);
+		expect(callIds).toEqual(["call_REUSE_fc_A", "call_REUSE_fc_B"]);
+		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(results.map(resultMessage => resultMessage.toolCallId)).toEqual(["call_REUSE_fc_A", "call_REUSE_fc_B"]);
+		expect(results.map(resultMessage => resultMessage.content)).toEqual([
+			[{ type: "text", text: "result one" }],
+			[{ type: "text", text: "result two" }],
+		]);
+	});
 });
