@@ -1850,6 +1850,7 @@ describe("Codex-style Abort Handling", () => {
 });
 
 describe("Responses composite ids replayed into a non-Anthropic target", () => {
+	// Responses-origin composite history is replayed into OpenAI Chat Completions, engaging its split-on-pipe normalizer.
 	const openaiTarget: Model<"openai-completions"> = buildModel({
 		api: "openai-completions",
 		provider: "openai",
