@@ -197,13 +197,9 @@ describe("Duplicate Tool Results Regression", () => {
 	});
 
 	it("routes a reused tool-call id to its own result, never an earlier orphaned one", () => {
-		// Compaction folded the assistant turn that originally issued `sharedId`
-		// into a summary string, but its tool result survived as an orphan. A
-		// later turn reuses the same id, and a developer note sits between that
-		// call and its real result — forcing a pending-call flush before the real
-		// result is reached. The flush must pull THIS turn's result, not the
-		// earlier orphan's output (regression: a tool call returning an earlier,
-		// unrelated command's output).
+		// Compaction orphaned the first result; a later turn reuses the id.
+		// A developer note forces a pending-call flush before the real result.
+		// The flush must route this turn's result, not the stale orphan output.
 		const sharedId = "toolu_shared_reuse_1";
 		const messages: Message[] = [
 			{ role: "user", content: "first request", timestamp: 1 },
@@ -1854,8 +1850,6 @@ describe("Codex-style Abort Handling", () => {
 });
 
 describe("Responses composite ids replayed into a non-Anthropic target", () => {
-	// The sanitizer is deliberately injected for the model-agnostic branch; it does not represent openai-completions' production split-on-pipe normalizer.
-	// Differing composite halves verify pairing without a synthetic stub.
 	const openaiTarget: Model<"openai-completions"> = buildModel({
 		api: "openai-completions",
 		provider: "openai",
@@ -1896,38 +1890,31 @@ describe("Responses composite ids replayed into a non-Anthropic target", () => {
 		timestamp,
 	});
 
-	const hasSyntheticStub = (messages: Message[]): boolean =>
-		messages.some(
-			m =>
-				m.role === "toolResult" &&
-				(m as ToolResultMessage).content.some(part => part.type === "text" && part.text === "No result provided"),
-		);
+	const wireMessages = (messages: Message[]): ChatCompletionMessageParam[] =>
+		convertMessages(openaiTarget, { messages }, openaiTarget.compat);
 
-	it("pairs a composite result through a sanitizing normalizer when the item half differs", () => {
-		const sanitize = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+	const assistantIds = (messages: ChatCompletionMessageParam[]): string[] =>
+		messages
+			.filter((m): m is ChatCompletionAssistantMessageParam => m.role === "assistant" && Array.isArray(m.tool_calls))
+			.flatMap(m => m.tool_calls?.map(toolCall => toolCall.id) ?? []);
+
+	const toolResults = (messages: ChatCompletionMessageParam[]): ChatCompletionToolMessageParam[] =>
+		messages.filter((m): m is ChatCompletionToolMessageParam => m.role === "tool");
+
+	it("pairs a composite result through the production OpenAI normalizer", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "do", timestamp: 1 },
 			responsesAssistant(["call_X|fc_A"], 2),
 			result("call_X|fc_B", "the real result", 3),
 		];
 
-		const transformed = transformMessages(messages, openaiTarget, id => sanitize(id));
-
-		expect(hasSyntheticStub(transformed)).toBe(false);
-		const callIds = transformed
-			.filter((m): m is AssistantMessage => m.role === "assistant")
-			.flatMap(m => m.content)
-			.filter((b): b is ToolCall => b.type === "toolCall")
-			.map(b => b.id);
-		expect(callIds).toEqual(["call_X_fc_A"]);
-		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
-		expect(results).toHaveLength(1);
-		expect(results[0]!.toolCallId).toBe("call_X_fc_A");
-		expect(results[0]!.content).toEqual([{ type: "text", text: "the real result" }]);
+		const transformed = wireMessages(messages);
+		expect(assistantIds(transformed)).toEqual(["call_X"]);
+		expect(toolResults(transformed).map(message => message.tool_call_id)).toEqual(["call_X"]);
+		expect(toolResults(transformed).map(message => message.content)).toEqual(["the real result"]);
 	});
 
-	it("pairs reused Responses call components to each turn's emitted ID", () => {
-		const sanitize = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+	it("deduplicates reused Responses call components and rewrites each result", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "search twice", timestamp: 1 },
 			responsesAssistant(["call_REUSE|fc_A"], 2),
@@ -1936,20 +1923,11 @@ describe("Responses composite ids replayed into a non-Anthropic target", () => {
 			result("call_REUSE|fc_RESULT_B", "result two", 5),
 		];
 
-		const transformed = transformMessages(messages, openaiTarget, id => sanitize(id));
-
-		expect(hasSyntheticStub(transformed)).toBe(false);
-		const callIds = transformed
-			.filter((m): m is AssistantMessage => m.role === "assistant")
-			.flatMap(m => m.content)
-			.filter((b): b is ToolCall => b.type === "toolCall")
-			.map(b => b.id);
-		expect(callIds).toEqual(["call_REUSE_fc_A", "call_REUSE_fc_B"]);
-		const results = transformed.filter((m): m is ToolResultMessage => m.role === "toolResult");
-		expect(results.map(resultMessage => resultMessage.toolCallId)).toEqual(["call_REUSE_fc_A", "call_REUSE_fc_B"]);
-		expect(results.map(resultMessage => resultMessage.content)).toEqual([
-			[{ type: "text", text: "result one" }],
-			[{ type: "text", text: "result two" }],
-		]);
+		const transformed = wireMessages(messages);
+		expect(assistantIds(transformed)).toEqual(["call_REUSE", "call_REUSE_dup1"]);
+		const results = toolResults(transformed);
+		expect(results).toHaveLength(2);
+		expect(results.map(message => message.tool_call_id)).toEqual(["call_REUSE", "call_REUSE_dup1"]);
+		expect(results.map(message => message.content)).toEqual(["result one", "result two"]);
 	});
 });
