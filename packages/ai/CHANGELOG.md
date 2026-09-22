@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Added dynamic Claude Code version adoption to support API-requested upgrades
-- Added automatic retry mechanism on version-related request failures
+- Updated the bundled Claude Code fingerprint to `2.1.280`.
+- Anthropic OAuth streams adopt a server-required Claude Code version and retry at most once when no replay-unsafe content was streamed.
 
+### Escape hatch
+
+- Set `PI_AI_CLAUDE_CODE_VERSION` to pin the reported version. An explicit pin disables automatic version adoption.
 ## [18.2.8] - 2026-09-21
 
 ### Added

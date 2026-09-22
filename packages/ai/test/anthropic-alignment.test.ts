@@ -187,8 +187,8 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(headers.Accept).toBe("application/json");
-		// The wire header follows the effective version (env pin / adopted / default);
-		// the pinned default is asserted separately so a wrong bump is still caught.
+		expect(headers["User-Agent"]).toBe("claude-cli/2.1.280 (external, cli)");
+		// The wire header follows the pinned default unless an env pin or adoption is active.
 		expect(headers["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
@@ -700,7 +700,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			type: "error",
 			error: {
 				type: "invalid_request_error",
-				message: "Claude Code 2.1.257 does not support this model; version 99.0.0 or newer is required.",
+				message: "Claude Code 2.1.257 does not support this model; version 3.0.0 or newer is required.",
 				details: { error_code: "claude_code_version_too_old" },
 			},
 		});
@@ -721,9 +721,9 @@ describe("Anthropic request fingerprint alignment", () => {
 		await streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result();
 
 		expect(requests).toHaveLength(2);
-		expect(requests[0].userAgent).not.toBe("claude-cli/99.0.0 (external, cli)");
-		expect(requests[1].userAgent).toBe("claude-cli/99.0.0 (external, cli)");
-		expect(requests[1].body).toContain("cc_version=99.0.0.");
+		expect(requests[0].userAgent).not.toBe("claude-cli/3.0.0 (external, cli)");
+		expect(requests[1].userAgent).toBe("claude-cli/3.0.0 (external, cli)");
+		expect(requests[1].body).toContain("cc_version=3.0.0.");
 
 		// Same rejection at the already-adopted version is terminal, not a retry loop.
 		requests.length = 0;
@@ -737,6 +737,47 @@ describe("Anthropic request fingerprint alignment", () => {
 		}).result();
 		expect(requests).toHaveLength(1);
 		expect(result.stopReason).toBe("error");
+	});
+
+	it("rejects escalating server versions and honors an explicit version pin", async () => {
+		const escalating = JSON.stringify({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "version 4.0.0 or newer is required.",
+				details: { error_code: "claude_code_version_too_old" },
+			},
+		});
+		const requests: string[] = [];
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requests.push(new Headers(init?.headers).get("User-Agent") ?? "");
+			return new Response(escalating, { status: 400, headers: { "Content-Type": "application/json" } });
+		}) as typeof fetch;
+		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+		const result = await streamAnthropic(ANTHROPIC_MODEL, context, {
+			apiKey: "sk-ant-oat-test",
+			fetch: fetchMock,
+		}).result();
+		expect(requests).toHaveLength(1);
+		expect(result.stopReason).toBe("error");
+
+		await withEnv({ PI_AI_CLAUDE_CODE_VERSION: "1.2.3" }, async () => {
+			const pinnedTooOld = JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "version 3.1.0 or newer is required.",
+					details: { error_code: "claude_code_version_too_old" },
+				},
+			});
+			const pinnedRequests: string[] = [];
+			const pinnedFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+				pinnedRequests.push(new Headers(init?.headers).get("User-Agent") ?? "");
+				return new Response(pinnedTooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+			}) as typeof fetch;
+			await streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: pinnedFetch }).result();
+			expect(pinnedRequests).toEqual(["claude-cli/1.2.3 (external, cli)"]);
+		});
 	});
 
 	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {

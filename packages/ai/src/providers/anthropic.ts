@@ -2408,6 +2408,7 @@ const streamAnthropicOnce = (
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
 			// Malformed envelopes/JSON: only before replay-unsafe text/tool events are visible on this stream.
 			let providerRetryAttempt = 0;
+			let versionAdoptionRetryAttempted = false;
 			const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(
 				"Anthropic stream timed out while waiting for the first event",
 			);
@@ -3068,9 +3069,12 @@ const streamAnthropicOnce = (
 					if (
 						isOAuthToken &&
 						clientArgs &&
+						!versionAdoptionRetryAttempted &&
 						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
 						adoptRequiredClaudeCodeVersion(streamFailure)
 					) {
+						versionAdoptionRetryAttempted = true;
 						logger.warn("anthropic: Claude Code version rejected as too old, retrying with required version", {
 							model: model.id,
 							version: getClaudeCodeVersion(),

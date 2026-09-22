@@ -62,6 +62,10 @@ export function adoptRequiredClaudeCodeVersion(error: unknown): boolean {
 	if (!message.includes(VERSION_TOO_OLD_CODE)) return false;
 	const required = REQUIRED_VERSION_PATTERN.exec(message)?.[1];
 	if (!required || compareSemver(required, getClaudeCodeVersion()) <= 0) return false;
+	const currentMajor = Number(SEMVER_PATTERN.exec(DEFAULT_CLAUDE_CODE_VERSION)?.[1]);
+	const requiredMajor = Number(SEMVER_PATTERN.exec(required)?.[1]);
+	if (!Number.isFinite(currentMajor) || !Number.isFinite(requiredMajor) || requiredMajor > currentMajor + 1)
+		return false;
 	adoptedClaudeCodeVersion = required;
 	return true;
 }

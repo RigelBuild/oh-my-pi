@@ -80,6 +80,8 @@ async function run() {
 	let anyDrift = false;
 	let anyChecked = false;
 
+	// Each source file has exactly one check; keep this invariant so --update cannot
+	// silently rewrite multiple unrelated version constants in one file.
 	for (const check of checks) {
 		const file = path.join(REPO_ROOT, check.file);
 		const source = await Bun.file(file).text();

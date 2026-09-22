@@ -10639,7 +10639,7 @@
 				]
 			}
 		},
-		"amazon-bedrock": { "id": "amazon-bedrock", "defaultModel": "us.anthropic.claude-opus-5-5" },
+		"amazon-bedrock": { "id": "amazon-bedrock", "defaultModel": "us.anthropic.claude-opus-4-8" },
 		"anthropic": {
 			"id": "anthropic",
 			"defaultModel": "claude-opus-5-5",
@@ -10832,7 +10832,7 @@
 		},
 		"cloudflare-ai-gateway": {
 			"id": "cloudflare-ai-gateway",
-			"defaultModel": "anthropic/claude-opus-5-5",
+			"defaultModel": "anthropic/claude-opus-4-8",
 			"envVars": ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
 			"discovery": { "label": "Cloudflare AI Gateway" },
 			"seed": {
@@ -11102,7 +11102,7 @@
 		},
 		"kilo": {
 			"id": "kilo",
-			"defaultModel": "anthropic/claude-opus-5.5",
+			"defaultModel": "anthropic/claude-opus-4.8",
 			"envVars": ["KILO_API_KEY"],
 			"discovery": { "label": "Kilo Gateway", "allowUnauthenticated": true }
 		},
@@ -11670,7 +11670,7 @@
 		},
 		"opencode-zen": {
 			"id": "opencode-zen",
-			"defaultModel": "claude-opus-5-5",
+			"defaultModel": "claude-opus-4-8",
 			"envVars": ["OPENCODE_API_KEY"],
 			"dynamicModelsAuthoritative": true
 		},
@@ -11986,7 +11986,7 @@
 		},
 		"vercel-ai-gateway": {
 			"id": "vercel-ai-gateway",
-			"defaultModel": "anthropic/claude-opus-5.5",
+			"defaultModel": "anthropic/claude-opus-4.8",
 			"envVars": ["AI_GATEWAY_API_KEY"],
 			"discovery": {
 				"label": "Vercel AI Gateway",
@@ -12594,7 +12594,7 @@
 		},
 		"zenmux": {
 			"id": "zenmux",
-			"defaultModel": "anthropic/claude-opus-5.5",
+			"defaultModel": "anthropic/claude-opus-4.8",
 			"envVars": ["ZENMUX_API_KEY"],
 			"allowUnauthenticated": true,
 			"discovery": { "label": "ZenMux", "allowUnauthenticated": true }
