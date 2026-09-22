@@ -10,6 +10,7 @@
 
 - Updated the Anthropic and LiteLLM default models to Claude Opus 5.5.
 - Updated the CommandCode default model to Claude Sonnet 5.
+- Updated the Cursor default model to Claude Opus 5 (high).
 
 ## [18.2.8] - 2026-09-21
 
