@@ -7,6 +7,28 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
+	family "opus" {
+		// Upper bound excludes the dotless-id misparse band: Venice spells Opus
+		// 4.5 `claude-opus-45`, which revision extraction reads as `45.0.0` and
+		// an open-ended `>=5.5` would wrongly capture (same reason the adaptive
+		// rules below stop at `<45.1`).
+		revision ">=5.5 <45" {
+			// Opus 5.5 joined the Fable 5.1 generation in binding signed thinking
+			// to the exact preceding conversation.
+			thinking-prefix-binding #true
+		}
+	}
+	// Opus 5.5 dropped forced tool choice (`tool_choice` `any`/`tool`) on every
+	// Anthropic-messages host, not just the first-party endpoint: the rejection
+	// is a model-lineage trait carried by the request adapter, so it is scoped
+	// by `on-api` rather than an enumerated provider list.
+	on-api "anthropic-messages" {
+		family "opus" {
+			revision ">=5.5 <45" {
+				supports-forced-tool-choice #false
+			}
+		}
+	}
 	// Server-side compaction (compact-2026-01-12) is a lineage capability: the
 	// documented model list is the adaptive-thinking generation onward (Opus
 	// 4.6+, Sonnet 4.6+, Fable/Mythos 5+). Whether a host delivers the beta is
@@ -65,6 +87,11 @@ class "anthropic" {
 			}
 			revision ">=5" {
 				supports-per-message-effort #true
+			}
+			// Opus 5.5 carries Fable 5.1's thinking binding controls on the hosts
+			// that expose them, so prefix-bound thinking stays steerable.
+			revision ">=5.5" {
+				supports-thinking-binding-controls #true
 			}
 		}
 	}

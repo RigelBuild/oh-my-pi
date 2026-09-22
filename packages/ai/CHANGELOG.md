@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added dynamic Claude Code version adoption to support API-requested upgrades
+- Added automatic retry mechanism on version-related request failures
+
 ## [18.2.8] - 2026-09-21
 
 ### Added

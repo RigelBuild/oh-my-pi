@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Claude Opus 5.5 to the bundled Anthropic catalog, with its published pricing, 1M/128K limits, and the compat corrections its lineage requires: prefix-bound thinking, host-scoped thinking binding controls, and no forced tool choice on any Anthropic-messages host.
+
+### Changed
+
+- Updated default models for anthropic, amazon-bedrock, cloudflare-ai-gateway, kilo, litellm, opencode-zen, vercel-ai-gateway, and zenmux to claude-opus-5-5
+- Updated default model for commandcode to claude-sonnet-5
+
 ## [18.2.8] - 2026-09-21
 
 ### Added

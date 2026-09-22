@@ -2249,33 +2249,54 @@
 			{
 				"source": "classes/anthropic.kdl:15",
 				"class": "anthropic",
+				"family": "opus",
+				"revision": [
+					{ "op": ">=", "revision": "5.5.0" },
+					{ "op": "<", "revision": "45.0.0" }
+				],
+				"thinking": { "prefixBinding": true }
+			},
+			{
+				"source": "classes/anthropic.kdl:27",
+				"class": "anthropic",
+				"apis": ["anthropic-messages"],
+				"family": "opus",
+				"revision": [
+					{ "op": ">=", "revision": "5.5.0" },
+					{ "op": "<", "revision": "45.0.0" }
+				],
+				"wire": { "supportsForcedToolChoice": false }
+			},
+			{
+				"source": "classes/anthropic.kdl:37",
+				"class": "anthropic",
 				"family": "fable",
 				"revision": [{ "op": ">=", "revision": "5.0.0" }],
 				"wire": { "supportsServerCompaction": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:20",
+				"source": "classes/anthropic.kdl:42",
 				"class": "anthropic",
 				"family": "mythos",
 				"revision": [{ "op": ">=", "revision": "5.0.0" }],
 				"wire": { "supportsServerCompaction": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:25",
+				"source": "classes/anthropic.kdl:47",
 				"class": "anthropic",
 				"family": "opus",
 				"revision": [{ "op": ">=", "revision": "4.6.0" }],
 				"wire": { "supportsServerCompaction": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:30",
+				"source": "classes/anthropic.kdl:52",
 				"class": "anthropic",
 				"family": "sonnet",
 				"revision": [{ "op": ">=", "revision": "4.6.0" }],
 				"wire": { "supportsServerCompaction": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:36",
+				"source": "classes/anthropic.kdl:58",
 				"class": "anthropic",
 				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
 				"family": "fable",
@@ -2287,7 +2308,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:41",
+				"source": "classes/anthropic.kdl:63",
 				"class": "anthropic",
 				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
 				"family": "fable",
@@ -2295,7 +2316,7 @@
 				"wire": { "supportsPerMessageEffort": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:46",
+				"source": "classes/anthropic.kdl:68",
 				"class": "anthropic",
 				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
 				"family": "mythos",
@@ -2307,7 +2328,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:51",
+				"source": "classes/anthropic.kdl:73",
 				"class": "anthropic",
 				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
 				"family": "mythos",
@@ -2315,7 +2336,7 @@
 				"wire": { "supportsPerMessageEffort": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:56",
+				"source": "classes/anthropic.kdl:78",
 				"class": "anthropic",
 				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
 				"family": "fable",
@@ -2323,7 +2344,7 @@
 				"wire": { "supportsThinkingBindingControls": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:61",
+				"source": "classes/anthropic.kdl:83",
 				"class": "anthropic",
 				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
 				"family": "opus",
@@ -2335,7 +2356,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:66",
+				"source": "classes/anthropic.kdl:88",
 				"class": "anthropic",
 				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
 				"family": "opus",
@@ -2343,13 +2364,21 @@
 				"wire": { "supportsPerMessageEffort": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:71",
+				"source": "classes/anthropic.kdl:93",
+				"class": "anthropic",
+				"providers": ["anthropic", "cloudflare-ai-gateway", "google-vertex"],
+				"family": "opus",
+				"revision": [{ "op": ">=", "revision": "5.5.0" }],
+				"wire": { "supportsThinkingBindingControls": true }
+			},
+			{
+				"source": "classes/anthropic.kdl:98",
 				"class": "anthropic",
 				"providers": ["aimlapi", "gitlab-duo", "kilo", "nanogpt", "venice"],
 				"thinking": { "efforts": ["minimal", "low", "medium", "high", "xhigh"] }
 			},
 			{
-				"source": "classes/anthropic.kdl:77",
+				"source": "classes/anthropic.kdl:104",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -2371,7 +2400,7 @@
 				"thinking": { "mode": "budget" }
 			},
 			{
-				"source": "classes/anthropic.kdl:84",
+				"source": "classes/anthropic.kdl:111",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -2387,7 +2416,7 @@
 				"thinking": { "mode": "budget" }
 			},
 			{
-				"source": "classes/anthropic.kdl:91",
+				"source": "classes/anthropic.kdl:118",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -2408,7 +2437,7 @@
 				"thinking": { "mode": "anthropic-budget-effort" }
 			},
 			{
-				"source": "classes/anthropic.kdl:99",
+				"source": "classes/anthropic.kdl:126",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -2429,7 +2458,7 @@
 				"thinking": { "efforts": ["low", "medium", "high", "max"] }
 			},
 			{
-				"source": "classes/anthropic.kdl:106",
+				"source": "classes/anthropic.kdl:133",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -2448,7 +2477,7 @@
 				"thinking": { "mode": "anthropic-adaptive" }
 			},
 			{
-				"source": "classes/anthropic.kdl:113",
+				"source": "classes/anthropic.kdl:140",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -2466,7 +2495,7 @@
 				"thinking": { "mode": "budget" }
 			},
 			{
-				"source": "classes/anthropic.kdl:120",
+				"source": "classes/anthropic.kdl:147",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock", "cursor", "google-antigravity", "openrouter"],
 				"family": "sonnet",
@@ -2477,7 +2506,7 @@
 				"thinking": { "efforts": ["minimal", "low", "medium", "high"] }
 			},
 			{
-				"source": "classes/anthropic.kdl:124",
+				"source": "classes/anthropic.kdl:151",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock", "cursor", "google-antigravity", "openrouter"],
 				"revision": [
@@ -2487,7 +2516,7 @@
 				"thinking": { "efforts": ["minimal", "low", "medium", "high"] }
 			},
 			{
-				"source": "classes/anthropic.kdl:130",
+				"source": "classes/anthropic.kdl:157",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock", "google-antigravity"],
 				"family": "sonnet",
@@ -2498,7 +2527,7 @@
 				"thinking": { "mode": "budget" }
 			},
 			{
-				"source": "classes/anthropic.kdl:137",
+				"source": "classes/anthropic.kdl:164",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -2517,7 +2546,7 @@
 				"thinking": { "efforts": ["low", "medium", "high", "xhigh", "max"] }
 			},
 			{
-				"source": "classes/anthropic.kdl:144",
+				"source": "classes/anthropic.kdl:171",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -2536,7 +2565,7 @@
 				"thinking": { "efforts": ["low", "medium", "high"] }
 			},
 			{
-				"source": "classes/anthropic.kdl:148",
+				"source": "classes/anthropic.kdl:175",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -2554,7 +2583,7 @@
 				"thinking": { "mode": "anthropic-adaptive" }
 			},
 			{
-				"source": "classes/anthropic.kdl:155",
+				"source": "classes/anthropic.kdl:182",
 				"class": "anthropic",
 				"providers": ["anthropic"],
 				"family": "opus",
@@ -2562,33 +2591,33 @@
 				"catalog": { "costPatch": { "cacheRead": 0.5, "cacheWrite": 6.25 } }
 			},
 			{
-				"source": "classes/anthropic.kdl:181",
-				"class": "anthropic",
-				"providers": ["anthropic"],
-				"family": "fable",
-				"revision": [{ "op": "=", "revision": "5.1.0" }],
-				"catalog": { "costPatch": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 } }
-			},
-			{
-				"source": "classes/anthropic.kdl:165",
-				"class": "anthropic",
-				"providers": ["anthropic"],
-				"family": "fable",
-				"catalog": {
-					"costPatch": { "input": 10, "output": 50, "cacheRead": 1, "cacheWrite": 12.5 },
-					"limitsPatch": { "contextWindow": 1000000, "maxTokens": 128000 }
-				}
-			},
-			{
 				"source": "classes/anthropic.kdl:208",
 				"class": "anthropic",
 				"providers": ["anthropic"],
+				"family": "fable",
+				"revision": [{ "op": "=", "revision": "5.1.0" }],
+				"catalog": { "costPatch": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 } }
+			},
+			{
+				"source": "classes/anthropic.kdl:192",
+				"class": "anthropic",
+				"providers": ["anthropic"],
+				"family": "fable",
+				"catalog": {
+					"costPatch": { "input": 10, "output": 50, "cacheRead": 1, "cacheWrite": 12.5 },
+					"limitsPatch": { "contextWindow": 1000000, "maxTokens": 128000 }
+				}
+			},
+			{
+				"source": "classes/anthropic.kdl:235",
+				"class": "anthropic",
+				"providers": ["anthropic"],
 				"family": "mythos",
 				"revision": [{ "op": "=", "revision": "5.1.0" }],
 				"catalog": { "costPatch": { "input": 10, "output": 50, "cacheRead": 0.25, "cacheWrite": 12.5 } }
 			},
 			{
-				"source": "classes/anthropic.kdl:194",
+				"source": "classes/anthropic.kdl:221",
 				"class": "anthropic",
 				"providers": ["anthropic"],
 				"family": "mythos",
@@ -2598,7 +2627,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:227",
+				"source": "classes/anthropic.kdl:254",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "opus",
@@ -2613,7 +2642,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:232",
+				"source": "classes/anthropic.kdl:259",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "opus",
@@ -2626,7 +2655,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:238",
+				"source": "classes/anthropic.kdl:265",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "opus",
@@ -2642,7 +2671,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:252",
+				"source": "classes/anthropic.kdl:279",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "opus",
@@ -2658,7 +2687,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:258",
+				"source": "classes/anthropic.kdl:285",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "opus",
@@ -2671,7 +2700,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:267",
+				"source": "classes/anthropic.kdl:294",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "sonnet",
@@ -2684,7 +2713,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:273",
+				"source": "classes/anthropic.kdl:300",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "sonnet",
@@ -2696,7 +2725,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:278",
+				"source": "classes/anthropic.kdl:305",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "sonnet",
@@ -2711,7 +2740,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:283",
+				"source": "classes/anthropic.kdl:310",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "sonnet",
@@ -2724,7 +2753,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:289",
+				"source": "classes/anthropic.kdl:316",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "sonnet",
@@ -2736,7 +2765,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:294",
+				"source": "classes/anthropic.kdl:321",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "sonnet",
@@ -2749,7 +2778,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:302",
+				"source": "classes/anthropic.kdl:329",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "haiku",
@@ -2761,7 +2790,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:307",
+				"source": "classes/anthropic.kdl:334",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "haiku",
@@ -2774,7 +2803,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:315",
+				"source": "classes/anthropic.kdl:342",
 				"class": "anthropic",
 				"providers": ["amazon-bedrock"],
 				"family": "fable",
@@ -2787,20 +2816,20 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:325",
+				"source": "classes/anthropic.kdl:352",
 				"class": "anthropic",
 				"family": "haiku",
 				"revision": [{ "op": "=", "revision": "3.5.0" }],
 				"wire": { "injectClaudeCodeInstruction": false }
 			},
 			{
-				"source": "classes/anthropic.kdl:331",
+				"source": "classes/anthropic.kdl:358",
 				"class": "anthropic",
 				"providers": ["google-antigravity", "google-gemini-cli"],
 				"wire": { "supportsFunctionPartId": true, "ccaLegacyParametersSchema": true }
 			},
 			{
-				"source": "classes/anthropic.kdl:335",
+				"source": "classes/anthropic.kdl:362",
 				"class": "anthropic",
 				"providers": ["google-antigravity"],
 				"wire": {
@@ -4265,7 +4294,7 @@
 				"wire": { "streamRevision": "possible" }
 			},
 			{
-				"source": "providers/anthropic.kdl:58",
+				"source": "providers/anthropic.kdl:64",
 				"class": "anthropic",
 				"providers": ["anthropic"],
 				"revision": [
@@ -4275,7 +4304,7 @@
 				"thinking": { "efforts": ["minimal", "low", "medium", "high", "xhigh"] }
 			},
 			{
-				"source": "providers/anthropic.kdl:63",
+				"source": "providers/anthropic.kdl:69",
 				"providers": ["anthropic"],
 				"models": [
 					{ "kind": "glob", "value": "*20240229" },
@@ -10610,16 +10639,28 @@
 				]
 			}
 		},
-		"amazon-bedrock": { "id": "amazon-bedrock", "defaultModel": "us.anthropic.claude-opus-4-8" },
+		"amazon-bedrock": { "id": "amazon-bedrock", "defaultModel": "us.anthropic.claude-opus-5-5" },
 		"anthropic": {
 			"id": "anthropic",
-			"defaultModel": "claude-opus-4-8",
+			"defaultModel": "claude-opus-5-5",
 			"envVars": ["ANTHROPIC_API_KEY"],
 			"discovery": { "label": "Anthropic" },
 			"seed": {
 				"bundle": "always",
 				"precedence": "upstream",
 				"models": [
+					{
+						"id": "claude-opus-5-5",
+						"name": "Claude Opus 5.5",
+						"api": "anthropic-messages",
+						"provider": "anthropic",
+						"baseUrl": "https://api.anthropic.com",
+						"reasoning": true,
+						"input": ["text", "image"],
+						"cost": { "input": 4, "output": 20, "cacheRead": 0.2, "cacheWrite": 5 },
+						"contextWindow": 1000000,
+						"maxTokens": 128000
+					},
 					{
 						"id": "claude-sonnet-5",
 						"name": "Claude Sonnet 5",
@@ -10791,7 +10832,7 @@
 		},
 		"cloudflare-ai-gateway": {
 			"id": "cloudflare-ai-gateway",
-			"defaultModel": "anthropic/claude-opus-4-8",
+			"defaultModel": "anthropic/claude-opus-5-5",
 			"envVars": ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
 			"discovery": { "label": "Cloudflare AI Gateway" },
 			"seed": {
@@ -10815,7 +10856,7 @@
 		},
 		"commandcode": {
 			"id": "commandcode",
-			"defaultModel": "claude-sonnet-4-6",
+			"defaultModel": "claude-sonnet-5",
 			"envVars": ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"],
 			"allowUnauthenticated": true,
 			"dynamicModelsAuthoritative": true,
@@ -10831,7 +10872,7 @@
 		},
 		"cursor": {
 			"id": "cursor",
-			"defaultModel": "claude-4.6-opus-high",
+			"defaultModel": "claude-opus-5-high",
 			"envVars": ["CURSOR_ACCESS_TOKEN"],
 			"discovery": { "label": "Cursor", "oauthProvider": "cursor", "envVars": ["CURSOR_API_KEY"] }
 		},
@@ -11061,7 +11102,7 @@
 		},
 		"kilo": {
 			"id": "kilo",
-			"defaultModel": "anthropic/claude-opus-4.8",
+			"defaultModel": "anthropic/claude-opus-5.5",
 			"envVars": ["KILO_API_KEY"],
 			"discovery": { "label": "Kilo Gateway", "allowUnauthenticated": true }
 		},
@@ -11072,7 +11113,7 @@
 		},
 		"litellm": {
 			"id": "litellm",
-			"defaultModel": "claude-opus-4-8",
+			"defaultModel": "claude-opus-5-5",
 			"envVars": ["LITELLM_API_KEY"],
 			"discovery": { "label": "LiteLLM", "allowUnauthenticated": true }
 		},
@@ -11629,7 +11670,7 @@
 		},
 		"opencode-zen": {
 			"id": "opencode-zen",
-			"defaultModel": "claude-opus-4-8",
+			"defaultModel": "claude-opus-5-5",
 			"envVars": ["OPENCODE_API_KEY"],
 			"dynamicModelsAuthoritative": true
 		},
@@ -11945,7 +11986,7 @@
 		},
 		"vercel-ai-gateway": {
 			"id": "vercel-ai-gateway",
-			"defaultModel": "anthropic/claude-opus-4.8",
+			"defaultModel": "anthropic/claude-opus-5.5",
 			"envVars": ["AI_GATEWAY_API_KEY"],
 			"discovery": {
 				"label": "Vercel AI Gateway",
@@ -12553,7 +12594,7 @@
 		},
 		"zenmux": {
 			"id": "zenmux",
-			"defaultModel": "anthropic/claude-opus-4.8",
+			"defaultModel": "anthropic/claude-opus-5.5",
 			"envVars": ["ZENMUX_API_KEY"],
 			"allowUnauthenticated": true,
 			"discovery": { "label": "ZenMux", "allowUnauthenticated": true }
