@@ -188,8 +188,6 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(headers.Accept).toBe("application/json");
 		expect(headers["User-Agent"]).toBe("claude-cli/2.1.280 (external, cli)");
-		// The wire header follows the pinned default unless an env pin or adoption is active.
-		expect(headers["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
 		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");

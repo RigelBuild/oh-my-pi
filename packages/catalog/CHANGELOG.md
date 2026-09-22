@@ -8,8 +8,8 @@
 
 ### Changed
 
-- Updated default models for anthropic, amazon-bedrock, cloudflare-ai-gateway, kilo, litellm, opencode-zen, vercel-ai-gateway, and zenmux to claude-opus-5-5
-- Updated default model for commandcode to claude-sonnet-5
+- Updated the Anthropic and LiteLLM default models to Claude Opus 5.5.
+- Updated the CommandCode default model to Claude Sonnet 5.
 
 ## [18.2.8] - 2026-09-21
 

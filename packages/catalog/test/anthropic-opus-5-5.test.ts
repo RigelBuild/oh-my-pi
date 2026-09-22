@@ -120,6 +120,10 @@ describe("Claude Opus 5.5 bundled row", () => {
 			supportsThinkingBindingControls: true,
 		});
 		expect(model.thinking?.prefixBinding).toBe(true);
+		expect(model.thinking?.mode).toBe("anthropic-adaptive");
+		expect(
+			model.compat && "requiresThinkingEnabled" in model.compat ? model.compat.requiresThinkingEnabled : false,
+		).toBe(true);
 	});
 
 	test("is the Anthropic provider default and resolves from the bundle", () => {

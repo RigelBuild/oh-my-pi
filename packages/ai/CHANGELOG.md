@@ -6,10 +6,8 @@
 
 - Updated the bundled Claude Code fingerprint to `2.1.280`.
 - Anthropic OAuth streams adopt a server-required Claude Code version and retry at most once when no replay-unsafe content was streamed.
+- Documented `PI_AI_CLAUDE_CODE_VERSION` as the explicit fingerprint pin; setting it disables automatic version adoption.
 
-### Escape hatch
-
-- Set `PI_AI_CLAUDE_CODE_VERSION` to pin the reported version. An explicit pin disables automatic version adoption.
 ## [18.2.8] - 2026-09-21
 
 ### Added

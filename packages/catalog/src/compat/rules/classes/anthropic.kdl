@@ -16,6 +16,7 @@ class "anthropic" {
 			// Opus 5.5 joined the Fable 5.1 generation in binding signed thinking
 			// to the exact preceding conversation.
 			thinking-prefix-binding #true
+			requires-thinking-enabled #true
 		}
 	}
 	// Opus 5.5 dropped forced tool choice (`tool_choice` `any`/`tool`) on every
@@ -90,7 +91,7 @@ class "anthropic" {
 			}
 			// Opus 5.5 carries Fable 5.1's thinking binding controls on the hosts
 			// that expose them, so prefix-bound thinking stays steerable.
-			revision ">=5.5" {
+			revision ">=5.5 <45" {
 				supports-thinking-binding-controls #true
 			}
 		}
