@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { AgentsHubDeps } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
@@ -9,6 +10,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import { getConfigDirs } from "../config";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	modelCatalogForClassification,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
 	resolveAgentPrewalkPattern,
@@ -49,6 +51,7 @@ export function createAgentsHubDeps(
 	settings: Settings,
 	modelRegistry: ModelRegistry,
 	extensionRoots: () => EffectiveExtensionRoots,
+	activeModel: () => Model | undefined,
 	activeModelPattern?: string,
 	defaultModelPattern?: string,
 ): AgentsHubDeps {
@@ -80,6 +83,7 @@ export function createAgentsHubDeps(
 				settings,
 				activeModelPattern,
 				fallbackModelPattern: defaultModelPattern,
+				availableModels: modelCatalogForClassification(modelRegistry.getAvailable(), activeModel()),
 			}),
 		resolvePatterns: patterns => {
 			if (patterns.length === 0) return undefined;
