@@ -5,30 +5,69 @@ import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/bro
 import { type ChildProcess, ptree } from "@oh-my-pi/pi-utils";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 
+const PROBE_TIMEOUT_MS = 30_000;
+
 /**
  * Whether the Chromium puppeteer resolves can actually execute on this host.
  * CI runners without Chrome's system libraries (libnspr4 & co.) hold the
  * downloaded binary but cannot exec it. A wrapper can also print a version
  * without starting Chrome, so Linux requires a live headless CDP endpoint.
+ *
+ * Resolution and launch run under one deadline. `ensureChromiumExecutable()`
+ * may download Chromium on first use, which is unbounded on its own — without
+ * this outer bound a slow or wedged download hangs every importing suite
+ * during module evaluation, with no test name to blame it on.
  */
-async function chromiumCanLaunch(): Promise<boolean> {
+export async function chromiumCanLaunch(
+	resolve: () => Promise<string | undefined> = ensureChromiumExecutable,
+	launch: (executable: string) => Promise<boolean> = launchProbe,
+	timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<boolean> {
+	const deadline = AbortSignal.timeout(timeoutMs);
+	let settled = false;
 	try {
-		const executable = await ensureChromiumExecutable();
-		if (!executable) return false;
-		// Only Linux runs the exec probe. Elsewhere the resolved candidate is a
-		// GUI application path, and running it is the hazard
-		// `isChromiumExecutable()` already refuses for the same reason (#8445): a
-		// GUI `chrome.exe --version` prints nothing to a detached stdout and does
-		// not exit, so this spawnSync never returns and every importing suite
-		// hangs during module evaluation. Check the file instead, so a stale
-		// PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
-		// back unvalidated — still skips the suites rather than failing them at
-		// launch.
-		if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
-		return await chromiumCdpAvailable(executable);
+		const probing = (async () => {
+			const executable = await resolve();
+			return executable ? await launch(executable) : false;
+		})();
+		return await Promise.race([
+			probing.then(
+				verdict => {
+					settled = true;
+					return verdict;
+				},
+				error => {
+					settled = true;
+					throw error;
+				},
+			),
+			new Promise<boolean>(resolveRace => {
+				deadline.addEventListener("abort", () => {
+					if (settled) return;
+					console.error(
+						`chromium-probe: no answer within ${timeoutMs}ms; treating Chromium as unavailable and SKIPPING the browser suites`,
+					);
+					resolveRace(false);
+				});
+			}),
+		]);
 	} catch {
 		return false;
 	}
+}
+
+async function launchProbe(executable: string): Promise<boolean> {
+	// Only Linux runs the exec probe. Elsewhere the resolved candidate is a
+	// GUI application path, and running it is the hazard
+	// `isChromiumExecutable()` already refuses for the same reason (#8445): a
+	// GUI `chrome.exe --version` prints nothing to a detached stdout and does
+	// not exit, so the probe never returns and every importing suite hangs
+	// during module evaluation. Check the file instead, so a stale
+	// PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
+	// back unvalidated — still skips the suites rather than failing them at
+	// launch.
+	if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
+	return await chromiumCdpAvailable(executable);
 }
 
 /** A disposable headless launch must actually answer CDP, not just --version. */
