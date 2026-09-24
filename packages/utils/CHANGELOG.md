@@ -16,6 +16,9 @@
 ### Fixed
 
 - Fixed a startup crash when PI_TIMING profiled modules loaded via require() or TypeScript declaration assets.
+### Added
+
+- Added `findDuplicateJsonKey()`, which reports the first object key repeated within one object of a JSON document. `JSON.parse` keeps only the last value for a repeated key and a `reviver` never sees the discarded one, so a loader that must reject a duplicate rather than silently adopt the last spelling has to scan the raw text; this shares that scan through the existing lexer. A key counts as a member only once its `:` arrives, and a repeat is confirmed with one `JSON.parse` of the document before it is reported, so the scan reports no duplicate for input a real parse would refuse ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 
 ## [18.2.5] - 2026-09-17
 
@@ -101,6 +104,8 @@
 
 - Timed out stalled Chrome-for-Testing metadata requests after 30 seconds when looking up download metadata
 - Concurrent browser installations share one download without replacing a running browser, and stalled downloads time out with partial files cleaned up for retry.
+
+### Added
 
 ## [18.1.19] - 2026-09-12
 
