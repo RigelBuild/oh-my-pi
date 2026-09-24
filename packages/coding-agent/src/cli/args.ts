@@ -63,6 +63,8 @@ export interface Args {
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;
+	/** Exact session id: open it when it exists, else create a session with this id. */
+	sessionId?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
 	models?: string[];

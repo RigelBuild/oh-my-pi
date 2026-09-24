@@ -128,6 +128,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--fork": (result, value) => {
 		result.fork = value;
 	},
+	"--session-id": (result, value) => {
+		result.sessionId = value;
+	},
 	"--provider": (result, value) => {
 		result.provider = value;
 	},
@@ -374,6 +377,7 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
 	"--session",
 	"--continue",
 	"-c",
+	"--session-id",
 	"--fork",
 	"--from-claude",
 	"--from-codex",

@@ -1106,6 +1106,31 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
 		throw new SessionResolutionError("--continue requires session persistence");
 	}
 }
+
+// Same grammar as pi's `assertValidSessionId`; the id becomes part of a file name.
+const SESSION_ID_FLAG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+function validateSessionIdArgs(parsed: Args): void {
+	if (parsed.sessionId === undefined) return;
+	const conflicts = [
+		parsed.continue ? "--continue" : undefined,
+		parsed.resume !== undefined ? "--resume" : undefined,
+		parsed.noSession ? "--no-session" : undefined,
+	].filter(flag => flag !== undefined);
+	if (conflicts.length > 0) {
+		throw new SessionResolutionError(`--session-id cannot be combined with ${conflicts.join(", ")}`);
+	}
+	if (!SESSION_ID_FLAG_RE.test(parsed.sessionId)) {
+		throw new SessionResolutionError(
+			`Invalid --session-id "${parsed.sessionId}": use letters, digits, '.', '_' and '-', starting and ending with a letter or digit`,
+		);
+	}
+}
+
+async function findLocalSessionById(id: string, cwd: string, sessionDir?: string): Promise<string | undefined> {
+	const sessions = await SessionManager.list(cwd, sessionDir);
+	return sessions.find(session => session.id === id)?.path;
+}
 /**
  * Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager.
  *
@@ -1119,14 +1144,20 @@ export async function createSessionManager(
 	askToMoveSession: SessionPrompt = promptMoveSession,
 	options: { nativeFlagOwnership?: "preliminary" | "resolved" } = {},
 ): Promise<SessionManager | undefined> {
+	validateSessionIdArgs(parsed);
+	const sessionId = parsed.sessionId;
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
 		}
+		if (sessionId && (await findLocalSessionById(sessionId, cwd, parsed.sessionDir))) {
+			throw new SessionResolutionError(`Session already exists with id "${sessionId}".`);
+		}
+		const forkOptions = sessionId ? { id: sessionId } : undefined;
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			try {
-				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir, undefined, forkOptions);
 			} catch (err) {
 				if (err instanceof ForkSourceNotFoundError) {
 					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
@@ -1139,7 +1170,7 @@ export async function createSessionManager(
 			throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 		}
 		try {
-			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, forkOptions);
 		} catch (err) {
 			if (err instanceof ForkSourceNotFoundError) {
 				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
@@ -1203,6 +1234,11 @@ export async function createSessionManager(
 	}
 	if (parsed.continue) {
 		return await SessionManager.continueRecent(cwd, parsed.sessionDir);
+	}
+	if (sessionId) {
+		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
+		if (existing) return await SessionManager.open(existing, parsed.sessionDir);
+		return SessionManager.create(cwd, parsed.sessionDir, undefined, { id: sessionId });
 	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there

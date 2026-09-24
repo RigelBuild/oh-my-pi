@@ -1487,12 +1487,12 @@ export class SessionManager {
 		}
 	}
 
-	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string, sessionId?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
-		this.#sessionId = mintSessionId();
+		this.#sessionId = sessionId ?? mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -3300,10 +3300,15 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = new FileSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: { id?: string },
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
-		manager.#resetToNewSession();
+		manager.#resetToNewSession(undefined, undefined, options?.id);
 		return manager;
 	}
 
@@ -3349,6 +3354,8 @@ export class SessionManager {
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
+			/** Exact id for the fork; default mints a fresh one. */
+			id?: string;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
@@ -3378,6 +3385,7 @@ export class SessionManager {
 				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
 			},
 			options?.sessionFile,
+			options?.id,
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
