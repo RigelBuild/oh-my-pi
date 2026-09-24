@@ -219,7 +219,7 @@ export async function runEvalWait(
 	return await withBridgeTimeoutPause(
 		options.emitStatus,
 		async () => {
-			for (const handle of resolved) emitLatestProgress(handle);
+            // Heartbeat emits cover long waits; the post-settlement emit carries the latest snapshot.
 			const interval = setInterval(() => {
 				for (const handle of resolved) emitLatestProgress(handle);
 			}, 1_000);
