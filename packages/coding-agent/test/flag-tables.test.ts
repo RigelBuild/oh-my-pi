@@ -216,12 +216,21 @@ describe("restartArgv (/restart relaunch argv)", () => {
 
 	it("keeps --session-id and does not append a prefix-matched --resume", () => {
 		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "seat-1")).toEqual([
-			"--session-id",
-			"seat-1",
 			"--model",
 			"m",
+			"--session-id",
+			"seat-1",
 		]);
-		expect(restartArgv(["--session-id=seat-1"], undefined)).toEqual(["--session-id=seat-1"]);
+		expect(restartArgv(["--session-id=seat-1"], undefined)).toEqual(["--session-id", "seat-1"]);
+	});
+
+	it("resumes the active session after an in-session switch away from the pinned id", () => {
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "0199aaaa-new")).toEqual([
+			"--model",
+			"m",
+			"--resume",
+			"0199aaaa-new",
+		]);
 	});
 
 	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {
