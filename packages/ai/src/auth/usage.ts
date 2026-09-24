@@ -43,6 +43,7 @@ import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
 	scopedUsageLimits,
+	usageReportHasNoIdentity,
 	usageReportMetadataValue,
 	usageReportScopeAccountId,
 } from "./usage-report";
@@ -259,6 +260,34 @@ export class UsageService implements UsageApi {
 				fetch: this.fetch,
 				logger: this.logger,
 			});
+			// A stable, non-secret per-credential discriminator. Providers whose
+			// reports carry no account, email, project, or organization identity
+			// (`synthetic`, `charm-hyper`) also use fixed limit ids, so several of
+			// their credentials render one identical label set and the exposition
+			// drops every later one as a duplicate — the accounts silently vanish
+			// from `/metrics`. The stored row id is stable across restarts and
+			// across an OAuth refresh, and is never derived from token material.
+			// Stamped ONLY when the report recovered no identity of its own, so no
+			// series that can already be attributed is re-keyed.
+			//
+			// `scope.shared` is deliberately NOT consulted. It marks a limit as
+			// credential-wide — exhaustion gating counts it against the whole
+			// credential rather than one model family — which most quota providers
+			// set; it does NOT assert that two DIFFERENT credentials observe the
+			// SAME pool. No field in a report proves that today: charm-hyper's
+			// balance is account-wide, but its endpoint exposes no account id to
+			// group keys by, and that very absence is why it marks the limit
+			// shared. Suppressing the stamp on every all-shared report would
+			// therefore also collapse two different accounts' identity-less
+			// reports into one series and silently drop the later one — the loss
+			// this stamp exists to prevent. The two error directions are not
+			// symmetric: stamping a genuine single-account multi-key pool renders
+			// its one balance as several `credential:<id>` series — visible, and
+			// diagnosable as the known multi-key case — while suppressing it drops
+			// an account with no trace. Prefer the visible error; always stamp.
+			if (report && request.credentialId !== undefined && usageReportHasNoIdentity(report)) {
+				report.metadata = { ...report.metadata, credentialKey: String(request.credentialId) };
+			}
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
 			// orgId from the `anthropic-organization-id` response header but never
@@ -563,7 +592,11 @@ export class UsageService implements UsageApi {
 				let hasUsableStoredOAuthCredential = false;
 				for (const entry of entries) {
 					if (entry.credential.type !== "oauth") continue;
-					const request = oauthUsageRequest(provider, entry.credential, baseUrl);
+					// Stamped here too: this branch has its own `continue`, so a pool
+					// of identity-less OAuth rows shared the `unidentified` account and
+					// xAI's fixed limit ids, and the renderer dropped every credential
+					// after the first as a duplicate series.
+					const request = { ...oauthUsageRequest(provider, entry.credential, baseUrl), credentialId: entry.id };
 					if (providerImpl.supports && !providerImpl.supports(request)) continue;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
@@ -606,6 +639,9 @@ export class UsageService implements UsageApi {
 				} else {
 					request = oauthUsageRequest(provider, credential, baseUrl);
 				}
+				// The stored row id, so an identity-less provider's several
+				// credentials stay distinguishable downstream.
+				request = { ...request, credentialId: entry.id };
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
 			}
