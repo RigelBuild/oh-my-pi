@@ -15,6 +15,7 @@ import type {
 	UsageResetCredits,
 	UsageWindow,
 } from "../usage";
+import { canonicalizePlan } from "../usage";
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
 import { listCodexResetCredits } from "./openai-codex-reset";
@@ -722,11 +723,7 @@ function getUsagePlanType(report: UsageReport | null): string | undefined {
 	if (!metadata) return undefined;
 	const planType = metadata.planType;
 	if (typeof planType !== "string") return undefined;
-	const normalized = planType
-		.trim()
-		.toLowerCase()
-		.replace(/[\s-]+/g, "_");
-	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
+	return canonicalizePlan(planType);
 }
 
 function classifyOpenAICodexPlan(report: UsageReport | null): OpenAICodexPlanClass {
