@@ -124,6 +124,20 @@ export interface ScopedModel {
 	explicitThinkingLevel: boolean;
 }
 
+/**
+ * Whether the WHOLE `provider/id` value is a shipped model id.
+ *
+ * A real id can end in an effort name, so splitting the suffix first and then
+ * asking about the stripped base answers for a different model. Callers that
+ * classify a trailing effort suffix must check the full value first.
+ */
+function isWholeLiteralModelId(value: string, isLiteralModelId?: (provider: string, id: string) => boolean): boolean {
+	if (isLiteralModelId === undefined) return false;
+	const slashIdx = value.indexOf("/");
+	if (slashIdx <= 0) return false;
+	return isLiteralModelId(value.slice(0, slashIdx), value.slice(slashIdx + 1)) === true;
+}
+
 function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
 	const glob = new Bun.Glob(pattern.toLowerCase());
 	return availableModels.filter(model => {
@@ -1024,7 +1038,7 @@ export function parseModelPattern(
 	);
 }
 
-const DEFAULT_MODEL_ROLE = "default";
+export const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
 
 function isModelRole(role: string): role is ModelRole {
@@ -1087,8 +1101,8 @@ export function resolveExplicitModelRole(
  *
  * The colon floor is the matched alias prefix (so `pi/default` keeps its
  * slash-prefixed shape and `*:high` splits after the one-character token);
- * non-alias patterns fall back to the legacy prefix length, which is what the
- * role expansion below already does.
+ * non-alias patterns fall back to the legacy prefix length, matching the role
+ * expansion below.
  */
 export function splitRoleAliasThinkingSuffix(value: string): { base: string; level?: ConfiguredThinkingLevel } {
 	return splitThinkingSuffix(
@@ -1106,6 +1120,28 @@ function isDefaultRolePattern(value: string): boolean {
 		value === DEFAULT_MODEL_ROLE_ALIAS ||
 		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}`
 	);
+}
+
+/**
+ * Parse a `modelRoles.default` entry that refers back to the default role
+ * instead of naming a model. A suffixed alias (`*:xhigh`) still names the
+ * thinking knob; `inherit` names none. The bare `default` sentinel takes no
+ * suffix: `default:low` is the concrete `cursor/default` model.
+ */
+export function parseDefaultModelRoleSelfAlias(
+	value: string,
+): { base: string; level?: ConfiguredThinkingLevel } | undefined {
+	if (value === DEFAULT_MODEL_ROLE) return { base: value };
+	const prefixLength = modelRoleAliasPrefixLength(value);
+	if (prefixLength === undefined) return undefined;
+	const split = splitThinkingSuffix(value, prefixLength, MAX_THINKING_SUFFIX_OPTIONS);
+	if (!isDefaultRolePattern(split.base)) return undefined;
+	return split.level === ThinkingLevel.Inherit ? { base: split.base } : split;
+}
+
+/** Whether a `modelRoles.default` entry is a self alias that names no model. */
+export function isDefaultModelRoleSelfAlias(value: string): boolean {
+	return parseDefaultModelRoleSelfAlias(value) !== undefined;
 }
 
 /**
@@ -1288,12 +1324,23 @@ export function resolveConfiguredModelPatterns(
 	value: string | string[] | undefined,
 	settings?: ModelRoleLookup,
 ): string[] {
-	const patterns = normalizeModelPatternList(value);
-	return patterns.flatMap(pattern => {
-		const resolved = resolveConfiguredRolePattern(pattern, settings);
-		return resolved ?? [];
-	});
+	return resolveConfiguredModelPatternOrigins(value, settings).map(entry => entry.pattern);
 }
+
+/**
+ * As {@link resolveConfiguredModelPatterns}, but each expanded pattern keeps the
+ * index of the raw pattern it came from: an alias expanding to several
+ * candidates shifts every later expanded position.
+ */
+export function resolveConfiguredModelPatternOrigins(
+	value: string | string[] | undefined,
+	settings?: ModelRoleLookup,
+): Array<{ pattern: string; rawIndex: number }> {
+	return normalizeModelPatternList(value).flatMap((pattern, rawIndex) =>
+		(resolveConfiguredRolePattern(pattern, settings) ?? []).map(resolved => ({ pattern: resolved, rawIndex })),
+	);
+}
+
 export interface AgentModelPatternResolutionOptions {
 	/** Highest-priority request selector, when supplied by a caller. */
 	requestModel?: string | string[];
@@ -1302,6 +1349,12 @@ export interface AgentModelPatternResolutionOptions {
 	settings?: Settings;
 	activeModelPattern?: string;
 	fallbackModelPattern?: string;
+	/**
+	 * Catalog used to tell a literal model id from a thinking selector when a
+	 * requested level re-tiers an inherited pattern. Spawn paths pass
+	 * {@link modelCatalogForClassification}; omitted means no id is literal.
+	 */
+	availableModels?: readonly Model<Api>[];
 }
 
 interface EffectiveAgentModelSelection {
@@ -1311,9 +1364,29 @@ interface EffectiveAgentModelSelection {
 	inheritsLiveThinkingLevel?: true;
 }
 
-/** Point an inherited selector at an explicitly requested thinking level. */
-function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingLevel): string {
-	return `${pattern}:${level}`;
+/**
+ * Point inherited patterns at an explicitly requested thinking level. A
+ * selector suffix is replaced; a pattern that is itself a literal catalog id
+ * ending in an effort name (`nanogpt/coding-router:low`) keeps its identity and
+ * gets the level appended, which the recursive pattern parser reads as thinking.
+ */
+function withThinkingSuffix(
+	patterns: string[],
+	level: ConfiguredThinkingLevel,
+	availableModels: readonly Model<Api>[],
+): string[] {
+	return patterns.map(pattern => {
+		const split = splitThinkingSuffix(pattern);
+		if (
+			split.level !== undefined &&
+			isWholeLiteralModelId(pattern, (provider, id) =>
+				availableModels.some(model => model.provider === provider && model.id === id),
+			)
+		) {
+			return `${pattern}:${level}`;
+		}
+		return `${split.base}:${level}`;
+	});
 }
 
 function resolveEffectiveAgentModelSelection(
@@ -1324,8 +1397,9 @@ function resolveEffectiveAgentModelSelection(
 		const active = activeModelPattern?.trim();
 		const fallback = active || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
 		const patterns = resolveConfiguredModelPatterns(fallback, settings);
-		const level = requested?.level;
-		if (level) return { patterns: patterns.map(pattern => applyRequestedThinkingLevel(pattern, level)) };
+		// `inherit` names no thinking knob, so it must not mark the level explicit.
+		const level = requested?.level === ThinkingLevel.Inherit ? undefined : requested?.level;
+		if (level) return { patterns: withThinkingSuffix(patterns, level, options.availableModels ?? []) };
 		return active ? { patterns, inheritsLiveThinkingLevel: true } : { patterns };
 	};
 
@@ -1358,9 +1432,10 @@ function resolveEffectiveAgentModelSelection(
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
 	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
-	const agentInheritance = singleAgentPattern
-		? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
-		: undefined;
+	const agentInheritance =
+		singleAgentPattern && !singleAgentPattern.startsWith(`${DEFAULT_MODEL_ROLE}:`)
+			? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
+			: undefined;
 	if (configuredAgentPatterns.length > 0) {
 		if (!agentInheritance || resolveExplicitModelRole(singleAgentPattern, settings) === "task") {
 			return { source: agentModel, patterns: configuredAgentPatterns };
@@ -1368,6 +1443,13 @@ function resolveEffectiveAgentModelSelection(
 	}
 
 	return inheritSessionModel(agentInheritance);
+}
+
+/** The classification catalog includes an active model omitted by the registry. */
+export function modelCatalogForClassification(available: Model<Api>[] | undefined, active: Model | undefined): Model[] {
+	const catalog = available ?? [];
+	if (!active || catalog.some(model => model.provider === active.provider && model.id === active.id)) return catalog;
+	return [...catalog, active];
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
@@ -1477,6 +1559,10 @@ export interface ResolvedModelRoleValue {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** matchedPatternIndex identifies the first configured pattern that matched an available model. */
 	matchedPatternIndex?: number;
+	/** Index of the raw selector that expanded to the matched pattern. */
+	matchedRawPatternIndex?: number;
+	/** Expanded selector that matched the model. */
+	matchedPattern?: string;
 	explicitThinkingLevel: boolean;
 	warning: string | undefined;
 }
@@ -1500,8 +1586,12 @@ export function resolveModelRoleValue(
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
-	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.roleLookup ?? options?.settings);
-	if (!effectivePatterns || effectivePatterns.length === 0) {
+	const effectivePatternOrigins = resolveConfiguredModelPatternOrigins(
+		normalized,
+		options?.roleLookup ?? options?.settings,
+	);
+	const effectivePatterns = effectivePatternOrigins.map(entry => entry.pattern);
+	if (effectivePatterns.length === 0) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
@@ -1517,6 +1607,8 @@ export function resolveModelRoleValue(
 			return {
 				model: resolved.model,
 				matchedPatternIndex: patternIndex,
+				matchedRawPatternIndex: effectivePatternOrigins[patternIndex]?.rawIndex,
+				matchedPattern: effectivePattern,
 				thinkingLevel: resolved.explicitThinkingLevel
 					? resolved.thinkingLevel === AUTO_THINKING
 						? AUTO_THINKING
@@ -1538,11 +1630,6 @@ interface ExplicitThinkingSelectorOptions {
 	isLiteralModelId?: (provider: string, id: string) => boolean;
 }
 
-function isLiteralModelSelector(value: string, options?: ExplicitThinkingSelectorOptions): boolean {
-	const parsed = parseModelString(value);
-	return parsed !== undefined && options?.isLiteralModelId?.(parsed.provider, parsed.id) === true;
-}
-
 export function extractExplicitThinkingSelector(
 	value: string | undefined,
 	settings?: Settings,
@@ -1556,16 +1643,17 @@ export function extractExplicitThinkingSelector(
 	let current = normalized;
 	while (!visited.has(current)) {
 		visited.add(current);
-		const rolePrefixLength = modelRoleAliasPrefixLength(current) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
+		const roleAliasPrefixLength = modelRoleAliasPrefixLength(current);
+		const rolePrefixLength = roleAliasPrefixLength ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length;
+		if (roleAliasPrefixLength === undefined && isWholeLiteralModelId(current, options?.isLiteralModelId)) {
+			return undefined;
+		}
 		const strictSelector = splitThinkingSuffix(current, rolePrefixLength).level;
 		if (strictSelector) {
 			return strictSelector;
 		}
 		const maxSelector = splitThinkingSuffix(current, rolePrefixLength, MAX_THINKING_SUFFIX_OPTIONS).level;
-		if (
-			maxSelector &&
-			(modelRoleAliasPrefixLength(current) !== undefined || !isLiteralModelSelector(current, options))
-		) {
+		if (maxSelector) {
 			return maxSelector;
 		}
 		const expanded = expandRoleAlias(current, settings).trim();

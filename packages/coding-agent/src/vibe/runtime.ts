@@ -26,7 +26,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { modelCatalogForClassification, resolveAgentModelSelection } from "../config/model-resolver";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -105,6 +105,10 @@ export interface VibeParentSession {
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
+	/** Parent model catalog for distinguishing literal ids from thinking selectors. */
+	modelRegistry?: ToolSession["modelRegistry"];
+	/** Parent's active model, which may not appear in its registry projection. */
+	getActiveModel?: ToolSession["getActiveModel"];
 }
 
 interface VibeRestoreCandidate {
@@ -369,6 +373,10 @@ export class VibeSessionRegistry {
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
+			availableModels: modelCatalogForClassification(
+				session.modelRegistry?.getAvailable(),
+				session.getActiveModel?.(),
+			),
 		});
 		return {
 			agent,

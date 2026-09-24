@@ -10869,10 +10869,9 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 
-			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
-			const hasServiceTierEntry = this.sessionManager
-				.getBranch()
-				.some(entry => entry.type === "service_tier_change");
+			const restoreBranch = this.sessionManager.getBranch();
+			const hasThinkingEntry = restoreBranch.some(entry => entry.type === "thinking_level_change");
+			const hasServiceTierEntry = restoreBranch.some(entry => entry.type === "service_tier_change");
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
 			const configuredServiceTierByFamily = buildServiceTierByFamily(
 				cfgTierOpenai.get(this.settings),
@@ -10894,8 +10893,15 @@ export class AgentSession implements SettingsScope {
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			// A resumed session without a tier entry restores the empty map: a
+			// `tier.*` set after it was baked must not take effect on `/resume`.
+			// Only a target with no history falls through to config.
 			this.#models.restoreServiceTiers(
-				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				hasServiceTierEntry
+					? (sessionContext.serviceTier ?? {})
+					: restoreBranch.length > 0
+						? {}
+						: configuredServiceTierByFamily,
 			);
 
 			if (switchingToDifferentSession) {
