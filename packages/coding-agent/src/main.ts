@@ -100,7 +100,7 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
+import { assertValidSessionId, ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -831,8 +831,8 @@ function exitForSessionResolutionError(error: SessionResolutionError): never {
 	process.exit(1);
 }
 
-function resolveForeignSessionSource(
-	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume">,
+export function resolveForeignSessionSource(
+	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume" | "sessionId">,
 ): ForeignSessionSource | undefined {
 	if (parsed.fromClaude && parsed.fromCodex) {
 		throw new SessionResolutionError("--from-claude and --from-codex cannot be used together");
@@ -842,8 +842,10 @@ function resolveForeignSessionSource(
 	if (parsed.noSession) {
 		throw new SessionResolutionError(`--from-${source} requires session persistence`);
 	}
-	if (parsed.continue || parsed.resume || parsed.fork) {
-		throw new SessionResolutionError(`--from-${source} cannot be combined with --continue, --resume, or --fork`);
+	if (parsed.continue || parsed.resume || parsed.fork || parsed.sessionId !== undefined) {
+		throw new SessionResolutionError(
+			`--from-${source} cannot be combined with --continue, --resume, --fork, or --session-id`,
+		);
 	}
 	return source;
 }
@@ -1107,9 +1109,6 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
 	}
 }
 
-// Same grammar as pi's `assertValidSessionId`; the id becomes part of a file name.
-const SESSION_ID_FLAG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
-
 function validateSessionIdArgs(parsed: Args): void {
 	if (parsed.sessionId === undefined) return;
 	const conflicts = [
@@ -1120,10 +1119,10 @@ function validateSessionIdArgs(parsed: Args): void {
 	if (conflicts.length > 0) {
 		throw new SessionResolutionError(`--session-id cannot be combined with ${conflicts.join(", ")}`);
 	}
-	if (!SESSION_ID_FLAG_RE.test(parsed.sessionId)) {
-		throw new SessionResolutionError(
-			`Invalid --session-id "${parsed.sessionId}": use letters, digits, '.', '_' and '-', starting and ending with a letter or digit`,
-		);
+	try {
+		assertValidSessionId(parsed.sessionId);
+	} catch (err) {
+		throw new SessionResolutionError(`--session-id: ${(err as Error).message}`);
 	}
 }
 
@@ -1237,7 +1236,12 @@ export async function createSessionManager(
 	}
 	if (sessionId) {
 		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
-		if (existing) return await SessionManager.open(existing, parsed.sessionDir);
+		if (existing) {
+			const manager = await SessionManager.open(existing, parsed.sessionDir);
+			// Reopening is a restore: buildSessionOptions must keep the session's model and thinking level.
+			if (manager.getEntries().length > 0) parsed.continue = true;
+			return manager;
+		}
 		return SessionManager.create(cwd, parsed.sessionDir, undefined, { id: sessionId });
 	}
 	// --resume without value is handled separately (needs picker UI)

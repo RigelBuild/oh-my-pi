@@ -214,6 +214,16 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		).toEqual(["--resume", "sid"]);
 	});
 
+	it("keeps --session-id and does not append a prefix-matched --resume", () => {
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "seat-1")).toEqual([
+			"--session-id",
+			"seat-1",
+			"--model",
+			"m",
+		]);
+		expect(restartArgv(["--session-id=seat-1"], undefined)).toEqual(["--session-id=seat-1"]);
+	});
+
 	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {
 		expect(restartArgv(["--myext-flag", "val", "--no-tools"], "sid")).toEqual([
 			"--myext-flag",

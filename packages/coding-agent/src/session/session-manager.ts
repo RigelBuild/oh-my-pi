@@ -116,6 +116,18 @@ function mintSessionId(): string {
 	return Bun.randomUUIDv7();
 }
 
+// Same grammar as pi's `assertValidSessionId`: the id becomes part of the session file name.
+const SESSION_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+/** Throw unless `id` is safe to use as a caller-chosen session id. */
+export function assertValidSessionId(id: string): void {
+	if (!SESSION_ID_RE.test(id)) {
+		throw new Error(
+			`Invalid session id "${id}": use letters, digits, '.', '_' and '-', starting and ending with a letter or digit`,
+		);
+	}
+}
+
 function nowIso(): string {
 	return new Date().toISOString();
 }
@@ -1492,6 +1504,7 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
+		if (sessionId !== undefined) assertValidSessionId(sessionId);
 		this.#sessionId = sessionId ?? mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;

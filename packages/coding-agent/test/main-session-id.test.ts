@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createSessionManager } from "@oh-my-pi/pi-coding-agent/main";
+import { createSessionManager, resolveForeignSessionSource } from "@oh-my-pi/pi-coding-agent/main";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 const stubSettings = { get: () => undefined } as unknown as Settings;
@@ -57,6 +57,21 @@ describe("--session-id", () => {
 		expect(second?.getSessionFile()).toBe(firstFile);
 		expect(second?.getEntries().some(e => e.type === "message")).toBe(true);
 		expect(await jsonlFiles(sessionDir)).toHaveLength(1);
+	});
+
+	it("marks a reopened session as a restore so its model and thinking level are kept", async () => {
+		const id = "0e5d4c3b-2a19-4f00-8000-000000000004";
+		const first = await createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings);
+		first!.appendMessage({ role: "user", content: "remember me", timestamp: Date.now() });
+		await first!.rewriteEntries();
+
+		const reopened = args({ sessionId: id, sessionDir });
+		await createSessionManager(reopened, cwd, stubSettings);
+		expect(reopened.continue).toBe(true);
+
+		const fresh = args({ sessionId: "0e5d4c3b-2a19-4f00-8000-000000000005", sessionDir });
+		await createSessionManager(fresh, cwd, stubSettings);
+		expect(fresh.continue).toBeFalsy();
 	});
 
 	it("matches the exact id, never a prefix", async () => {
@@ -116,5 +131,21 @@ describe("--session-id", () => {
 		await expect(createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings)).rejects.toMatchObject({
 			name: "SessionResolutionError",
 		});
+	});
+
+	it("rejects an invalid id at the SessionManager API too", async () => {
+		expect(() => SessionManager.create(cwd, sessionDir, undefined, { id: "x/../../escape" })).toThrow();
+		const source = SessionManager.create(cwd, sessionDir);
+		source.appendMessage({ role: "user", content: "source", timestamp: Date.now() });
+		await source.rewriteEntries();
+		await expect(
+			SessionManager.forkFrom(source.getSessionFile()!, cwd, sessionDir, undefined, { id: "../escape" }),
+		).rejects.toThrow();
+	});
+});
+
+describe("--session-id with a foreign session import", () => {
+	it.each([["fromClaude"], ["fromCodex"]] as const)("rejects %s", key => {
+		expect(() => resolveForeignSessionSource(args({ sessionId: "abc", [key]: true }))).toThrow(/--session-id/);
 	});
 });
