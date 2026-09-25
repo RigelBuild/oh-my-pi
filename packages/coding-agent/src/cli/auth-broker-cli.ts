@@ -152,10 +152,28 @@ async function readTokenFile(file: string): Promise<string | null> {
 
 async function writeTokenFile(file: string, token: string): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	// No trailing newline: the raw file bytes ARE the token value a secrets-staging
-	// step stages verbatim.
-	await Bun.write(file, token);
+	// Created 0600 in a sibling temp and renamed over the target: a reader never
+	// sees a partial token or a wider mode, and rotation replaces it atomically.
+	const tmpPath = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+	let removeTemp = false;
 	try {
+		const handle = await fs.open(tmpPath, "wx", 0o600);
+		removeTemp = true;
+		try {
+			// No trailing newline: the raw file bytes ARE the token value a
+			// secrets-staging step stages verbatim.
+			await handle.writeFile(token);
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		await fs.rename(tmpPath, file);
+		removeTemp = false;
+	} finally {
+		if (removeTemp) await fs.rm(tmpPath, { force: true }).catch(() => {});
+	}
+	try {
+		// `open`'s mode is masked by umask; only a umask wider than 077 needs this.
 		await fs.chmod(file, 0o600);
 	} catch {
 		// Best-effort (e.g. Windows).

@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Fixed `omp auth-broker` token files being created at the default file mode and narrowed to 0600 only afterwards, best-effort: the bearer and `/metrics` tokens are now written to a 0600 temp file and renamed into place, so a reader never sees a world-readable or partially written token and rotation is atomic ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
 - `/debug` memory reports now include numeric memory statistics instead of raw heap snapshots that could expose provider and MCP credentials.
 
 ## [18.1.21] - 2026-09-14

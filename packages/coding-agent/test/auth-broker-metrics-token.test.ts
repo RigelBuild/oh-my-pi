@@ -185,6 +185,22 @@ describe("auth-broker token --metrics (scrape-scoped mint)", () => {
 		expect(parsed.path).toBe(metricsPath());
 		expect(parsed.token).toBe(await Bun.file(metricsPath()).text());
 	});
+
+	test("a token file is private even when the post-write chmod fails", async () => {
+		// The chmod is best-effort, so a token must be born 0600 rather than
+		// written at the umask default and narrowed afterwards.
+		const chmodSpy = spyOn(fs, "chmod").mockRejectedValue(new Error("EPERM"));
+		try {
+			silenceStdout();
+			await runAuthBrokerCommand({ action: "token", flags: { metrics: true, regenerate: true } });
+		} finally {
+			chmodSpy.mockRestore();
+		}
+
+		expect((await fs.stat(metricsPath())).mode & 0o777).toBe(0o600);
+		expect(await Bun.file(metricsPath()).text()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect((await fs.readdir(path.dirname(metricsPath()))).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
 });
 
 // Full-suite safety: the mint suite above overrides the shared dirs resolver in
