@@ -108,7 +108,7 @@ describe("bedrock onPayload replacement", () => {
 		expect(body.additionalModelResponseFieldPaths).toEqual(["/input_transformations"]);
 	}, 10_000);
 
-	// Bedrock's preserved-thinking doc covers Fable 5.1 only; an unaccepted beta 400s every request.
+	// Bedrock's preserved-thinking doc covers Fable 5.1 only, so Opus 5.5 must not send the controls beta.
 	it("sends no thinking-binding controls for Opus 5.5", async () => {
 		const target = buildModel({
 			id: "us.anthropic.claude-opus-5-5",
