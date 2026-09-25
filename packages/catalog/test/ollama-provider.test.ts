@@ -131,7 +131,13 @@ describe("ollama tool forcing", () => {
 		let requestBody: OllamaRequestBody | undefined;
 		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
 			requestBody = JSON.parse(String(init?.body ?? "{}")) as OllamaRequestBody;
-			return new Response(`${JSON.stringify({ done: true })}\n`, {
+			// A forced call answers with the tool call; a bare `done` is an empty completion.
+			const reply = {
+				message: { role: "assistant", content: "", tool_calls: [{ function: { name: "write", arguments: {} } }] },
+				done: true,
+				done_reason: "stop",
+			};
+			return new Response(`${JSON.stringify(reply)}\n`, {
 				status: 200,
 				headers: { "Content-Type": "application/x-ndjson" },
 			});
