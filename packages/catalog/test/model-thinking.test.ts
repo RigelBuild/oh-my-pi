@@ -807,9 +807,8 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
-	it("bakes Opus 5.5 prefix binding and host-gated controls", () => {
-		const direct = createModel({ id: "claude-opus-5-5", api: "anthropic-messages", provider: "anthropic" });
-		const vertex = createModel({ id: "claude-opus-5-5", api: "anthropic-messages", provider: "google-vertex" });
+	it("bakes Opus 5.5 prefix binding only on hosts with the controls beta", () => {
+		const opus = (provider: Provider) => createModel({ id: "claude-opus-5-5", api: "anthropic-messages", provider });
 		const bedrock = createModel({
 			id: "global.anthropic.claude-opus-5-5-v1:0",
 			api: "bedrock-converse-stream",
@@ -819,11 +818,15 @@ describe("model thinking derivation", () => {
 		// Venice's dotless Opus 4.5 id parses as revision 45.
 		const venice45 = createModel({ id: "claude-opus-45", api: "anthropic-messages", provider: "venice" });
 
-		expect(direct.thinking?.prefixBinding).toBe(true);
-		expect(vertex.thinking?.prefixBinding).toBe(true);
-		expect(bedrock.thinking?.prefixBinding).toBe(true);
-		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
-		expect(vertex.compat.supportsThinkingBindingControls).toBe(true);
+		for (const provider of ["anthropic", "cloudflare-ai-gateway", "google-vertex"] as const) {
+			expect(opus(provider).thinking?.prefixBinding, provider).toBe(true);
+			expect(opus(provider).compat.supportsThinkingBindingControls, provider).toBe(true);
+		}
+		for (const provider of ["github-copilot", "opencode-zen", "vercel-ai-gateway", "zenmux"] as const) {
+			expect(opus(provider).thinking?.prefixBinding, provider).toBeUndefined();
+			expect(opus(provider).compat.supportsThinkingBindingControls, provider).toBe(false);
+		}
+		expect(bedrock.thinking?.prefixBinding).toBeUndefined();
 		expect(opus5.thinking?.prefixBinding).toBeUndefined();
 		expect(opus5.compat.supportsThinkingBindingControls).toBe(false);
 		expect(venice45.thinking?.prefixBinding).toBeUndefined();
