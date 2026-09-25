@@ -78,6 +78,14 @@ class "anthropic" {
 			}
 		}
 		family "opus" {
+			// Opus 5.5 binds thinking to its prefix like Fable 5.1. Scoped to hosts
+			// verified for the controls beta; `<6` keeps `claude-opus-45` out.
+			revision ">=5.5 <6" {
+				thinking-prefix-binding #true
+				supports-thinking-binding-controls #true
+			}
+		}
+		family "opus" {
 			revision ">=4.8" {
 				supports-mid-conversation-system #true
 				supports-mid-conversation-tool-changes #true

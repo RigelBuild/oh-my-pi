@@ -149,6 +149,15 @@ describe("Anthropic preserved-thinking request shaping", () => {
 		expect(payload.thinking?.block_binding).toEqual({ prefix_mismatch_behavior: "drop_block" });
 	});
 
+	it("opts Opus 5.5 into dropping prefix-mismatched thinking", async () => {
+		const payload = await capturePayload(makeAnthropicModel("claude-opus-5-5"), {
+			thinkingEnabled: true,
+			reasoning: Effort.High,
+		});
+
+		expect(payload.thinking?.block_binding).toEqual({ prefix_mismatch_behavior: "drop_block" });
+	});
+
 	it("allows callers to make prefix mismatches fail loudly", async () => {
 		const payload = await capturePayload(makeAnthropicModel("claude-fable-5-1"), {
 			thinkingEnabled: true,
