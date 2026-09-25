@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Claude Opus 5.5 requests that force tool use, preventing turn failures and allowing forced tool selections to fall back to automatic tool selection when required.
+- Fixed Claude Opus 5.5 replaying signed thinking after a conversation-prefix change: the model now carries prefix-bound thinking like Fable 5.1, and first-party, Vertex, and Cloudflare AI Gateway requests opt into dropping mismatched thinking blocks instead of failing with an invalid-signature 400.
 - Yolo-Auto Qwen3.8 models now offer the `xhigh` reasoning level the provider advertises ([#13160](https://github.com/can1357/oh-my-pi/pull/13160) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.3.0] - 2026-09-24

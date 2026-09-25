@@ -7,6 +7,13 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
+	family "opus" {
+		// Opus 5.5 shares Fable 5.1's prefix-bound thinking. `<6` keeps
+		// dotless ids such as `claude-opus-45` (revision 45) out.
+		revision ">=5.5 <6" {
+			thinking-prefix-binding #true
+		}
+	}
 	// On-demand compaction (compact-2026-09-04) is available on the Claude
 	// API and Vertex, not Amazon Bedrock or unverified gateway deployments.
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
@@ -74,6 +81,11 @@ class "anthropic" {
 		}
 		family "fable" {
 			revision ">=5.1" {
+				supports-thinking-binding-controls #true
+			}
+		}
+		family "opus" {
+			revision ">=5.5 <6" {
 				supports-thinking-binding-controls #true
 			}
 		}

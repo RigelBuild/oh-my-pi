@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	clampThinkingLevelForModel,
@@ -804,6 +805,37 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsMidConversationToolChanges).toBe(true);
 		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
+	});
+
+	it("bakes Opus 5.5 prefix binding and host-gated controls", () => {
+		const direct = createModel({ id: "claude-opus-5-5", api: "anthropic-messages", provider: "anthropic" });
+		const vertex = createModel({ id: "claude-opus-5-5", api: "anthropic-messages", provider: "google-vertex" });
+		const bedrock = createModel({
+			id: "global.anthropic.claude-opus-5-5-v1:0",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		const opus5 = createModel({ id: "claude-opus-5", api: "anthropic-messages", provider: "anthropic" });
+		// Venice's dotless Opus 4.5 id parses as revision 45.
+		const venice45 = createModel({ id: "claude-opus-45", api: "anthropic-messages", provider: "venice" });
+
+		expect(direct.thinking?.prefixBinding).toBe(true);
+		expect(vertex.thinking?.prefixBinding).toBe(true);
+		expect(bedrock.thinking?.prefixBinding).toBe(true);
+		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(vertex.compat.supportsThinkingBindingControls).toBe(true);
+		expect(opus5.thinking?.prefixBinding).toBeUndefined();
+		expect(opus5.compat.supportsThinkingBindingControls).toBe(false);
+		expect(venice45.thinking?.prefixBinding).toBeUndefined();
+	});
+
+	// The runtime serves models.json rows as committed, so the row must carry the rule.
+	it("ships Opus 5.5 prefix binding in the bundled first-party row", () => {
+		const row = getBundledModels("anthropic").find(model => model.id === "claude-opus-5-5") as
+			| Model<"anthropic-messages">
+			| undefined;
+		expect(row?.thinking?.prefixBinding).toBe(true);
+		expect(row?.compat.supportsThinkingBindingControls).toBe(true);
 	});
 
 	it("uses Bedrock Fable 5.1's five supported effort levels", () => {
