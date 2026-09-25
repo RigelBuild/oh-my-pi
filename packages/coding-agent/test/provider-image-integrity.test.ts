@@ -325,4 +325,71 @@ describe("dropUnreadableContextImages", () => {
 
 		expect(await dropUnreadableContextImages(context, OPENAI_RESPONSES_MODEL)).toBe(context);
 	});
+
+	/**
+	 * A warm or compaction replay carries a paired `computer_call_output` on the
+	 * user payload, and `buildResponsesInput()` sends it verbatim. Its screenshot
+	 * sits in `output`, not an `input_image`, so it needs its own check. The
+	 * item keeps its type and `call_id` so the paired `computer_call` is not orphaned.
+	 */
+	function computerReplayMessage(output: Record<string, unknown>): UserMessage {
+		return userMessage([{ type: "text", text: "continue" }], {
+			type: "openaiResponsesHistory",
+			dt: true,
+			items: [
+				{ type: "computer_call", call_id: "cu_1", action: { type: "screenshot" } },
+				{ type: "computer_call_output", call_id: "cu_1", output },
+			],
+		});
+	}
+
+	test("drops an undecodable inline screenshot from a replayed computer output that has a file id", async () => {
+		const original = computerReplayMessage({
+			type: "computer_screenshot",
+			image_url: `data:image/png;base64,${MIDDLE_ELIDED_PNG}`,
+			file_id: "file_shot",
+		});
+
+		const guarded = await dropUnreadableContextImages({ messages: [original] }, OPENAI_RESPONSES_MODEL);
+
+		const items = nativeItems(guarded.messages[0]!);
+		expect(items[0]).toBe(nativeItems(original)[0]);
+		expect(items[1]).toEqual({
+			type: "computer_call_output",
+			call_id: "cu_1",
+			output: { type: "computer_screenshot", file_id: "file_shot" },
+		});
+	});
+
+	test("removes an undecodable inline-only computer output together with its paired call", async () => {
+		const original = computerReplayMessage({
+			type: "computer_screenshot",
+			image_url: `data:image/png;base64,${MIDDLE_ELIDED_PNG}`,
+		});
+		const payload = original.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("expected a native history payload");
+		const withSibling: UserMessage = {
+			...original,
+			providerPayload: { ...payload, items: [...payload.items, { type: "compaction", encrypted_content: "x" }] },
+		};
+
+		const guarded = await dropUnreadableContextImages({ messages: [withSibling] }, OPENAI_RESPONSES_MODEL);
+
+		// No `computer_screenshot` alternative exists to degrade to, and a call left
+		// without its output is an orphan the provider rejects.
+		expect(nativeItems(guarded.messages[0]!)).toEqual([{ type: "compaction", encrypted_content: "x" }]);
+	});
+
+	test("keeps a decodable replayed computer screenshot byte-identical", async () => {
+		const context: Context = {
+			messages: [
+				computerReplayMessage({
+					type: "computer_screenshot",
+					image_url: `data:image/png;base64,${ODD_FRAMED_PNG}`,
+				}),
+			],
+		};
+
+		expect(await dropUnreadableContextImages(context, OPENAI_RESPONSES_MODEL)).toBe(context);
+	});
 });

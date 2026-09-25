@@ -1707,19 +1707,45 @@ async function replaceUnreadableNativeItem(
  * NOT reproduce, so clearing the payload would trade one broken request for
  * silent history loss. A valid image is never touched: every level returns
  * `undefined` when nothing changed, so the original objects survive by identity.
+ *
+ * A `computer_call_output` screenshot has no text form to degrade to. One that
+ * also carries a `file_id` keeps that reference; otherwise the output and its
+ * paired `computer_call` are removed together, as the clamp does.
  */
 async function replaceUnreadableNativePayload(
 	payload: ProviderPayload | undefined,
 ): Promise<ProviderPayload | undefined> {
 	if (payload?.type !== "openaiResponsesHistory" || !Array.isArray(payload.items)) return undefined;
-	let items: Array<Record<string, unknown>> | undefined;
+	let items: Array<Record<string, unknown> | undefined> | undefined;
+	const droppedComputerCallIds = new Set<string>();
 	for (let index = 0; index < payload.items.length; index++) {
-		const rewritten = await replaceUnreadableNativeItem(payload.items[index]!);
+		const item = payload.items[index]!;
+		if (item.type === "computer_call_output") {
+			const [screenshot] = nativeInputImageParts(item);
+			const image = screenshot ? inlineImageFromDataUri(screenshot.image_url) : undefined;
+			if (!screenshot || !image || (await unreadableImageReason(image)) === null) continue;
+			items ??= [...payload.items];
+			if (typeof screenshot.file_id === "string") {
+				const { image_url: _unreadable, ...reference } = screenshot;
+				items[index] = { ...item, output: reference };
+			} else if (typeof item.call_id === "string") {
+				droppedComputerCallIds.add(item.call_id);
+			} else {
+				items[index] = undefined;
+			}
+			continue;
+		}
+		const rewritten = await replaceUnreadableNativeItem(item);
 		if (!rewritten) continue;
 		items ??= [...payload.items];
 		items[index] = rewritten;
 	}
-	return items ? { ...payload, items } : undefined;
+	if (!items) return undefined;
+	const surviving = items.filter(
+		(item): item is Record<string, unknown> =>
+			item !== undefined && !isDroppedComputerItem(item, droppedComputerCallIds),
+	);
+	return { ...payload, items: surviving };
 }
 
 /**
