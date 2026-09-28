@@ -49,7 +49,10 @@ export type GatewayUsageOutcome = "ok" | "error" | "aborted";
 
 /** One settled upstream call, reported to {@link AuthGatewayRouteOptions.onUsage}. */
 export interface GatewayUsageEvent {
-	/** The gateway's per-request id, also sent in the response headers. */
+	/**
+	 * The `x-request-id` of a successful response (error envelopes omit the header).
+	 * Video reuses its stable job id on every completed poll; dedupe on this id.
+	 */
 	requestId: string;
 	provider: string;
 	model: string;
@@ -70,8 +73,8 @@ export function gatewayUsageOutcome(stopReason: string): GatewayUsageOutcome {
 export interface AuthGatewayRouteOptions {
 	/** Source of credentials: broker-backed for `serve`, the CLI's own for `stdio`. */
 	storage: AuthStorage;
-	/** Called once for each settled upstream call with nonzero usage. */
-	onUsage?: (event: GatewayUsageEvent) => void;
+	/** May repeat for the same requestId (video polls); dedupe on it. */
+	onUsage?: (event: GatewayUsageEvent) => void | Promise<void>;
 	/**
 	 * The admitted caller's credential pool. When set it replaces `storage` for
 	 * every request, so one tenant's requests never select another's credential.
@@ -347,10 +350,13 @@ export function recordGatewayUsage(
 	});
 }
 
-/** Call the boot `onUsage` hook; a throwing hook is logged and never reaches the route. */
+/** Call the boot hook; synchronous throws and asynchronous rejections are logged. */
 export function emitGatewayUsage(bootOpts: AuthGatewayRouteOptions, event: GatewayUsageEvent): void {
 	try {
-		bootOpts.onUsage?.(event);
+		const result = bootOpts.onUsage?.({ ...event, usage: structuredClone(event.usage) });
+		if (result && typeof result.then === "function") {
+			void result.catch(error => logger.warn("auth-gateway onUsage hook failed", { error }));
+		}
 	} catch (error) {
 		logger.warn("auth-gateway onUsage hook failed", { error });
 	}
