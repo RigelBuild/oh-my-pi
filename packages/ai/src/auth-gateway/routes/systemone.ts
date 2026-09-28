@@ -87,6 +87,7 @@ export async function handleSystemOne(bootOpts: AuthGatewayBootOptions, req: Req
 			},
 		),
 		api: model.api,
+		provider: model.provider,
 		model: model.id,
 		baseUrl: model.baseUrl,
 		fetch: bootOpts.fetch,
