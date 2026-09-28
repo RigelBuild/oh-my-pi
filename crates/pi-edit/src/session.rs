@@ -397,7 +397,9 @@ fn carried_seen_lines(before: &str, after: &str, prior: Option<&Snapshot>) -> Ve
 		.count();
 	let unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
 	match prior.and_then(|snapshot| snapshot.seen_lines.as_ref()) {
-		Some(seen) if !seen.is_empty() => seen.range(1..=unchanged).copied().collect(),
+		Some(seen) if !seen.is_empty() && unchanged > 0 => {
+			seen.range(1..=unchanged).copied().collect()
+		},
 		_ => (1..=unchanged).collect(),
 	}
 }

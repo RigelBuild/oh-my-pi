@@ -1033,6 +1033,24 @@ async fn edit_results_carry_unshifted_prior_provenance_only() {
 	assert_eq!(workspace.read("a.txt").as_deref(), Some(expected.as_str()));
 }
 
+#[tokio::test]
+async fn edit_results_carry_no_prior_lines_when_first_line_changes() {
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	let source = "one\ntwo\nthree\n";
+	workspace.write("a.txt", source);
+	let tag = workspace.snapshot("a.txt", source, Some(&[1, 2, 3]));
+
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[a.txt#{tag}]\nPUT 1.=1:\n+ONE") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("first-line edit must not panic");
+	assert_eq!(workspace.read("a.txt").as_deref(), Some("ONE\ntwo\nthree\n"));
+}
+
 fn preview_for(
 	workspace: &Workspace,
 	input: String,
