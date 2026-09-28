@@ -92,7 +92,9 @@ async function boot(trustProxyHeaders = false): Promise<Harness> {
 		},
 		version: "test",
 		fetch: fetchImpl,
-		onUsage: event => events.push(event),
+		onUsage: event => {
+			events.push(event);
+		},
 	});
 	return { url: handle.url, storage, upstream, handle, dir, events };
 }

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { startAuthGateway, type GatewayUsageEvent } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { decodeGatewayJobId, encodeGatewayJobId } from "@oh-my-pi/pi-ai/providers/video-server";
@@ -24,6 +24,7 @@ interface Harness {
 	upstream: UpstreamRequest[];
 	handle: AuthGatewayServerHandle;
 	dir: string;
+	events: GatewayUsageEvent[];
 }
 
 function model(id: string, api: Api = "openrouter-video", kind: "video" | undefined = "video"): Model<Api> {
@@ -49,6 +50,7 @@ async function boot(): Promise<Harness> {
 	const video = model("google/veo-3.1");
 	const wrongApi = model("openrouter/auto", "openrouter", undefined);
 	const upstream: UpstreamRequest[] = [];
+	const events: GatewayUsageEvent[] = [];
 	const fetchImpl: FetchImpl = async (input, init) => {
 		const url = String(input);
 		const method = init?.method ?? "GET";
@@ -68,6 +70,14 @@ async function boot(): Promise<Harness> {
 				},
 				{ status: 202 },
 			);
+		}
+		if (url.endsWith("/videos/job-no-usage") && method === "GET") {
+			return Response.json({
+				id: "job-no-usage",
+				polling_url: "https://openrouter.ai/api/v1/videos/job-no-usage",
+				status: "completed",
+				unsigned_urls: [],
+			});
 		}
 		if (url.endsWith("/videos/job-upstream-123") && method === "GET") {
 			return Response.json({
@@ -97,8 +107,11 @@ async function boot(): Promise<Harness> {
 		},
 		version: "test",
 		fetch: fetchImpl,
+		onUsage: event => {
+			events.push(event);
+		},
 	});
-	return { url: handle.url, storage, upstream, handle, dir };
+	return { url: handle.url, storage, upstream, handle, dir, events };
 }
 
 async function close(harness: Harness | undefined): Promise<void> {
@@ -209,6 +222,25 @@ describe("auth-gateway asynchronous video generation", () => {
 		expect(observed).toEqual([
 			expect.objectContaining({ provider: "openrouter", model: "google/veo-3.1", costUsd: 0.4 }),
 		]);
+		expect(harness.events).toHaveLength(1);
+		expect(harness.events[0]).toMatchObject({ requestId: gatewayId, usage: { cost: { total: 0.4 } } });
+		const repeated = await fetch(`${harness.url}/v1/videos/${gatewayId}`, {
+			headers: { Authorization: "Bearer gw-token", "x-omp-app": "video-client" },
+		});
+		expect(repeated.status).toBe(200);
+		expect(harness.events).toHaveLength(2);
+		expect(harness.events[1]).toMatchObject({ requestId: gatewayId, usage: { cost: { total: 0.4 } } });
+
+		const noUsageId = encodeGatewayJobId({
+			provider: "openrouter",
+			modelId: "google/veo-3.1",
+			upstreamId: "job-no-usage",
+		});
+		const noUsage = await fetch(`${harness.url}/v1/videos/${noUsageId}`, {
+			headers: { Authorization: "Bearer gw-token" },
+		});
+		expect(noUsage.status).toBe(200);
+		expect(harness.events).toHaveLength(2);
 	});
 
 	it("streams content bytes and the upstream media type", async () => {

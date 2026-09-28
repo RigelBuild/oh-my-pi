@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types";
@@ -35,7 +36,7 @@ interface Harness {
 	model: MockModel;
 }
 
-async function boot(onUsage?: (event: GatewayUsageEvent) => void): Promise<Harness> {
+async function boot(onUsage?: (event: GatewayUsageEvent) => void | Promise<void>): Promise<Harness> {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-usage-hook-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
@@ -50,7 +51,7 @@ async function boot(onUsage?: (event: GatewayUsageEvent) => void): Promise<Harne
 		version: "test",
 		onUsage: event => {
 			events.push(event);
-			onUsage?.(event);
+			return onUsage?.(event);
 		},
 	});
 	return { url: handle.url, storage, handle, dir, events, model };
@@ -91,6 +92,77 @@ describe("auth-gateway onUsage hook", () => {
 			usage,
 			outcome: "ok",
 		});
+	});
+
+	it("attributes usage to the API key that served the call", async () => {
+		harness = await boot();
+		harness.model.push({ content: ["ok"], usage });
+		const response = await chatRequest(harness.url);
+		expect(response.status).toBe(200);
+		expect(harness.events[0]?.account).toBe(`key:${Bun.hash("test-key").toString(36)}`);
+	});
+
+	it("attributes retried usage to the sibling credential that served it", async () => {
+		registerMockApi();
+		let attempt = 0;
+		const model = createMockModel({
+			provider: "mock",
+			id: "usage-hook-rotation-model",
+			handler: () => {
+				if (attempt++ === 0) throw new ProviderHttpError("expired credential", 401);
+				return { content: ["ok"], usage };
+			},
+		});
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-usage-rotation-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		await storage.credentials.set("mock", [
+			{ type: "api_key", key: "key-one" },
+			{ type: "api_key", key: "key-two" },
+		]);
+		const events: GatewayUsageEvent[] = [];
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+			onUsage: event => {
+				events.push(event);
+			},
+		});
+		try {
+			const response = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ model: model.id, messages: [{ role: "user", content: "hello" }] }),
+			});
+			expect(response.status).toBe(200);
+			expect(events).toHaveLength(1);
+			expect(model.calls).toHaveLength(2);
+			expect(model.calls.at(-1)?.options?.apiKey).toBeDefined();
+			const account = `key:${Bun.hash("key-two").toString(36)}`;
+			expect(events[0]?.account).toBe(account);
+			expect(events[0]?.account).not.toBe(`key:${Bun.hash("key-one").toString(36)}`);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("isolates route usage from a mutating hook while observing the original", async () => {
+		harness = await boot(event => {
+			event.usage.input = 0;
+		});
+		harness.model.push({ content: ["ok"], usage });
+		const observed: Array<{ usage: { input: number } }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+
+		const response = await chatRequest(harness.url);
+		const body = await response.json();
+		expect(response.status).toBe(200);
+		expect(body).toMatchObject({ usage: { prompt_tokens: usage.input + 3, completion_tokens: usage.output } });
+		expect(observed).toEqual([expect.objectContaining({ usage: expect.objectContaining({ input: usage.input }) })]);
 	});
 
 	it("reports stream completion once, and maps error and aborted outcomes", async () => {
@@ -134,5 +206,29 @@ describe("auth-gateway onUsage hook", () => {
 		expect(response.status).toBe(200);
 		expect(harness.events).toHaveLength(1);
 		expect(observed).toHaveLength(1);
+	});
+
+	it("contains rejected async hooks without an unhandled rejection", async () => {
+		harness = await boot(async () => {
+			throw new Error("consumer rejected");
+		});
+		let unhandled = 0;
+		const unhandledEvent = Promise.withResolvers<void>();
+		const listener = () => {
+			unhandled++;
+			unhandledEvent.resolve();
+		};
+		process.on("unhandledRejection", listener);
+		try {
+			harness.model.push({ content: ["ok"], usage });
+			const response = await chatRequest(harness.url);
+			expect(response.status).toBe(200);
+			const nextTurn = Promise.withResolvers<void>();
+			setImmediate(nextTurn.resolve);
+			await nextTurn.promise;
+			expect(unhandled).toBe(0);
+		} finally {
+			process.off("unhandledRejection", listener);
+		}
 	});
 });
