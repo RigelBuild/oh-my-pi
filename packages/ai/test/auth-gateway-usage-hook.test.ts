@@ -165,6 +165,28 @@ describe("auth-gateway onUsage hook", () => {
 		expect(observed).toEqual([expect.objectContaining({ usage: expect.objectContaining({ input: usage.input }) })]);
 	});
 
+	it("isolates client identity from a mutating hook while observing the original", async () => {
+		harness = await boot(event => {
+			event.client.installId = "mutated";
+		});
+		harness.model.push({ content: ["ok"], usage });
+		const observed: Array<{ client?: { installId?: string } }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		const response = await fetch(`${harness.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: {
+				Authorization: "Bearer test-token",
+				"Content-Type": "application/json",
+				"x-omp-install-id": "original-install",
+			},
+			body: JSON.stringify({ model: "usage-hook-model", messages: [{ role: "user", content: "hello" }] }),
+		});
+		expect(response.status).toBe(200);
+		expect(observed).toHaveLength(1);
+		expect(observed[0]?.client?.installId).toBe("original-install");
+		expect(harness.events[0]?.client.installId).toBe("mutated");
+	});
+
 	it("reports stream completion once, and maps error and aborted outcomes", async () => {
 		const settled = Promise.withResolvers<GatewayUsageEvent>();
 		harness = await boot(event => settled.resolve(event));
