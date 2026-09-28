@@ -104,8 +104,8 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 	const maxAgeMs = opts.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
 	const maxBatch = opts.maxBatch ?? DEFAULT_MAX_BATCH;
 	const retryBaseMs = opts.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
-	const now = opts.now ?? Date.now;
-	const newId = opts.newId ?? crypto.randomUUID;
+	const now = opts.now ?? (() => performance.now());
+	const newId = opts.newId ?? (() => crypto.randomUUID());
 	const scheduleTimer =
 		opts.setTimer ??
 		((callback, delayMs) => {
@@ -122,6 +122,7 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 	let inFlight: Promise<void> | undefined;
 	let failures = 0;
 	let closed = false;
+	let closePromise: Promise<void> | undefined;
 	let timer: UsageTimer | undefined;
 	const clearScheduled = (): void => {
 		if (timer !== undefined) {
@@ -150,11 +151,19 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 				dropped += expired;
 			}
 			while (buffer.length > 0) {
-				const chunk = buffer.slice(0, maxBatch);
+				// Take the chunk out before awaiting so capacity eviction can't touch rows in flight.
+				const chunk = buffer.splice(0, maxBatch);
 				try {
 					await opts.send(chunk.map(item => item.row));
 				} catch (error) {
 					failures++;
+					buffer.unshift(...chunk);
+					// Keep the retried chunk's ids; drop the oldest rows queued behind it instead.
+					const excess = buffer.length - maxEvents;
+					if (excess > 0) {
+						buffer.splice(chunk.length, excess);
+						dropped += excess;
+					}
 					try {
 						opts.log?.warn("Compass usage batch send failed", { error, buffered: buffer.length });
 					} catch {
@@ -164,7 +173,6 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 					schedule(delay);
 					return;
 				}
-				buffer.splice(0, chunk.length);
 				sent += chunk.length;
 				failures = 0;
 			}
@@ -178,9 +186,13 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 
 	const emitter: UsageEmitter = {
 		onUsage(event): void {
+			if (closed) {
+				dropped++;
+				return;
+			}
 			try {
 				const attribution = opts.attribute(event);
-				if (!attribution) {
+				if (!attribution?.agentAccountId || !attribution.ownerUserId) {
 					droppedUnattributed();
 					return;
 				}
@@ -194,22 +206,25 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 			}
 		},
 		flush,
-		async close(): Promise<void> {
-			if (closed) return;
+		close(): Promise<void> {
+			if (closePromise) return closePromise;
 			closed = true;
 			clearScheduled();
-			await flush();
-			clearScheduled();
-			if (buffer.length > 0) {
-				const remaining = buffer.length;
-				try {
-					opts.log?.warn("Dropping buffered Compass usage events on close", { count: remaining });
-				} catch {
-					// Logging must not prevent close from dropping unsent events.
+			closePromise = (async () => {
+				await flush();
+				clearScheduled();
+				if (buffer.length > 0) {
+					const remaining = buffer.length;
+					try {
+						opts.log?.warn("Dropping buffered Compass usage events on close", { count: remaining });
+					} catch {
+						// Logging must not prevent close from dropping unsent events.
+					}
+					buffer.length = 0;
+					dropped += remaining;
 				}
-				buffer.length = 0;
-				dropped += remaining;
-			}
+			})();
+			return closePromise;
 		},
 		stats: () => ({ buffered: buffer.length, dropped, unattributed, sent }),
 	};
