@@ -20,9 +20,32 @@ import type { AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
 
+export type GatewayUsageOutcome = "ok" | "error" | "aborted";
+
+/** One settled upstream call, reported to {@link AuthGatewayBootOptions.onUsage}. */
+export interface GatewayUsageEvent {
+	/** The gateway's per-request id, also sent in the response headers. */
+	requestId: string;
+	provider: string;
+	model: string;
+	usage: Usage;
+	outcome: GatewayUsageOutcome;
+	at: number;
+	client: ClientUsageIdentity;
+	/** Identity of the credential that served the call, when the route knows it. */
+	account?: string;
+}
+
+/** Map an assistant stop reason to the usage outcome. */
+export function gatewayUsageOutcome(stopReason: string): GatewayUsageOutcome {
+	return stopReason === "error" || stopReason === "aborted" ? stopReason : "ok";
+}
+
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
 	storage: AuthStorage;
+	/** Called once for each settled upstream call with nonzero usage. */
+	onUsage?: (event: GatewayUsageEvent) => void;
 	/**
 	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
 	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse
@@ -244,14 +267,15 @@ export function buildGatewayApiKeyResolver(
  * (pre-flight failures) are skipped. `at` defaults to now.
  */
 export function recordGatewayUsage(
-	storage: AuthStorage,
+	bootOpts: AuthGatewayBootOptions,
 	model: Model<Api>,
 	client: ClientUsageIdentity,
 	usage: Usage,
-	at?: number,
+	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string },
 ): void {
 	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
-	storage.usage.observe({
+	const at = options.at ?? Date.now();
+	bootOpts.storage.usage.observe({
 		provider: model.provider,
 		model: model.id,
 		at,
@@ -259,6 +283,25 @@ export function recordGatewayUsage(
 		costUsd: usage.cost.total,
 		client,
 	});
+	emitGatewayUsage(bootOpts, {
+		requestId: options.requestId,
+		provider: model.provider,
+		model: model.id,
+		usage,
+		outcome: options.outcome,
+		at,
+		client,
+		...(options.account !== undefined && { account: options.account }),
+	});
+}
+
+/** Call the boot `onUsage` hook; a throwing hook is logged and never reaches the route. */
+export function emitGatewayUsage(bootOpts: AuthGatewayBootOptions, event: GatewayUsageEvent): void {
+	try {
+		bootOpts.onUsage?.(event);
+	} catch (error) {
+		logger.warn("auth-gateway onUsage hook failed", { error });
+	}
 }
 
 /**

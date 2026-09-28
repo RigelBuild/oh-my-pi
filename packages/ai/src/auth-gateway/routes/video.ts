@@ -8,6 +8,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayBootOptions,
 	buildGatewayApiKeyResolver,
+	emitGatewayUsage,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
 } from "../dispatch";
@@ -95,19 +96,32 @@ function logVideoRequest(
 	});
 }
 
+// Every poll of a completed job reports usage; the hook gets the stable gateway
+// job id as its requestId so a consumer can dedupe repeat polls.
 function recordCompletedUsage(
 	bootOpts: AuthGatewayBootOptions,
 	resolved: ResolvedVideoRequest,
 	req: Request,
 	job: VideoJob,
+	gatewayId: string,
 ): void {
 	if (job.status !== "completed" || job.usage === undefined) return;
+	const client = resolveClientIdentity(req.headers);
 	bootOpts.storage.usage.observe({
 		provider: resolved.model.provider,
 		model: resolved.model.id,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		costUsd: job.usage.cost.total,
-		client: resolveClientIdentity(req.headers),
+		client,
+	});
+	emitGatewayUsage(bootOpts, {
+		requestId: gatewayId,
+		provider: resolved.model.provider,
+		model: resolved.model.id,
+		usage: job.usage,
+		outcome: "ok",
+		at: Date.now(),
+		client,
 	});
 }
 
@@ -197,7 +211,7 @@ export async function handleVideoPoll(
 	logVideoRequest(requestId, "poll", resolved.model, peer);
 	try {
 		const job = await pollVideo(resolved.model, resolved.upstreamId, videoOptions(bootOpts, resolved, peer));
-		recordCompletedUsage(bootOpts, resolved, req, job);
+		recordCompletedUsage(bootOpts, resolved, req, job, gatewayId);
 		return json(
 			200,
 			videoServer.encodePollResponse(job, req, gatewayId),

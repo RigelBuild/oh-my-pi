@@ -79,7 +79,7 @@ export async function handleEmbeddings(
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok" });
 		return json(
 			200,
 			embeddings.encodeResponse(result, parsed.modelId),
