@@ -96,8 +96,7 @@ function logVideoRequest(
 	});
 }
 
-// Every poll of a completed job reports usage; the hook gets the stable gateway
-// job id as its requestId so a consumer can dedupe repeat polls.
+// Report completed jobs on each poll; zero-cost, zero-token results remain observed only.
 function recordCompletedUsage(
 	bootOpts: AuthGatewayBootOptions,
 	resolved: ResolvedVideoRequest,
@@ -114,6 +113,15 @@ function recordCompletedUsage(
 		costUsd: job.usage.cost.total,
 		client,
 	});
+	if (
+		job.usage.cost.total === 0 &&
+		job.usage.input === 0 &&
+		job.usage.output === 0 &&
+		job.usage.cacheRead === 0 &&
+		job.usage.cacheWrite === 0
+	) {
+		return;
+	}
 	emitGatewayUsage(bootOpts, {
 		requestId: gatewayId,
 		provider: resolved.model.provider,

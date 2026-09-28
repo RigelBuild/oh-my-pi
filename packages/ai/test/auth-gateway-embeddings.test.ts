@@ -90,7 +90,9 @@ async function boot(): Promise<Harness> {
 		},
 		version: "test",
 		fetch: fetchImpl,
-		onUsage: event => events.push(event),
+		onUsage: event => {
+			events.push(event);
+		},
 	});
 	return { url: handle.url, storage, upstream, handle, dir, events };
 }
