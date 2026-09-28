@@ -93,6 +93,24 @@ describe("auth-gateway onUsage hook", () => {
 			outcome: "ok",
 		});
 	});
+	it("reports usage when only totalTokens is populated", async () => {
+		harness = await boot();
+		harness.model.push({
+			content: ["ok"],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 17,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		const response = await chatRequest(harness.url);
+		expect(response.status).toBe(200);
+		expect(harness.events).toHaveLength(1);
+		expect(harness.events[0]?.usage.totalTokens).toBe(17);
+	});
 
 	it("attributes usage to the API key that served the call", async () => {
 		harness = await boot();
@@ -166,7 +184,9 @@ describe("auth-gateway onUsage hook", () => {
 	});
 
 	it("isolates client identity from a mutating hook while observing the original", async () => {
+		let identityBeforeMutation: string | undefined;
 		harness = await boot(event => {
+			identityBeforeMutation = event.client.installId;
 			event.client.installId = "mutated";
 		});
 		harness.model.push({ content: ["ok"], usage });
@@ -183,6 +203,7 @@ describe("auth-gateway onUsage hook", () => {
 		});
 		expect(response.status).toBe(200);
 		expect(observed).toHaveLength(1);
+		expect(identityBeforeMutation).toBe("original-install");
 		expect(observed[0]?.client?.installId).toBe("original-install");
 		expect(harness.events[0]?.client.installId).toBe("mutated");
 	});
