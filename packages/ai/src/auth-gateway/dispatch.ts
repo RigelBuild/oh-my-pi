@@ -262,6 +262,18 @@ export function buildGatewayApiKeyResolver(
 	};
 }
 
+/** Whether settled usage has any billable tokens or reported total cost. */
+export function hasGatewayUsage(usage: Usage): boolean {
+	return (
+		usage.input > 0 ||
+		usage.output > 0 ||
+		usage.cacheRead > 0 ||
+		usage.cacheWrite > 0 ||
+		usage.totalTokens > 0 ||
+		usage.cost.total > 0
+	);
+}
+
 /**
  * Attribute one settled upstream request to the originating client via the
  * broker's observed-usage channel (`AuthStorage.usage.observe`, batched
@@ -276,16 +288,18 @@ export function recordGatewayUsage(
 	usage: Usage,
 	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string },
 ): void {
-	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
 	const at = options.at ?? Date.now();
-	bootOpts.storage.usage.observe({
-		provider: model.provider,
-		model: model.id,
-		at,
-		usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
-		costUsd: usage.cost.total,
-		client,
-	});
+	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite !== 0) {
+		bootOpts.storage.usage.observe({
+			provider: model.provider,
+			model: model.id,
+			at,
+			usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
+			costUsd: usage.cost.total,
+			client,
+		});
+	}
+	if (!hasGatewayUsage(usage)) return;
 	emitGatewayUsage(bootOpts, {
 		requestId: options.requestId,
 		provider: model.provider,
@@ -301,7 +315,7 @@ export function recordGatewayUsage(
 /** Call the boot hook; synchronous throws and asynchronous rejections are logged. */
 export function emitGatewayUsage(bootOpts: AuthGatewayBootOptions, event: GatewayUsageEvent): void {
 	try {
-		const result = bootOpts.onUsage?.({ ...event, usage: structuredClone(event.usage) });
+		const result = bootOpts.onUsage?.({ ...event, usage: structuredClone(event.usage), client: { ...event.client } });
 		if (result && typeof result.then === "function") {
 			void result.catch(error => logger.warn("auth-gateway onUsage hook failed", { error }));
 		}

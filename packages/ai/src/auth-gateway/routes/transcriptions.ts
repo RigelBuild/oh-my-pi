@@ -8,6 +8,7 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
+	resolveGatewayAccount,
 	resolveGatewayApiKey,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
@@ -54,6 +55,7 @@ export async function handleTranscriptions(
 	if (typeof apiKey !== "string") {
 		return transcriptions.formatError(apiKey.status, apiKey.type, apiKey.message);
 	}
+	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -75,11 +77,14 @@ export async function handleTranscriptions(
 				controller.signal,
 				"transcriptions",
 				peer,
+				resolvedKey => {
+					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+				},
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok" });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
 		return json(
 			200,
 			transcriptions.encodeResponse(result),

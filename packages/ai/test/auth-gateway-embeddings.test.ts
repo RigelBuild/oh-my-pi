@@ -164,6 +164,17 @@ describe("auth-gateway POST /v1/embeddings", () => {
 			outcome: "ok",
 		});
 	});
+	it("attributes usage to the runtime API key account", async () => {
+		harness = await boot();
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "account attribution" }),
+		});
+		expect(response.status).toBe(200);
+		expect(harness.events).toHaveLength(1);
+		expect(harness.events[0]?.account).toBe(`key:${Bun.hash("openai-secret").toString(36)}`);
+	});
 
 	it("passes OpenRouter base64 embeddings and provider-reported cost through", async () => {
 		harness = await boot();
