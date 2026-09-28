@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
+import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
 import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
@@ -19,6 +20,11 @@ const bundledModuleKeys = new Set(bundledEntries.map(entry => entry.key));
 // the same `omp-legacy-pi-bundled:` virtual namespace as package roots without
 // a generated registry or duplicate key list.
 describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () => {
+	it("exposes the build plugin to SDK consumers", async () => {
+		const plugin = await createLegacyPiVirtualModulePlugin();
+		expect(plugin.name).toBe("omp:legacy-pi-modules");
+	});
+
 	it("does not evaluate unrelated host modules while loading the registry", async () => {
 		using tempDir = TempDir.createSync("@omp-legacy-pi-loaders-");
 		const alphaPath = path.join(tempDir.path(), "alpha.ts");
