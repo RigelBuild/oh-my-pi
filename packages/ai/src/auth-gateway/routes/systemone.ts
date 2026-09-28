@@ -91,6 +91,7 @@ export async function handleSystemOne(
 			},
 		),
 		api: model.api,
+		provider: model.provider,
 		model: model.id,
 		baseUrl: model.baseUrl,
 		fetch: bootOpts.fetch,

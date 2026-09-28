@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { generateImage } from "@oh-my-pi/pi-ai/images";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
@@ -33,10 +34,20 @@ async function withGateway(
 	fetchImpl: FetchImpl,
 	test: (url: string, storage: AuthStorage) => Promise<void>,
 	onUsage?: (event: GatewayUsageEvent) => void,
+	apiKeys?: readonly string[],
 ): Promise<void> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-images-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	for (const model of models) storage.keys.setRuntime(model.provider, `key-${model.provider}`);
+	for (const model of models) {
+		if (apiKeys && model.provider === "openrouter") {
+			await storage.credentials.set(
+				model.provider,
+				apiKeys.map(key => ({ type: "api_key", key })),
+			);
+		} else {
+			storage.keys.setRuntime(model.provider, `key-${model.provider}`);
+		}
+	}
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		bearerTokens: ["gateway-token"],
@@ -257,6 +268,40 @@ describe("auth gateway images", () => {
 				expect(events[0]?.usage.cost.total).toBe(0.42);
 			},
 			event => events.push(event),
+		);
+	});
+
+	it("attributes rotated image usage to the key that served it", async () => {
+		const model = imageModel("openrouter", "rotated-image", "openrouter-images");
+		const events: GatewayUsageEvent[] = [];
+		const attempts: Array<string | null> = [];
+		const fetchStub: FetchImpl = async (_input, init) => {
+			const authorization = new Headers(init?.headers).get("authorization");
+			attempts.push(authorization);
+			if (authorization === "Bearer key-one") throw new ProviderHttpError("expired credential", 401);
+			return Response.json({
+				created: 1,
+				data: [{ b64_json: IMAGE_DATA, media_type: "image/webp" }],
+				usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14, cost: 0.42 },
+			});
+		};
+		await withGateway(
+			[model],
+			fetchStub,
+			async url => {
+				const response = await gatewayRequest(url, "/v1/images", {
+					model: model.id,
+					prompt: "rotate key",
+					n: 1,
+					response_format: "b64_json",
+				});
+				expect(response.status).toBe(200);
+				expect(attempts).toEqual(["Bearer key-one", "Bearer key-two"]);
+				expect(events).toHaveLength(1);
+				expect(events[0]?.account).toBe(`key:${Bun.hash("key-two").toString(36)}`);
+			},
+			event => events.push(event),
+			["key-one", "key-two"],
 		);
 	});
 
