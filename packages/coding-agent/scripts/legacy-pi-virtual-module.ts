@@ -6,7 +6,6 @@ export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
 
 const VIRTUAL_NAMESPACE = "omp-legacy-pi-modules-build";
 const packageDir = path.resolve(import.meta.dir, "..");
-const repoRoot = path.resolve(packageDir, "..", "..");
 
 interface BundledPackage {
 	readonly dir: string;
@@ -116,8 +115,9 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	}
 
 	for (const pkg of BUNDLED_PACKAGES) {
-		const packageRoot = path.join(repoRoot, "packages", pkg.dir);
-		const manifestPath = path.join(packageRoot, "package.json");
+		const name = `@oh-my-pi/pi-${pkg.dir === "agent" ? "agent-core" : pkg.dir}`;
+		const manifestPath = Bun.resolveSync(`${name}/package.json`, packageDir);
+		const packageRoot = path.dirname(manifestPath);
 		const manifest: unknown = await Bun.file(manifestPath).json();
 		if (!isRecord(manifest) || typeof manifest.name !== "string") {
 			throw new Error(`Bundled Pi package manifest has no name: ${manifestPath}`);
