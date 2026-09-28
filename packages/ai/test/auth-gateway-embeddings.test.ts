@@ -7,6 +7,7 @@ import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { GatewayUsageEvent } from "@oh-my-pi/pi-ai/auth-gateway";
 import { logger } from "@oh-my-pi/pi-utils";
 
 interface UpstreamRequest {
@@ -21,6 +22,7 @@ interface Harness {
 	upstream: UpstreamRequest[];
 	handle: AuthGatewayServerHandle;
 	dir: string;
+	events: GatewayUsageEvent[];
 }
 
 function embeddingModel(
@@ -54,6 +56,7 @@ async function boot(trustProxyHeaders = false): Promise<Harness> {
 	const routed = embeddingModel("openrouter", "qwen/qwen3-embedding-8b");
 	const wrongApi = embeddingModel("openai", "gpt-5.5", "openai-responses");
 	const upstream: UpstreamRequest[] = [];
+	const events: GatewayUsageEvent[] = [];
 	const fetchImpl: FetchImpl = async (input, init) => {
 		const body: unknown = JSON.parse(String(init?.body));
 		upstream.push({
@@ -89,8 +92,9 @@ async function boot(trustProxyHeaders = false): Promise<Harness> {
 		},
 		version: "test",
 		fetch: fetchImpl,
+		onUsage: event => events.push(event),
 	});
-	return { url: handle.url, storage, upstream, handle, dir };
+	return { url: handle.url, storage, upstream, handle, dir, events };
 }
 
 async function close(harness: Harness | undefined): Promise<void> {
@@ -152,6 +156,13 @@ describe("auth-gateway POST /v1/embeddings", () => {
 			model: "text-embedding-3-small",
 			costUsd: 0.0000001,
 			client: { app: "vector-client" },
+		});
+		expect(harness.events).toHaveLength(1);
+		expect(harness.events[0]).toMatchObject({
+			requestId: response.headers.get("x-request-id"),
+			provider: "openai",
+			model: "text-embedding-3-small",
+			outcome: "ok",
 		});
 	});
 

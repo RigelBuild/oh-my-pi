@@ -104,7 +104,7 @@ async function handleImages(
 			signal: controller.signal,
 		});
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok" });
 		return json(
 			200,
 			imagesServer.encodeResponse(result, parsed.modelId),

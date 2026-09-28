@@ -55,6 +55,7 @@ import {
 	buildGatewayApiKeyResolver,
 	type CandidateFailoverOptions,
 	type FailoverContext,
+	gatewayUsageOutcome,
 	mirrorRequestAbort,
 	normalizeClientSessionKey,
 	recordGatewayUsage,
@@ -484,7 +485,7 @@ interface FailoverRoute {
 
 interface FailoverRequest {
 	readonly failover: CandidateFailoverOptions;
-	readonly storage: AuthStorage;
+	readonly bootOpts: AuthGatewayRouteOptions;
 	readonly req: Request;
 	readonly controller: AbortController;
 	readonly model: Model<Api>;
@@ -794,7 +795,7 @@ async function runFailoverLoop(
 				continue;
 			}
 
-			const { streamOpts, lease } = start;
+			const { streamOpts, lease, account } = start;
 			const follower = await lookupNext();
 			if (controller.signal.aborted || expired) {
 				lease.release();
@@ -864,13 +865,12 @@ async function runFailoverLoop(
 					unlink();
 				}
 				if (message) {
-					recordGatewayUsage(
-						request.storage,
-						answering,
-						request.client,
-						message.usage,
-						message.timestamp || undefined,
-					);
+					recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
+						requestId,
+						outcome: gatewayUsageOutcome(message.stopReason),
+						at: message.timestamp || undefined,
+						account: account(),
+					});
 					if (message.stopReason !== "error" && message.stopReason !== "aborted") {
 						return { kind: "answered", model: answering, message };
 					}
@@ -890,13 +890,12 @@ async function runFailoverLoop(
 				void events
 					.result()
 					.then(message =>
-						recordGatewayUsage(
-							request.storage,
-							answering,
-							request.client,
-							message.usage,
-							message.timestamp || undefined,
-						),
+						recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
+							requestId,
+							outcome: gatewayUsageOutcome(message.stopReason),
+							at: message.timestamp || undefined,
+							account: account(),
+						}),
 					)
 					.catch(() => {})
 					.finally(() => {
@@ -1017,7 +1016,7 @@ async function handleFormatEndpoint(
 		return serveWithFailover(
 			{
 				failover: bootOpts.candidateFailover,
-				storage: bootOpts.storage,
+				bootOpts,
 				req,
 				controller,
 				model,
@@ -1073,7 +1072,7 @@ async function handleFormatEndpoint(
 		throw error;
 	}
 	if (!start.ok) return route.module.formatError(start.failure.status, start.failure.type, start.failure.message);
-	const { streamOpts, lease } = start;
+	const { streamOpts, lease, account } = start;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -1089,7 +1088,12 @@ async function handleFormatEndpoint(
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+			recordGatewayUsage(bootOpts, model, client, message.usage, {
+				requestId,
+				outcome: gatewayUsageOutcome(message.stopReason),
+				at: message.timestamp || undefined,
+				account: account(),
+			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -1145,7 +1149,12 @@ async function handleFormatEndpoint(
 		void events
 			.result()
 			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				recordGatewayUsage(bootOpts, model, client, message.usage, {
+					requestId,
+					outcome: gatewayUsageOutcome(message.stopReason),
+					at: message.timestamp || undefined,
+					account: account(),
+				}),
 			)
 			.catch(() => {})
 			.finally(() => lease.release());
@@ -1242,7 +1251,7 @@ async function handlePiNative(
 		return serveWithFailover(
 			{
 				failover: bootOpts.candidateFailover,
-				storage: bootOpts.storage,
+				bootOpts,
 				req,
 				controller,
 				model,
@@ -1297,7 +1306,7 @@ async function handlePiNative(
 		throw error;
 	}
 	if (!start.ok) return piNative.formatError(start.failure.status, start.failure.type, start.failure.message);
-	const { streamOpts, lease } = start;
+	const { streamOpts, lease, account } = start;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -1313,7 +1322,12 @@ async function handlePiNative(
 		try {
 			if (controller.signal.aborted) return aborted();
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+			recordGatewayUsage(bootOpts, model, client, message.usage, {
+				requestId,
+				outcome: gatewayUsageOutcome(message.stopReason),
+				at: message.timestamp || undefined,
+				account: account(),
+			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -1365,7 +1379,12 @@ async function handlePiNative(
 		void events
 			.result()
 			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				recordGatewayUsage(bootOpts, model, client, message.usage, {
+					requestId,
+					outcome: gatewayUsageOutcome(message.stopReason),
+					at: message.timestamp || undefined,
+					account: account(),
+				}),
 			)
 			.catch(() => {})
 			.finally(() => lease.release());
