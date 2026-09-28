@@ -1034,7 +1034,7 @@ async fn edit_results_carry_unshifted_prior_provenance_only() {
 }
 
 #[tokio::test]
-async fn edit_results_carry_no_prior_lines_when_first_line_changes() {
+async fn first_line_edit_with_seen_provenance_does_not_panic() {
 	let mut workspace = Workspace::new(EditMode::Hashline);
 	workspace.config.enforce_seen_lines = true;
 	let source = "one\ntwo\nthree\n";
