@@ -10,6 +10,7 @@ import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	emitGatewayUsage,
+	hasGatewayUsage,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
 } from "../dispatch";
@@ -114,15 +115,8 @@ function recordCompletedUsage(
 		costUsd: job.usage.cost.total,
 		client,
 	});
-	if (
-		job.usage.cost.total === 0 &&
-		job.usage.input === 0 &&
-		job.usage.output === 0 &&
-		job.usage.cacheRead === 0 &&
-		job.usage.cacheWrite === 0
-	) {
-		return;
-	}
+	if (!hasGatewayUsage(job.usage)) return;
+	// Poll credentials can differ from the credential that billed the submitted job.
 	emitGatewayUsage(bootOpts, {
 		requestId: gatewayId,
 		provider: resolved.model.provider,

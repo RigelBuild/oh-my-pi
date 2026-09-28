@@ -21,6 +21,7 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
+	resolveGatewayAccount,
 	resolveGatewayApiKey,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
@@ -74,6 +75,7 @@ export async function handleSystemOne(
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
+	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
 
 	const judge = new TypeSafeJudge({
 		apiKey: buildGatewayApiKeyResolver(
@@ -84,9 +86,11 @@ export async function handleSystemOne(
 			controller.signal,
 			"systemone",
 			peer,
+			resolvedKey => {
+				account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			},
 		),
 		api: model.api,
-		provider: model.provider,
 		model: model.id,
 		baseUrl: model.baseUrl,
 		fetch: bootOpts.fetch,
@@ -109,7 +113,7 @@ export async function handleSystemOne(
 		// when the upstream reported tokens only (TypeSafe).
 		const body = systemOne.encodeResponse(result);
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok" });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
 		return json(200, body, gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }));
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();

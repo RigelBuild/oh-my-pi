@@ -8,6 +8,7 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
+	resolveGatewayAccount,
 	resolveGatewayApiKey,
 } from "../dispatch";
 import { gatewayResponseHeaders, resolveClientIdentity } from "../http";
@@ -59,6 +60,7 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return speechWire.formatError(apiKey.status, apiKey.type, apiKey.message);
 
+	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "speech",
@@ -79,11 +81,14 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 				controller.signal,
 				"speech",
 				peer,
+				resolvedKey => {
+					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+				},
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok" });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
 		const response = speechWire.encodeResponse(result, parsed.modelId);
 		const responseHeaders = gatewayResponseHeaders(model, {
 			requestId,
