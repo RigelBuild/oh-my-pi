@@ -229,4 +229,125 @@ describe("Compass usage emitter", () => {
 		expect(emitter.stats()).toMatchObject({ buffered: 0, sent: 2 });
 		expect(clock.timers.size).toBe(0);
 	});
+	it("uses a UUID id when no id factory is supplied", async () => {
+		const clock = new Clock();
+		let sent: TokenUsageEvent[] = [];
+		const emitter = createUsageEmitter(
+			options(
+				clock,
+				async batch => {
+					sent = batch;
+				},
+				{ newId: undefined },
+			),
+		);
+		emitter.onUsage(event());
+		await emitter.flush();
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+		await emitter.close();
+	});
+
+	it("preserves in-flight chunk rows when capacity overflows", async () => {
+		const clock = new Clock();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const batches: string[][] = [];
+		const emitter = createUsageEmitter(
+			options(
+				clock,
+				async batch => {
+					batches.push(batch.map(row => row.id));
+					if (batches.length === 1) {
+						started.resolve();
+						await release.promise;
+					}
+				},
+				{ maxEvents: 3, maxBatch: 2 },
+			),
+		);
+		for (let index = 0; index < 3; index++) emitter.onUsage(event());
+		const flush = emitter.flush();
+		await started.promise;
+		for (let index = 0; index < 3; index++) emitter.onUsage(event());
+		release.resolve();
+		await flush;
+		expect(batches).toEqual([["id-1", "id-2"], ["id-4", "id-5"], ["id-6"]]);
+		expect(emitter.stats()).toMatchObject({ buffered: 0, dropped: 1, sent: 5 });
+		await emitter.close();
+	});
+
+	it("retries an in-flight chunk before buffered rows after overflow", async () => {
+		const clock = new Clock();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const batches: string[][] = [];
+		let failFirst = true;
+		const emitter = createUsageEmitter(
+			options(
+				clock,
+				async batch => {
+					batches.push(batch.map(row => row.id));
+					if (failFirst) {
+						failFirst = false;
+						started.resolve();
+						await release.promise;
+						throw new Error("offline");
+					}
+				},
+				{ maxEvents: 3, maxBatch: 2 },
+			),
+		);
+		for (let index = 0; index < 3; index++) emitter.onUsage(event());
+		const flush = emitter.flush();
+		await started.promise;
+		for (let index = 0; index < 3; index++) emitter.onUsage(event());
+		release.resolve();
+		await flush;
+		expect(emitter.stats()).toMatchObject({ buffered: 3, dropped: 3 });
+		clock.fireNext();
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(batches.slice(1)).toEqual([["id-1", "id-2"], ["id-6"]]);
+		expect(emitter.stats()).toMatchObject({ buffered: 0, sent: 3, dropped: 3 });
+		await emitter.close();
+	});
+
+	it("shares close completion and drops usage received after close starts", async () => {
+		const clock = new Clock();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const emitter = createUsageEmitter(
+			options(clock, async () => {
+				started.resolve();
+				await release.promise;
+			}),
+		);
+		emitter.onUsage(event());
+		const first = emitter.close();
+		await started.promise;
+		let secondResolved = false;
+		const second = emitter.close().then(() => {
+			secondResolved = true;
+		});
+		emitter.onUsage(event());
+		expect(emitter.stats()).toMatchObject({ buffered: 0, dropped: 1 });
+		await Promise.resolve();
+		expect(secondResolved).toBe(false);
+		release.resolve();
+		await Promise.all([first, second]);
+		expect(secondResolved).toBe(true);
+		expect(emitter.stats()).toMatchObject({ buffered: 0, sent: 1, dropped: 1 });
+	});
+
+	it("rejects empty attribution keys", async () => {
+		const clock = new Clock();
+		const emitter = createUsageEmitter(
+			options(clock, async () => {}, { attribute: () => ({ agentAccountId: "", ownerUserId: "owner" }) }),
+		);
+		emitter.onUsage(event());
+		expect(emitter.stats()).toMatchObject({ buffered: 0, unattributed: 1 });
+		await emitter.close();
+	});
 });
