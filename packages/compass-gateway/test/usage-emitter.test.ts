@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { GatewayUsageEvent } from "@oh-my-pi/pi-ai/auth-gateway";
 import { createUsageEmitter, toTokenUsageEvent, type TokenUsageEvent } from "../src/usage-emitter";
 
@@ -306,9 +306,7 @@ describe("Compass usage emitter", () => {
 		await flush;
 		expect(emitter.stats()).toMatchObject({ buffered: 3, dropped: 3 });
 		clock.fireNext();
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		await emitter.flush();
 		expect(batches.slice(1)).toEqual([["id-1", "id-2"], ["id-6"]]);
 		expect(emitter.stats()).toMatchObject({ buffered: 0, sent: 3, dropped: 3 });
 		await emitter.close();
@@ -342,12 +340,69 @@ describe("Compass usage emitter", () => {
 	});
 
 	it("rejects empty attribution keys", async () => {
+		for (const keys of [
+			{ agentAccountId: "", ownerUserId: "owner" },
+			{ agentAccountId: "agent", ownerUserId: "" },
+		]) {
+			const emitter = createUsageEmitter(options(new Clock(), async () => {}, { attribute: () => keys }));
+			emitter.onUsage(event());
+			expect(emitter.stats()).toMatchObject({ buffered: 0, unattributed: 1 });
+			await emitter.close();
+		}
+	});
+
+	it("drops a chained flush's failed chunk before close resolves", async () => {
 		const clock = new Clock();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
 		const emitter = createUsageEmitter(
-			options(clock, async () => {}, { attribute: () => ({ agentAccountId: "", ownerUserId: "owner" }) }),
+			options(
+				clock,
+				async () => {
+					calls++;
+					if (calls === 1) {
+						started.resolve();
+						await release.promise;
+						return;
+					}
+					throw new Error("offline");
+				},
+				{ maxBatch: 1 },
+			),
 		);
 		emitter.onUsage(event());
-		expect(emitter.stats()).toMatchObject({ buffered: 0, unattributed: 1 });
-		await emitter.close();
+		const drain = emitter.flush();
+		await started.promise;
+		emitter.onUsage(event());
+		const chained = drain.then(() => emitter.flush());
+		const closed = emitter.close();
+		release.resolve();
+		await Promise.all([chained, closed]);
+		expect(emitter.stats()).toMatchObject({ buffered: 0, sent: 1, dropped: 1 });
+	});
+
+	it("ages the buffer on the monotonic clock, not wall time", async () => {
+		const wall = spyOn(Date, "now").mockReturnValue(0);
+		const mono = spyOn(performance, "now").mockReturnValue(0);
+		try {
+			const batches: TokenUsageEvent[][] = [];
+			const emitter = createUsageEmitter({
+				send: async batch => {
+					batches.push(batch);
+				},
+				attribute: () => attribution,
+				rateVersion: "r",
+				maxAgeMs: 1_000,
+			});
+			emitter.onUsage(event());
+			wall.mockReturnValue(10_000);
+			await emitter.flush();
+			expect(batches).toHaveLength(1);
+			await emitter.close();
+		} finally {
+			wall.mockRestore();
+			mono.mockRestore();
+		}
 	});
 });
