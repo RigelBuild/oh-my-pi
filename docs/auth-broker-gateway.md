@@ -146,6 +146,23 @@ The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using
 
 ## auth-gateway
 
+### Container boot
+
+`Dockerfile.gateway` is based on the `pi-runtime` stage in `Dockerfile`. Build both images from the repository root:
+
+```sh
+podman build --target pi-runtime -f Dockerfile -t oh-my-pi/pi:dev .
+podman build -f Dockerfile.gateway -t compass-gateway:dev .
+```
+
+With `gateway.token` set to a host-owned `0600` bearer file and both broker variables exported, run the gateway with:
+
+```sh
+podman run --rm --stop-timeout 25 -p 127.0.0.1:4100:4000 -v "$PWD/gateway.token:/run/compass/gateway.token:ro" -e OMP_AUTH_BROKER_URL -e OMP_AUTH_BROKER_TOKEN compass-gateway:dev
+```
+
+The entrypoint reads one non-empty bearer token from `COMPASS_GATEWAY_TOKEN_FILE` before it starts `auth-gateway serve`. Defaults are `/run/compass/gateway.token`, `0.0.0.0:4000`, and a 20-second SIGTERM drain. Set the container stop timeout to 25 seconds. The current CLI still requires `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN` (or equivalent config); T1 does not connect to a Compass server URL. Root inside rootless Podman can read a host-owned `0600` read-only token mount without changing its permissions.
+
 ### CLI
 
 ```
