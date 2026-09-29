@@ -5,7 +5,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
 
 const VIRTUAL_NAMESPACE = "omp-legacy-pi-modules-build";
-const packageDir = path.resolve(import.meta.dir, "..");
+const packageDir = path.resolve(import.meta.dir, "..", "..");
 
 interface BundledPackage {
 	readonly dir: string;
@@ -16,7 +16,6 @@ interface BundledPackage {
 const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 	{ dir: "agent", identifier: "PiAgentCore", rootShim: null },
 	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts" },
-	{ dir: "catalog", identifier: "PiCatalog", rootShim: null },
 	{ dir: "coding-agent", identifier: "PiCodingAgent", rootShim: "legacy-pi-coding-agent-shim.ts" },
 	{ dir: "natives", identifier: "PiNatives", rootShim: null },
 	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts" },
@@ -55,7 +54,7 @@ function bindingForSubpath(identifier: string, subpath: string): string {
 		.filter(Boolean)
 		.map(segment =>
 			segment
-				.split(/[^a-zA-Z0-9]+/)
+				.split(/[-_]/)
 				.filter(Boolean)
 				.map(part => part.charAt(0).toUpperCase() + part.slice(1))
 				.join(""),
@@ -67,7 +66,7 @@ function isSafeWildcardBasename(basename: string): boolean {
 	if (!basename || basename.startsWith(".") || basename.startsWith("_")) return false;
 	if (SKIPPED_WILDCARD_BASENAMES.has(basename)) return false;
 	if (MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES.has(basename)) return false;
-	return !/\.(test|spec|d|d\.json|generated|bench)$/.test(basename);
+	return !/\.(test|spec|d|generated|bench)$/.test(basename);
 }
 
 function parseWildcardPattern(exportKey: string, sourcePattern: string): WildcardPattern | null {
@@ -97,8 +96,8 @@ function shimSpecifier(file: string): string {
 
 /**
  * Derive the bundled legacy Pi module surface from current package exports.
- * Named wildcard exports are expanded from source. Only catalog's root catch-all
- * is safe to expand: other packages expose CLI entrypoints at that level.
+ * Named wildcard exports are expanded from source; root catch-alls stay out to
+ * avoid importing CLI entrypoints and other non-extension surfaces.
  */
 export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	const entries: BundledPiEntry[] = [];
@@ -127,7 +126,8 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 		addEntry(manifest.name, `bundled${pkg.identifier}`, rootSpecifier);
 
 		for (const exportKey in exportsField) {
-			if (!exportKey.startsWith("./") || exportKey === "." || exportKey.includes("*")) continue;
+			if (!exportKey.startsWith("./") || exportKey === "." || exportKey === "./build" || exportKey.includes("*"))
+				continue;
 			const subpath = exportKey.slice(2);
 			const key = `${manifest.name}/${subpath}`;
 			addEntry(key, bindingForSubpath(pkg.identifier, subpath), key);
@@ -139,8 +139,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			if (!sourcePattern) continue;
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
-			const catalogRootWildcard = pkg.dir === "catalog" && exportKey === "./*";
-			if ((pattern.exportPrefix === "" || pattern.exportPrefix === "/") && !catalogRootWildcard) continue;
+			if (pattern.exportPrefix === "" || pattern.exportPrefix === "/") continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {
@@ -161,7 +160,6 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 				matches.sort();
 				for (const match of matches) {
 					if (!match.endsWith(pattern.sourceSuffix)) continue;
-					if (catalogRootWildcard && match.includes("/")) continue;
 					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
 					const segments = basename.split("/");
 					// Every directory on the way has to be importable too: a private or
@@ -202,7 +200,7 @@ export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin
 		name: "omp:legacy-pi-modules",
 		setup(build) {
 			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({
-				path: LEGACY_PI_MODULES_SPECIFIER,
+				path: path.join(import.meta.dir, `${LEGACY_PI_MODULES_SPECIFIER}.virtual.ts`),
 				namespace: VIRTUAL_NAMESPACE,
 			}));
 			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));
