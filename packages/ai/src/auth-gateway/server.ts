@@ -42,6 +42,7 @@ import { parseBind } from "../utils/parse-bind";
 import {
 	type AuthGatewayBootOptions,
 	buildGatewayApiKeyResolver,
+	gatewayUsageOutcome,
 	mirrorRequestAbort,
 	normalizeClientSessionKey,
 	recordGatewayUsage,
@@ -356,11 +357,12 @@ async function handleFormatEndpoint(
 	// otherwise re-learn each lesson from a fresh upstream rejection. The lease
 	// keeps the entry out of reach of eviction until this request is done with
 	// it, so it MUST be released on every exit path.
+	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey);
 	const lease = sessionStates.acquire({
 		clientKey,
 		model,
 		context: parsed.context,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey),
+		account,
 	});
 	streamOpts.providerSessionState = lease.states;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
@@ -371,8 +373,10 @@ async function handleFormatEndpoint(
 		controller.signal,
 		route.label,
 		peer,
-		resolvedKey =>
-			lease.updateAccount(resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey)),
+		resolvedKey => {
+			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			lease.updateAccount(account);
+		},
 	);
 
 	logger.info("auth-gateway request", {
@@ -389,7 +393,12 @@ async function handleFormatEndpoint(
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+			recordGatewayUsage(bootOpts, model, client, message.usage, {
+				requestId,
+				outcome: gatewayUsageOutcome(message.stopReason),
+				at: message.timestamp || undefined,
+				account,
+			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -445,7 +454,12 @@ async function handleFormatEndpoint(
 		void events
 			.result()
 			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				recordGatewayUsage(bootOpts, model, client, message.usage, {
+					requestId,
+					outcome: gatewayUsageOutcome(message.stopReason),
+					at: message.timestamp || undefined,
+					account,
+				}),
 			)
 			.catch(() => {})
 			.finally(() => lease.release());
@@ -546,11 +560,12 @@ async function handlePiNative(
 	// every turn would otherwise re-learn each lesson from a fresh upstream
 	// rejection. The lease keeps the entry out of reach of eviction until this
 	// request is done with it, so it MUST be released on every exit path.
+	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey);
 	const lease = sessionStates.acquire({
 		clientKey,
 		model,
 		context: parsed.context,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey),
+		account,
 	});
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
 	// trust the client's options (already allow-listed by `parseRequest`) and
@@ -572,8 +587,10 @@ async function handlePiNative(
 		controller.signal,
 		"pi-native",
 		peer,
-		resolvedKey =>
-			lease.updateAccount(resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey)),
+		resolvedKey => {
+			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			lease.updateAccount(account);
+		},
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
@@ -605,7 +622,12 @@ async function handlePiNative(
 		try {
 			if (controller.signal.aborted) return aborted();
 			const message = await completeSimple(model, parsed.context, streamOpts);
-			recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+			recordGatewayUsage(bootOpts, model, client, message.usage, {
+				requestId,
+				outcome: gatewayUsageOutcome(message.stopReason),
+				at: message.timestamp || undefined,
+				account,
+			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
@@ -657,7 +679,12 @@ async function handlePiNative(
 		void events
 			.result()
 			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+				recordGatewayUsage(bootOpts, model, client, message.usage, {
+					requestId,
+					outcome: gatewayUsageOutcome(message.stopReason),
+					at: message.timestamp || undefined,
+					account,
+				}),
 			)
 			.catch(() => {})
 			.finally(() => lease.release());

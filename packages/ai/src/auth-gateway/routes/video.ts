@@ -8,6 +8,8 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayBootOptions,
 	buildGatewayApiKeyResolver,
+	emitGatewayUsage,
+	hasGatewayUsage,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
 } from "../dispatch";
@@ -95,19 +97,33 @@ function logVideoRequest(
 	});
 }
 
+// Report completed jobs on each poll; zero-cost, zero-token results remain observed only.
 function recordCompletedUsage(
 	bootOpts: AuthGatewayBootOptions,
 	resolved: ResolvedVideoRequest,
 	req: Request,
 	job: VideoJob,
+	gatewayId: string,
 ): void {
 	if (job.status !== "completed" || job.usage === undefined) return;
+	const client = resolveClientIdentity(req.headers);
 	bootOpts.storage.usage.observe({
 		provider: resolved.model.provider,
 		model: resolved.model.id,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		costUsd: job.usage.cost.total,
-		client: resolveClientIdentity(req.headers),
+		client,
+	});
+	if (!hasGatewayUsage(job.usage)) return;
+	// Poll credentials can differ from the credential that billed the submitted job.
+	emitGatewayUsage(bootOpts, {
+		requestId: gatewayId,
+		provider: resolved.model.provider,
+		model: resolved.model.id,
+		usage: job.usage,
+		outcome: "ok",
+		at: Date.now(),
+		client,
 	});
 }
 
@@ -197,7 +213,7 @@ export async function handleVideoPoll(
 	logVideoRequest(requestId, "poll", resolved.model, peer);
 	try {
 		const job = await pollVideo(resolved.model, resolved.upstreamId, videoOptions(bootOpts, resolved, peer));
-		recordCompletedUsage(bootOpts, resolved, req, job);
+		recordCompletedUsage(bootOpts, resolved, req, job, gatewayId);
 		return json(
 			200,
 			videoServer.encodePollResponse(job, req, gatewayId),

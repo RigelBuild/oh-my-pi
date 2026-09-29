@@ -20,9 +20,35 @@ import type { AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
 
+export type GatewayUsageOutcome = "ok" | "error" | "aborted";
+
+/** One settled upstream call, reported to {@link AuthGatewayBootOptions.onUsage}. */
+export interface GatewayUsageEvent {
+	/**
+	 * The `x-request-id` of a successful response (error envelopes omit the header).
+	 * Video reuses its stable job id on every completed poll; dedupe on this id.
+	 */
+	requestId: string;
+	provider: string;
+	model: string;
+	usage: Usage;
+	outcome: GatewayUsageOutcome;
+	at: number;
+	client: ClientUsageIdentity;
+	/** Identity of the credential that served the call, when the route knows it. */
+	account?: string;
+}
+
+/** Map an assistant stop reason to the usage outcome. */
+export function gatewayUsageOutcome(stopReason: string): GatewayUsageOutcome {
+	return stopReason === "error" || stopReason === "aborted" ? stopReason : "ok";
+}
+
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
 	storage: AuthStorage;
+	/** May repeat for the same requestId (video polls); dedupe on it. */
+	onUsage?: (event: GatewayUsageEvent) => void | Promise<void>;
 	/**
 	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
 	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse
@@ -236,6 +262,18 @@ export function buildGatewayApiKeyResolver(
 	};
 }
 
+/** Whether settled usage has any billable tokens or reported total cost. */
+export function hasGatewayUsage(usage: Usage): boolean {
+	return (
+		usage.input > 0 ||
+		usage.output > 0 ||
+		usage.cacheRead > 0 ||
+		usage.cacheWrite > 0 ||
+		usage.totalTokens > 0 ||
+		usage.cost.total > 0
+	);
+}
+
 /**
  * Attribute one settled upstream request to the originating client via the
  * broker's observed-usage channel (`AuthStorage.usage.observe`, batched
@@ -244,21 +282,46 @@ export function buildGatewayApiKeyResolver(
  * (pre-flight failures) are skipped. `at` defaults to now.
  */
 export function recordGatewayUsage(
-	storage: AuthStorage,
+	bootOpts: AuthGatewayBootOptions,
 	model: Model<Api>,
 	client: ClientUsageIdentity,
 	usage: Usage,
-	at?: number,
+	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string },
 ): void {
-	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite === 0) return;
-	storage.usage.observe({
+	const at = options.at ?? Date.now();
+	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite !== 0) {
+		bootOpts.storage.usage.observe({
+			provider: model.provider,
+			model: model.id,
+			at,
+			usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
+			costUsd: usage.cost.total,
+			client,
+		});
+	}
+	if (!hasGatewayUsage(usage)) return;
+	emitGatewayUsage(bootOpts, {
+		requestId: options.requestId,
 		provider: model.provider,
 		model: model.id,
+		usage,
+		outcome: options.outcome,
 		at,
-		usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
-		costUsd: usage.cost.total,
 		client,
+		...(options.account !== undefined && { account: options.account }),
 	});
+}
+
+/** Call the boot hook; synchronous throws and asynchronous rejections are logged. */
+export function emitGatewayUsage(bootOpts: AuthGatewayBootOptions, event: GatewayUsageEvent): void {
+	try {
+		const result = bootOpts.onUsage?.({ ...event, usage: structuredClone(event.usage), client: { ...event.client } });
+		if (result && typeof result.then === "function") {
+			void result.catch(error => logger.warn("auth-gateway onUsage hook failed", { error }));
+		}
+	} catch (error) {
+		logger.warn("auth-gateway onUsage hook failed", { error });
+	}
 }
 
 /**
