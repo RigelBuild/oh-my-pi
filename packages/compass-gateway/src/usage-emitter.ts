@@ -212,6 +212,8 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 			clearScheduled();
 			closePromise = (async () => {
 				await flush();
+				// A caller may chain another flush onto the one close awaited; let it settle first.
+				while (inFlight) await inFlight;
 				clearScheduled();
 				if (buffer.length > 0) {
 					const remaining = buffer.length;
