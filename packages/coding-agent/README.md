@@ -15,7 +15,7 @@ Package-specific references:
 
 ## Compiling SDK consumers
 
-Standalone Bun builds that load legacy Pi extensions must include the exported build plugin:
+Standalone Bun builds that load legacy Pi extensions must include the build plugin and set `PI_COMPILED` at build time:
 
 ```ts
 import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
@@ -29,7 +29,7 @@ const result = await Bun.build({
 if (!result.success) throw new Error(result.logs.map(log => log.message).join("\n"));
 ```
 
-The plugin embeds lazy loaders for legacy imports from the installed Pi packages.
+The plugin embeds lazy loaders from the installed Pi packages. Keep the SDK and its Pi dependencies on matching release versions, with their exported source files installed.
 
 ## Memory backends
 
