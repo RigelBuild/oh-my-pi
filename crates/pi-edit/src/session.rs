@@ -509,6 +509,8 @@ pub fn strip_trailing_unbalanced_removal(diff: &str) -> std::borrow::Cow<'_, str
 
 #[cfg(test)]
 mod tests {
+	use std::collections::BTreeSet;
+
 	use super::*;
 
 	#[test]
@@ -523,5 +525,18 @@ mod tests {
 		let big = "x".repeat(MAX_EDIT_SNAPSHOT_TEXT_CHARS);
 		assert_eq!(prune_snapshots(Some(big.clone()), None), (Some(big.clone()), None, false));
 		assert_eq!(prune_snapshots(Some(big), Some("y".into())), (None, None, true));
+	}
+
+	#[test]
+	fn first_line_change_carries_no_prior_seen_lines() {
+		let prior = Snapshot {
+			path:       PathBuf::from("a.txt"),
+			text:       "one\ntwo\nthree\n".into(),
+			hash:       file_hash("one\ntwo\nthree\n"),
+			seen_lines: Some(BTreeSet::from([1, 2, 3])),
+		};
+		assert!(
+			carried_seen_lines("one\ntwo\nthree\n", "ONE\ntwo\nthree\n", Some(&prior)).is_empty()
+		);
 	}
 }
