@@ -18,7 +18,7 @@ import type { KeyResolver, ProviderDefinition } from "./types";
 /** Request/model shaping a provider implements in TypeScript beside its KDL auth policy. */
 export type ProviderTransport = Pick<
 	ProviderDefinition,
-	"prepareModel" | "prepareRequest" | "mapSimpleOptions" | "prepareModelDiscovery"
+	"prepareModel" | "prepareRequest" | "mapSimpleOptions" | "prepareModelDiscovery" | "subscriptionTosTier"
 >;
 
 function envResolver(env: CompiledAuthProvider["env"]): KeyResolver | undefined {
@@ -52,6 +52,7 @@ function loginFor(policy: CompiledAuthProvider): ProviderDefinition["login"] {
 export function buildProviderDefinition(
 	policy: CompiledAuthProvider,
 	transport?: ProviderTransport,
+	subscriptionTosTier?: ProviderDefinition["subscriptionTosTier"],
 ): ProviderDefinition {
 	const envKeys = envResolver(policy.env);
 	const login = loginFor(policy);
@@ -60,6 +61,7 @@ export function buildProviderDefinition(
 		id: policy.id,
 		name: policy.name,
 		...transport,
+		...(subscriptionTosTier !== undefined ? { subscriptionTosTier } : {}),
 		...(envKeys !== undefined ? { envKeys } : {}),
 		...(policy.allowsMissingApiKey !== undefined ? { allowsMissingApiKey: policy.allowsMissingApiKey } : {}),
 		...(policy.nativeAuthApis !== undefined ? { nativeAuthApis: policy.nativeAuthApis } : {}),

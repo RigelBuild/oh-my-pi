@@ -1,7 +1,11 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai/registry";
+import {
+	PASTE_CODE_LOGIN_PROVIDERS,
+	RESTRICTED_SUBSCRIPTION_OAUTH_PROVIDERS,
+	subscriptionTosTierForProvider,
+} from "@oh-my-pi/pi-ai/registry";
 import {
 	getOAuthProviders,
 	refreshOAuthToken,
@@ -58,6 +62,14 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("coreweave")).toBe("wandb-env");
 		Bun.env.COREWEAVE_API_KEY = "coreweave-env";
 		expect(getEnvApiKey("coreweave")).toBe("coreweave-env");
+	});
+
+	test("subscription OAuth tiers default to restricted until a provider is verified permissive", () => {
+		expect([...RESTRICTED_SUBSCRIPTION_OAUTH_PROVIDERS].sort()).toEqual(["anthropic", "openai-codex"]);
+		expect(subscriptionTosTierForProvider("anthropic")).toBe("restricted");
+		expect(subscriptionTosTierForProvider("openai-codex")).toBe("restricted");
+		expect(subscriptionTosTierForProvider("zai-coding-plan")).toBe("restricted");
+		expect(subscriptionTosTierForProvider("unknown-provider")).toBe("restricted");
 	});
 
 	test("login list contains loginable providers and excludes env-only model providers", () => {

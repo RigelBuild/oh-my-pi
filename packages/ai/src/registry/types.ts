@@ -53,6 +53,7 @@ export type ProviderModelDiscoveryPreparer = (config: ProviderModelDiscoveryConf
  * - `login` present ⇒ member of `OAuthProvider`, shown in the `/login` list
  *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.oauth.login`.
  * - `callbackPort` present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.
+ * - `subscriptionTosTier` ⇒ tier for subscription OAuth; absent values serialize as `restricted` on the enrollment wire.
  * - `pasteCodeFlow` ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.
  *
  * Heavy OAuth flow modules MUST be reached through the lazy hook tables in
@@ -92,4 +93,6 @@ export interface ProviderDefinition {
 	readonly callbackPort?: number;
 	/** OAuth flow needs a pasted code/redirect URL rather than a callback server. */
 	readonly pasteCodeFlow?: boolean;
+	/** Subscription OAuth ToS tier; absent tiers serialize as `restricted` on the enrollment wire. */
+	readonly subscriptionTosTier?: "permissive" | "restricted";
 }
