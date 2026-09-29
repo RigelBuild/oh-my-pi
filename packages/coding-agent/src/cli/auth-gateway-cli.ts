@@ -64,6 +64,9 @@ export interface AuthGatewayCommandArgs {
 		 * actually usable" signal. Slower and consumes a tiny amount of quota.
 		 */
 		strict?: boolean;
+		/** Internal serve-only bootstrap overrides; never surfaced as CLI flags. */
+		gatewayToken?: string;
+		drainMs?: number;
 	};
 }
 
@@ -252,7 +255,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		);
 	}
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
-	const gatewayToken = flags.noAuth ? null : await ensureToken();
+	const gatewayToken = flags.noAuth ? null : (flags.gatewayToken ?? (await ensureToken()));
 
 	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 	// in sdk.ts. The gateway never touches local SQLite.
@@ -321,7 +324,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
-		process.stdout.write(`bearer token: ${getTokenFilePath()} (chmod 0600)\n`);
+		process.stdout.write(`bearer auth: enabled\n`);
 	} else {
 		process.stdout.write(`auth: disabled (--no-auth) — any client can call this gateway\n`);
 	}
@@ -370,7 +373,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		clearInterval(credentialSync);
 		let closeError: unknown;
 		try {
-			await handle.close();
+			await handle.close(signal === "SIGTERM" ? flags.drainMs : undefined);
 		} catch (error) {
 			closeError = error;
 		} finally {
