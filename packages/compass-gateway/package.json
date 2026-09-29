@@ -1,0 +1,21 @@
+{
+	"name": "@oh-my-pi/compass-gateway",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"lint": "oxlint .",
+		"test": "bun test --parallel",
+		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
+	},
+	"dependencies": {
+		"@oh-my-pi/pi-ai": "catalog:"
+	},
+	"devDependencies": {
+		"@types/bun": "catalog:"
+	}
+}
