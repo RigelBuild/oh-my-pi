@@ -289,7 +289,7 @@ export function recordGatewayUsage(
 	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string },
 ): void {
 	const at = options.at ?? Date.now();
-	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite !== 0) {
+	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0 || usage.cost.total > 0) {
 		bootOpts.storage.usage.observe({
 			provider: model.provider,
 			model: model.id,
