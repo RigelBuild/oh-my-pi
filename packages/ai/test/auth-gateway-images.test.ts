@@ -243,7 +243,7 @@ describe("auth gateway images", () => {
 		});
 	});
 
-	it("emits usage when the wire response has cost but no tokens", async () => {
+	it("records cost-only wire usage to the hook and the broker observer", async () => {
 		const model = imageModel("openrouter", "cost-only-image", "openrouter-images");
 		const events: GatewayUsageEvent[] = [];
 		const fetchStub: FetchImpl = async () =>
@@ -255,7 +255,9 @@ describe("auth gateway images", () => {
 		await withGateway(
 			[model],
 			fetchStub,
-			async url => {
+			async (url, storage) => {
+				const recorded: Parameters<AuthStorage["usage"]["observe"]>[0][] = [];
+				vi.spyOn(storage.usage, "observe").mockImplementation(entry => recorded.push(entry));
 				const response = await gatewayRequest(url, "/v1/images", {
 					model: model.id,
 					prompt: "paint a forest",
@@ -266,6 +268,8 @@ describe("auth gateway images", () => {
 				await response.json();
 				expect(events).toHaveLength(1);
 				expect(events[0]?.usage.cost.total).toBe(0.42);
+				expect(recorded).toHaveLength(1);
+				expect(recorded[0]).toMatchObject({ usage: { input: 0, output: 0 }, costUsd: 0.42 });
 			},
 			event => events.push(event),
 		);
