@@ -3,7 +3,7 @@
 import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
-import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
+import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
 export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze(["fastembed", "onnxruntime-node"]);
