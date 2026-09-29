@@ -901,11 +901,19 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 		url: `http://${boundHost}:${boundPort}`,
 		port: boundPort,
 		hostname: boundHost,
-		close: async () => {
-			server.stop(true);
-			// Drain after the listener is down: the retained provider states own
-			// sockets and timers (Codex WebSockets, GitLab Duo workflows), so the
-			// process can't settle until each one is closed.
+		close: async (drainMs?: number) => {
+			if (drainMs === undefined || drainMs <= 0) {
+				await server.stop(true);
+			} else {
+				const deadline = setTimeout(() => void server.stop(true), drainMs);
+				try {
+					await server.stop();
+				} finally {
+					clearTimeout(deadline);
+				}
+			}
+			// Retained provider sessions own sockets and timers; close only after
+			// active responses have completed or their drain deadline has elapsed.
 			sessionStates.close();
 		},
 	};

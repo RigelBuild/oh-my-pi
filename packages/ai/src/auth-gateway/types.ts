@@ -158,5 +158,6 @@ export interface AuthGatewayServerHandle {
 	url: string;
 	port: number;
 	hostname: string;
-	close(): Promise<void>;
+	/** Drain active responses for at most this long; omitted means immediate close. */
+	close(drainMs?: number): Promise<void>;
 }
