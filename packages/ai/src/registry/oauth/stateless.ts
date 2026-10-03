@@ -13,6 +13,7 @@ import {
 	throwIfCancelled,
 } from "../engine/common";
 import type { OAuthCredentials, OAuthPrompt } from "./types";
+import { parseCallbackInput } from "./callback-server";
 
 export interface OAuthCodeAuthorizationArgs {
 	state: string;
@@ -40,7 +41,7 @@ export interface OAuthCodeFlowSettings {
 	authorizeUrl: string;
 }
 
-function oauthCodePolicy(provider: string): CompiledOAuthCodeLogin {
+function oauthCodePolicy(provider: "anthropic" | "openai-codex"): CompiledOAuthCodeLogin {
 	const rule = authPolicyFor(provider)?.login;
 	if (!rule || rule.kind !== "oauth-code") {
 		throw new AIError.OAuthError(`Provider ${provider} has no authorization-code OAuth flow`, {
@@ -153,46 +154,67 @@ export async function exchangeOAuthCodeFlow(
 	});
 }
 
-/** Build an authorization URL from a provider's compiled auth rule and caller-owned state/PKCE challenge. */
-export async function createOAuthCodeAuthorizationUrl(
-	provider: string,
+function assertEnrollmentInputs(
+	provider: "anthropic" | "openai-codex",
+	args: OAuthCodeAuthorizationArgs | OAuthCodeExchangeArgs,
+): void {
+	if (!args.state.trim())
+		throw new AIError.OAuthError("OAuth state must not be empty", { kind: "validation", provider });
+	if ("pkceChallenge" in args && !args.pkceChallenge.trim()) {
+		throw new AIError.OAuthError("PKCE challenge must not be empty", { kind: "validation", provider });
+	}
+	if ("pkceVerifier" in args && !args.pkceVerifier.trim()) {
+		throw new AIError.OAuthError("PKCE verifier must not be empty", { kind: "validation", provider });
+	}
+	if (provider === "openai-codex" && args.redirectUri !== "http://localhost:1455/auth/callback") {
+		throw new AIError.OAuthError("Codex requires its fixed callback URI", { kind: "validation", provider });
+	}
+}
+
+async function createEnrollmentAuthorizationUrl(
+	provider: "anthropic" | "openai-codex",
 	args: OAuthCodeAuthorizationArgs,
 ): Promise<{ url: string; instructions?: string }> {
+	assertEnrollmentInputs(provider, args);
 	const rule = oauthCodePolicy(provider);
 	const settings = await resolveOAuthCodeFlowSettings(rule, args.signal);
 	return createOAuthCodeFlowAuthorizationUrl(rule, settings, args);
 }
 
-/** Exchange a caller-owned authorization code and PKCE verifier through a provider's compiled auth rule. */
-export async function exchangeOAuthCodeStateless(
-	provider: string,
+async function exchangeEnrollmentCode(
+	provider: "anthropic" | "openai-codex",
 	args: OAuthCodeExchangeArgs,
 ): Promise<OAuthCredentials> {
+	assertEnrollmentInputs(provider, args);
+	const parsed = parseCallbackInput(args.code);
+	if (!parsed.code || (parsed.state && parsed.state !== args.state)) {
+		throw new AIError.OAuthError("OAuth callback code or state is invalid", { kind: "validation", provider });
+	}
 	const rule = oauthCodePolicy(provider);
 	const settings = await resolveOAuthCodeFlowSettings(rule, args.signal);
-	return exchangeOAuthCodeFlow(provider, rule, settings, args);
+	return exchangeOAuthCodeFlow(provider, rule, settings, { ...args, code: parsed.code });
 }
 
 /** Create Anthropic's authorization URL without retaining its state or verifier. */
 export function createAnthropicEnrollmentAuthorizationUrl(
 	args: OAuthCodeAuthorizationArgs,
 ): Promise<{ url: string; instructions?: string }> {
-	return createOAuthCodeAuthorizationUrl("anthropic", args);
+	return createEnrollmentAuthorizationUrl("anthropic", args);
 }
 
 /** Exchange Anthropic authorization code using caller-owned state and PKCE verifier. */
 export function exchangeAnthropicAuthorizationCode(args: OAuthCodeExchangeArgs): Promise<OAuthCredentials> {
-	return exchangeOAuthCodeStateless("anthropic", args);
+	return exchangeEnrollmentCode("anthropic", args);
 }
 
 /** Create Codex's authorization URL without retaining its state or verifier. */
 export function createOpenAICodexEnrollmentAuthorizationUrl(
 	args: OAuthCodeAuthorizationArgs,
 ): Promise<{ url: string; instructions?: string }> {
-	return createOAuthCodeAuthorizationUrl("openai-codex", args);
+	return createEnrollmentAuthorizationUrl("openai-codex", args);
 }
 
 /** Exchange Codex authorization code using caller-owned state and PKCE verifier. */
 export function exchangeOpenAICodexAuthorizationCode(args: OAuthCodeExchangeArgs): Promise<OAuthCredentials> {
-	return exchangeOAuthCodeStateless("openai-codex", args);
+	return exchangeEnrollmentCode("openai-codex", args);
 }

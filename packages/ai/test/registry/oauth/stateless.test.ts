@@ -39,7 +39,7 @@ describe("stateless provider OAuth flows", () => {
 		expect(result.instructions).toContain("paste");
 	});
 
-	it("exchanges Anthropic code#state with caller verifier and retains mapped organization credentials", async () => {
+	it("exchanges Anthropic pasted callback URL with caller verifier and retains mapped organization credentials", async () => {
 		const requests: Array<{ url: string; init?: RequestInit }> = [];
 		const fetchMock: FetchImpl = vi.fn(async (input, init) => {
 			const url = String(input);
@@ -57,7 +57,7 @@ describe("stateless provider OAuth flows", () => {
 		});
 
 		const credentials = await exchangeAnthropicAuthorizationCode({
-			code: "authorization-code#fragment-state",
+			code: `http://localhost:54545/callback?code=authorization-code&state=${STATE}`,
 			state: STATE,
 			redirectUri: "http://localhost:54545/callback",
 			pkceVerifier: VERIFIER,
@@ -67,7 +67,7 @@ describe("stateless provider OAuth flows", () => {
 		const request = requests[0];
 		const form = request ? (JSON.parse(String(request.init?.body)) as Record<string, unknown>) : {};
 		expect(request?.url).toBe("https://api.anthropic.com/v1/oauth/token");
-		expect(form).toMatchObject({ code: "authorization-code", state: "fragment-state", code_verifier: VERIFIER });
+		expect(form).toMatchObject({ code: "authorization-code", state: STATE, code_verifier: VERIFIER });
 		expect(credentials).toMatchObject({
 			access: "access-token",
 			refresh: "refresh-token",
@@ -133,5 +133,62 @@ describe("stateless provider OAuth flows", () => {
 			orgName: "plus",
 			email: "person@example.com",
 		});
+	});
+	it("rejects callback state mismatch before contacting the provider", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			throw new Error("token endpoint should not be called");
+		});
+		for (const code of [
+			"authorization-code#attacker-state",
+			"http://localhost:54545/callback?code=authorization-code&state=attacker-state",
+		]) {
+			await expect(
+				exchangeAnthropicAuthorizationCode({
+					code,
+					state: STATE,
+					redirectUri: "http://localhost:54545/callback",
+					pkceVerifier: VERIFIER,
+					fetch: fetchMock,
+				}),
+			).rejects.toThrow("OAuth callback code or state is invalid");
+		}
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("rejects empty state and PKCE material and Codex redirect override", async () => {
+		await expect(
+			createAnthropicEnrollmentAuthorizationUrl({
+				state: "",
+				redirectUri: "http://localhost:54545/callback",
+				pkceChallenge: CHALLENGE,
+			}),
+		).rejects.toThrow("OAuth state must not be empty");
+		await expect(
+			createAnthropicEnrollmentAuthorizationUrl({
+				state: STATE,
+				redirectUri: "http://localhost:54545/callback",
+				pkceChallenge: "",
+			}),
+		).rejects.toThrow("PKCE challenge must not be empty");
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			throw new Error("token endpoint should not be called");
+		});
+		await expect(
+			exchangeOpenAICodexAuthorizationCode({
+				code: "code",
+				state: STATE,
+				redirectUri: "http://localhost:1455/auth/callback",
+				pkceVerifier: "",
+				fetch: fetchMock,
+			}),
+		).rejects.toThrow("PKCE verifier must not be empty");
+		await expect(
+			createOpenAICodexEnrollmentAuthorizationUrl({
+				state: STATE,
+				redirectUri: "http://localhost:9999/callback",
+				pkceChallenge: CHALLENGE,
+			}),
+		).rejects.toThrow("Codex requires its fixed callback URI");
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });
