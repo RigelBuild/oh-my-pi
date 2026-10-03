@@ -93,9 +93,9 @@ Indent width is detected from the source so the common case does not drift.
   the `/: +$/gm` strip (it would corrupt block scalars whose lines end in `: `);
   `yaml` does not emit Bun's trailing-space artifact.
 - `toString` options: `{ lineWidth: 0, indent: <detected, default 2>,
-  flowCollectionPadding: false }`. Strings containing a newline that the reconcile
-  sets get `Scalar.QUOTE_DOUBLE` so the file never gains semantically significant
-  trailing spaces; untouched block scalars keep their style.
+  flowCollectionPadding: false, doubleQuotedMinMultiLineLength: Infinity }`. Every
+  changed string containing a newline is double-quoted, including strings inside
+  newly inserted maps and sequences; untouched block scalars keep their style.
 - Paths are key arrays, never dot-split: legacy flat keys such as
   `"dev.autoqa.consent"` are single map keys.
 - Invariant for every write: `Bun.YAML.parse(bytes)` deep-equals
@@ -140,26 +140,33 @@ Algorithm:
 1. `target = Bun.YAML.parse(stringifyYamlConfig(next))`; `base = Bun.YAML.parse(source) ?? {}`.
    `base` not a plain object → `unpreservable("root is not a mapping")`.
    `Bun.deepEquals(base, target)` → `unchanged`.
-2. `const { parseDocument, visit, isMap, isSeq, Scalar } = await import("yaml")`;
-   `doc = parseDocument(source)`. `doc.errors.length > 0` → `unpreservable(first error
-   message, which names the key for DUPLICATE_KEY)`. `visit(doc, { Alias })` finds any
-   alias → `unpreservable("anchors/aliases")`. `doc.contents` neither `null` nor a map →
-   `unpreservable`. If `doc.contents === null`, set `doc.contents = doc.createNode({})`
-   before reconciliation; document-level comments remain on `doc`.
+2. `const { parseDocument, visit, isMap, isSeq, isScalar, Scalar, LineCounter } =
+   await import("yaml")`; pass `{ prettyErrors: false, lineCounter: new LineCounter() }`
+   to `parseDocument(source, options)`. On `doc.errors`, return `unpreservable`
+   with only `error.code` and `lineCounter.linePos(error.pos[0]).line`, never the
+   error message, key text, source excerpt or value: config keys and values can be
+   sensitive, and errors reach logs and the UI. Any `Alias` found by `visit` →
+   `unpreservable("anchors/aliases")`. If `doc.contents` is null or a scalar whose
+   value is null, replace it with `doc.createNode({})`; move any scalar comments to
+   `doc.commentBefore` before replacement. Keep document-level comments. Any other
+   non-map root → `unpreservable`.
 3. `reconcile(doc, [], doc.contents, target)`:
    - map: for each pair whose key is not a string → `unpreservable`; whose key is absent
      from `target` → `doc.deleteIn([...path, key])`. For each `[key, value]` of
      `target`: `existing = map.get(key, true)`; both maps → recurse; both sequences →
-     recurse; `Bun.deepEquals(existing?.toJSON(), value)` → skip; else
-     `doc.setIn([...path, key], value)`.
+     recurse; `Bun.deepEquals(existing?.toJSON(), value)` → skip; else set the value.
    - sequence (positional): index `i < min(len)`: both maps → recurse; equal → skip;
-     else `doc.setIn([...path, i], item)` (`YAMLSeq.set` updates a scalar node in place).
-     Extra source items → `doc.deleteIn` from the end; extra target items → `setIn` at
-     their index.
-   - after any `setIn` of a string containing `\n`:
-     `doc.getIn(fullPath, true).type = Scalar.QUOTE_DOUBLE`.
+     else set the item. Extra source items → `doc.deleteIn` from the end; extra
+     target items → set at their index.
+   - When changing an existing scalar to a scalar, `doc.setIn(path, value)` updates
+     it in place and keeps its comment; set its type to `Scalar.QUOTE_DOUBLE` if the
+     new string contains `\n`. For any inserted or replacement map, sequence, or
+     scalar, create the node with `doc.createNode(value)`, visit all nested scalars
+     and set multiline strings to `Scalar.QUOTE_DOUBLE`, then `doc.setIn(path, node)`.
+     Do not assign `.type` to a raw JS string returned by `getIn`.
 4. `indent` = width of the first `^( +)[^\s#]` match in `source`, default 2.
-   `out = doc.toString({ lineWidth: 0, indent, flowCollectionPadding: false })`.
+   `out = doc.toString({ lineWidth: 0, indent, flowCollectionPadding: false,
+   doubleQuotedMinMultiLineLength: Infinity })`. Re-parse with Bun;
    `!Bun.deepEquals(Bun.YAML.parse(out), target)` → `unpreservable("round-trip
    mismatch")`. Return `updated(out)`.
 
@@ -178,10 +185,12 @@ Tests (`packages/utils/test/yaml-config.test.ts`, new; red first):
   tail; lengthening appends;
 - `unchanged` when `next` equals the parsed source even though the source uses 4-space
   indent and `[a, b]` flow style;
-- `unpreservable` on duplicate top-level keys (reason names the key) and on an alias;
-- comment-only and empty sources gain keys and keep the comment;
-- a string with newlines and a line ending in a colon plus space round-trips
-  without a match for the trailing-space strip;
+- `unpreservable` on duplicate top-level keys (reason gives code and line, never
+  key or either seeded secret value) and on an alias;
+- comment-only and empty sources, including `---` with comments and a null scalar
+  with an inline comment, gain keys and keep the comments;
+- multiline strings changed in place, added as a key, and nested inside an added map
+  round-trip without a match for the trailing-space strip;
 - an `undefined`-valued key in `next` is absent from the output.
 
 Dependency: `yaml` added to `packages/utils/package.json` and the root catalog.
@@ -263,7 +272,7 @@ dev:
 - "setupVersion migration keeps every comment and lands the four key changes": seed
   the fixture; `Settings.init`; `set("composer.shape", "band")`;
   `markSetupWizardComplete(settings, 2)` (sets `setupVersion` and flushes). Assert all
-  six comment lines are present verbatim; parsed file has `setupVersion: 2`,
+  seven comment lines are present verbatim; parsed file has `setupVersion: 2`,
   `dev.autoqaConsent: "unset"` with no `dev.autoqa`, `compaction.methodOrder:
   ["handoff", "soft"]` with no `strategy` / `remoteEnabled`, `composer.shape: "band"`;
   `custom.tags` and `modelRoles` unchanged.
@@ -275,9 +284,9 @@ dev:
 - "keeps project config comments when a project role is set": same shape on
   `.omp/config.yml` via `setProjectModelRole`.
 - "rejects a duplicate-key config without touching it and retains the pending change":
-  seed a file with a duplicate top-level key; `set(...)`; `flush()` rejects with a
-  message naming the key; bytes unchanged; no `.broken-` backup; `get` still returns
-  the new value (mirrors the existing unreadable-config test).
+  seed a file with duplicate `searxng.token` keys containing distinct fake secrets;
+  `set(...)`; `flush()` rejects with the error code and line but neither secret nor
+  credential key; bytes unchanged; no `.broken-` backup; `get` still returns the new value.
 
 Atomicity: unchanged mechanism (temp file + fsync + rename), content computed before
 the temp file opens; existing write-failure tests cover it. Existing tests that must
