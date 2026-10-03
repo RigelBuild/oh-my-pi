@@ -251,6 +251,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	}
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
 	const gatewayToken = flags.noAuth ? null : (flags.gatewayToken ?? (await ensureToken()));
+	if (!flags.noAuth && !gatewayToken) throw new Error("auth-gateway bearer token must not be empty");
 
 	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 	// in sdk.ts. The gateway never touches local SQLite.

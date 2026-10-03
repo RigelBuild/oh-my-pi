@@ -40,6 +40,9 @@ describe("Compass gateway boot", () => {
 		expect(() => getGatewayBootConfig({ COMPASS_GATEWAY_DRAIN_MS: "20s" })).toThrow(
 			"COMPASS_GATEWAY_DRAIN_MS must be a positive integer",
 		);
+		expect(() => getGatewayBootConfig({ COMPASS_GATEWAY_DRAIN_MS: "2147483648" })).toThrow(
+			"COMPASS_GATEWAY_DRAIN_MS must be a positive integer no greater than 2147483647",
+		);
 		expect(() => getGatewayBootConfig({ COMPASS_GATEWAY_BIND: "" })).toThrow(
 			"COMPASS_GATEWAY_BIND must not be empty",
 		);
