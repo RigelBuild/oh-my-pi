@@ -186,8 +186,11 @@ async function exchangeEnrollmentCode(
 	args: OAuthCodeExchangeArgs,
 ): Promise<OAuthCredentials> {
 	assertEnrollmentInputs(provider, args);
-	const parsed = parseCallbackInput(args.code);
-	if (!parsed.code || (parsed.state && parsed.state !== args.state)) {
+	const raw = args.code.trim();
+	const parsed = parseCallbackInput(raw);
+	// A bare pasted code is PKCE-bound only; any callback shape that carries state must echo ours.
+	const carriesState = raw.includes("#") || raw.includes("code=") || URL.canParse(raw);
+	if (!parsed.code || (carriesState && parsed.state !== args.state)) {
 		throw new AIError.OAuthError("OAuth callback code or state is invalid", { kind: "validation", provider });
 	}
 	const rule = oauthCodePolicy(provider);
