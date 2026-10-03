@@ -43,14 +43,14 @@ The `yaml` package is a write-side serializer only.
   semantics decide (for example a `%YAML 1.1` file where `yaml` reads `yes` as `true`
   and Bun reads the string `"yes"`: the reconcile re-sets the scalar quoted and Bun
   reads the same value as before).
-- **Unpreservable sources fail closed (stated assumption, see OQ1).** A source that Bun
+- **Unpreservable sources fail closed (RIG-4215, option A).** A source that Bun
   loaded but `yaml` cannot edit safely — `doc.errors` non-empty (duplicate keys: Bun is
   last-wins, `parseDocument` reports `DUPLICATE_KEY`, and with `uniqueKeys: false` the
   CST edits the first pair while `toJS` keeps the last), any `Alias` node (Bun resolves
   `<<` merge keys, YAML 1.2 `yaml` does not), a non-map root, or a round-trip mismatch —
   makes the save reject with an error naming the file and the condition. The file is
   untouched and the pending change is retained for retry by the existing `#saveNow`
-  catch path. Destructive full-regeneration is never silent.
+  catch path. There is no destructive full-regeneration fallback.
 - **No new disk read.** The source is the text already read under `withFileLock` from
   `writePath`. `#writeYamlAtomically`'s temp + fsync + `replaceFileAtomically` path is
   unchanged. Paths with no loaded source (new file, quarantined file recovered from
@@ -76,8 +76,8 @@ Indent width is detected from the source so the common case does not drift.
   the stale-skip and role-merge logic and misses migration-driven deletions
   (`lastChangelogVersion`, `compaction.strategy`), which existing tests require on the
   next save.
-- **Destructive fallback with a warning on unpreservable sources.** Not chosen; the
-  issue's thesis is silent destruction of a git-tracked file. Recorded as OQ1.
+- **Destructive fallback with a warning on unpreservable sources.** Rejected in
+  RIG-4215: it would remove comments from the git-tracked file this change protects.
 
 ## Global Constraints
 
@@ -300,26 +300,17 @@ whitespace and preserves multiline values", "moves legacy lastChangelogVersion �
       green.
 - [ ] T3 CHANGELOG line.
 
+## Resolved decisions
+
+### RIG-4215 — unpreservable source
+
+Matt chose option A: fail closed. A config Bun loads but `yaml` cannot edit safely
+(duplicate keys, anchors/aliases, round-trip mismatch) rejects the save with the file
+path and condition. The file stays untouched; the existing catch path retains the
+pending change for retry. A user with duplicate keys must repair the file before
+`setupVersion` can persist.
+
 ## Open Questions
-
-### OQ1 (load-bearing) — unpreservable source: fail closed or regenerate?
-
-A config Bun loads but `yaml` cannot edit safely (duplicate keys, anchors/aliases,
-round-trip mismatch). Options:
-
-- **A. Fail closed (designed against).** Save rejects with an error naming the file and
-  condition; file untouched; pending change retained and retried by the existing catch
-  path. Cost: a user with a duplicate key cannot persist any setting until the file is
-  fixed; the setup wizard's `markComplete` rejects on such a file.
-- **B. Regenerate with `stringifyYamlConfig` and `logger.warn`.** Today's bytes, so
-  the change always lands. Cost: silent comment loss on exactly the class of file this
-  issue is about; omp warnings are not prominent.
-- **C. Hybrid.** A for user-fixable conditions (duplicate keys, aliases), B for an
-  internal round-trip mismatch (should be unreachable; B keeps the harness working if
-  the reconcile has a bug).
-
-Recommendation: A. Non-destructive silent failure beats destructive silent success on
-a git-tracked file, and the message is actionable. Decision needed: A, B or C.
 
 ### OQ2 (non-load-bearing) — formatting drift on untouched nodes
 
