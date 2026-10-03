@@ -155,6 +155,29 @@ describe("stateless provider OAuth flows", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it("rejects structured callbacks with missing or empty state before contacting the provider", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			throw new Error("token endpoint should not be called");
+		});
+		for (const code of [
+			"authorization-code#",
+			"http://localhost:54545/callback?code=authorization-code",
+			"http://localhost:54545/callback?code=authorization-code&state=",
+			"code=authorization-code",
+		]) {
+			await expect(
+				exchangeAnthropicAuthorizationCode({
+					code,
+					state: STATE,
+					redirectUri: "http://localhost:54545/callback",
+					pkceVerifier: VERIFIER,
+					fetch: fetchMock,
+				}),
+			).rejects.toThrow("OAuth callback code or state is invalid");
+		}
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("rejects empty state and PKCE material and Codex redirect override", async () => {
 		await expect(
 			createAnthropicEnrollmentAuthorizationUrl({
