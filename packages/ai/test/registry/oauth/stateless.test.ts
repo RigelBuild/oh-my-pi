@@ -65,7 +65,7 @@ describe("stateless provider OAuth flows", () => {
 		});
 
 		const request = requests[0];
-		const form = request ? (JSON.parse(String(request.init?.body)) as Record<string, unknown>) : {};
+		const form: unknown = request ? JSON.parse(String(request.init?.body)) : undefined;
 		expect(request?.url).toBe("https://api.anthropic.com/v1/oauth/token");
 		expect(form).toMatchObject({ code: "authorization-code", state: STATE, code_verifier: VERIFIER });
 		expect(credentials).toMatchObject({
