@@ -919,8 +919,8 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 					clearTimeout(deadline);
 				}
 			}
-			// Retained provider sessions own sockets and timers; close only after
-			// active responses have completed or their drain deadline has elapsed.
+			// Retained provider sessions own sockets and timers; close them after
+			// requests complete or the listener force-stops.
 			sessionStates.close();
 		},
 	};

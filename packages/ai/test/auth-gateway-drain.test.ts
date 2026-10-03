@@ -106,6 +106,47 @@ test("drain deadline aborts an in-flight request", async () => {
 	}
 });
 
+test("omitted drain duration immediately aborts an active request", async () => {
+	registerMockApi();
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-drain-immediate-"));
+	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+	storage.keys.setRuntime("mock", "test-key");
+	const active = Promise.withResolvers<void>();
+	const aborted = Promise.withResolvers<void>();
+	const mock = createMockModel({
+		handler: async (_context, options) => {
+			const signal = options?.signal;
+			if (!signal) throw new Error("Expected gateway request signal");
+			active.resolve();
+			if (!signal.aborted)
+				await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+			aborted.resolve();
+			throw signal.reason;
+		},
+	});
+	const gateway = startAuthGateway({
+		bind: "127.0.0.1:0",
+		bearerTokens: ["test-token"],
+		storage,
+		resolveModel: () => mock.model,
+	});
+	try {
+		const response = fetch(`${gateway.url}/v1/chat/completions`, {
+			method: "POST",
+			headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ model: mock.model.id, messages: [{ role: "user", content: "hi" }], stream: false }),
+		});
+		await active.promise;
+		await gateway.close();
+		await aborted.promise;
+		await response.catch(() => undefined);
+	} finally {
+		await gateway.close();
+		storage.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("rejects drain durations that cannot be represented by a timer", async () => {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-drain-invalid-"));
