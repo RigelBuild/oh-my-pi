@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { installGlobalProxyFetch } from "@oh-my-pi/pi-ai/utils/proxy";
 import { runAuthGatewayCommand } from "./auth-gateway-cli";
 
 /** T1 deliberately does not provide a broker URL; the serve command still requires OMP_AUTH_BROKER_URL. */
@@ -21,8 +22,8 @@ export function getGatewayBootConfig(env: Readonly<Record<string, string | undef
 
 	const drainValue = env.COMPASS_GATEWAY_DRAIN_MS;
 	const drainMs = drainValue === undefined ? DEFAULT_DRAIN_MS : Number(drainValue);
-	if (!Number.isSafeInteger(drainMs) || drainMs <= 0) {
-		throw new Error("COMPASS_GATEWAY_DRAIN_MS must be a positive integer");
+	if (!Number.isSafeInteger(drainMs) || drainMs <= 0 || drainMs > 2_147_483_647) {
+		throw new Error("COMPASS_GATEWAY_DRAIN_MS must be a positive integer no greater than 2147483647");
 	}
 
 	return { tokenFile, bind, drainMs };
@@ -39,6 +40,7 @@ export async function readGatewayToken(tokenFile: string): Promise<string> {
 export async function runGatewayBoot(env: Readonly<Record<string, string | undefined>> = process.env): Promise<void> {
 	const config = getGatewayBootConfig(env);
 	const gatewayToken = await readGatewayToken(config.tokenFile);
+	installGlobalProxyFetch();
 	await runAuthGatewayCommand({
 		action: "serve",
 		flags: { bind: config.bind, gatewayToken, drainMs: config.drainMs },
