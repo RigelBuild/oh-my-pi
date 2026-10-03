@@ -5,7 +5,7 @@
 ### Added
 
 - Added case-sensitive per-agent compaction thresholds for task/eval subagents, with percentage or fixed-token limits that leave the main session threshold unchanged ([#13107](https://github.com/can1357/oh-my-pi/pull/13107) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- Added a container-ready auth-gateway boot entrypoint that reads a mounted bearer token and drains requests on SIGTERM.
+- Added a container-ready auth-gateway boot entrypoint that reads a mounted bearer token and drains requests on SIGTERM; `auth-gateway serve` now shuts down through postmortem cleanup, so SIGTERM exits `143` after the drain.
 - Added trusted additional context support for extension and hook tool results, including `ctx.addAdditionalContext()` for registered tools, allowing instructions to be passed to the model without altering the tool result.
 - Added dictation support to `/btw` follow-up input, including microphone controls on the follow-up line.
 - Added opt-in CUDA support to the Nix package for tiny-model inference with the ONNX Runtime CUDA execution provider.
