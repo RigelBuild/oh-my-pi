@@ -65,7 +65,9 @@ describe("provider registry auth surface", () => {
 	});
 
 	test("subscription OAuth tiers default to restricted until a provider is verified permissive", () => {
-		expect([...RESTRICTED_SUBSCRIPTION_OAUTH_PROVIDERS].sort()).toEqual(["anthropic", "openai-codex"]);
+		expect(RESTRICTED_SUBSCRIPTION_OAUTH_PROVIDERS.has("anthropic")).toBe(true);
+		expect(RESTRICTED_SUBSCRIPTION_OAUTH_PROVIDERS.has("openai-codex")).toBe(true);
+		expect(RESTRICTED_SUBSCRIPTION_OAUTH_PROVIDERS.has("zai-coding-plan")).toBe(true);
 		expect(subscriptionTosTierForProvider("anthropic")).toBe("restricted");
 		expect(subscriptionTosTierForProvider("openai-codex")).toBe("restricted");
 		expect(subscriptionTosTierForProvider("zai-coding-plan")).toBe("restricted");

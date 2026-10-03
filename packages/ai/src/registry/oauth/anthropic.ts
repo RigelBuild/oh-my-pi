@@ -17,8 +17,6 @@ const CLAUDE_CODE_BOOTSTRAP_MODEL = "claude-opus-4-8";
 
 export { ANTHROPIC_OAUTH_GRANT_TTL_MS } from "./anthropic-constants";
 
-export { createAnthropicEnrollmentAuthorizationUrl, exchangeAnthropicAuthorizationCode } from "./stateless";
-
 interface AnthropicBootstrapResponse {
 	oauth_account?: {
 		account_uuid?: string;

@@ -20,6 +20,11 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
 	"muse-code": museCodeTransport,
 };
 
+const SUBSCRIPTION_TOS_TIERS: Readonly<Record<string, "restricted">> = {
+	anthropic: "restricted",
+	"openai-codex": "restricted",
+};
+
 /**
  * The single per-provider list, derived from the compiled auth stratum
  * (`@oh-my-pi/pi-catalog` `rules/auth/*.kdl`) in `/login` display order.
@@ -28,11 +33,6 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
  * env map, login list, refresh/login dispatch, CLI callback maps) derives
  * from this registry.
  */
-const SUBSCRIPTION_TOS_TIERS: Readonly<Record<string, "restricted">> = {
-	anthropic: "restricted",
-	"openai-codex": "restricted",
-};
-
 export const PROVIDER_REGISTRY: readonly ProviderDefinition[] = authProviders().map(policy =>
 	buildProviderDefinition(policy, TRANSPORTS[policy.id], SUBSCRIPTION_TOS_TIERS[policy.id]),
 );
