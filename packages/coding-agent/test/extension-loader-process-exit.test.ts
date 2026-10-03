@@ -16,12 +16,16 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("extension/hook loader process.exit guard (#3680)", () => {
 	let project: TempDir | undefined;
+	const probes = new Set<Bun.Subprocess>();
 
 	beforeEach(() => {
 		project = TempDir.createSync("@omp-exit-guard-");
 	});
 
 	afterEach(() => {
+		// Bun SIGTERMs a hung probe at the test timeout; SIGKILL any that trapped it.
+		for (const proc of probes) proc.kill("SIGKILL");
+		probes.clear();
 		project?.removeSync();
 		project = undefined;
 	});
@@ -42,22 +46,15 @@ describe("extension/hook loader process.exit guard (#3680)", () => {
 			stdout: "pipe",
 			stderr: "pipe",
 		});
-		// Real process signals cannot use fake timers; this only bounds a wedged child.
-		const watchdog = setTimeout(() => {
-			try {
-				proc.kill("SIGKILL");
-			} catch {}
-		}, 2000);
-		try {
-			const [exitCode, stdout, stderr] = await Promise.all([
-				proc.exited,
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]);
-			return { exitCode, stdout, stderr };
-		} finally {
-			clearTimeout(watchdog);
-		}
+		probes.add(proc);
+		// Gate on the child's own exit; the per-test timeout bounds a real hang.
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		probes.delete(proc);
+		return { exitCode, stdout, stderr };
 	};
 
 	const runGuardedShutdownProbe = (trigger: "sigint" | "fatal") => {
