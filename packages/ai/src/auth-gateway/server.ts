@@ -902,9 +902,16 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 		port: boundPort,
 		hostname: boundHost,
 		close: async (drainMs?: number) => {
-			if (drainMs === undefined || drainMs <= 0) {
+			if (drainMs === undefined) {
+				await server.stop(true);
+			} else if (!Number.isFinite(drainMs)) {
+				throw new RangeError("drainMs must be a finite duration no greater than 2147483647 ms");
+			} else if (drainMs <= 0) {
 				await server.stop(true);
 			} else {
+				if (drainMs > 2_147_483_647) {
+					throw new RangeError("drainMs must be a finite duration no greater than 2147483647 ms");
+				}
 				const deadline = setTimeout(() => void server.stop(true), drainMs);
 				try {
 					await server.stop();
