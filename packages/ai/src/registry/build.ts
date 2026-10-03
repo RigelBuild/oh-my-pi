@@ -52,6 +52,7 @@ function loginFor(policy: CompiledAuthProvider): ProviderDefinition["login"] {
 export function buildProviderDefinition(
 	policy: CompiledAuthProvider,
 	transport?: ProviderTransport,
+	subscriptionTosTier?: ProviderDefinition["subscriptionTosTier"],
 ): ProviderDefinition {
 	const envKeys = envResolver(policy.env);
 	const login = loginFor(policy);
@@ -60,6 +61,7 @@ export function buildProviderDefinition(
 		id: policy.id,
 		name: policy.name,
 		...transport,
+		...(subscriptionTosTier !== undefined ? { subscriptionTosTier } : {}),
 		...(envKeys !== undefined ? { envKeys } : {}),
 		...(policy.allowsMissingApiKey !== undefined ? { allowsMissingApiKey: policy.allowsMissingApiKey } : {}),
 		...(policy.nativeAuthApis !== undefined ? { nativeAuthApis: policy.nativeAuthApis } : {}),

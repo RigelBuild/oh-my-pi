@@ -11,16 +11,12 @@ import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "../oauth/callb
 import { generatePKCE } from "../oauth/pkce";
 import type { OAuthController, OAuthCredentials } from "../oauth/types";
 import {
-	applyAfterExchange,
-	applyUserinfo,
-	mapCredentials,
-	NEVER_EXPIRES,
-	postTokenRequest,
-	resolveValue,
-	template,
-	type TemplateVars,
-	throwIfCancelled,
-} from "./common";
+	createOAuthCodeFlowAuthorizationUrl,
+	exchangeOAuthCodeFlow,
+	resolveOAuthCodeFlowSettings,
+	type OAuthCodeFlowSettings,
+} from "../oauth/stateless";
+import { NEVER_EXPIRES, resolveValue, throwIfCancelled } from "./common";
 
 function isLoopbackHost(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
@@ -91,10 +87,7 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 	#label: string;
 	#fetch: FetchImpl;
 	#verifier = "";
-	#clientId?: string;
-	#clientSecret?: string;
-	#base?: string;
-	#auth?: string;
+	#settings?: OAuthCodeFlowSettings;
 
 	constructor(
 		ctrl: OAuthController,
@@ -121,102 +114,37 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
-		const rule = this.#rule;
 		const signal = this.ctrl.signal;
-		this.#clientId = rule.clientId ? await resolveValue(rule.clientId, signal) : undefined;
-		this.#clientSecret = rule.clientSecret ? await resolveValue(rule.clientSecret, signal) : undefined;
-		this.#base = rule.baseUrl ? (await resolveValue(rule.baseUrl, signal)).replace(/\/+$/, "") : undefined;
-		this.#auth = rule.authUrl ? (await resolveValue(rule.authUrl, signal)).replace(/\/+$/, "") : undefined;
-		let challenge: string | undefined;
-		if (rule.pkce) {
-			const pkce = await generatePKCE();
-			this.#verifier = pkce.verifier;
-			challenge = pkce.challenge;
-		}
-		const scope = rule.scopes.length > 0 ? rule.scopes.join(rule.scopeSeparator) : undefined;
-		const vars: TemplateVars = {
-			client_id: this.#clientId,
-			redirect_uri: redirectUri,
-			scope,
+		this.#settings = await resolveOAuthCodeFlowSettings(this.#rule, signal);
+		const pkce = this.#rule.pkce ? await generatePKCE() : undefined;
+		this.#verifier = pkce?.verifier ?? "";
+		return createOAuthCodeFlowAuthorizationUrl(this.#rule, this.#settings, {
 			state,
-			code_challenge: challenge,
-			base: this.#base,
-			auth: this.#auth,
-		};
-		const params = new URLSearchParams();
-		if (rule.standardAuthorizeParams) {
-			if (this.#clientId) params.set("client_id", this.#clientId);
-			params.set("response_type", "code");
-			params.set("redirect_uri", redirectUri);
-			if (scope) params.set("scope", scope);
-			if (challenge) {
-				params.set("code_challenge", challenge);
-				params.set("code_challenge_method", "S256");
-			}
-			if (state) params.set("state", state);
-		}
-		for (const key in rule.authorizeParams) params.set(key, template(rule.authorizeParams[key], vars));
-		const authorizeUrl = template(await resolveValue(rule.authorizeUrl, signal), vars);
-		return { url: `${authorizeUrl}?${params.toString()}`, instructions: rule.instructions };
+			redirectUri,
+			pkceChallenge: pkce?.challenge ?? "",
+			signal,
+		});
 	}
 
 	async exchangeToken(code: string, state: string, redirectUri: string): Promise<OAuthCredentials> {
-		const rule = this.#rule;
 		const signal = this.ctrl.signal;
 		throwIfCancelled(signal);
-		if (rule.pasteKey && code.startsWith(rule.pasteKey.prefix)) {
-			// The manual-input race feeds pasted text through the code path; a
-			// pasted API key short-circuits the exchange after validation.
+		if (this.#rule.pasteKey && code.startsWith(this.#rule.pasteKey.prefix)) {
 			await validateApiKeyAgainstModelsEndpoint({
 				provider: this.#label,
 				apiKey: code,
-				modelsUrl: rule.pasteKey.validateUrl,
+				modelsUrl: this.#rule.pasteKey.validateUrl,
 				signal,
 				fetch: this.ctrl.fetch,
 			});
 			return { access: code, refresh: "", expires: NEVER_EXPIRES };
 		}
-		// Providers may echo `code#state`; the fragment wins over the callback state.
-		let exchangeCode = code;
-		let exchangeState = state;
-		const fragment = code.indexOf("#");
-		if (fragment >= 0) {
-			exchangeCode = code.slice(0, fragment);
-			exchangeState = code.slice(fragment + 1) || state;
-		}
-		const vars: TemplateVars = {
-			code: exchangeCode,
-			state: exchangeState,
-			redirect_uri: redirectUri,
-			code_verifier: rule.pkce ? this.#verifier : undefined,
-			client_id: this.#clientId,
-			client_secret: this.#clientSecret,
-			base: this.#base,
-			auth: this.#auth,
-		};
-		const context = { provider: this.#provider, fetch: this.#fetch, signal };
-		const { body } = await postTokenRequest(
-			rule.token,
-			{
-				grant_type: "authorization_code",
-				client_id: this.#clientId,
-				client_secret: this.#clientSecret,
-				code: exchangeCode,
-				redirect_uri: redirectUri,
-				code_verifier: rule.pkce ? this.#verifier : undefined,
-			},
-			vars,
-			context,
-			"token-exchange",
-		);
-		throwIfCancelled(signal);
-		let credentials = mapCredentials(rule.credential, body, this.#provider);
-		credentials = await applyUserinfo(rule.userinfo, credentials, context, vars);
-		throwIfCancelled(signal);
-		return applyAfterExchange(rule.afterExchange, credentials, {
-			provider: this.#provider,
-			phase: "login",
-			raw: body,
+		const settings = this.#settings ?? (await resolveOAuthCodeFlowSettings(this.#rule, signal));
+		return exchangeOAuthCodeFlow(this.#provider, this.#rule, settings, {
+			code,
+			state,
+			redirectUri,
+			pkceVerifier: this.#verifier,
 			fetch: this.#fetch,
 			signal,
 			onProgress: this.ctrl.onProgress,
@@ -224,7 +152,6 @@ export class DeclarativeOAuthCodeFlow extends OAuthCallbackFlow {
 		});
 	}
 }
-
 /** Builds the login function for one `login "oauth-code"` rule. */
 export function createOAuthCodeLogin(
 	rule: CompiledOAuthCodeLogin,
