@@ -164,7 +164,7 @@ Algorithm:
      scalar, create the node with `doc.createNode(value)`, visit all nested scalars
      and set multiline strings to `Scalar.QUOTE_DOUBLE`, then `doc.setIn(path, node)`.
      Do not assign `.type` to a raw JS string returned by `getIn`.
-4. `indent` = width of the first `^( +)[^\s#]` match in `source`, default 2.
+4. `indent` = width of the first `/^( +)[^\s#]/m` match in `source`, default 2.
    `out = doc.toString({ lineWidth: 0, indent, flowCollectionPadding: false,
    doubleQuotedMinMultiLineLength: Infinity })`. Re-parse with Bun;
    `!Bun.deepEquals(Bun.YAML.parse(out), target)` → `unpreservable("round-trip
@@ -184,6 +184,8 @@ Tests (`packages/utils/test/yaml-config.test.ts`, new; red first):
 - sequence: changing one item keeps the comments on the others; shortening drops the
   tail; lengthening appends; changing an item inside a nested sequence keeps comments
   on its unchanged sibling items;
+- a changed write to a source whose first line is a top-level key or comment and
+  whose nested keys use 4-space indent retains that indent width;
 - `unchanged` when `next` equals the parsed source even though the source uses 4-space
   indent and `[a, b]` flow style;
 - `unpreservable` on duplicate top-level keys (reason gives code and line, never
