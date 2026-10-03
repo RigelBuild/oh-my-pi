@@ -23,7 +23,7 @@ describe("extension/hook loader process.exit guard (#3680)", () => {
 	});
 
 	afterEach(() => {
-		// A probe still alive here hung past the test timeout; reap it.
+		// Bun SIGTERMs a hung probe at the test timeout; SIGKILL any that trapped it.
 		for (const proc of probes) proc.kill("SIGKILL");
 		probes.clear();
 		project?.removeSync();
