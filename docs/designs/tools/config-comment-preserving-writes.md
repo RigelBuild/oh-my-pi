@@ -144,7 +144,8 @@ Algorithm:
    `doc = parseDocument(source)`. `doc.errors.length > 0` → `unpreservable(first error
    message, which names the key for DUPLICATE_KEY)`. `visit(doc, { Alias })` finds any
    alias → `unpreservable("anchors/aliases")`. `doc.contents` neither `null` nor a map →
-   `unpreservable`.
+   `unpreservable`. If `doc.contents === null`, set `doc.contents = doc.createNode({})`
+   before reconciliation; document-level comments remain on `doc`.
 3. `reconcile(doc, [], doc.contents, target)`:
    - map: for each pair whose key is not a string → `unpreservable`; whose key is absent
      from `target` → `doc.deleteIn([...path, key])`. For each `[key, value]` of
@@ -261,8 +262,8 @@ dev:
 
 - "setupVersion migration keeps every comment and lands the four key changes": seed
   the fixture; `Settings.init`; `set("composer.shape", "band")`;
-  `markSetupWizardComplete(settings, 2)` (sets `setupVersion` and flushes). Assert each
-  of the five comment lines is present verbatim; parsed file has `setupVersion: 2`,
+  `markSetupWizardComplete(settings, 2)` (sets `setupVersion` and flushes). Assert all
+  six comment lines are present verbatim; parsed file has `setupVersion: 2`,
   `dev.autoqaConsent: "unset"` with no `dev.autoqa`, `compaction.methodOrder:
   ["handoff", "soft"]` with no `strategy` / `remoteEnabled`, `composer.shape: "band"`;
   `custom.tags` and `modelRoles` unchanged.
@@ -287,9 +288,10 @@ whitespace and preserves multiline values", "moves legacy lastChangelogVersion �
 ### Task 3 — CHANGELOG
 
 - `packages/coding-agent/CHANGELOG.md` under `[Unreleased]` / `Changed`: "Settings saves
-  now edit `config.yml` in place, preserving comments, key order and formatting of
-  unchanged keys; a config `yaml` cannot edit safely (duplicate keys, anchors) now
-  rejects the save with an actionable error instead of being rewritten."
+  now preserve comments and key order in `config.yml`, and the values and styles of
+  untouched nodes. Whitespace can normalize when another value changes. A config
+  `yaml` cannot edit safely (duplicate keys, anchors) rejects the save with an
+  actionable error instead of being rewritten."
 
 ## Tasks
 
