@@ -155,9 +155,9 @@ Algorithm:
      from `target` → `doc.deleteIn([...path, key])`. For each `[key, value]` of
      `target`: `existing = map.get(key, true)`; both maps → recurse; both sequences →
      recurse; `Bun.deepEquals(existing?.toJSON(), value)` → skip; else set the value.
-   - sequence (positional): index `i < min(len)`: both maps → recurse; equal → skip;
-     else set the item. Extra source items → `doc.deleteIn` from the end; extra
-     target items → set at their index.
+   - sequence (positional): index `i < min(len)`: both maps → recurse; both sequences
+     → recurse; equal → skip; else set the item. Extra source items → `doc.deleteIn`
+     from the end; extra target items → set at their index.
    - When changing an existing scalar to a scalar, `doc.setIn(path, value)` updates
      it in place and keeps its comment; set its type to `Scalar.QUOTE_DOUBLE` if the
      new string contains `\n`. For any inserted or replacement map, sequence, or
@@ -182,7 +182,8 @@ Tests (`packages/utils/test/yaml-config.test.ts`, new; red first):
 - per-role: changing `modelRoles.default` keeps the comment on `modelRoles.advisor`;
   removing one role keeps the others' comments;
 - sequence: changing one item keeps the comments on the others; shortening drops the
-  tail; lengthening appends;
+  tail; lengthening appends; changing an item inside a nested sequence keeps comments
+  on its unchanged sibling items;
 - `unchanged` when `next` equals the parsed source even though the source uses 4-space
   indent and `[a, b]` flow style;
 - `unpreservable` on duplicate top-level keys (reason gives code and line, never
