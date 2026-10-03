@@ -11,7 +11,14 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 const stubSettings = { get: () => undefined } as unknown as Settings;
 
 function args(extra: Partial<Args>): Args {
-	return { messages: [], fileArgs: [], unknownFlags: new Map(), unrecognizedFlags: [], ...extra };
+	return {
+		messages: [],
+		fileArgs: [],
+		unknownFlags: new Map(),
+		invalidFlagValues: [],
+		unrecognizedFlags: [],
+		...extra,
+	};
 }
 
 async function jsonlFiles(dir: string): Promise<string[]> {

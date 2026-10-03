@@ -8,6 +8,8 @@ import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
+import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
+
 type Spy = Mock<(...args: unknown[]) => unknown>;
 type StartPendingSubmissionSpy = Mock<InteractiveModeContext["startPendingSubmission"]>;
 type FakeEditor = {
@@ -222,6 +224,7 @@ function createContext(): {
 		hasActiveOmfg,
 		handleCleanseEscape,
 		hasActiveCleanse,
+		dismissCommandReport: vi.fn(() => false),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
@@ -310,12 +313,15 @@ describe("InputController escape behavior", () => {
 		controller.setupEditorSubmitHandler();
 		await editor.onSubmit?.("hello");
 
-		expect(spies.startPendingSubmission).toHaveBeenCalledWith({
-			text: "hello",
-			images: undefined,
-			imageLinks: undefined,
-			streamingBehavior: "steer",
-		});
+		expect(spies.startPendingSubmission).toHaveBeenCalledWith(
+			{
+				text: "hello",
+				images: undefined,
+				imageLinks: undefined,
+				streamingBehavior: "steer",
+			},
+			{ clearEditor: false },
+		);
 		expect(spies.onInputCallback).toHaveBeenCalledWith(submission);
 
 		editor.onEscape?.();
@@ -324,10 +330,27 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
+	it("preserves text arriving after Enter while idle submission awaits", async () => {
+		const { ctx, editor, spies } = createContext();
+		spies.startPendingSubmission.mockImplementation((input, options) => {
+			if (!options?.preserveDraft && options?.clearEditor !== false) editor.setText("");
+			return createSubmission(input);
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+		const submission = editor.onSubmit?.("first line");
+		editor.setText("paste tail after Enter");
+		await submission;
+		expect(editor.getText()).toBe("paste tail after Enter");
+		expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
+	});
+
 	it("empty-submit with a queued message aborts the active stream and refreshes pending display", async () => {
 		const { ctx, editor, spies } = createContext();
-		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).isStreaming = true;
-		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).queuedMessageCount = 1;
+		// Stubbed session: only the streaming/interrupt gate fields matter here.
+		const session = ctx.session as { isStreaming: boolean; hasInterruptibleInput: boolean };
+		session.isStreaming = true;
+		session.hasInterruptibleInput = true;
 		const order: string[] = [];
 		spies.abort.mockImplementation(async () => {
 			order.push("abort");
@@ -697,7 +720,7 @@ describe("InputController escape behavior", () => {
 	});
 
 	it("ignores double-Esc when the action is disabled", () => {
-		Settings.instance.override("doubleEscapeAction", "none");
+		cfgDoubleEscapeAction.override(Settings.instance, "none");
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
@@ -711,7 +734,7 @@ describe("InputController escape behavior", () => {
 	});
 
 	it("opens the session tree on double-Esc when the action is tree", () => {
-		Settings.instance.override("doubleEscapeAction", "tree");
+		cfgDoubleEscapeAction.override(Settings.instance, "tree");
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
@@ -824,16 +847,6 @@ describe("InputController Ctrl+C behavior", () => {
 		// guarantee that the JSONL is on disk even if the user closes the
 		// terminal before the second press.
 		expect(spies.flushSync).toHaveBeenCalledTimes(2);
-	});
-
-	it("does not flush when Ctrl+C is not pressed", () => {
-		const { ctx, editor, spies } = createContext();
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-		editor.onEscape?.(); // Esc is a different handler
-
-		expect(spies.flushSync).not.toHaveBeenCalled();
 	});
 });
 

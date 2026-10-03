@@ -10,6 +10,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
+import { type JudgmentUsageLedger, journalJudgmentUsage } from "../judgment";
 import type {
 	MemoryBackend,
 	MemoryBackendSaveInput,
@@ -42,6 +43,9 @@ import {
 	requireMnemopiCore,
 	setMnemopiSessionState,
 } from "./state";
+
+import { cfgMemoryBackend } from "../memory-backend/settings";
+import { cfgMnemopiInjectionTokenLimit } from "./settings";
 
 // `/diagnose` is the only user of this subpath; load it lazily alongside the
 // loaders in ./state to keep mnemopi off the CLI startup module graph.
@@ -118,7 +122,13 @@ export const mnemopiBackend: MemoryBackend = {
 		}
 
 		try {
-			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
+			const config = await loadMnemopiConfigWithProviders(
+				settings,
+				agentDir,
+				modelRegistry,
+				sessionId,
+				session.sessionManager,
+			);
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			await installMnemopiState(session, config);
 		} catch (error) {
@@ -133,7 +143,7 @@ export const mnemopiBackend: MemoryBackend = {
 		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
 		const rendered = parts.join("\n\n").trim();
 		if (!rendered) return undefined;
-		return truncateApproxTokens(rendered, settings.get("mnemopi.injectionTokenLimit"));
+		return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));
 	},
 
 	async beforeAgentStartPrompt(session, promptText, signal): Promise<MemoryPromptPreparation | undefined> {
@@ -148,7 +158,7 @@ export const mnemopiBackend: MemoryBackend = {
 			});
 			const rendered = [instructions, preparation.context].join("\n\n").trim();
 			preparation.context =
-				truncateApproxTokens(rendered, session.settings.get("mnemopi.injectionTokenLimit"))
+				truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(session.settings))
 					.slice(instructions.length)
 					.trim() || undefined;
 		}
@@ -173,7 +183,7 @@ export const mnemopiBackend: MemoryBackend = {
 		requireMnemopiCore().resetMemoryForTests();
 		await Bun.sleep(0);
 		await removeDbFiles(getMnemopiScopedDbPaths(config));
-		if (!session?.sessionId || previous?.aliasOf || session.settings.get("memory.backend") !== "mnemopi") return;
+		if (!session?.sessionId || previous?.aliasOf || cfgMemoryBackend.get(session.settings) !== "mnemopi") return;
 		try {
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			await installMnemopiState(session, config);
@@ -191,6 +201,7 @@ export const mnemopiBackend: MemoryBackend = {
 					agentDir,
 					session.modelRegistry,
 					session.sessionId,
+					session.sessionManager,
 				);
 				await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 				state = await installMnemopiState(session, config);
@@ -488,9 +499,16 @@ async function loadMnemopiConfigWithProviders(
 	agentDir: string,
 	modelRegistry: ModelRegistry,
 	sessionId: string,
+	usageLedger: Partial<JudgmentUsageLedger>,
 ): Promise<MnemopiBackendConfig> {
 	const config = loadMnemopiConfig(settings, agentDir);
-	config.providerOptions = await resolveMnemopiProviderOptions(config, settings, modelRegistry, sessionId);
+	config.providerOptions = await resolveMnemopiProviderOptions(
+		config,
+		settings,
+		modelRegistry,
+		sessionId,
+		usageLedger,
+	);
 	return config;
 }
 
@@ -518,6 +536,7 @@ async function resolveMnemopiProviderOptions(
 	settings: MemoryBackendStartOptions["settings"],
 	modelRegistry: ModelRegistry,
 	sessionId: string,
+	usageLedger: Partial<JudgmentUsageLedger>,
 ): Promise<MnemopiProviderOptions> {
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
@@ -557,6 +576,10 @@ async function resolveMnemopiProviderOptions(
 		}
 
 		const complete = async (prompt: string, opts?: MnemopiLlmCompleteOptions): Promise<string | null> => {
+			// journalJudgmentUsage snapshots the session id. /new, fork, and session
+			// switch keep this function, so bind inside each call. An in-flight call
+			// keeps the callback it already created and still journals to its start.
+			const onUsage = journalJudgmentUsage(usageLedger);
 			const request = resolveMemoryCompletionInput(prompt, opts);
 			const signal =
 				typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
@@ -603,6 +626,17 @@ async function resolveMnemopiProviderOptions(
 									maxTokens: opts?.maxTokens,
 									temperature: opts?.temperature,
 									signal,
+									onAttempt: message =>
+										onUsage?.({
+											purpose: "memory",
+											role: "memory",
+											api: model.api,
+											provider: model.provider,
+											model: model.id,
+											usage: message.usage,
+											stopReason: message.stopReason,
+											errorMessage: message.errorMessage,
+										}),
 								},
 							),
 						{ provider: model.provider, signal },

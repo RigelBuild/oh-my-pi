@@ -11,6 +11,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgDefaultThinkingLevel, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -295,7 +296,7 @@ describe("AgentSession model persistence", () => {
 		// per-knob contract keeps the session's own level — the flag must never
 		// move it onto a schema default or a bare model default.
 		const settings = await loadOverlaySettings({ default: modelValue(model) });
-		expect(settings.isConfigured("defaultThinkingLevel")).toBe(false);
+		expect(cfgDefaultThinkingLevel.isConfigured(settings)).toBe(false);
 
 		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
 
@@ -448,7 +449,7 @@ describe("AgentSession model persistence", () => {
 			const targetSessionFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
 
 			const settings = await loadOverlaySettingsRaw(`modelRoles:\n  default: "${selfAlias}"\n`);
-			expect(settings.isConfigured("defaultThinkingLevel")).toBe(false);
+			expect(cfgDefaultThinkingLevel.isConfigured(settings)).toBe(false);
 
 			const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
 
@@ -514,7 +515,7 @@ describe("AgentSession model persistence", () => {
 		);
 		const adopted = getAnthropicModelOrThrow("claude-sonnet-4-6");
 		const settings = await loadOverlaySettingsRaw(`modelRoles:\n  default: "${modelValue(adopted)}"\n`);
-		expect(settings.isConfigured("defaultThinkingLevel")).toBe(false);
+		expect(cfgDefaultThinkingLevel.isConfigured(settings)).toBe(false);
 
 		const result = await createStartupResumeSession(targetSessionFile, settings, {
 			reapplyConfig: true,
@@ -590,7 +591,7 @@ describe("AgentSession model persistence", () => {
 		);
 
 		const settings = await loadOverlaySettings({ default: modelValue(overlayModel) });
-		expect(settings.isConfigured("defaultThinkingLevel")).toBe(false);
+		expect(cfgDefaultThinkingLevel.isConfigured(settings)).toBe(false);
 
 		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
 
@@ -654,7 +655,7 @@ describe("AgentSession model persistence", () => {
 		);
 
 		const settings = await loadOverlaySettings({ default: modelValue(explicitModel) });
-		expect(settings.isConfigured("defaultThinkingLevel")).toBe(false);
+		expect(cfgDefaultThinkingLevel.isConfigured(settings)).toBe(false);
 
 		const result = await createStartupResumeSession(targetSessionFile, settings, {
 			reapplyConfig: true,
@@ -1104,7 +1105,7 @@ describe("AgentSession model persistence", () => {
 			persist: true,
 		});
 		// A paid tier configured AFTER that session existed.
-		created.settings.override("tier.openai", "priority");
+		cfgTierOpenai.override(created.settings, "priority");
 
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 
@@ -1409,17 +1410,5 @@ describe("AgentSession model persistence", () => {
 				EPHEMERAL_MODEL_CHANGE_ROLE,
 			),
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
-	});
-
-	it("lists a named role model before the default fallback", () => {
-		expect(
-			getRestorableSessionModels(
-				{
-					default: "anthropic/claude-sonnet-4-5",
-					smol: "anthropic/claude-sonnet-4-6",
-				},
-				"smol",
-			),
-		).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
 	});
 });

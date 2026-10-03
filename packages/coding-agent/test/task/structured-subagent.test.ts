@@ -4,6 +4,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -12,12 +13,14 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
 	buildStructuredSubagentRecoveryHint,
+	invalidModelSelectorReason,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
@@ -27,6 +30,9 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
+import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
+
 const AGENT: AgentDefinition = {
 	name: "worker",
 	description: "Test worker",
@@ -35,6 +41,20 @@ const AGENT: AgentDefinition = {
 	tools: ["read", "write", "ast_grep"],
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
+
+/** One catalog entry so a populated registry can reject an unmatchable selector. */
+const MODEL = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "Claude Sonnet 4.5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	reasoning: false,
+	baseUrl: "https://api.anthropic.com",
+	input: ["text"],
+	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+});
 
 function session(
 	options: {
@@ -48,6 +68,7 @@ function session(
 		modelRoles?: Record<string, string>;
 		agentServiceTierOverrides?: Record<string, string>;
 		agentCompactionThresholdOverrides?: Record<string, AgentCompactionThresholdOverride>;
+		sessionAgents?: readonly AgentDefinition[];
 	} = {},
 ): ToolSession {
 	return {
@@ -72,6 +93,7 @@ function session(
 			}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		getSessionAgents: () => options.sessionAgents ?? [],
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
 }
@@ -252,10 +274,12 @@ describe("structured subagent primitive", () => {
 			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
 
 			expect(policy.modelOverride).toEqual(["xai-oauth/grok-4.6:medium"]);
-			expect(liveSettings.get("task.enableEffort")).toBe(false);
-			expect(liveSettings.get("retry.modelFallback")).toBe(false);
+			expect(cfgTaskEnableEffort.get(liveSettings)).toBe(false);
+			expect(cfgRetryModelFallback.get(liveSettings)).toBe(false);
 		} finally {
 			liveSettings.cancelPendingSaves();
+			// `Settings.loadIsolated` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -310,10 +334,26 @@ describe("structured subagent primitive", () => {
 			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
+			AgentStorage.close();
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 
+	it("forwards parent-authorized model agents to nested subagent sessions", async () => {
+		mockDiscovery();
+		const inheritedAgent: AgentDefinition = { ...AGENT, name: "m1", model: ["b/y"] };
+		const parentSession = session({ sessionAgents: [inheritedAgent] });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(request({ session: parentSession, retainArtifacts: true }));
+
+		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);
@@ -466,7 +506,7 @@ describe("structured subagent primitive", () => {
 				definition: "openai/gpt-4o",
 			},
 		});
-		roleSession.settings.override("task.agentModelOverrides", { worker: "@override" });
+		cfgTaskAgentModelOverrides.override(roleSession.settings, { worker: "@override" });
 
 		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
 		expect(requestPolicy.modelRole).toBe("request");
@@ -480,7 +520,7 @@ describe("structured subagent primitive", () => {
 				definition: "openai/gpt-4o",
 			},
 		});
-		concreteOverrideSession.settings.override("task.agentModelOverrides", { worker: "openai/gpt-4o" });
+		cfgTaskAgentModelOverrides.override(concreteOverrideSession.settings, { worker: "openai/gpt-4o" });
 		const concreteOverridePolicy = await resolveEffectiveSubagentPolicy(
 			request({ session: concreteOverrideSession }),
 		);
@@ -502,11 +542,157 @@ describe("structured subagent primitive", () => {
 		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
 	});
 
+	it("rejects an ambiguous per-call selector instead of resolving it as the default role", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "default" })),
+		).rejects.toThrow(/"@default"/);
+		// The rule applies per pattern, not to the joined chain.
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "openai/gpt-4o,default" })),
+		).rejects.toThrow(/"@default"/);
+	});
+
+	it("rejects an ambiguous per-call selector carrying a thinking suffix", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+
+		for (const model of ["default:high", "DEFAULT:high", "inherit:low"]) {
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/"@default"/,
+			);
+		}
+	});
+
+	it("fails a per-call selector that expands to nothing rather than silently demoting it", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
+
+		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@empty" }))).rejects.toThrow(
+			/No available model matches `model`/,
+		);
+	});
+	it("admits a valid explicit selector while the model registry is cold", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({ modelRoles: { definition: "openai/gpt-4o" } }),
+			modelRegistry: { getAvailable: () => [] },
+		} as unknown as ToolSession;
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "openai/gpt-4o" }));
+
+		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	});
+
+	it("validates every concrete candidate beside a session-model inheritance alias", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({ modelRoles: { definition: "openai/gpt-4o" } }),
+			getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+			modelRegistry: { getAvailable: () => [MODEL] },
+		} as unknown as ToolSession;
+
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({ session: childSession, model: "@default,anthropic/claude-sonnet-4-5:heigh" }),
+			),
+		).rejects.toThrow(/Invalid thinking suffix/);
+	});
+
+	it("fails a per-call selector that matches no available model", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+		const registry = { getAvailable: () => [MODEL] } as unknown as ToolSession["modelRegistry"];
+		const withRegistry = { ...childSession, modelRegistry: registry } as ToolSession;
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "openai/does-not-exist" })),
+		).rejects.toThrow(/No available model matches `model`/);
+
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: withRegistry, model: "anthropic/claude-sonnet-4-5" }),
+		);
+		expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	it("inherits the parent's active model for `@default`, not the configured default role", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({ modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" } }),
+			getActiveModelString: () => "zai/glm-5.2:high",
+			getModelString: () => "openai/gpt-4o",
+		} as ToolSession;
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default" }));
+
+		expect(policy.modelOverride).toEqual(["zai/glm-5.2:high"]);
+		// The request still outranks the agent definition; it just resolves to inheritance.
+		expect(policy.modelRole).toBeUndefined();
+	});
+
+	it("withholds the parent credential fallback from an explicit per-call model and marks inherited effort", async () => {
+		mockDiscovery();
+		const parent = "anthropic/claude-sonnet-4-5:high";
+		const childSession = { ...session(), getActiveModelString: () => parent } as ToolSession;
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		for (const model of [
+			"openai/gpt-4o",
+			["openai/gpt-4o", "openai/gpt-4o-mini"],
+			"@default",
+			"@default:low",
+			undefined,
+		]) {
+			await runStructuredSubagent(request({ session: childSession, model }));
+		}
+
+		expect(
+			dispatched.map(options => [options.parentActiveModelPattern, options.modelInheritsLiveThinkingLevel ?? false]),
+		).toEqual([
+			// A requested model that cannot authenticate fails rather than running on the parent's.
+			[undefined, false],
+			[undefined, false],
+			// `@default` names the parent; its live `:high` is inherited, not requested.
+			[parent, true],
+			[parent, false],
+			// No selector: the agent inherits the session model and the #985 fallback stays.
+			[parent, true],
+		]);
+	});
+
+	it("admits mixed inherited requests when configured role candidates are unavailable", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({
+				modelRoles: { default: "openai/gpt-4o", smol: "openai/gpt-4o", definition: "openai/gpt-4o" },
+			}),
+			getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+			getModelString: () => "openai/gpt-4o",
+			modelRegistry: { getAvailable: () => [MODEL] },
+		} as ToolSession;
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "@default:high,@smol" }),
+		);
+		const selected = resolveModelOverride(
+			normalizeModelPatternList(policy.modelOverride),
+			{ getAvailable: () => [MODEL] },
+			childSession.settings,
+		);
+
+		expect(selected.model).toBe(MODEL);
+		expect(policy.modelRole).toBeUndefined();
+	});
+
 	it("falls through an empty configured override to the agent definition role", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-		childSession.settings.override("task.agentModelOverrides", { worker: "" });
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "" });
 
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 
@@ -517,7 +703,7 @@ describe("structured subagent primitive", () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
-		childSession.settings.override("task.agentModelOverrides", { worker: "@empty" });
+		cfgTaskAgentModelOverrides.override(childSession.settings, { worker: "@empty" });
 
 		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession }));
 
@@ -1033,4 +1219,28 @@ describe("structured subagent primitive", () => {
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+});
+
+describe("per-call selector syntax", () => {
+	it("rejects a comma-only selector instead of treating it as no selector", () => {
+		expect(invalidModelSelectorReason(" , ", "The call")).toMatch(/invalid .*model/);
+	});
+
+	for (const model of [
+		"anthropic/claude-sonnet-4-5:heigh",
+		["anthropic/claude-sonnet-4-5:heigh", "anthropic/claude-sonnet-4-5"],
+		"@default,anthropic/claude-sonnet-4-5:heigh",
+	]) {
+		it(`rejects an invalid thinking suffix instead of silently dropping it: ${JSON.stringify(model)}`, async () => {
+			mockDiscovery();
+			const childSession = {
+				...session(),
+				getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+				modelRegistry: { getAvailable: () => [MODEL] },
+			} as ToolSession;
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/Invalid thinking suffix/,
+			);
+		});
+	}
 });

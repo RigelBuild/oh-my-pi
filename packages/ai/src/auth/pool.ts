@@ -206,6 +206,19 @@ export class CredentialPool implements CredentialsApi {
 		}
 	}
 
+	/**
+	 * Take over the subscribers, buffered disable events, and generation counter of
+	 * the pool this one replaces (store swap). Listener sets are shared, so
+	 * unsubscribe functions handed out by `previous` keep working.
+	 */
+	adoptSubscribers(previous: CredentialPool): void {
+		this.#credentialDisabledListeners = previous.#credentialDisabledListeners;
+		this.#generationListeners = previous.#generationListeners;
+		this.#pendingDisabledEvents = previous.#pendingDisabledEvents;
+		previous.#pendingDisabledEvents = [];
+		this.#generation = previous.#generation;
+	}
+
 	onGeneration(listener: (generation: number) => void): () => void {
 		this.#generationListeners.add(listener);
 		return () => {
@@ -454,7 +467,9 @@ export class CredentialPool implements CredentialsApi {
 	/**
 	 * Persist a refreshed credential by id only while the row still matches this
 	 * process's snapshot. A peer rotation wins the CAS and is reloaded instead of
-	 * being overwritten after this process releases its refresh lease.
+	 * being overwritten after this process releases its refresh lease. An
+	 * unchanged credential still runs the CAS check (stores skip rewriting
+	 * identical bytes), so peer rotations are detected without churning the row.
 	 *
 	 * Returns the row's current index, or -1 when it was disabled or removed.
 	 */
@@ -476,7 +491,9 @@ export class CredentialPool implements CredentialsApi {
 			return latest.findIndex(row => row.id === id);
 		}
 		if (!expected || !this.#store.tryUpdateAuthCredentialIfMatches) {
-			this.#store.updateAuthCredential(id, credential);
+			if (serializeCredential(provider, credential)?.data !== expected?.data) {
+				this.#store.updateAuthCredential(id, credential);
+			}
 		}
 		const updated = [...entries];
 		updated[index] = { id, credential };

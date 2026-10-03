@@ -13,7 +13,6 @@
  *     the broker already has.
  *   - `status` — health-pings the configured remote broker.
  */
-import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -40,25 +39,18 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import {
-	$which,
-	APP_NAME,
-	getAgentDbPath,
-	getAgentDir,
-	getConfigRootDir,
-	isEnoent,
-	logger,
-	VERSION,
-} from "@oh-my-pi/pi-utils";
+import { $which, APP_NAME, getAgentDbPath, getAgentDir, getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { findDuplicateJsonKey } from "@oh-my-pi/pi-utils/json-lexer";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
+import { cfgAuthBrokerMetrics } from "../config/model-settings";
 import { Settings } from "../config/settings";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
+import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -137,32 +129,6 @@ function getMetricsTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker-metrics.token");
 }
 
-async function readTokenFile(file: string): Promise<string | null> {
-	try {
-		const raw = await Bun.file(file).text();
-		const trimmed = raw.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	} catch (err) {
-		if (isEnoent(err)) return null;
-		throw err;
-	}
-}
-
-async function writeTokenFile(file: string, token: string): Promise<void> {
-	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	// No trailing newline: the raw file bytes are the token value staged by secret tooling.
-	await fs.writeFile(file, token, { mode: 0o600 });
-	try {
-		await fs.chmod(file, 0o600);
-	} catch {
-		// Best-effort (e.g. Windows).
-	}
-}
-
-function generateToken(): string {
-	return crypto.randomBytes(32).toString("base64url");
-}
-
 /** Read-or-mint the token at `file`, persisting a freshly generated one. */
 async function ensureTokenFile(file: string): Promise<string> {
 	const existing = await readTokenFile(file);
@@ -226,7 +192,7 @@ async function resolveMetricsEnabled(enableMetrics: boolean | undefined): Promis
 		// inside omp's own directory, which carries no project config. `agentDir`
 		// needs no override: it already defaults to `getAgentDir()`.
 		const settings = await Settings.loadReadOnly({ cwd: getAgentDir() });
-		return settings.get("auth.broker.metrics");
+		return cfgAuthBrokerMetrics.get(settings);
 	} catch {
 		// Config is the weakest source and the broker must still boot without it;
 		// an unreadable or malformed config leaves the endpoint off, matching the

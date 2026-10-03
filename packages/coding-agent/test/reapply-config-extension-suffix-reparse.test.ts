@@ -22,6 +22,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -469,7 +470,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		// outranks the saved suffix here, through `adoptConfigThinking`.
 		const settings = Settings.isolated();
 		settings.setModelRole("default", "runtime-provider/config-pick");
-		settings.set("defaultThinkingLevel", ThinkingLevel.High);
+		cfgDefaultThinkingLevel.override(settings, ThinkingLevel.High);
 		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-cfg"));
 
 		const created = createAgentSession({

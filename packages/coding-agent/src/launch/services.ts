@@ -4,13 +4,15 @@ import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { getDaemonRuntimeDir, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerClient, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
+
+import { cfgLaunchEnabled } from "../tools/settings";
 
 export interface ServiceReady {
 	log?: string;
@@ -23,7 +25,6 @@ export interface ServiceStart {
 	command: string;
 	cwd?: string;
 	pty?: boolean;
-	env?: Record<string, string>;
 	ready?: ServiceReady;
 }
 
@@ -125,6 +126,26 @@ export async function listServices(session: ToolSession, signal?: AbortSignal): 
 	return result.daemons;
 }
 
+/**
+ * {@link listServices} for callers whose jobs and agents live in-process (`wait`,
+ * `proc://`): a broker failure (timeout, crash) must not hide that state. Returns
+ * the failure message alongside an empty list; owned-service tracking keeps its
+ * last known state. A caller abort still throws.
+ */
+export async function listServicesTolerant(
+	session: ToolSession,
+	signal?: AbortSignal,
+): Promise<{ services: DaemonSnapshot[]; error?: string }> {
+	try {
+		return { services: await listServices(session, signal) };
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		const message = error instanceof Error ? error.message : String(error);
+		logger.warn("Daemon broker list failed; continuing without service state", { error: message });
+		return { services: [], error: message };
+	}
+}
+
 export async function findService(
 	session: ToolSession,
 	name: string,
@@ -187,7 +208,7 @@ export async function startService(
 	readyTimedOut: boolean;
 	log: string;
 }> {
-	if (!session.settings.get("launch.enabled")) throw new ToolError("Service launch is disabled in this session.");
+	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
 		throw new ToolError("Service name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 	const ready = params.ready;
@@ -206,7 +227,7 @@ export async function startService(
 		name: params.name,
 		application: shell.shell,
 		args: [...shell.args, `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`],
-		env: { ...shell.env, ...params.env },
+		env: shell.env,
 		cwd: resolveToCwd(params.cwd ?? session.cwd, session.cwd),
 		pty: params.pty ?? true,
 		ready: ready

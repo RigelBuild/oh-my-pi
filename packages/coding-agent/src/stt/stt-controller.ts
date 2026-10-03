@@ -13,6 +13,8 @@ import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
 import { encodePcm16Wav } from "./wav";
 
+import { cfgSttLanguage, cfgSttSubmitTrigger } from "./settings";
+
 export type SttState = "idle" | "recording" | "transcribing";
 
 /** How a capture reports progress and state to its host. */
@@ -160,26 +162,18 @@ export class STTController {
 		// modelRoles.dictation mid-session re-runs preflight for the new model.
 		if (this.#resolvedModelKey === modelKey) return modelKey;
 		try {
-			// Only clear the status line when preflight emitted progress; the
-			// cached-model fast path emits nothing.
-			let wroteStatus = false;
-			const status = (msg: string): void => {
-				wroteStatus = true;
-				options.showStatus(msg);
-			};
 			// Loading the multi-hundred-MB speech model into the worker is what made
 			// the old "Checking STT dependencies…" step slow. Don't pay it before
 			// recording: when the weights are already cached, start now and warm the
 			// model in the background — the stream/transcribe paths load it on demand
 			// (memoized in the worker) and it is hot by the time recording stops.
-			// Only a genuine first-use download blocks, with explicit progress, so we
-			// never record silently against missing weights.
+			// Only a genuine first-use download blocks (its progress shows in the
+			// download HUD), so we never record silently against missing weights.
 			if (await isSttModelCached(modelKey)) {
 				this.#warmModel(modelKey);
 			} else {
-				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
+				await downloadSttModel(modelKey);
 			}
-			if (wroteStatus) options.showStatus("");
 			this.#resolvedModelKey = modelKey;
 			return modelKey;
 		} catch (err) {
@@ -312,7 +306,7 @@ export class STTController {
 		let failed = false;
 		let finalText = "";
 		try {
-			const language = this.#settings.get("stt.language");
+			const language = cfgSttLanguage.get(this.#settings);
 			const result = await transcribeAudio(
 				model,
 				{
@@ -368,7 +362,7 @@ export class STTController {
 	}
 
 	async #startStreaming(editor: SttTarget, options: SttCallbacks, modelKey: SttModelKey): Promise<void> {
-		const language = this.#settings.get("stt.language");
+		const language = cfgSttLanguage.get(this.#settings);
 		this.#streamEditor = editor;
 		this.#streamCallbacks = options;
 		this.#streamCommitted = false;
@@ -493,7 +487,7 @@ export class STTController {
 		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
 
 		if (this.#streamCommitted && !failed && this.#streamEditor) {
-			const trigger = this.#settings.get("stt.submitTrigger");
+			const trigger = cfgSttSubmitTrigger.get(this.#settings);
 			const { submit, trimTrailing } = evaluateSubmitTrigger(this.#streamUtterance, trigger);
 			if (trimTrailing > 0) {
 				this.#streamEditor.deleteBeforeCursor(trimTrailing);
