@@ -236,6 +236,41 @@ describe("AuthStorage identity-less usage reports", () => {
 		}
 	}, 20_000);
 
+	it("keeps org-scoped conflicting reports with shared email and org separate", async () => {
+		const report = (): UsageReport => ({
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: ["acct-x", "acct-y"].map(accountId => ({
+				id: `openai-codex:${accountId}`,
+				label: "Weekly",
+				scope: { provider: "openai-codex", accountId },
+				amount: { usedFraction: 0.2, unit: "percent" },
+			})),
+			metadata: { email: "shared@example.com", orgId: "org-shared" },
+		});
+		const codexRow = (id: number): StoredAuthCredential => ({
+			id,
+			provider: "openai-codex",
+			credential: { type: "api_key", key: `sk-${id}` },
+			disabledCause: null,
+		});
+		const storage = new AuthStorage(makeStore([codexRow(71), codexRow(72)]), {
+			usageProviderResolver: provider =>
+				provider === "openai-codex"
+					? ({ id: provider, fetchUsage: async () => report() } as UsageProvider)
+					: undefined,
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.usage.reports()) ?? [];
+			const codex = reports.filter(item => item.provider === "openai-codex");
+			expect(codex).toHaveLength(2);
+			expect(new Set(codex.map(item => item.metadata?.credentialKey)).size).toBe(2);
+		} finally {
+			storage.close();
+		}
+	}, 20_000);
+
 	it("stamps different-account shared-limit reports so their series stay distinct", async () => {
 		// `scope.shared` marks a limit as credential-wide for exhaustion gating —
 		// most quota providers set it — NOT that two DIFFERENT credentials observe
