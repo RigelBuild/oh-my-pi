@@ -304,9 +304,6 @@ export function applyPackageVersion(content: string, version: string): string {
 export function applyCargoWorkspaceVersion(content: string, version: string): string {
 	return content.replace(/^version = "[^"]+"/gm, `version = "${version}"`);
 }
-export function applyNativesSentinel(content: string, sentinelName: string): string {
-	return content.replace(/__piNativesV[A-Za-z0-9_]+/g, sentinelName);
-}
 
 async function cmdDeps(): Promise<void> {
 	console.log("\n=== Full dependency refresh ===\n");

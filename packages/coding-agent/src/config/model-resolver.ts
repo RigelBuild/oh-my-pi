@@ -1481,7 +1481,7 @@ function resolveEffectiveAgentModelSelection(
 	let requestedInheritance = false;
 	let everyRequestPatternInheritsLiveLevel = true;
 	const requestPatterns = normalizeModelPatternList(requestModel).flatMap((pattern, index, patterns) => {
-		const inheritance = matchSessionInheritedPattern(pattern);
+		const inheritance = matchSessionInheritedPattern(pattern, { selfAliasOnly: true });
 		if (!inheritance) {
 			everyRequestPatternInheritsLiveLevel = false;
 			return resolveConfiguredModelPatterns(pattern, settings);

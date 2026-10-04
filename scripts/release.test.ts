@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
 	applyCargoWorkspaceVersion,
-	applyNativesSentinel,
 	applyPackageVersion,
 	bumpCanaryVersion,
 	bumpVersion,
@@ -76,7 +75,6 @@ describe("release reliability helpers", () => {
 	test("rewrites release targets in process", () => {
 		expect(applyPackageVersion('{"version": "1.0.0"}', "2.0.0")).toBe('{"version": "2.0.0"}');
 		expect(applyCargoWorkspaceVersion('version = "1.0.0"\n', "2.0.0")).toBe('version = "2.0.0"\n');
-		expect(applyNativesSentinel("__piNativesV1 __piNativesV1", "__piNativesV2")).toBe("__piNativesV2 __piNativesV2");
 	});
 	test("retries transient API failures and stops on non-transient", async () => {
 		let attempts = 0;

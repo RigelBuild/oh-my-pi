@@ -1238,7 +1238,7 @@ describe("resolveAgentModelPatterns", () => {
 			modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" },
 		});
 
-		for (const requestModel of ["@default:high", "*:high", "pi/default:high", "default:high"]) {
+		for (const requestModel of ["@default:high", "*:high", "pi/default:high"]) {
 			expect(
 				resolveAgentModelSelection({
 					requestModel,
@@ -1250,6 +1250,14 @@ describe("resolveAgentModelPatterns", () => {
 				}),
 			).toEqual({ patterns: ["zai/glm-5.2:high"], role: undefined });
 		}
+		expect(
+			resolveAgentModelSelection({
+				requestModel: "default:high",
+				settings,
+				activeModelPattern: "zai/glm-5.2",
+				availableModels: mockModels,
+			}),
+		).toEqual({ patterns: ["default:high"], role: undefined });
 
 		// A bare `@default` inherits an unsuffixed parent selector verbatim.
 		expect(
