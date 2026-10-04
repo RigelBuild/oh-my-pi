@@ -35,6 +35,9 @@ const oauthToken: GatewayOAuthToken = {
 	orgId: "org-1",
 	orgName: "Example Org",
 	authorizedAtUnixMs: "1740000000456",
+	region: "eu",
+	inferenceRegion: "eu",
+	activeOrganizationId: "org-active",
 };
 
 let servers: Bun.Server<undefined>[] = [];
@@ -210,6 +213,9 @@ describe("CompassAuthCredentialStore", () => {
 				orgId: "org-1",
 				orgName: "Example Org",
 				authorizedAt: 1_740_000_000_456,
+				region: "eu",
+				inferenceRegion: "eu",
+				activeOrganizationId: "org-active",
 			});
 			const emptyOAuth = rows[1]?.credential;
 			if (emptyOAuth?.type !== "oauth") throw new Error("expected empty OAuth credential");
@@ -241,10 +247,23 @@ describe("CompassAuthCredentialStore", () => {
 	});
 
 	test("decodes rows carrying fields a newer server added", async () => {
-		const server = startFakeServer([{ ...oauthRow(), oauth: { ...oauthToken, region: "eu" } as GatewayOAuthToken }]);
+		const server = startFakeServer([{ ...oauthRow(), oauth: { ...oauthToken, futureField: "x" } as GatewayOAuthToken }]);
 		const store = await storeFor(server.url);
 		try {
 			expect(store.listAuthCredentials("anthropic")).toHaveLength(1);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("writes every OAuth field back so a refresh keeps the account's region", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-refreshed" });
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth).toEqual({ ...oauthToken, access: "access-refreshed" });
 		} finally {
 			store.close();
 		}

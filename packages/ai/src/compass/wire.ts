@@ -15,6 +15,9 @@ export interface GatewayOAuthToken {
 	orgId?: string;
 	orgName?: string;
 	authorizedAtUnixMs?: GatewayInt64;
+	region?: string;
+	inferenceRegion?: string;
+	activeOrganizationId?: string;
 }
 
 export interface GatewayCredential {
@@ -47,6 +50,9 @@ export interface GatewayOAuthTokenRequest {
 	orgId?: string;
 	orgName?: string;
 	authorizedAtUnixMs?: GatewayInt64;
+	region?: string;
+	inferenceRegion?: string;
+	activeOrganizationId?: string;
 }
 
 export interface UpdateCredentialOAuthRequest {
@@ -100,6 +106,9 @@ export const gatewayOAuthTokenSchema: FluentType<GatewayOAuthToken> = type({
 	"orgId?": "string",
 	"orgName?": "string",
 	"authorizedAtUnixMs?": int64Schema,
+	"region?": "string",
+	"inferenceRegion?": "string",
+	"activeOrganizationId?": "string",
 });
 
 export const gatewayCredentialSchema: FluentType<GatewayCredential> = type({

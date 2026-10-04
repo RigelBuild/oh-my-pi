@@ -62,6 +62,10 @@ function optionalNumber(value: GatewayInt64 | undefined): number | undefined {
 	return number ? number : undefined;
 }
 
+function isInferenceRegion(value: string | undefined): value is "global" | "eu" | "us" {
+	return value === "global" || value === "eu" || value === "us";
+}
+
 function oauthFromGateway(token: GatewayOAuthToken): OAuthCredential {
 	const credential: OAuthCredential = {
 		type: "oauth",
@@ -79,6 +83,9 @@ function oauthFromGateway(token: GatewayOAuthToken): OAuthCredential {
 		...(token.orgId ? { orgId: token.orgId } : {}),
 		...(token.orgName ? { orgName: token.orgName } : {}),
 		...(authorizedAt !== undefined ? { authorizedAt } : {}),
+		...(token.region ? { region: token.region } : {}),
+		...(isInferenceRegion(token.inferenceRegion) ? { inferenceRegion: token.inferenceRegion } : {}),
+		...(token.activeOrganizationId ? { activeOrganizationId: token.activeOrganizationId } : {}),
 	};
 	return { ...credential, ...optionalFields };
 }
@@ -99,6 +106,9 @@ function oauthToGateway(credential: OAuthCredential): GatewayOAuthTokenRequest {
 		...(credential.orgId ? { orgId: credential.orgId } : {}),
 		...(credential.orgName ? { orgName: credential.orgName } : {}),
 		...(authorizedAtUnixMs ? { authorizedAtUnixMs } : {}),
+		...(credential.region ? { region: credential.region } : {}),
+		...(credential.inferenceRegion ? { inferenceRegion: credential.inferenceRegion } : {}),
+		...(credential.activeOrganizationId ? { activeOrganizationId: credential.activeOrganizationId } : {}),
 	};
 }
 
