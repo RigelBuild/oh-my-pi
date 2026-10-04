@@ -48,8 +48,9 @@ interface CacheEntry {
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000;
 const EMPTY_CREDENTIALS_ERROR = "Credentials are enrolled through Compass";
-// A timed-out write may have committed, so it is treated like a lost race.
-const CONFLICT_CODES: ReadonlySet<string> = new Set(["aborted", "not_found", "deadline_exceeded"]);
+const CONFLICT_CODES: ReadonlySet<string> = new Set(["aborted", "not_found"]);
+// The write may or may not have landed; resending the same CAS settles it either way.
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(["unavailable", "deadline_exceeded", "unknown"]);
 
 function int64String(value: GatewayInt64): string {
 	return typeof value === "string" ? value : String(value);
@@ -107,12 +108,16 @@ function credentialFromGateway(row: GatewayCredential): AuthCredential | undefin
 	return undefined;
 }
 
+type Unsynced = { kind: "oauth"; credential: OAuthCredential } | { kind: "disable"; row: CredentialRow; cause: string };
+
 /** Writes are queued per row so each RPC carries the version of the state its caller checked. */
 interface RowState {
 	version: string;
 	/** Bumped on a conflict; jobs accepted under an older epoch drop instead of writing. */
 	epoch: number;
 	pending: number;
+	/** A fire-and-forget write that failed transiently; resent before the next reload. */
+	unsynced?: Unsynced;
 }
 
 /**
@@ -139,6 +144,8 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	#acknowledgedRevision = 0;
 	#refreshInFlight: Promise<void> | undefined;
 	#lastRefreshStartMs = 0;
+	#refreshStarted = 0;
+	#refreshApplied = 0;
 	#closed = false;
 
 	constructor(opts: CompassAuthCredentialStoreOptions) {
@@ -162,8 +169,12 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	async refreshSnapshot(): Promise<StoredAuthCredential[]> {
 		this.#lastRefreshStartMs = Date.now();
+		const sequence = ++this.#refreshStarted;
 		const request: ListCredentialPoolRequest = { agentAccountId: this.#agentAccountId };
 		const response = await this.#request("ListCredentialPool", request, listCredentialPoolResponseSchema);
+		// Overlapping lists can land out of order; an older one must not undo a newer one.
+		if (sequence < this.#refreshApplied) return this.listAuthCredentials();
+		this.#refreshApplied = sequence;
 		const seen = new Set<string>();
 		for (const wireRow of response.credentials ?? []) {
 			if (this.#disabled.has(wireRow.id)) continue;
@@ -172,7 +183,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			const state = this.#state.get(wireRow.id);
 			const version = int64String(wireRow.version);
 			// A pending write or a newer local version outranks a list that may predate it.
-			if (state && (state.pending > 0 || BigInt(version) < BigInt(state.version))) continue;
+			if (state && (this.#isHeld(state) || BigInt(version) < BigInt(state.version))) continue;
 			const credential = credentialFromGateway(wireRow);
 			if (credential === undefined) {
 				logger.warn("Compass credential row has no credential payload", {
@@ -187,7 +198,8 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			this.#rows.set(id, { id, serverId: wireRow.id, provider: wireRow.provider, credential });
 		}
 		for (const [id, row] of this.#rows) {
-			if (seen.has(row.serverId) || (this.#state.get(row.serverId)?.pending ?? 0) > 0) continue;
+			const state = this.#state.get(row.serverId);
+			if (seen.has(row.serverId) || (state && this.#isHeld(state))) continue;
 			this.#rows.delete(id);
 		}
 		this.#refreshRevision();
@@ -232,21 +244,22 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		const row = this.#rows.get(id);
 		if (!row) return false;
 		if (serializeCredential(row.provider, row.credential)?.data !== expectedData) return false;
-		const epoch = this.#accept(row.serverId);
 		this.#removeLocalRow(id);
-		void this.#runWrite(row, epoch, () => this.#disable(row, cause)).catch(error => {
-			this.#logWriteFailure("Compass credential disable failed", row, this.#errorCode(error));
-		});
+		this.#queueDisable(row, cause);
 		return true;
 	}
 
+	/** Unconditional: after a lost race it retries once against the reloaded version. */
 	async deleteAuthCredential(id: number, cause: string): Promise<boolean> {
-		if (this.#closed) return false;
-		const row = this.#rows.get(id);
-		if (!row) return false;
-		const epoch = this.#accept(row.serverId);
-		const result = await this.#runWrite(row, epoch, () => this.#disable(row, cause));
-		return result === true;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			if (this.#closed) return false;
+			const row = this.#rows.get(id);
+			if (!row) return false;
+			const epoch = this.#accept(row.serverId);
+			if ((await this.#runWrite(row, epoch, undefined, () => this.#disable(row, cause))) === true) return true;
+			if (this.#disabled.has(row.serverId)) return false;
+		}
+		return false;
 	}
 
 	upsertAuthCredential(_provider: string, _credential: AuthCredential): Promise<StoredAuthCredential[]> {
@@ -310,23 +323,33 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		return id;
 	}
 
+	#stateFor(serverId: string): RowState {
+		const state = this.#state.get(serverId);
+		if (!state) throw new Error("Compass credential row has no version state");
+		return state;
+	}
+
+	#isHeld(state: RowState): boolean {
+		return state.pending > 0 || state.unsynced !== undefined;
+	}
+
 	#accept(serverId: string): number {
-		let state = this.#state.get(serverId);
-		if (!state) {
-			state = { version: "0", epoch: 0, pending: 0 };
-			this.#state.set(serverId, state);
-		}
+		const state = this.#stateFor(serverId);
 		state.pending += 1;
 		return state.epoch;
 	}
 
 	#acceptOAuthUpdate(row: CredentialRow, credential: OAuthCredential): void {
-		const epoch = this.#accept(row.serverId);
 		row.credential = credential;
 		this.#refreshRevision();
-		void this.#runWrite(row, epoch, async () => {
-			const state = this.#state.get(row.serverId);
-			if (!state) return;
+		this.#queueOAuthUpdate(row, credential);
+	}
+
+	#queueOAuthUpdate(row: CredentialRow, credential: OAuthCredential): void {
+		const epoch = this.#accept(row.serverId);
+		const unsynced: Unsynced = { kind: "oauth", credential };
+		void this.#runWrite(row, epoch, unsynced, async () => {
+			const state = this.#stateFor(row.serverId);
 			const request: UpdateCredentialOAuthRequest = {
 				id: row.serverId,
 				token: oauthToGateway(credential),
@@ -334,14 +357,35 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			};
 			const response = await this.#request("UpdateCredentialOAuth", request, updateCredentialOAuthResponseSchema);
 			state.version = int64String(response.version);
-		}).catch(error => {
-			this.#logWriteFailure("Compass OAuth update failed", row, this.#errorCode(error));
-		});
+			if (state.unsynced === unsynced) state.unsynced = undefined;
+		}).catch(error => this.#logWriteFailure("Compass OAuth update failed", row, this.#errorCode(error)));
+	}
+
+	#queueDisable(row: CredentialRow, cause: string): void {
+		const epoch = this.#accept(row.serverId);
+		void this.#runWrite(row, epoch, { kind: "disable", row, cause }, () => this.#disable(row, cause)).catch(error =>
+			this.#logWriteFailure("Compass credential disable failed", row, this.#errorCode(error)),
+		);
+	}
+
+	#resendUnsynced(): void {
+		for (const [serverId, state] of this.#state) {
+			const unsynced = state.unsynced;
+			if (!unsynced || state.pending > 0) continue;
+			const id = this.#localIdByServerId.get(serverId);
+			if (id === undefined) continue;
+			if (unsynced.kind === "oauth") {
+				const row = this.#rows.get(id);
+				if (row) this.#queueOAuthUpdate(row, unsynced.credential);
+				else state.unsynced = undefined;
+			} else {
+				this.#queueDisable(unsynced.row, unsynced.cause);
+			}
+		}
 	}
 
 	async #disable(row: CredentialRow, cause: string): Promise<boolean> {
-		const state = this.#state.get(row.serverId);
-		if (!state) return false;
+		const state = this.#stateFor(row.serverId);
 		const request: DisableCredentialRequest = { id: row.serverId, cause, expectedVersion: state.version };
 		try {
 			await this.#request("DisableCredential", request, disableCredentialResponseSchema);
@@ -356,14 +400,20 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	#tombstone(row: CredentialRow): void {
 		this.#disabled.add(row.serverId);
+		this.#stateFor(row.serverId).unsynced = undefined;
 		this.#removeLocalRow(row.id);
 	}
 
 	/**
 	 * Runs one write on the row's chain. A conflict bumps the epoch so every job accepted
-	 * before it drops, then reloads the pool; other errors reject to the caller.
+	 * before it drops, then reloads the pool. A transient failure keeps `unsynced` for a resend.
 	 */
-	#runWrite<T>(row: CredentialRow, epoch: number, work: () => Promise<T>): Promise<T | false> {
+	#runWrite<T>(
+		row: CredentialRow,
+		epoch: number,
+		unsynced: Unsynced | undefined,
+		work: () => Promise<T>,
+	): Promise<T | false> {
 		const job = async (): Promise<T | false> => {
 			const state = this.#state.get(row.serverId);
 			if (this.#closed || !state || state.epoch !== epoch) return false;
@@ -371,9 +421,13 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 				return await work();
 			} catch (error) {
 				const code = this.#errorCode(error);
-				if (!CONFLICT_CODES.has(code)) throw error;
+				if (!CONFLICT_CODES.has(code)) {
+					if (unsynced && !this.#closed && TRANSIENT_CODES.has(code)) state.unsynced = unsynced;
+					throw error;
+				}
 				state.epoch += 1;
 				state.pending = 0;
+				state.unsynced = undefined;
 				this.#logWriteFailure("Compass credential write conflicted; reloading pool", row, code);
 				await this.#refreshQuietly();
 				return false;
@@ -397,6 +451,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	#maybeBackgroundRefresh(): void {
 		if (this.#closed || this.#refreshInFlight) return;
 		if (Date.now() - this.#lastRefreshStartMs < this.#refreshIntervalMs) return;
+		this.#resendUnsynced();
 		this.#refreshInFlight = this.#refreshQuietly().finally(() => {
 			this.#refreshInFlight = undefined;
 		});

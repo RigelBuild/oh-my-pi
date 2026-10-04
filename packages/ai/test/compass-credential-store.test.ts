@@ -485,4 +485,55 @@ describe("CompassAuthCredentialStore", () => {
 		await store.flush();
 		expect(methods(server)).toEqual(["ListCredentialPool", "UpdateCredentialOAuth"]);
 	});
+
+	test("keeps a minted token through a transient write failure and resends it", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url, { refreshIntervalMs: 0 });
+		try {
+			const row = oauthOf(store);
+			server.failNext("UpdateCredentialOAuth", () => new Response("bad gateway", { status: 503 }));
+			store.updateAuthCredential(row.id, { ...row.credential, refresh: "refresh-minted" });
+			await store.flush();
+			store.pollExternalChanges();
+			await store.flush();
+			expect(oauthOf(store).credential.refresh).toBe("refresh-minted");
+			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-minted");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("ignores a list that lands after a newer one", async () => {
+		const server = startFakeServer([apiKeyRow("cred/a", "sk-a"), apiKeyRow("cred/b", "sk-b")]);
+		const store = await storeFor(server.url);
+		try {
+			const held = server.hold("ListCredentialPool");
+			const older = store.refreshSnapshot();
+			await held.reached;
+			const both = new Map(server.rows);
+			server.rows.delete("cred/b");
+			await store.refreshSnapshot();
+			for (const [id, row] of both) server.rows.set(id, row);
+			held.release();
+			await older;
+			expect(store.listAuthCredentials().map(row => row.credential)).toEqual([
+				{ type: "api_key", key: "sk-a", source: "login" },
+			]);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("a user delete lands even after a peer bumped the row", async () => {
+		const server = startFakeServer([apiKeyRow()]);
+		const store = await storeFor(server.url);
+		try {
+			server.rows.set("cred/key", { ...apiKeyRow(), version: "4" });
+			expect(await store.deleteAuthCredential(1, "deleted by user")).toBe(true);
+			expect(server.rows.has("cred/key")).toBe(false);
+			expect(store.listAuthCredentials()).toEqual([]);
+		} finally {
+			store.close();
+		}
+	});
 });

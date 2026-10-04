@@ -164,17 +164,13 @@ export function decodeCompassJson<T>(text: string, schema: FluentType<T>): T {
 function connectCodeForStatus(status: number): string {
 	switch (status) {
 		case 400:
-			return "invalid_argument";
+			return "internal";
 		case 401:
 			return "unauthenticated";
 		case 403:
 			return "permission_denied";
 		case 404:
 			return "unimplemented";
-		case 409:
-			return "aborted";
-		case 412:
-			return "failed_precondition";
 		case 429:
 		case 502:
 		case 503:
