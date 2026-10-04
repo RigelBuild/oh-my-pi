@@ -85,6 +85,9 @@ describe("AgentSession live settings", () => {
 	it("applies settings changed through code to the running agent without a UI", async () => {
 		const settings = Settings.isolated();
 		const live = await start(settings);
+		const initialTierEntries = live.sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "service_tier_change").length;
 
 		cfgTemperature.set(settings, 0.2);
 		cfgTopP.set(settings, -1);
@@ -100,9 +103,9 @@ describe("AgentSession live settings", () => {
 		expect(live.interruptMode).toBe("wait");
 		expect(live.agent.hideThinkingSummary).toBe(true);
 		expect(live.serviceTierByFamily.openai).toBe("priority");
-		// Exactly one transcript entry: the watch applies the tier once.
+		// The watch records exactly one change after the initial session tier entry.
 		const tierEntries = live.sessionManager.getBranch().filter(entry => entry.type === "service_tier_change");
-		expect(tierEntries).toHaveLength(1);
+		expect(tierEntries).toHaveLength(initialTierEntries + 1);
 	});
 
 	it("rebuilds the system prompt when prompt-affecting settings change", async () => {
