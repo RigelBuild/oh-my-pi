@@ -50,7 +50,7 @@ const DEFAULT_REFRESH_INTERVAL_MS = 5_000;
 const EMPTY_CREDENTIALS_ERROR = "Credentials are enrolled through Compass";
 const CONFLICT_CODES: ReadonlySet<string> = new Set(["aborted", "not_found"]);
 // The write may or may not have landed; resending the same CAS settles it either way.
-const TRANSIENT_CODES: ReadonlySet<string> = new Set(["unavailable", "deadline_exceeded", "unknown"]);
+const TRANSIENT_CODES: ReadonlySet<string> = new Set(["unavailable", "deadline_exceeded", "unknown", "internal"]);
 
 function int64String(value: GatewayInt64): string {
 	return typeof value === "string" ? value : String(value);
@@ -108,7 +108,8 @@ function credentialFromGateway(row: GatewayCredential): AuthCredential | undefin
 	return undefined;
 }
 
-type Unsynced = { kind: "oauth"; credential: OAuthCredential } | { kind: "disable"; row: CredentialRow; cause: string };
+/** An OAuth resend always sends the row's current credential, never a stored copy. */
+type Unsynced = { kind: "oauth" } | { kind: "disable"; row: CredentialRow; cause: string };
 
 /** Writes are queued per row so each RPC carries the version of the state its caller checked. */
 interface RowState {
@@ -347,8 +348,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	#queueOAuthUpdate(row: CredentialRow, credential: OAuthCredential): void {
 		const epoch = this.#accept(row.serverId);
-		const unsynced: Unsynced = { kind: "oauth", credential };
-		void this.#runWrite(row, epoch, unsynced, async () => {
+		void this.#runWrite(row, epoch, { kind: "oauth" }, async () => {
 			const state = this.#stateFor(row.serverId);
 			const request: UpdateCredentialOAuthRequest = {
 				id: row.serverId,
@@ -357,7 +357,8 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			};
 			const response = await this.#request("UpdateCredentialOAuth", request, updateCredentialOAuthResponseSchema);
 			state.version = int64String(response.version);
-			if (state.unsynced === unsynced) state.unsynced = undefined;
+			// The chain is FIFO, so this write supersedes any earlier failed one.
+			if (state.unsynced?.kind === "oauth") state.unsynced = undefined;
 		}).catch(error => this.#logWriteFailure("Compass OAuth update failed", row, this.#errorCode(error)));
 	}
 
@@ -376,7 +377,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			if (id === undefined) continue;
 			if (unsynced.kind === "oauth") {
 				const row = this.#rows.get(id);
-				if (row) this.#queueOAuthUpdate(row, unsynced.credential);
+				if (row?.credential.type === "oauth") this.#queueOAuthUpdate(row, row.credential);
 				else state.unsynced = undefined;
 			} else {
 				this.#queueDisable(unsynced.row, unsynced.cause);
@@ -422,7 +423,8 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			} catch (error) {
 				const code = this.#errorCode(error);
 				if (!CONFLICT_CODES.has(code)) {
-					if (unsynced && !this.#closed && TRANSIENT_CODES.has(code)) state.unsynced = unsynced;
+					// A definitive failure releases the row so the next list reconciles it from the server.
+					if (unsynced && !this.#closed) state.unsynced = TRANSIENT_CODES.has(code) ? unsynced : undefined;
 					throw error;
 				}
 				state.epoch += 1;

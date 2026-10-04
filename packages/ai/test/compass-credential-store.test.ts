@@ -498,6 +498,52 @@ describe("CompassAuthCredentialStore", () => {
 			await store.flush();
 			expect(oauthOf(store).credential.refresh).toBe("refresh-minted");
 			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-minted");
+			// Once the resend lands, later polls send nothing more.
+			store.pollExternalChanges();
+			await store.flush();
+			expect(methods(server).filter(method => method === "UpdateCredentialOAuth")).toHaveLength(2);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("never resends an older token after a newer one landed", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url, { refreshIntervalMs: 0 });
+		try {
+			const row = oauthOf(store);
+			server.failNext("UpdateCredentialOAuth", () => new Response("bad gateway", { status: 503 }));
+			store.updateAuthCredential(row.id, { ...row.credential, refresh: "refresh-r1" });
+			store.updateAuthCredential(row.id, { ...row.credential, refresh: "refresh-r2" });
+			await store.flush();
+			for (let poll = 0; poll < 2; poll++) {
+				store.pollExternalChanges();
+				await store.flush();
+			}
+			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-r2");
+			expect(oauthOf(store).credential.refresh).toBe("refresh-r2");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("a resend that fails definitively lets the next list reconcile the row", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url, { refreshIntervalMs: 0 });
+		try {
+			const row = oauthOf(store);
+			server.failNext("UpdateCredentialOAuth", () => new Response("bad gateway", { status: 503 }));
+			store.updateAuthCredential(row.id, { ...row.credential, refresh: "refresh-local" });
+			await store.flush();
+			const denied = () => Response.json({ code: "permission_denied", message: "denied" }, { status: 403 });
+			server.rows.delete("cred/oauth");
+			// The error persists, so only releasing the row lets a list reconcile it.
+			for (let poll = 0; poll < 2; poll++) {
+				server.failNext("UpdateCredentialOAuth", denied);
+				store.pollExternalChanges();
+				await store.flush();
+			}
+			expect(store.listAuthCredentials()).toEqual([]);
 		} finally {
 			store.close();
 		}
