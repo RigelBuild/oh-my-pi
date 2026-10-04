@@ -199,6 +199,20 @@ export const observed = buildModel({
 		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
 
+	it("loads catalog .js aliases from the bundled graph", async () => {
+		const key = "@oh-my-pi/pi-catalog/build.js";
+		const entry = bundledEntries.find(candidate => candidate.key === key);
+		if (!entry) throw new Error("Catalog build.js alias is missing from the bundled registry");
+		const observed = await runRegistryProbe(
+			[entry],
+			`const { buildModel } = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
+export const observed = buildModel({ id: "alias", name: "OpenAI: Alias (latest)", api: "openai-completions", provider: "custom", baseUrl: "https://api.example.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 8192 }).name;`,
+		);
+		expect(observed).toBe("Alias");
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
 	it("expands web search provider wildcard exports for compiled plugin imports", () => {
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		const providerKeys = [

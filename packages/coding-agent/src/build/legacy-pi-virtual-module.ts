@@ -140,7 +140,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			if (!sourcePattern) continue;
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
-			const catalogRootWildcard = pkg.dir === "catalog" && exportKey === "./*";
+			const catalogRootWildcard = pkg.dir === "catalog" && (exportKey === "./*" || exportKey === "./*.js");
 			if ((pattern.exportPrefix === "" || pattern.exportPrefix === "/") && !catalogRootWildcard) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
