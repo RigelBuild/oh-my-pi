@@ -54,25 +54,15 @@ function hasConflictingScopeAccountId(report: UsageReport): boolean {
 }
 
 /**
- * Whether a report carries none of the identities the metrics renderer's
- * account chain reads. Deliberately the same sources in the same order, so a
- * report that WOULD render a real account label is never re-keyed by the
- * credential stamp.
- *
- * A CONFLICTING `scope.accountId` (several distinct accounts in one report)
- * is checked before the weaker `projectId`/account-alias/`scope.projectId`
- * fallbacks because it is TERMINAL in the renderer's `accountLabelOf`: once
- * that chain sees several accounts it refuses those fallbacks and lands on
- * the credential stamp or the sentinel. So the stamp must be applied whenever
- * the conflict exists, even alongside a `projectId` the renderer will never
- * consult — without it two such reports reach an unstamped sentinel, their
- * matching limit ids collide, and the later credential's gauges are dropped.
+ * Match the renderer's account identity order. A conflicting set of scoped
+ * accounts is terminal even when email, org, or project metadata exists:
+ * the renderer needs a credential stamp to keep those reports distinct.
  */
 export function usageReportHasNoIdentity(report: UsageReport): boolean {
 	if (usageReportMetadataValue(report, "accountId")) return false;
+	if (hasConflictingScopeAccountId(report)) return true;
 	if (usageReportMetadataValue(report, "email")) return false;
 	if (usageReportMetadataValue(report, "orgId")) return false;
-	if (hasConflictingScopeAccountId(report)) return true;
 	if (usageReportMetadataValue(report, "projectId")) return false;
 	if (usageReportMetadataValue(report, "account")) return false;
 	if (usageReportMetadataValue(report, "user")) return false;
@@ -83,6 +73,9 @@ export function usageReportHasNoIdentity(report: UsageReport): boolean {
 }
 
 function usageReportIdentifiers(report: UsageReport): string[] {
+	// Honor the stamp before email or org grouping, including org-scoped providers.
+	const credentialKey = usageReportMetadataValue(report, "credentialKey");
+	if (credentialKey) return [`${report.provider}:credential:${credentialKey.toLowerCase()}`];
 	const identifiers: string[] = [];
 	const email = usageReportMetadataValue(report, "email");
 	if (email) identifiers.push(`email:${email.toLowerCase()}`);
@@ -107,20 +100,6 @@ function usageReportIdentifiers(report: UsageReport): string[] {
 		}
 		return identifiers.map(identifier => `${report.provider}:${identifier.toLowerCase()}`);
 	}
-	// A credential stamp is an EXPLICIT distinct identity that the usage fetch
-	// applies precisely when the report recovered none of its own
-	// ({@link usageReportHasNoIdentity}) — the conflicting-scope shape among
-	// them, where the limits name several accounts. Such a report can still
-	// carry a shared metadata.projectId or an account alias, and grouping by
-	// those would fold two genuinely distinct credentials into one group that
-	// `mergeUsageReportGroup` collapses to a single credentialKey — exactly the
-	// identity the stamp exists to keep apart. Honor the stamp before the
-	// weaker fallbacks so a stamped report is never merged by a shared id.
-	// Mirrors accountLabelOf, which prefers `credential:<key>` over the same
-	// fallbacks. Unstamped reports (two users on one GCP project) are
-	// untouched: they carry no stamp and still group by project.
-	const credentialKey = usageReportMetadataValue(report, "credentialKey");
-	if (credentialKey) return [`${report.provider}:credential:${credentialKey.toLowerCase()}`];
 	const projectId = usageReportMetadataValue(report, "projectId") ?? usageReportScopeProjectId(report);
 	// Only add project as a fallback when no email is available — two users
 	// with different emails on the same GCP project must not merge.

@@ -210,6 +210,32 @@ describe("AuthStorage identity-less usage reports", () => {
 		}
 	}, 20_000);
 
+	it("keeps conflicting-scope reports with a shared email separate", async () => {
+		const report = (): UsageReport => ({
+			provider: "synthetic",
+			fetchedAt: Date.now(),
+			limits: ["acct-x", "acct-y"].map(accountId => ({
+				id: `synthetic:${accountId}`,
+				label: "Weekly",
+				scope: { provider: "synthetic", accountId },
+				amount: { usedFraction: 0.2, unit: "percent" },
+			})),
+			metadata: { email: "shared@example.com" },
+		});
+		const storage = new AuthStorage(makeStore([apiKeyRow(61), apiKeyRow(62)]), {
+			usageProviderResolver: provider => (provider === "synthetic" ? stubProvider(report) : undefined),
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.usage.reports()) ?? [];
+			const synthetic = reports.filter(item => item.provider === "synthetic");
+			expect(synthetic).toHaveLength(2);
+			expect(new Set(synthetic.map(item => item.metadata?.credentialKey)).size).toBe(2);
+		} finally {
+			storage.close();
+		}
+	}, 20_000);
+
 	it("stamps different-account shared-limit reports so their series stay distinct", async () => {
 		// `scope.shared` marks a limit as credential-wide for exhaustion gating —
 		// most quota providers set it — NOT that two DIFFERENT credentials observe
