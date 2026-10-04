@@ -247,7 +247,9 @@ describe("CompassAuthCredentialStore", () => {
 	});
 
 	test("decodes rows carrying fields a newer server added", async () => {
-		const server = startFakeServer([{ ...oauthRow(), oauth: { ...oauthToken, futureField: "x" } as GatewayOAuthToken }]);
+		const server = startFakeServer([
+			{ ...oauthRow(), oauth: { ...oauthToken, futureField: "x" } as GatewayOAuthToken },
+		]);
 		const store = await storeFor(server.url);
 		try {
 			expect(store.listAuthCredentials("anthropic")).toHaveLength(1);
