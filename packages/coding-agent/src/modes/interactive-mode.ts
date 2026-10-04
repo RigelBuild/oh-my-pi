@@ -4517,6 +4517,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.session.model
 					? formatModelSelectorValue(formatModelStringWithRouting(this.session.model), this.session.thinkingLevel)
 					: undefined,
+			// `rehydrate` re-resolves every restored worker, so it needs the same
+			// catalog the spawn path uses to tell an inherited literal model id from
+			// a thinking selector — including the active model, which the registry's
+			// available projection omits when the session pinned and authenticated it
+			// itself.
+			modelRegistry: this.session.modelRegistry,
+			getActiveModel: () => this.session.model,
 		};
 	}
 

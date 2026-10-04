@@ -64,17 +64,17 @@ export function parseModelString(
 	if (slashIdx <= 0) return undefined;
 	const id = modelStr.slice(slashIdx + 1);
 	const provider = modelStr.slice(0, slashIdx);
+	// A literal id can end in any effort name. Settle an authoritative whole-id
+	// match before splitting, or a shipped model such as `coding-router:low`
+	// would be rewritten into a different model plus a thinking selection.
+	if (options?.isLiteralModelId?.(provider, id) === true) return { provider, id };
 	// Strip strict thinking level suffixes first (e.g. "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high").
 	const strict = splitThinkingSuffix(id);
 	if (strict.level) return { provider, id: strict.base, thinkingLevel: strict.level };
 	// `max` is a real thinking level, but real model IDs can also end in
-	// `:max`. Context-aware callers pass a literal lookup so those models win.
+	// `:max`. Literal IDs already won above, so a `:max` reaching here is a selector.
 	const maxAlias = splitThinkingSuffix(id, -1, options);
-	if (maxAlias.level) {
-		return options?.isLiteralModelId?.(provider, id) === true
-			? { provider, id }
-			: { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
-	}
+	if (maxAlias.level) return { provider, id: maxAlias.base, thinkingLevel: maxAlias.level };
 	return { provider, id };
 }
 

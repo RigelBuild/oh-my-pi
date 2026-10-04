@@ -64,6 +64,19 @@ describe("--external-thinking", () => {
 		expect(result.messages).toEqual(["check this"]);
 	});
 });
+
+describe("--reapply-config", () => {
+	it("enables config-model adoption without consuming the initial message", () => {
+		const result = parseArgs(["--reapply-config", "check this"]);
+
+		expect(result.reapplyConfig).toBe(true);
+		expect(result.messages).toEqual(["check this"]);
+	});
+
+	it("stays unset when omitted", () => {
+		expect(parseArgs([]).reapplyConfig).toBeUndefined();
+	});
+});
 describe("--session-dir", () => {
 	it("uses PI_CODING_AGENT_SESSION_DIR unless the CLI flag overrides it", () => {
 		const previous = Bun.env.PI_CODING_AGENT_SESSION_DIR;
@@ -242,6 +255,25 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		expect(
 			restartArgv(["--resume=old", "-r", "old2", "--continue", "-c", "--fork", "xyz", "--from-claude"], "sid"),
 		).toEqual(["--resume", "sid"]);
+	});
+
+	it("keeps --session-id and does not append a prefix-matched --resume", () => {
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "seat-1")).toEqual([
+			"--model",
+			"m",
+			"--session-id",
+			"seat-1",
+		]);
+		expect(restartArgv(["--session-id=seat-1"], undefined)).toEqual(["--session-id", "seat-1"]);
+	});
+
+	it("resumes the active session after an in-session switch away from the pinned id", () => {
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "0199aaaa-new")).toEqual([
+			"--model",
+			"m",
+			"--resume",
+			"0199aaaa-new",
+		]);
 	});
 
 	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {

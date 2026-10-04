@@ -34,11 +34,10 @@ const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const EMPTY_MODEL_PRESETS_RECORD: Record<string, ModelPreset> = {};
 const EMPTY_AUTH_ACCOUNT_POLICIES: AuthAccountPolicies = [];
 
-// Auth broker — credentials proxied through a remote `omp auth-broker serve`
-// host. Hidden from the UI; populate via env vars or hand-edited config.yml. Env takes
-// precedence so per-machine overrides remain trivial. The connection itself is resolved by
-// `@oh-my-pi/pi-ai/auth-broker/discover` from env + global config.yml only (project layers
-// never redirect credentials); these definitions own validation, CLI, and `cfg://` display.
+// Auth broker credentials use env vars or global config.yml; project layers never redirect them.
+// `auth.broker.metrics` opts into the serving `/metrics` endpoint, default off.
+// Its config value is weakest: `--enable-metrics` and `OMP_AUTH_BROKER_METRICS` take precedence.
+// These definitions own validation, CLI, and `cfg://` display.
 export const cfgAuthBrokerUrl = register({
 	id: "auth.broker.url",
 	type: "string",
@@ -52,6 +51,12 @@ export const cfgAuthBrokerToken = register({
 	default: undefined,
 	env: "OMP_AUTH_BROKER_TOKEN",
 	credential: true,
+});
+
+export const cfgAuthBrokerMetrics = register({
+	id: "auth.broker.metrics",
+	type: "boolean",
+	default: false,
 });
 
 export const cfgAuthAccountPolicies = register({

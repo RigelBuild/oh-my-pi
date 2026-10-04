@@ -28,7 +28,19 @@ const USAGE_FORCE_REFRESH_TTL_MS = 5 * 60_000;
 export const DEFAULT_USAGE_REQUEST_TIMEOUT_MS = 10_000;
 
 /** A single usage fetch target; used by usage probes and the cache. */
-export type UsageRequestDescriptor = { provider: Provider; credential: UsageCredential; baseUrl?: string };
+export type UsageRequestDescriptor = {
+	provider: Provider;
+	credential: UsageCredential;
+	baseUrl?: string;
+	/**
+	 * Stored row id of the credential this request came from, when it came from
+	 * one. Carried so a report that recovers NO identity of its own still has a
+	 * stable, non-secret discriminator downstream — see the `credentialKey`
+	 * stamp in `UsageService`. Absent for env- and override-derived
+	 * credentials, which have no row.
+	 */
+	credentialId?: number;
+};
 /** Forced-refresh markers active for one reports pass; used by UsageService. */
 export type ForcedUsageRefresh = { all: boolean; providers: Set<Provider> };
 /** Cached value and its logical expiry; used by UsageService. */

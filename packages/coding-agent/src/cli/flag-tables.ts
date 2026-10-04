@@ -131,6 +131,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--fork": (result, value) => {
 		result.fork = value;
 	},
+	"--session-id": (result, value) => {
+		result.sessionId = value;
+	},
 	"--provider": (result, value) => {
 		result.provider = value;
 	},
@@ -315,6 +318,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--prewalk",
 	"--no-prewalk",
 	"--plan-yolo",
+	"--reapply-config",
 	"--print",
 	"--print-thoughts",
 	"--no-extensions",
@@ -379,6 +383,7 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
 	"--session",
 	"--continue",
 	"-c",
+	"--session-id",
 	"--fork",
 	"--from-claude",
 	"--from-codex",
@@ -397,16 +402,20 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
  * `resumeSessionId` is omitted for a session that never materialized on disk;
- * the relaunch then starts fresh with the same configuration.
+ * the relaunch then starts fresh with the same configuration. A launch pinned
+ * with `--session-id` re-pins that id while it is still the active session
+ * (even before the first write), where `--resume` would prefix-match.
  */
 export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
 	const kept: string[] = [];
+	let pinnedSessionId: string | undefined;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") break; // end-of-options: the rest is literal prompt text
 		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
 		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
 		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
+		if (flag === "--session-id") pinnedSessionId = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : argv[i + 1];
 		if (SESSION_SOURCE_FLAGS.has(flag)) {
 			if (consumesNext) i++;
 			continue;
@@ -414,6 +423,10 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
+	if (pinnedSessionId !== undefined && (resumeSessionId === undefined || resumeSessionId === pinnedSessionId)) {
+		kept.push("--session-id", pinnedSessionId);
+	} else if (resumeSessionId !== undefined) {
+		kept.push("--resume", resumeSessionId);
+	}
 	return kept;
 }

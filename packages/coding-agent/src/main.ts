@@ -111,7 +111,12 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import {
+	assertValidSessionId,
+	ForkSourceNotFoundError,
+	SessionManager,
+	SessionMoveRefusedError,
+} from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -356,6 +361,37 @@ function resumeStartupWatchdog(): void {
 export interface InteractiveModeNotify {
 	kind: "warn" | "error" | "info";
 	message: string;
+}
+
+/**
+ * Severity for a `modelFallbackMessage`. A `--reapply-config` config *adoption*
+ * ("resumed on X from config instead of the session's Y") is the user-requested
+ * outcome of the flag, so it is informational; the flag's other notices report a
+ * model that "did not resolve", which is a genuine fallback and stays a warning,
+ * as does every non-`--reapply-config` restore failure.
+ */
+/**
+ * The stderr line a NONINTERACTIVE run owes the user about its model, or
+ * `undefined` when there is nothing to say or the interactive notice queue will
+ * carry it. Split out so the routing is testable without launching a session.
+ *
+ * Only the resolved-model case: with no model at all the caller prints a longer
+ * diagnostic with setup instructions.
+ */
+export function renderStartupModelNotice(input: {
+	isInteractive: boolean;
+	hasModel: boolean;
+	modelFallbackMessage: string | undefined;
+}): string | undefined {
+	if (input.isInteractive || !input.hasModel || !input.modelFallbackMessage) return undefined;
+	const { kind } = buildModelFallbackNotification(input.modelFallbackMessage);
+	const paint = kind === "info" ? chalk.cyan : chalk.yellow;
+	return `${paint(input.modelFallbackMessage)}\n`;
+}
+
+export function buildModelFallbackNotification(modelFallbackMessage: string): InteractiveModeNotify {
+	const configAdoption = modelFallbackMessage.startsWith("--reapply-config: resumed on ");
+	return { kind: configAdoption ? "info" : "warn", message: modelFallbackMessage };
 }
 
 export function buildModelScopeNotification(
@@ -833,8 +869,8 @@ function exitForSessionResolutionError(error: SessionResolutionError): never {
 	process.exit(1);
 }
 
-function resolveForeignSessionSource(
-	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume">,
+export function resolveForeignSessionSource(
+	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume" | "sessionId">,
 ): ForeignSessionSource | undefined {
 	if (parsed.fromClaude && parsed.fromCodex) {
 		throw new SessionResolutionError("--from-claude and --from-codex cannot be used together");
@@ -844,8 +880,10 @@ function resolveForeignSessionSource(
 	if (parsed.noSession) {
 		throw new SessionResolutionError(`--from-${source} requires session persistence`);
 	}
-	if (parsed.continue || parsed.resume || parsed.fork) {
-		throw new SessionResolutionError(`--from-${source} cannot be combined with --continue, --resume, or --fork`);
+	if (parsed.continue || parsed.resume || parsed.fork || parsed.sessionId !== undefined) {
+		throw new SessionResolutionError(
+			`--from-${source} cannot be combined with --continue, --resume, --fork, or --session-id`,
+		);
 	}
 	return source;
 }
@@ -1156,6 +1194,28 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
 		throw new SessionResolutionError("--continue requires session persistence");
 	}
 }
+
+function validateSessionIdArgs(parsed: Args): void {
+	if (parsed.sessionId === undefined) return;
+	const conflicts = [
+		parsed.continue ? "--continue" : undefined,
+		parsed.resume !== undefined ? "--resume" : undefined,
+		parsed.noSession ? "--no-session" : undefined,
+	].filter(flag => flag !== undefined);
+	if (conflicts.length > 0) {
+		throw new SessionResolutionError(`--session-id cannot be combined with ${conflicts.join(", ")}`);
+	}
+	try {
+		assertValidSessionId(parsed.sessionId);
+	} catch (err) {
+		throw new SessionResolutionError(`--session-id: ${(err as Error).message}`);
+	}
+}
+
+async function findLocalSessionById(id: string, cwd: string, sessionDir?: string): Promise<string | undefined> {
+	const sessions = await SessionManager.list(cwd, sessionDir);
+	return sessions.find(session => session.id === id)?.path;
+}
 /**
  * Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager.
  *
@@ -1169,14 +1229,20 @@ export async function createSessionManager(
 	askToMoveSession: SessionPrompt = promptMoveSession,
 	options: { nativeFlagOwnership?: "preliminary" | "resolved" } = {},
 ): Promise<SessionManager | undefined> {
+	validateSessionIdArgs(parsed);
+	const sessionId = parsed.sessionId;
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
 		}
+		if (sessionId && (await findLocalSessionById(sessionId, cwd, parsed.sessionDir))) {
+			throw new SessionResolutionError(`Session already exists with id "${sessionId}".`);
+		}
+		const forkOptions = sessionId ? { id: sessionId } : undefined;
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			try {
-				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir, undefined, forkOptions);
 			} catch (err) {
 				if (err instanceof ForkSourceNotFoundError) {
 					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
@@ -1189,7 +1255,7 @@ export async function createSessionManager(
 			throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 		}
 		try {
-			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, forkOptions);
 		} catch (err) {
 			if (err instanceof ForkSourceNotFoundError) {
 				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
@@ -1254,6 +1320,16 @@ export async function createSessionManager(
 	if (parsed.continue) {
 		return await SessionManager.continueRecent(cwd, parsed.sessionDir);
 	}
+	if (sessionId) {
+		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
+		if (existing) {
+			const manager = await SessionManager.open(existing, parsed.sessionDir);
+			// Reopening is a restore: buildSessionOptions must keep the session's model and thinking level.
+			if (manager.getEntries().length > 0) parsed.continue = true;
+			return manager;
+		}
+		return SessionManager.create(cwd, parsed.sessionDir, undefined, { id: sessionId });
+	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there
 	if (parsed.sessionDir) {
@@ -1315,6 +1391,9 @@ export async function buildSessionOptions(
 		autoApprove: parsed.autoApprove ?? false,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
+	if (parsed.reapplyConfig) {
+		options.reapplyConfig = true;
+	}
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
 	}
@@ -1378,7 +1457,12 @@ export async function buildSessionOptions(
 			parsed.systemPromptTemplate !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.noTools === true ||
+			// --reapply-config re-resolves the model / thinking level from config,
+			// so a resumed fork's request shape can change without --model or
+			// --thinking ever being passed. An explicit --prompt-cache-key still
+			// wins: that case never reaches this branch.
+			parsed.reapplyConfig === true;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
@@ -2468,13 +2552,25 @@ export async function runRootCommand(
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
-				notifs.push({ kind: "warn", message: modelFallbackMessage });
+				notifs.push(buildModelFallbackNotification(modelFallbackMessage));
 			}
 
 			const modelRegistryError = modelRegistry.getError();
 			if (modelRegistryError) {
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
+
+			// A resolved model skips the no-model block below, but `notifs` is
+			// consumed only by `runInteractiveMode` — so under `-p` an adopted
+			// config model, or a config default that failed while the session
+			// model still restored, was reported nowhere. stderr keeps structured
+			// stdout clean.
+			const startupNotice = renderStartupModelNotice({
+				isInteractive,
+				hasModel: Boolean(session.model),
+				modelFallbackMessage,
+			});
+			if (startupNotice) process.stderr.write(startupNotice);
 
 			if (!isInteractive && !session.model) {
 				if (modelRegistryError) {

@@ -32,6 +32,7 @@ export interface Args {
 	provider?: string;
 	model?: string;
 	config?: string[];
+	reapplyConfig?: boolean;
 	smol?: string;
 	slow?: string;
 	plan?: string;
@@ -64,6 +65,8 @@ export interface Args {
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;
+	/** Exact session id: open it when it exists, else create a session with this id. */
+	sessionId?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
 	models?: string[];
@@ -334,6 +337,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPrewalk = true;
 		} else if (arg === "--plan-yolo") {
 			result.planYolo = true;
+		} else if (arg === "--reapply-config") {
+			result.reapplyConfig = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 		} else if (arg === "--print-thoughts") {

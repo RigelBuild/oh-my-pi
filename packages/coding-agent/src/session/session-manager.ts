@@ -128,6 +128,18 @@ export function mintSessionId(): string {
 	return Bun.randomUUIDv7();
 }
 
+// Same grammar as pi's `assertValidSessionId`: the id becomes part of the session file name.
+const SESSION_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+/** Throw unless `id` is safe to use as a caller-chosen session id. */
+export function assertValidSessionId(id: string): void {
+	if (!SESSION_ID_RE.test(id)) {
+		throw new Error(
+			`Invalid session id "${id}": use letters, digits, '.', '_' and '-', starting and ending with a letter or digit`,
+		);
+	}
+}
+
 /**
  * `moveTo` refused before anything moved: another live omp process writes the
  * session, or the session file at the destination.
@@ -1831,7 +1843,7 @@ export class SessionManager {
 		}
 	}
 
-	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string, sessionId?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
@@ -1840,7 +1852,8 @@ export class SessionManager {
 			this.#sessionDir = path.resolve(options.sessionDir);
 			this.#storage.ensureDirSync(this.#sessionDir);
 		}
-		this.#sessionId = mintSessionId();
+		if (sessionId !== undefined) assertValidSessionId(sessionId);
+		this.#sessionId = sessionId ?? mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -3777,10 +3790,15 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = new FileSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: { id?: string },
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
-		manager.#resetToNewSession();
+		manager.#resetToNewSession(undefined, undefined, options?.id);
 		return manager;
 	}
 
@@ -3826,6 +3844,8 @@ export class SessionManager {
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
+			/** Exact id for the fork; default mints a fresh one. */
+			id?: string;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
@@ -3854,6 +3874,7 @@ export class SessionManager {
 				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
 			},
 			options?.sessionFile,
+			options?.id,
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;

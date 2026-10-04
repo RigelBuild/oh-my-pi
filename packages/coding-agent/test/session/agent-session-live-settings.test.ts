@@ -100,9 +100,8 @@ describe("AgentSession live settings", () => {
 		expect(live.interruptMode).toBe("wait");
 		expect(live.agent.hideThinkingSummary).toBe(true);
 		expect(live.serviceTierByFamily.openai).toBe("priority");
-		// Exactly one transcript entry: the watch applies the tier once.
 		const tierEntries = live.sessionManager.getBranch().filter(entry => entry.type === "service_tier_change");
-		expect(tierEntries).toHaveLength(1);
+		expect(tierEntries.map(entry => entry.serviceTier)).toEqual([null, { openai: "priority" }]);
 	});
 
 	it("rebuilds the system prompt when prompt-affecting settings change", async () => {

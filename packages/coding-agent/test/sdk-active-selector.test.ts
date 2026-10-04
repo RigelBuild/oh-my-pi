@@ -73,6 +73,7 @@ for (const provider of ["openrouter", "vercel-ai-gateway"] as const) {
 				requestModel: "@default",
 				activeModelPattern: selected,
 				settings,
+				availableModels: [base],
 			});
 			expect(inherited).toEqual([selected!]);
 			const resolved = resolveModelOverride(inherited, modelRegistry, settings);
@@ -85,6 +86,7 @@ for (const provider of ["openrouter", "vercel-ai-gateway"] as const) {
 					requestModel: "@default:high",
 					activeModelPattern: captured.session?.getActiveModelString?.(),
 					settings,
+					availableModels: [base],
 				}),
 				modelRegistry,
 				settings,
@@ -97,6 +99,7 @@ for (const provider of ["openrouter", "vercel-ai-gateway"] as const) {
 					requestModel: explicit,
 					activeModelPattern: captured.session?.getActiveModelString?.(),
 					settings,
+					availableModels: [base],
 				}),
 			).toEqual([explicit]);
 		} finally {

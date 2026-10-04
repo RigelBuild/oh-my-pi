@@ -55,6 +55,10 @@ export const launchHelp = {
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",
 			multiple: true,
 		}),
+		"reapply-config": Flags.boolean({
+			description:
+				"On resume, use the config-resolved default model, thinking level, and service tier instead of restoring the session's own — applied per knob (and per family for the service tier), so anything the config does not specify keeps the session's; lets a --config/--profile overlay re-apply on resume (default off)",
+		}),
 		"add-dir": Flags.string({
 			description: "Add a workspace directory beyond the working directory (repeatable)",
 			multiple: true,
@@ -65,6 +69,7 @@ export const launchHelp = {
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
+		"session-id": Flags.string({ description: "Use exact project session ID, creating it if missing" }),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
 		models: Flags.string({ description: `Comma-separated model patterns for ${formatKeyHint("ctrl+p")} cycling` }),
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
