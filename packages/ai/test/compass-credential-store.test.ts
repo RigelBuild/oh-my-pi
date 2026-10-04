@@ -104,16 +104,15 @@ function startFakeServer(initialRows: FakeRow[]): FakeServer {
 				}
 				const tokenBody = record(body.token);
 				const access = tokenBody?.access;
-				const refresh = tokenBody?.refresh;
-				const expiresUnixMs = tokenBody?.expiresUnixMs;
-				if (
-					typeof access !== "string" ||
-					typeof refresh !== "string" ||
-					(typeof expiresUnixMs !== "string" && typeof expiresUnixMs !== "number")
-				) {
-					return Response.json({ code: "invalid_argument", message: "invalid token" }, { status: 400 });
+				if (typeof access !== "string" || access === "") {
+					return Response.json({ code: "invalid_argument", message: "token without access" }, { status: 400 });
 				}
-				row.oauth = { ...tokenBody, access, refresh, expiresUnixMs };
+				// The server merges: a field the client leaves empty keeps its stored value.
+				const merged: Record<string, unknown> = { ...row.oauth };
+				for (const [key, value] of Object.entries(tokenBody ?? {})) {
+					if (value !== "" && value !== undefined && value !== 0 && value !== "0") merged[key] = value;
+				}
+				row.oauth = merged;
 				row.version = String(Number(row.version) + 1);
 				return Response.json({ version: row.version });
 			}
