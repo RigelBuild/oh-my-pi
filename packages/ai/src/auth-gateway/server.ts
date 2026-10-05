@@ -547,6 +547,8 @@ async function handlePiNative(
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
 	const sessionId = callerSessionId(caller, clientKey ?? deriveSessionId(parsed.modelId, parsed.context));
 	parsed.options.sessionId = sessionId;
+	const clientCacheKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
+	if (clientCacheKey !== undefined) parsed.options.promptCacheKey = callerSessionId(caller, clientCacheKey);
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
@@ -846,6 +848,7 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 					});
 					return json(503, { error: "credential pool unavailable" });
 				}
+				if (req.signal.aborted) return new Response(null, { status: 499 });
 			}
 			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
 			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the

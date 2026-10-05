@@ -12,12 +12,16 @@ import {
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 
 interface Harness {
 	handle: AuthGatewayServerHandle;
 	mock: MockModel;
 	resolved: string[];
+	/** `Authorization` of every upstream call that went through the `fetch` seam. */
+	upstreamKeys: (string | null)[];
 	close(): Promise<void>;
 }
 
@@ -50,6 +54,30 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 	}
 	const resolved: string[] = [];
 	const mock = createMockModel({ provider: "openrouter", id: "mock/authorize" });
+	const embedding = buildModel({
+		id: "text-embedding-3-small",
+		name: "text-embedding-3-small",
+		api: "openai-embeddings",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 8192,
+		maxTokens: null,
+		kind: "embedding",
+		supportsTools: false,
+	} satisfies ModelSpec<Api>);
+	const upstreamKeys: (string | null)[] = [];
+	const fetchImpl: FetchImpl = async (_input, init) => {
+		upstreamKeys.push(new Headers(init?.headers).get("authorization"));
+		return Response.json({
+			object: "list",
+			data: [{ object: "embedding", index: 0, embedding: [0.5] }],
+			model: "text-embedding-3-small",
+			usage: { prompt_tokens: 1, total_tokens: 1 },
+		});
+	};
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		authorize,
@@ -62,13 +90,15 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 					return pool;
 				}
 			: undefined,
-		resolveModel: () => mock.model,
+		resolveModel: id => (id === embedding.id ? embedding : mock.model),
 		version: "test",
+		fetch: fetchImpl,
 	});
 	return {
 		handle,
 		mock,
 		resolved,
+		upstreamKeys,
 		close: async () => {
 			await handle.close();
 			shared.close();
@@ -103,7 +133,7 @@ function piNative(harness: Harness, token: string): Promise<Response> {
 		body: JSON.stringify({
 			modelId: "mock/authorize",
 			context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] },
-			options: { sessionId: "shared-session" },
+			options: { sessionId: "shared-session", promptCacheKey: "shared-cache" },
 			stream: false,
 		}),
 	});
@@ -196,17 +226,34 @@ describe("auth-gateway authorize seam", () => {
 		expect(await keyOfLastCall(harness.mock)).toBe("key-agent-b");
 	});
 
-	it("routes pi-native requests to the caller's pool", async () => {
+	it("routes pi-native requests to the caller's pool under caller-scoped cache keys", async () => {
 		harness = await boot(agentAuthorizer);
+		harness.mock.push({ content: ["a"] });
 		harness.mock.push({ content: ["b"] });
+		expect((await piNative(harness, "token-a")).status).toBe(200);
 		expect((await piNative(harness, "token-b")).status).toBe(200);
 		expect(await keyOfLastCall(harness.mock)).toBe("key-agent-b");
+		const [first, second] = harness.mock.calls.map(call => call.options);
+		expect(first?.promptCacheKey).not.toBe("shared-cache");
+		expect(first?.promptCacheKey).not.toBe(second?.promptCacheKey);
+		expect(first?.sessionId).not.toBe(second?.sessionId);
 	});
 
 	it("lists only the caller's own credentials", async () => {
 		harness = await boot(agentAuthorizer);
 		expect(await checkedProviders(harness, "token-a")).toEqual(["pool-agent-a"]);
 		expect(await checkedProviders(harness, "token-b")).toEqual(["pool-agent-b"]);
+	});
+
+	it("sends a non-chat route upstream with the caller's own key", async () => {
+		harness = await boot(agentAuthorizer);
+		const response = await fetch(`${harness.handle.url}/v1/embeddings`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: "Bearer token-b" },
+			body: JSON.stringify({ model: "text-embedding-3-small", input: "hi" }),
+		});
+		expect(response.status).toBe(200);
+		expect(harness.upstreamKeys).toEqual(["Bearer key-agent-b"]);
 	});
 
 	it("gives two agents sending the same session key distinct provider sessions", async () => {
