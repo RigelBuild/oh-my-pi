@@ -139,15 +139,20 @@ export const SHARED_TOKEN_CALLER: CallerIdentity = Object.freeze({ agentAccountI
  */
 export const UNAUTHENTICATED_CALLER: CallerIdentity = Object.freeze({ agentAccountId: "\u0000shared" });
 
+/** A non-empty id with no NUL: the reserved shared id carries one, so no real id can collide with it. */
+function isAccountId(value: unknown): value is string {
+	return typeof value === "string" && value !== "" && !value.includes("\u0000");
+}
+
 /**
  * Whether an authorizer result names a caller. Anything else (`undefined`, `{}`,
- * an empty or NUL-bearing id) is answered 401, never mapped to a default caller.
+ * an empty or NUL-bearing id or owner) is answered 401, never mapped to a default caller.
  */
 export function isCallerIdentity(value: unknown): value is CallerIdentity {
 	if (value === SHARED_TOKEN_CALLER || value === UNAUTHENTICATED_CALLER) return true;
 	if (typeof value !== "object" || value === null || !("agentAccountId" in value)) return false;
-	const id = value.agentAccountId;
-	return typeof id === "string" && id !== "" && !id.includes("\u0000");
+	if (!isAccountId(value.agentAccountId)) return false;
+	return !("ownerUserId" in value) || value.ownerUserId === undefined || isAccountId(value.ownerUserId);
 }
 
 /**

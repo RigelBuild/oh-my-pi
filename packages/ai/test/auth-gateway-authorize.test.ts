@@ -84,9 +84,10 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 		storage: shared,
 		resolveStorage: perAgentPools
 			? (caller: CallerIdentity) => {
-					resolved.push(caller.agentAccountId);
-					const pool = pools.get(caller.agentAccountId);
-					if (!pool) throw new Error(`no pool for ${caller.agentAccountId}`);
+					const tenant = caller.ownerUserId ?? caller.agentAccountId;
+					resolved.push(tenant);
+					const pool = pools.get(tenant);
+					if (!pool) throw new Error(`no pool for ${tenant}`);
 					return pool;
 				}
 			: undefined,
@@ -191,11 +192,31 @@ describe("auth-gateway authorize seam", () => {
 		["an empty id", { agentAccountId: "" }],
 		["a non-string id", { agentAccountId: 7 }],
 		["the reserved shared id", { agentAccountId: "\u0000shared" }],
+		["an empty owner", { agentAccountId: "agent-a", ownerUserId: "" }],
+		["a non-string owner", { agentAccountId: "agent-a", ownerUserId: 7 }],
 	])("answers 401 when the authorizer returns %s, never a default caller", async (_label, result) => {
 		harness = await boot(rawAuthorizer(result));
 		const response = await fetch(`${harness.handle.url}/v1/usage`, { headers: { Authorization: "Bearer token-a" } });
 		expect(response.status).toBe(401);
 		expect(harness.resolved).toEqual([]);
+	});
+
+	it("serves two agents of one owner from that owner's pool, in separate provider sessions", async () => {
+		const owned: Record<string, CallerIdentity> = {
+			"token-a": { agentAccountId: "agent-x", ownerUserId: "agent-a" },
+			"token-b": { agentAccountId: "agent-y", ownerUserId: "agent-a" },
+		};
+		harness = await boot(req => owned[req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? ""] ?? null);
+		harness.mock.push({ content: ["x"] });
+		harness.mock.push({ content: ["y"] });
+		const extra = { prompt_cache_key: "same-key" };
+		expect((await chat(harness, { Authorization: "Bearer token-a" }, extra)).status).toBe(200);
+		expect(await keyOfLastCall(harness.mock)).toBe("key-agent-a");
+		expect((await chat(harness, { Authorization: "Bearer token-b" }, extra)).status).toBe(200);
+		expect(await keyOfLastCall(harness.mock)).toBe("key-agent-a");
+		expect(harness.resolved).toEqual(["agent-a", "agent-a"]);
+		const [first, second] = harness.mock.calls.map(call => call.options?.sessionId);
+		expect(first).not.toBe(second);
 	});
 
 	it("answers 401 to an admission that carried no Authorization bearer", async () => {

@@ -147,8 +147,13 @@ export interface AuthGatewayFormatModule {
 
 /** The caller a request was admitted as. */
 export interface CallerIdentity {
-	/** Selects the caller's credential pool; requests from one account never see another's. */
+	/** The agent the request belongs to; retained provider sessions are kept per agent. */
 	agentAccountId: string;
+	/**
+	 * The tenant that owns the agent. Agents of one owner share a credential pool,
+	 * so `resolveStorage` keys on this when it is set.
+	 */
+	ownerUserId?: string;
 }
 
 /**
