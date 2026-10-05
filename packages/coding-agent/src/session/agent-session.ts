@@ -393,7 +393,12 @@ import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
-import type { BranchSummaryEntry, NewSessionOptions, SessionEntry } from "./session-entries";
+import {
+	type BranchSummaryEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type NewSessionOptions,
+	type SessionEntry,
+} from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -644,9 +649,11 @@ type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
-/** Session file plus the last model/thinking/tier entry ids a reapplied startup overrode. */
+/** A reapplied startup's session file, adopted model, and last knob entry ids. */
 interface ReappliedConfigBaseline {
 	sessionFile: string;
+	/** `provider/id` the startup adopted; reload restores it over a later ephemeral fallback. */
+	modelSelector: string | undefined;
 	model: string | undefined;
 	thinking: string | undefined;
 	tier: string | undefined;
@@ -654,6 +661,11 @@ interface ReappliedConfigBaseline {
 
 function lastEntryId(branch: readonly SessionEntry[], type: SessionEntry["type"]): string | undefined {
 	return branch.findLast(entry => entry.type === type)?.id;
+}
+
+/** Last model selection that a reload restores; retry and promotion fallbacks are skipped. */
+function lastSelectedModelEntryId(branch: readonly SessionEntry[]): string | undefined {
+	return branch.findLast(entry => entry.type === "model_change" && entry.role !== EPHEMERAL_MODEL_CHANGE_ROLE)?.id;
 }
 
 /**
@@ -1604,9 +1616,11 @@ export class AgentSession implements SettingsScope {
 		const startupSessionFile = this.sessionManager.getSessionFile();
 		if (config.reappliedConfig && startupSessionFile) {
 			const branch = this.sessionManager.getBranch();
+			const startupModel = this.model;
 			this.#reappliedConfigBaseline = {
 				sessionFile: path.resolve(startupSessionFile),
-				model: lastEntryId(branch, "model_change"),
+				modelSelector: startupModel ? `${startupModel.provider}/${startupModel.id}` : undefined,
+				model: lastSelectedModelEntryId(branch),
 				thinking: lastEntryId(branch, "thinking_level_change"),
 				tier: lastEntryId(branch, "service_tier_change"),
 			};
@@ -10854,15 +10868,19 @@ export class AgentSession implements SettingsScope {
 					? this.#reappliedConfigBaseline
 					: undefined;
 			const reloadBranch = this.sessionManager.getBranch();
-			const keepLiveModel = reapplied !== undefined && lastEntryId(reloadBranch, "model_change") === reapplied.model;
+			const keepReappliedModel =
+				reapplied !== undefined && lastSelectedModelEntryId(reloadBranch) === reapplied.model;
 			const keepLiveThinking =
 				reapplied !== undefined && lastEntryId(reloadBranch, "thinking_level_change") === reapplied.thinking;
 			const keepLiveTier =
 				reapplied !== undefined && lastEntryId(reloadBranch, "service_tier_change") === reapplied.tier;
 
-			// Restore model if saved
-			const targetModelStrings = keepLiveModel
-				? []
+			// Restore model if saved. An ephemeral fallback since a reapplied startup returns to the
+			// adopted model, as a plain session's fallback returns to its default.
+			const targetModelStrings = keepReappliedModel
+				? reapplied.modelSelector
+					? [reapplied.modelSelector]
+					: []
 				: getRestorableSessionModels(sessionContext.models, this.sessionManager.getLastModelChangeRole());
 			if (targetModelStrings.length > 0) {
 				const availableModels = this.#modelRegistry.getAvailable();

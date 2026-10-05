@@ -369,8 +369,8 @@ describe("--reapply-config configured default fallback order", () => {
 
 	it("restores a cold dynamic saved model under a self-alias-only default before any arbitrary pick", async () => {
 		// The saved provider is refreshable but not config-discoverable, so only
-		// the post-discovery fallback can restore it. RED (pre-fix): that fallback
-		// required a config-named default, so startup picked an Anthropic model.
+		// the post-discovery fallback can restore it, and it must not require a
+		// config-named default.
 		const sessionFile = await writeBakedSession(`${DYNAMIC_PROVIDER}/${DYNAMIC_MODEL}`);
 		const settings = await loadOverlay("*:high");
 
@@ -458,8 +458,8 @@ describe("--reapply-config configured default fallback order", () => {
 
 		const resumed = await resume(sessionFile, settings, true);
 
-		// RED (pre-fix): the trailing `*:low` counted as reached, so the baked
-		// model was retained at low effort instead of adopting `@slow`'s winner.
+		// A trailing `*:low` is not a reached candidate: adopt `@slow`'s winner
+		// rather than keep the baked model at low effort.
 		expect(resumed.model?.provider).toBe(winner.provider);
 		expect(resumed.model?.id).toBe(winner.id);
 	});

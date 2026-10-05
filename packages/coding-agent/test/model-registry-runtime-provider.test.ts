@@ -13,7 +13,16 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import {
+	factoryDroidModelManagerOptions,
+	MODELS_DEV_CATALOG_PROVIDER_IDS,
+	PROVIDER_DESCRIPTORS,
+	resolveModelCacheProviderId,
+} from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1676,6 +1685,69 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		expect(scoped.canRefreshProvider(providerName)).toBe(false);
 		expect(scoped.hasRefreshableProviders()).toBe(false);
+	});
+
+	const builtInOnly = async (providerId: string): Promise<ModelRegistry> =>
+		new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== providerId),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+	// A fresh authoritative row written before the migration policy existed
+	// still holds the migrated ids, so the manager refetches it.
+	test("a built-in cache awaiting a migration-policy refetch still counts as due", async () => {
+		const bundled = getBundledModels("google");
+		const catalogFingerprint = fingerprintStaticModels(bundled);
+		const dbPath = path.join(tempDir, "models.db");
+		authStorage.keys.setRuntime("google", "google-test-key");
+		try {
+			writeModelCache("google", Date.now(), bundled, true, catalogFingerprint, dbPath);
+			expect((await builtInOnly("google")).canRefreshProvider("google")).toBe(true);
+
+			const migrationIds = ["gemini-3.7-flash", "gemini-3.8-flash"].join("\0");
+			const migratedFingerprint = `${catalogFingerprint}:drop:${Bun.hash(migrationIds).toString(36)}`;
+			writeModelCache("google", Date.now(), bundled, true, migratedFingerprint, dbPath);
+			expect((await builtInOnly("google")).canRefreshProvider("google")).toBe(false);
+		} finally {
+			authStorage.keys.removeRuntime("google");
+		}
+	});
+
+	// An always-refetch manager goes online on every refresh, so a warm cache
+	// row is not a reason to skip it.
+	test("an always-refetch built-in counts as due despite a fresh cache", async () => {
+		const token = "droid-test-token";
+		const options = factoryDroidModelManagerOptions({ apiKey: token });
+		const seed = (options.staticModels ?? []).map(spec => buildModel(spec));
+		writeModelCache(
+			resolveModelCacheProviderId("factory-droid", { apiKey: token }),
+			Date.now(),
+			seed,
+			true,
+			fingerprintStaticModels(seed, true),
+			path.join(tempDir, "models.db"),
+		);
+		authStorage.keys.setRuntime("factory-droid", token);
+		try {
+			const scoped = await builtInOnly("factory-droid");
+			await scoped.hydrateCredentialScopedModelCaches();
+			const state = scoped.getProviderDiscoveryState("factory-droid");
+			expect(state?.source).toBe("cache");
+			expect(state?.stale).toBe(false);
+			expect(scoped.canRefreshProvider("factory-droid")).toBe(true);
+		} finally {
+			authStorage.keys.removeRuntime("factory-droid");
+		}
 	});
 
 	// `find` routes a dotted revision spelling onto the dashed id; whole-id

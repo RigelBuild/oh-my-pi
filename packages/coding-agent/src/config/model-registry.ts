@@ -25,7 +25,7 @@ import {
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
-import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { type CacheEntry, getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
 	fingerprintStaticModels,
@@ -180,22 +180,100 @@ const REFRESHABLE_BUILT_IN_PROVIDER_IDS: Readonly<Record<string, true>> = Object
 	),
 );
 
-const builtInRemoteFetcherCache = new Map<string, boolean>();
-/** Whether a credentialed built-in manager can ever fetch (seed-only `local`/`web`/`firepass` cannot). */
-function builtInProviderHasRemoteFetcher(providerId: string): boolean {
-	let hasFetcher = builtInRemoteFetcherCache.get(providerId);
-	if (hasFetcher === undefined) {
-		const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+/** The manager inputs a credentialed built-in refresh would use to decide whether to fetch. */
+interface BuiltInRefreshProbe {
+	options: ModelManagerOptions<Api>;
+	staticById: ReadonlyMap<string, Model<Api>>;
+	staticFingerprint: string;
+}
+
+const builtInRefreshProbeCache = new Map<string, BuiltInRefreshProbe | null>();
+
+/** Probe-credential options matching manager construction; seed-only `local`/`web`/`firepass` have no fetcher. */
+function builtInProbeOptions(providerId: string, baseUrl: string | undefined): ModelManagerOptions<Api> | undefined {
+	const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+	if (descriptor) {
 		// `sk-` satisfies key-shape checks (alibaba-token-plan); the probe never fetches.
-		const options = descriptor?.createModelManagerOptions({ apiKey: "sk-probe", authenticated: true });
-		hasFetcher =
-			descriptor === undefined ||
-			options?.fetchDynamicModels !== undefined ||
-			options?.modelsDev !== undefined ||
-			modelsDevCatalogFallback(providerId) !== undefined;
-		builtInRemoteFetcherCache.set(providerId, hasFetcher);
+		const options = descriptor.createModelManagerOptions({ apiKey: "sk-probe", baseUrl, authenticated: true });
+		const modelsDev = options.modelsDev ?? modelsDevCatalogFallback(providerId);
+		return modelsDev ? { ...options, modelsDev } : options;
 	}
-	return hasFetcher;
+	switch (providerId) {
+		case "google-antigravity":
+			return googleAntigravityModelManagerOptions({ oauthToken: "probe", endpoint: baseUrl });
+		case "google-gemini-cli":
+			return googleGeminiCliModelManagerOptions({ oauthToken: "probe", endpoint: baseUrl });
+		case "openai-codex":
+			return openaiCodexModelManagerOptions({ baseUrl, resolveAccounts: async () => [] });
+	}
+	const modelsDev = modelsDevCatalogFallback(providerId);
+	return modelsDev ? { providerId, modelsDev } : undefined;
+}
+
+/** Null when the provider's manager has no remote fetcher, so a refresh cannot change its catalog. */
+function builtInRefreshProbe(providerId: string, baseUrl: string | undefined): BuiltInRefreshProbe | null {
+	const key = `${providerId}\u0000${baseUrl ?? ""}`;
+	let probe = builtInRefreshProbeCache.get(key);
+	if (probe === undefined) {
+		const options = builtInProbeOptions(providerId, baseUrl);
+		if (!options || (options.fetchDynamicModels === undefined && options.modelsDev === undefined)) {
+			probe = null;
+		} else {
+			// Same static slice and cache identity as `resolveProviderModels`.
+			const staticModels = options.staticModels
+				? options.staticModels.map(model => ("identity" in model ? model : buildModel(model)))
+				: (getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]);
+			const catalogFingerprint = fingerprintStaticModels(staticModels, options.dynamicModelsAuthoritative ?? false);
+			const dropIds = options.dropCachedModelIdsOnStaticMismatch;
+			probe = {
+				options,
+				staticById: new Map(staticModels.map(model => [model.id, model])),
+				staticFingerprint:
+					dropIds && dropIds.length > 0
+						? `${catalogFingerprint}:drop:${Bun.hash(dropIds.join("\0")).toString(36)}`
+						: catalogFingerprint,
+			};
+		}
+		builtInRefreshProbeCache.set(key, probe);
+	}
+	return probe;
+}
+
+/** Mirrors `resolveProviderModels` under `online-if-uncached`: whether a cache row still forces a fetch. */
+function builtInCacheNeedsFetch(probe: BuiltInRefreshProbe, cache: CacheEntry<Api>, now: number): boolean {
+	const { options } = probe;
+	const fingerprintMatches = probe.staticFingerprint.length > 0 && cache.staticFingerprint === probe.staticFingerprint;
+	const omittedIds = new Set(cache.headerOmittedModelIds);
+	const unrestorableIds = new Set(cache.unrestorableHeaderModelIds);
+	const unresolvedIds = new Set<string>();
+	for (const model of cache.models) {
+		if (!omittedIds.has(model.id)) continue;
+		const unrestorable = unrestorableIds.has(model.id);
+		const source = unrestorable
+			? cache.legacyHeaderRestoreMarkers && model.requestModelId
+				? probe.staticById.get(model.requestModelId)
+				: undefined
+			: (probe.staticById.get(model.id) ??
+				(model.requestModelId ? probe.staticById.get(model.requestModelId) : undefined));
+		if (source?.headers || source?.resolveHeaders) continue;
+		if (!unrestorable && options.restorableHeaderFallback) continue;
+		const configured = options.restoreCachedHeaders?.(model);
+		if (configured?.headers || configured?.resolveHeaders) continue;
+		unresolvedIds.add(model.id);
+	}
+	const dropIds = options.dropCachedModelIdsOnStaticMismatch;
+	const needsMigration =
+		!fingerprintMatches &&
+		dropIds !== undefined &&
+		cache.models.some(model => !unresolvedIds.has(model.id) && dropIds.includes(model.id));
+	const usableFresh =
+		cache.fresh &&
+		unresolvedIds.size === 0 &&
+		!needsMigration &&
+		(!options.dynamicModelsAuthoritative || fingerprintMatches);
+	if (!usableFresh) return true;
+	if (cache.authoritative) return false;
+	return now - cache.updatedAt >= BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS;
 }
 
 /**
@@ -2931,19 +3009,24 @@ export class ModelRegistry {
 
 	/** Mirrors the built-in manager's fetch decision under `online-if-uncached`. */
 	#isBuiltInRefreshPending(providerId: string): boolean {
-		if (!builtInProviderHasRemoteFetcher(providerId)) return false;
+		const probe = builtInRefreshProbe(providerId, this.#descriptorBaseUrl(providerId));
+		if (!probe) return false;
+		if (probe.options.alwaysRefetchDynamicModels) {
+			// Every refresh refetches; only a live result already merged here is warm.
+			const state = this.#providerDiscoveryStates.get(providerId);
+			return state?.stale !== false || (state.source !== "provider" && state.source !== "models.dev");
+		}
 		// Credential-scoped namespaces need the key; hydration records the outcome.
 		if (isCredentialScopedModelCacheProvider(providerId)) {
 			return this.#providerDiscoveryStates.get(providerId)?.stale !== false;
 		}
 		const cache = readModelCache<Api>(
 			this.#resolveStartupModelCacheProviderId(providerId),
-			BUILT_IN_DISCOVERY_CACHE_TTL_MS,
+			probe.options.cacheTtlMs ?? BUILT_IN_DISCOVERY_CACHE_TTL_MS,
 			Date.now,
 			this.#cacheDbPath,
 		);
-		if (!cache?.fresh) return true;
-		return !cache.authoritative && Date.now() - cache.updatedAt >= BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS;
+		return cache === null || builtInCacheNeedsFetch(probe, cache, Date.now());
 	}
 
 	/**

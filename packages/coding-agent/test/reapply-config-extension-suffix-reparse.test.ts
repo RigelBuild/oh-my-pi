@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ModelSpec } from "@oh-my-pi/pi-ai";
+import { Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -125,6 +125,111 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			// selection, only the tail of a model id — must not ride along onto it.
 			expect(session.model?.id).toBe("config-pick");
 			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	/** Resume `runtime-provider/router:low` with no config default or pin, so restore owns identity and level. */
+	async function restoreBakedSession(extension: ExtensionFactory) {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const sessionFile = await writeBakedSession();
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, `startup-${Bun.nanoseconds()}`));
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated(),
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		return { session, modelRegistry };
+	}
+
+	const routedThinking = {
+		mode: "effort",
+		efforts: [Effort.Low, Effort.High],
+		defaultLevel: Effort.High,
+		effortRouting: { [Effort.Low]: "router:low" },
+	} satisfies NonNullable<Model["thinking"]>;
+
+	test("keeps the thinking suffix of a saved selector that only aliases a wire route", async () => {
+		const { session, modelRegistry } = await restoreBakedSession(pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "router",
+						name: "Router",
+						reasoning: true,
+						thinking: routedThinking,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		});
+		try {
+			// Alias-aware lookup reaches `router` through its wire route; exact membership does not.
+			expect(modelRegistry.find("runtime-provider", "router:low")?.id).toBe("router");
+			expect(modelRegistry.hasModelId("runtime-provider", "router:low")).toBe(false);
+			expect(session.model?.id).toBe("router");
+			expect(session.thinkingLevel).toBe(ThinkingLevel.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("restores a literal suffix-shaped id intact beside its suffix-less sibling", async () => {
+		const { session } = await restoreBakedSession(pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "router",
+						name: "Router",
+						reasoning: true,
+						thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.High },
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+					{
+						id: "router:low",
+						name: "Router Low",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		});
+		try {
+			expect(session.model?.id).toBe("router:low");
+			expect(session.configuredThinkingLevel()).not.toBe(ThinkingLevel.Low);
 		} finally {
 			await session.dispose();
 		}
@@ -1314,9 +1419,8 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			// default, not the baked `custom/router`.
 			expect(session.model?.provider).toBe("custom");
 			expect(session.model?.id).toBe("default");
-			// RED (pre-fix): the invented `low` -- the tail of a literal model id --
-			// rode onto the late config-selected model because the reparse was
-			// skipped while adoption read false.
+			// `low` is the tail of a literal model id, so it must not ride onto
+			// the late config-selected model.
 			expect(session.thinkingLevel).not.toBe(ThinkingLevel.Low);
 		} finally {
 			await session.dispose();
@@ -1419,11 +1523,11 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			// `default`, not the baked `custom/router`.
 			expect(session.model?.provider).toBe("custom");
 			expect(session.model?.id).toBe("default");
-			// RED (pre-fix): the stale index-0 marker made the notice claim the
-			// config default failed and the session kept its baked model.
+			// The notice must not claim the config default failed or that the
+			// session kept its baked model.
 			expect(modelFallbackMessage ?? "").not.toContain("did not resolve");
 			expect(modelFallbackMessage ?? "").not.toContain("kept the session");
-			// GREEN: the notice reports the config model the session actually adopted.
+			// The notice reports the config model the session actually adopted.
 			expect(modelFallbackMessage).toContain("resumed on custom/default from config");
 		} finally {
 			await session.dispose();

@@ -214,7 +214,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 		});
 
 		expect(resumed.model?.id).toBe(later.id);
-		// RED (pre-fix): the fallback ran its `refresh`, so this was defined.
+		// The fallback must not run its own `refresh`.
 		expect(observed?.fallbackSawJoin).toBeUndefined();
 	});
 
@@ -335,8 +335,8 @@ describe("--reapply-config cold-discovery configured default", () => {
 
 		expect(resumed.model?.provider).toBe(allowedModel.provider);
 		expect(fallbackMessage).toContain(`${modelValue(forbiddenModel)} could not be restored`);
-		// RED (pre-fix): the saved-model retry refreshed `anthropic` although the
-		// catalog already held the excluded model, so discovery could not help.
+		// The catalog already holds the excluded model, so discovery cannot help
+		// and the saved-model retry must not refresh its provider.
 		expect(refreshedProviders).not.toContain(forbiddenModel.provider);
 	});
 

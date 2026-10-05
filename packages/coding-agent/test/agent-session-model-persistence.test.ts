@@ -631,6 +631,47 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.Medium);
 	});
 
+	it("returns to the adopted model on same-session reload after an ephemeral fallback", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const configModel = getAnthropicModelOrThrow("claude-opus-4-5");
+		const fallbackModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const reappliedFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
+		const otherFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Low);
+		const settings = await loadOverlaySettings({ default: modelValue(configModel) });
+
+		const result = await createStartupResumeSession(reappliedFile, settings, { reapplyConfig: true });
+		expect(result.session.model?.id).toBe(configModel.id);
+
+		await result.session.setModelTemporary(fallbackModel, undefined, { ephemeral: true });
+		expect(result.session.sessionManager.getLastModelChangeRole()).toBe(EPHEMERAL_MODEL_CHANGE_ROLE);
+
+		await result.session.reload();
+		expect(result.session.model?.id).toBe(configModel.id);
+
+		await expect(result.session.switchSession(otherFile)).resolves.toBe(true);
+		expect(result.session.model?.id).toBe(bakedModel.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.Low);
+	});
+
+	it("lets an explicit model selection after a reapplied startup win on same-session reload", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const configModel = getAnthropicModelOrThrow("claude-opus-4-5");
+		const fallbackModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const chosenModel = getAnthropicModelOrThrow("claude-opus-4-1");
+		const reappliedFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
+		const settings = await loadOverlaySettings({ default: modelValue(configModel) });
+
+		const result = await createStartupResumeSession(reappliedFile, settings, { reapplyConfig: true });
+		expect(result.session.model?.id).toBe(configModel.id);
+
+		await result.session.setModel(chosenModel);
+		// A later fallback must not hide the explicit choice behind the startup baseline.
+		await result.session.setModelTemporary(fallbackModel, undefined, { ephemeral: true });
+
+		await result.session.reload();
+		expect(result.session.model?.id).toBe(chosenModel.id);
+	});
+
 	it("keeps the baked session thinking level when reapplyConfig is combined with an explicit model", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const targetSessionFile = await writeThinkingModelSession(modelValue(model), Effort.Minimal);

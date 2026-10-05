@@ -2011,7 +2011,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		restoredSessionThinkingLevel = parseModelString(sessionModelStrings[0], {
 			allowMaxSuffix: true,
 			allowAutoAlias: true,
-			isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+			isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 		})?.thinkingLevel;
 	}
 	if (!hasExplicitModel && !adoptConfigModel() && !model && sessionModelStrings.length > 0) {
@@ -2022,7 +2022,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const parsedModel = parseModelString(sessionModelStr, {
 					allowMaxSuffix: true,
 					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+					isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 				});
 				if (!parsedModel) {
 					failedSessionModel ??= sessionModelStr;
@@ -2837,7 +2837,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					const parsedModel = parseModelString(sessionModelStr, {
 						allowMaxSuffix: true,
 						allowAutoAlias: true,
-						isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+						isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 					});
 					if (!parsedModel) continue;
 					const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
@@ -2871,7 +2871,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const parsedModel = parseModelString(sessionModelStr, {
 							allowMaxSuffix: true,
 							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+							isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 						});
 						if (parsedModel && discoverableProviders.has(parsedModel.provider)) {
 							candidateProviders.add(parsedModel.provider);
@@ -2901,7 +2901,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// The caller's own pinned model counts as literal, compared
 					// case-insensitively like other model references.
 					isLiteralModelId: (provider, id) =>
-						modelRegistry.find(provider, id) !== undefined ||
+						modelRegistry.hasModelId(provider, id) ||
 						(sameModelReference(options.model?.provider, provider) && sameModelReference(options.model?.id, id)),
 				});
 			let savedParse = reparseSavedSuffix();
@@ -3047,7 +3047,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const parsedOriginal = parseModelString(originalSelector, {
 							allowMaxSuffix: true,
 							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+							isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 						});
 						const retryFallback: InitialRetryFallbackState = {
 							role: chainKey,
@@ -3317,7 +3317,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return true;
 			};
 
-			// Cold-cache discovery race (#6114, #6162): a discovery provider ships no
+			// Cold-cache discovery race: a discovery provider ships no
 			// static models, so take at most one cache-aware pass per session creation.
 			// `hasRefreshableProviders()` also covers extension runtime providers,
 			// which `getDiscoverableProviders()` omits.
@@ -3414,7 +3414,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const parsedModel = parseModelString(sessionModelStrings[i], {
 							allowMaxSuffix: true,
 							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+							isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 						});
 						if (!parsedModel) continue;
 						const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
@@ -3443,7 +3443,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const parsedModel = parseModelString(sessionModelStr, {
 							allowMaxSuffix: true,
 							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+							isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 						});
 						if (!parsedModel) continue;
 						// Already in the catalog: discovery cannot make an excluded model eligible.
@@ -3468,7 +3468,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.hasConcreteAuth(provider),
 				);
 
-				// #6114: nothing resolved and only a discovery provider's catalog could
+				// Nothing resolved and only a discovery provider's catalog could
 				// carry a model. A no-op when the configured-default pass already ran.
 				if (!pick && !hasExplicitModel && (await refreshDiscoveryOnce(false))) {
 					const refreshedCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
@@ -3519,7 +3519,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const bakedParsed = parseModelString(bakedSessionModel, {
 					allowMaxSuffix: true,
 					allowAutoAlias: true,
-					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+					isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 				});
 				if (
 					!sameModelReference(bakedParsed?.provider, model.provider) ||
