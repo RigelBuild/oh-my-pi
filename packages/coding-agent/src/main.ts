@@ -358,21 +358,7 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
-/**
- * Severity for a `modelFallbackMessage`. A `--reapply-config` config *adoption*
- * ("resumed on X from config instead of the session's Y") is the user-requested
- * outcome of the flag, so it is informational; the flag's other notices report a
- * model that "did not resolve", which is a genuine fallback and stays a warning,
- * as does every non-`--reapply-config` restore failure.
- */
-/**
- * The stderr line a NONINTERACTIVE run owes the user about its model, or
- * `undefined` when there is nothing to say or the interactive notice queue will
- * carry it. Split out so the routing is testable without launching a session.
- *
- * Only the resolved-model case: with no model at all the caller prints a longer
- * diagnostic with setup instructions.
- */
+/** Returns the stderr notice for a resolved noninteractive startup model. */
 export function renderStartupModelNotice(input: {
 	isInteractive: boolean;
 	hasModel: boolean;
@@ -384,6 +370,7 @@ export function renderStartupModelNotice(input: {
 	return `${paint(input.modelFallbackMessage)}\n`;
 }
 
+/** Config adoption is informational; unresolved restore failures remain warnings. */
 export function buildModelFallbackNotification(modelFallbackMessage: string): InteractiveModeNotify {
 	const configAdoption = modelFallbackMessage.startsWith("--reapply-config: resumed on ");
 	return { kind: configAdoption ? "info" : "warn", message: modelFallbackMessage };

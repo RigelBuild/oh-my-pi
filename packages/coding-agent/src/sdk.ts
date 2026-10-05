@@ -37,6 +37,7 @@ import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/d
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
@@ -1906,11 +1907,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			matchPreferences: modelMatchPreferences,
 		}),
 	);
-	// `reapplyConfig` adopts config per knob: model, thinking, and tier each
-	// switch only when config names that knob. A blank default, or one made only
-	// of default-role self aliases (`default`, `*`, `@default`, `pi/default`),
-	// names no model, so the session model is kept. Classify per pattern: the
-	// role getter flattens lists into `"*,@default"`, which matches no alias.
+	// `reapplyConfig` adopts config per knob. A default made only of self aliases
+	// (`default`, `*`, `@default`, `pi/default`) names no model; classify per
+	// pattern, since the role getter flattens lists into `"*,@default"`.
 	const normalizedDefaultRole = defaultRoleValue?.trim();
 	const defaultRolePatterns = normalizeModelPatternList(normalizedDefaultRole);
 	// A bare `default` is a self alias only as the whole value. Inside a list it
@@ -1980,12 +1979,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// host preconnect) can use the restored model; extension-registered
 	// providers aren't visible yet, so we retry the preferred candidates once
 	// extensions register below. Under `reapplyConfig` the config default wins
-	// first, and these stay the fallback when it resolves to nothing.
-	// Collected even under `--model`: every identity consumer is gated on
-	// `!hasExplicitModel`, but the saved thinking suffix is still read below.
-	const sessionModelStrings = hasExistingSession
-		? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
-		: [];
+	// first, and these stay the fallback when it resolves to nothing. A flag-off
+	// `--model` pins identity and thinking, so it reads no saved selector.
+	const sessionModelStrings =
+		hasExistingSession && (!hasExplicitModel || options.reapplyConfig === true)
+			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
+			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	// A saved selector carries identity AND a thinking suffix. When config or
@@ -2877,8 +2876,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		// The early saved-suffix parse ran before extension providers registered,
 		// so a literal id ending in an effort name (`custom/router:low`) may have
-		// been split and its tail misread as thinking. Re-parse now. Also run when
-		// `reResolveConfigDefault()` says the early adoption verdict is provisional.
+		// been misread as thinking. Re-parse now.
 		if ((adoptConfigModel() || hasExplicitModel || reResolveConfigDefault()) && sessionModelStrings.length > 0) {
 			const savedSessionModelString = sessionModelStrings[0];
 			const reparseSavedSuffix = () =>
@@ -3284,9 +3282,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					defaultRoleSpec = reResolvedRoleSpec;
 					return false;
 				}
-				// An earlier self alias was the entry fallback reached: keep its
-				// suffix live, but adopt nothing.
-				if (reachedSelfAlias(reResolvedRoleSpec)) {
+				// Under `reapplyConfig`, a self alias reached first means "keep the
+				// session model": adopt nothing. With no saved model there is none to keep.
+				if (
+					options.reapplyConfig === true &&
+					sessionModelStrings.length > 0 &&
+					reachedSelfAlias(reResolvedRoleSpec)
+				) {
 					defaultRoleSpec = reResolvedRoleSpec;
 					return false;
 				}
@@ -3389,9 +3391,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			// Under `reapplyConfig` the early restore was skipped. The config default
 			// did not resolve, so fall back to the session's own model rather than an
-			// arbitrary pick.
+			// arbitrary pick, fetching a cold discovery-backed provider once if needed.
 			if (!model && adoptConfigModel() && sessionModelStrings.length > 0) {
-				logger.time("restoreSessionModelReapplyFallback", () => {
+				const restoreSavedSessionModel = (): boolean => {
 					for (let i = 0; i < sessionModelStrings.length; i++) {
 						const parsedModel = parseModelString(sessionModelStrings[i], {
 							allowMaxSuffix: true,
@@ -3406,10 +3408,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							restoredSessionThinkingLevel = parsedModel.thinkingLevel;
 							adoptThinkingForModel(restoredModel);
 							preconnectModelHost(restoredModel.baseUrl);
-							break;
+							return true;
 						}
 					}
-				});
+					return false;
+				};
+				if (!logger.time("restoreSessionModelReapplyFallback", restoreSavedSessionModel)) {
+					const candidateProviders = new Set<string>();
+					for (const sessionModelStr of sessionModelStrings) {
+						const parsedModel = parseModelString(sessionModelStr, {
+							allowMaxSuffix: true,
+							allowAutoAlias: true,
+							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+						});
+						if (!parsedModel) continue;
+						const providerKey = registeredProviderKey(parsedModel.provider);
+						if (modelRegistry.canRefreshProvider(providerKey)) candidateProviders.add(providerKey);
+					}
+					if (candidateProviders.size > 0) {
+						await runtimeDiscoveryPromise;
+						await modelRegistry.awaitBackgroundRefresh();
+						await logger.time("restoreSessionModelReapplyDiscoveryFallback", () =>
+							modelRegistry.refreshDiscoverableProviders(candidateProviders, "online-if-uncached"),
+						);
+						restoreSavedSessionModel();
+					}
+				}
 			}
 
 			if (!model) {
@@ -3471,7 +3495,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					allowAutoAlias: true,
 					isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
 				});
-				if (bakedParsed?.provider !== model.provider || bakedParsed?.id !== model.id) {
+				if (
+					!sameModelReference(bakedParsed?.provider, model.provider) ||
+					!sameModelReference(bakedParsed?.id, model.id)
+				) {
 					modelFallbackMessage = `--reapply-config: resumed on ${formatModelString(model)} from config instead of the session's ${bakedSessionModel}`;
 				}
 			} else {
@@ -4495,18 +4522,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			return merged;
 		};
-		// On a resume without `reapplyConfig`, a missing tier entry is the empty
-		// map: a `tier.*` set after the session must not take effect. Only a new
-		// session takes config as its source.
+		// On a resume without `reapplyConfig`, a recorded tier entry (even `null`)
+		// is authoritative; a session predating tier entries keeps config as before.
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
 			(options.reapplyConfig
 				? mergeConfigServiceTier()
 				: hasServiceTierEntry
 					? (existingSession.serviceTier ?? {})
-					: hasExistingSession
-						? {}
-						: configServiceTierByFamily);
+					: configServiceTierByFamily);
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
@@ -5600,7 +5624,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionsResult,
 			setToolUIContext,
 			mcpManager,
-			modelFallbackMessage,
+			// Interpolates config and session selectors; strip terminal controls.
+			modelFallbackMessage: modelFallbackMessage === undefined ? undefined : sanitizeText(modelFallbackMessage),
 			lspServers,
 			startBackgroundModelDiscovery: startRuntimeDiscovery,
 			eventBus,

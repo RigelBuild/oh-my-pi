@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { type Api, type AssistantMessage, Effort, type Model, type ServiceTier } from "@oh-my-pi/pi-ai";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,7 +12,7 @@ import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/se
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgDefaultThinkingLevel, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession model persistence", () => {
@@ -139,7 +139,13 @@ describe("AgentSession model persistence", () => {
 	async function createStartupResumeSession(
 		targetSessionFile: string,
 		settings: Settings = Settings.isolated(),
-		extraOptions?: { reapplyConfig?: boolean; model?: Model<Api>; modelRegistry?: ModelRegistry },
+		extraOptions?: {
+			reapplyConfig?: boolean;
+			model?: Model<Api>;
+			thinkingLevel?: ConfiguredThinkingLevel;
+			openAIServiceTier?: ServiceTier | null;
+			modelRegistry?: ModelRegistry;
+		},
 	): Promise<CreateAgentSessionResult> {
 		const sessionManager = await SessionManager.open(targetSessionFile, path.join(tempDir.path(), "startup"));
 		const result = await createAgentSession({
@@ -159,6 +165,8 @@ describe("AgentSession model persistence", () => {
 			skipPythonPreflight: true,
 			reapplyConfig: extraOptions?.reapplyConfig,
 			model: extraOptions?.model,
+			thinkingLevel: extraOptions?.thinkingLevel,
+			openAIServiceTier: extraOptions?.openAIServiceTier,
 		});
 		session = result.session;
 		return result;
@@ -230,6 +238,20 @@ describe("AgentSession model persistence", () => {
 		const result = await createStartupResumeSession(targetSessionFile, settings);
 
 		expect(result.session.model?.id).toBe(bakedModel.id);
+	});
+
+	it("ignores a configured model and thinking level on a bare startup resume", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const configModel = getAnthropicModelOrThrow("claude-opus-4-5");
+		const targetSessionFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: ${modelValue(configModel)}\ndefaultThinkingLevel: ${Effort.XHigh}\n`,
+		);
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.model?.id).toBe(bakedModel.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.Medium);
 	});
 
 	it("adopts the config default thinking level over the baked session level on resume with reapplyConfig", async () => {
@@ -314,7 +336,7 @@ describe("AgentSession model persistence", () => {
 		});
 	}
 
-	async function writeServiceTierSession(modelValueStr: string, tier: string): Promise<string> {
+	async function writeServiceTierSession(modelValueStr: string, tier: string | null): Promise<string> {
 		const targetSessionFile = path.join(tempDir.path(), `target-tier-${Bun.nanoseconds()}.jsonl`);
 		const timestamp = "2026-06-01T00:00:00.000Z";
 		await Bun.write(
@@ -334,7 +356,7 @@ describe("AgentSession model persistence", () => {
 					id: "tier",
 					parentId: "default-model",
 					timestamp,
-					serviceTier: { openai: tier },
+					serviceTier: tier === null ? null : { openai: tier },
 				},
 			]
 				.map(entry => JSON.stringify(entry))
@@ -666,6 +688,28 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.XHigh);
 	});
 
+	it("lets explicit thinking and service-tier flags override reapply config", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const thinkingFile = await writeThinkingModelSession(modelValue(model), Effort.Medium);
+		const tierFile = await writeServiceTierSession(modelValue(model), "priority");
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: ${modelValue(model)}\ndefaultThinkingLevel: ${Effort.XHigh}\ntier:\n  openai: flex\n  google: priority\n`,
+		);
+
+		const thinkingResult = await createStartupResumeSession(thinkingFile, settings, {
+			reapplyConfig: true,
+			thinkingLevel: Effort.Low,
+		});
+		expect(thinkingResult.session.configuredThinkingLevel()).toBe(Effort.Low);
+
+		const tierResult = await createStartupResumeSession(tierFile, settings, {
+			reapplyConfig: true,
+			openAIServiceTier: "default",
+		});
+		expect(tierResult.session.serviceTierByFamily.openai).toBe("default");
+		expect(tierResult.session.serviceTierByFamily.google).toBe("priority");
+	});
+
 	it("adopts the config service tier over the baked session tier for the same family with reapplyConfig", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const targetSessionFile = await writeServiceTierSession(modelValue(model), "priority");
@@ -739,23 +783,30 @@ describe("AgentSession model persistence", () => {
 
 		expect(result.session.serviceTierByFamily.openai).toBe("priority");
 	});
-
-	it("does not adopt a tier configured after a session that baked none", async () => {
+	it("restores a recorded empty tier instead of adopting later config on bare resume", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
-		// A session with every tier at `none` when it started, so it recorded no
-		// tier of its own — the state a pre-tier session is also in.
-		const targetSessionFile = await writeRoleModelSession(modelValue(model), modelValue(model), "default");
+		const targetSessionFile = await writeServiceTierSession(modelValue(model), null);
 
-		// The user set `tier.openai` AFTER that session existed.
 		const settings = await loadOverlaySettingsRaw(
 			`modelRoles:\n  default: ${modelValue(model)}\ntier:\n  openai: priority\n`,
 		);
 
 		const result = await createStartupResumeSession(targetSessionFile, settings);
 
-		// Without `--reapply-config`, a resume must run the session as it was baked.
-		// Adopting the newer config here would silently move it onto a paid tier.
 		expect(result.session.serviceTierByFamily.openai).toBeUndefined();
+	});
+
+	it("adopts configured tier on bare resume of a legacy session without a tier entry", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeRoleModelSession(modelValue(model), modelValue(model), "default");
+
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: ${modelValue(model)}\ntier:\n  openai: priority\n`,
+		);
+
+		const result = await createStartupResumeSession(targetSessionFile, settings);
+
+		expect(result.session.serviceTierByFamily.openai).toBe("priority");
 	});
 
 	it("still adopts that later tier when reapplyConfig is supplied", async () => {
@@ -1093,15 +1144,13 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(smolModel.id);
 	});
 
-	it("does not enable a config tier when switching to a session that baked none", async () => {
+	it("does not enable a config tier when switching to a session that recorded none", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
-		const defaultRoleValue = modelValue(model);
-		// A target session that recorded no service_tier_change of its own.
-		const targetSessionFile = await writeRoleModelSession(defaultRoleValue, defaultRoleValue, "default");
+		const targetSessionFile = await writeServiceTierSession(modelValue(model), null);
 
 		const created = await createSession({
 			initialModel: model,
-			modelRoles: { default: defaultRoleValue },
+			modelRoles: { default: modelValue(model) },
 			persist: true,
 		});
 		// A paid tier configured AFTER that session existed.
@@ -1109,8 +1158,7 @@ describe("AgentSession model persistence", () => {
 
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 
-		// A bare `/resume` runs the target as baked; the later config tier must not
-		// silently take effect.
+		// Recorded absence remains empty after the later config tier is set.
 		expect(created.session.serviceTierByFamily.openai).toBeUndefined();
 	});
 

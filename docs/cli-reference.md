@@ -76,18 +76,19 @@ Argument handling:
 | `--profile <name>` | Use an isolated profile for auth, sessions, settings, and caches. |
 | `--alias <name>` | Create a shell shortcut for a named profile and exit; requires `--profile` or `OMP_PROFILE`. |
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
-| `--reapply-config` | On resume, adopt the config-resolved default model, thinking level, and service tier instead of the session's own; applied per knob. Default off. |
+| `--reapply-config` | Reapply config-selected model, thinking, and service tiers on CLI startup resume (`--resume`/`--continue`), per knob. Default off. |
 | `--session-dir <dir>` | Directory for session storage and lookup. |
 | `--no-session` | Don't save the session (ephemeral). |
 
-`--reapply-config` re-applies a `--config`/`--profile` overlay to a resumed
-session, which otherwise restores the model, thinking level, and service tier
-baked in at its original launch. Adoption is per knob — a value the config does
-not specify keeps the session's own. The model and thinking level are only
-adopted when no explicit `--model` is given (`--model` pins those two); the
-service tier re-applies per family regardless of `--model` (a family the config
-omits keeps the session's), and `--service-tier` still overrides it. A bare
-resume (flag off) always restores the session's own values.
+`--reapply-config` applies to CLI startup resumes, including `--continue` and
+`--resume`; it does not change an in-session `/resume`. It reapplies the
+`--config`/`--profile` settings over values baked into the session. Adoption is
+per knob: a value the config does not specify keeps the session's own. Config
+model and thinking are adopted only without an explicit `--model`; that flag
+pins both, while `--thinking` still takes precedence for the thinking level.
+Service tiers reapply per family regardless of `--model`; omitted families
+keep the session's tier, and `--service-tier` overrides the OpenAI tier. Without
+the flag, startup resume restores the session's own values.
 
 #### Session history
 

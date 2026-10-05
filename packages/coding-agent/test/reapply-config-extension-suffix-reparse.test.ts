@@ -1,15 +1,4 @@
-/**
- * A saved session model whose LITERAL id ends in an effort name
- * (`runtime-provider/router:low`) must not have that segment read as the
- * session's thinking choice.
- *
- * The saved selector's suffix is parsed early — before extensions load —
- * whenever config or `--model` supplies the identity. `isLiteralModelId` is
- * answered by the registry, which has no extension providers yet, so the whole
- * id is unrecognizable there and `:low` looks like a thinking suffix. That
- * misread level was then carried onto the config-selected model. The parse has
- * to run again once the providers are registered.
- */
+/** A saved literal model suffix must not become a thinking choice. */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -74,8 +63,8 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		});
 	};
 
-	/** A resumable session whose only model entry is the suffix-shaped literal id. */
-	async function writeBakedSession(): Promise<string> {
+	/** A resumable session whose only model entry is a suffix-shaped literal ID. */
+	async function writeBakedSession(provider = "runtime-provider"): Promise<string> {
 		const sessionFile = path.join(tempDir, `baked-${Bun.nanoseconds()}.jsonl`);
 		const timestamp = "2026-06-01T00:00:00.000Z";
 		await Bun.write(
@@ -87,7 +76,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 					id: "default-model",
 					parentId: null,
 					timestamp,
-					model: "runtime-provider/router:low",
+					model: `${provider}/router:low`,
 					role: "default",
 				},
 			]
@@ -141,14 +130,8 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	});
 
-	test("reparses a saved suffix whose id only exists in a cold dynamic catalog", async () => {
-		// The harder half of the same bug. A provider registered with a static
-		// `models` array is visible the moment the extension loads, so the reparse
-		// alone fixes it. A provider whose catalog comes from
-		// `fetchDynamicModels` is NOT: registration adds no models, and a cold
-		// start has no cache row for the offline hydration to load — so at reparse
-		// time `router:low` is still unknown and still splits at `:low`. Only a
-		// provider-scoped discovery pass makes the id visible.
+	test("reparses a saved suffix after dynamic discovery", async () => {
+		// The extension catalog supplies the saved literal ID.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
@@ -223,14 +206,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	});
 
-	test("discovers a cold built-in provider before reparsing its saved suffix", async () => {
-		// The third shape of the same bug. A BUILT-IN manager provider — a
-		// configured vLLM endpoint — has no live models, no `discovery:` entry, and
-		// no runtime manager, so `hasProvider` reports false while
-		// `#collectBuiltInModelManagerOptions` would happily build it a manager.
-		// Gating the scoped refresh on `hasProvider` therefore skipped the fetch
-		// that proves `router:low` is a literal id, and its `:low` was transferred
-		// to the config-selected model as a thinking level.
+	test("discovers a cold built-in provider and preserves literal suffix identity", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, `builtin-models-${Bun.nanoseconds()}.yml`);
@@ -242,22 +218,57 @@ describe("--reapply-config saved suffix against extension providers", () => {
 				},
 			}),
 		);
-		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+		let discoveryCount = 0;
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				if (String(input) !== "https://vllm.example.invalid/v1/models") {
+					throw new Error(`Unexpected URL: ${String(input)}`);
+				}
+				discoveryCount++;
+				return Response.json({ data: [{ id: "router:low", max_model_len: 32768 }, { id: "config-pick" }] });
+			},
+		});
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "vllm/config-pick");
+		const sessionFile = await writeBakedSession("vllm");
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-vllm"));
 
-		// The premise, measured rather than assumed: the provider is invisible to
-		// the old predicate and refreshable under the new one.
-		expect(modelRegistry.hasProvider("vllm")).toBe(false);
-		expect(modelRegistry.canRefreshProvider("vllm")).toBe(true);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			expect(discoveryCount).toBeGreaterThan(0);
+			expect(modelRegistry.find("vllm", "router:low")).toBeDefined();
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).not.toBe("low");
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("does not await discovery for a static-only provider that cannot discover anything", async () => {
-		// `custom/base:low` legitimately means model `base` at low effort. `custom`
-		// is declared in models.yml with static rows and NO `discovery:` entry, so
-		// a scoped refresh cannot produce an id the registry lacks — but
-		// `hasProvider` said yes purely because `base` is registered, and the
-		// saved-suffix path then awaited every in-flight discovery pass before a
-		// refresh that was a guaranteed no-op.
+		// A suffix is an effort only when no literal model ID matches it.
 		const authStorage = createInMemoryAuthStorage();
+
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, `static-models-${Bun.nanoseconds()}.yml`);
 		await Bun.write(
@@ -1146,33 +1157,17 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		});
 
 		try {
-			// The premise, measured: the refresh really did withdraw it.
 			expect(modelRegistry.find("vend", "going-away")).toBeUndefined();
-			// RED (pre-fix): the withdrawn model is still the session's model.
 			expect(session.model?.id).not.toBe("going-away");
 		} finally {
 			await session.dispose();
 		}
 	});
-
 	test("reparses a saved suffix when a late default flips adoption false->true", async () => {
-		// The adoption classification is itself PROVISIONAL. `adoptConfigModel()`
-		// is read before extensions register, so an all-self-alias default
-		// (`default,@default`) that only resolves once an extension supplies its
-		// model classifies as "no config default" -- adoption starts false. The
-		// early bare-resume restore then reads the saved `custom/router:low` as the
-		// already-known static `custom/router` at low effort, seeding an INVENTED
-		// `low` into `restoredSessionThinkingLevel`. When the extension registers a
-		// model with id `default`, `default,@default` resolves and
-		// `tryResolveDefaultRole()` adopts it -- and `pickInitialThinkingLevel`
-		// transfers the stale `low` onto the late config model, because the only
-		// saved-suffix reparse was gated on the early `adoptConfigModel()` and so
-		// never ran. Widening that gate to `reResolveConfigDefault()` re-settles
-		// the suffix through the same machinery once the winner is real.
+		// Late extension resolution can invalidate an earlier suffix split.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		// `custom/router` is a STATIC provider, so it is known at the early restore
-		// -- that is what seeds the `:low` misread before any extension loads.
+		// Static discovery can change a saved suffix's meaning.
 		const modelsPath = path.join(tempDir, `flip-models-${Bun.nanoseconds()}.yml`);
 		await Bun.write(
 			modelsPath,
