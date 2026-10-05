@@ -10,8 +10,10 @@ import {
 	fetchGitLabDuoWorkflowModels,
 } from "@oh-my-pi/pi-catalog/discovery/gitlab-duo-workflow";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { isCatalogDescriptor } from "@oh-my-pi/pi-catalog/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { gitLabDuoWorkflowModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 const TEST_TOKEN = "redacted-test-token";
@@ -807,5 +809,45 @@ describe("GitLab Duo Workflow discovery", () => {
 			.filter(call => new URL(call.url).pathname === "/api/v4/groups")
 			.map(call => new URL(call.url).searchParams.get("page"));
 		expect(groupPages).toEqual(["1", "2"]);
+	});
+
+	it("does not reuse a warm catalog after the workspace Git remote changes in place", async () => {
+		delete Bun.env.GITLAB_DUO_NAMESPACE_ID;
+		delete Bun.env.GITLAB_DUO_PROJECT_ID;
+		delete Bun.env.GITLAB_DUO_PROJECT_PATH;
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-gitlab-duo-workflow-cache-"));
+		try {
+			const workDir = path.join(tmpDir, "work");
+			const gitConfigPath = path.join(workDir, ".git", "config");
+			const cacheDbPath = path.join(tmpDir, "models.db");
+			await fs.mkdir(path.join(workDir, ".git"), { recursive: true });
+			const { fetch } = createMockFetch({
+				projects: {
+					"team-a/app": { id: 1, namespace: { rootAncestor: { id: "root-a" } } },
+					"team-b/app": { id: 2, namespace: { rootAncestor: { id: "root-b" } } },
+				},
+				models: { "root-a": availableModels("model_a"), "root-b": availableModels("model_b") },
+			});
+			const resolveFor = async (remote: string) => {
+				await fs.writeFile(gitConfigPath, `[remote "origin"]\n\turl = git@gitlab.com:${remote}.git\n`);
+				const options = gitLabDuoWorkflowModelManagerOptions({ apiKey: TEST_TOKEN, cwd: workDir, fetch });
+				const result = await resolveProviderModels({ ...options, cacheDbPath }, "online-if-uncached");
+				return { cacheProviderId: options.cacheProviderId, ids: result.models.map(model => model.id) };
+			};
+
+			const first = await resolveFor("team-a/app");
+			expect(first.ids).toEqual(["model_a"]);
+			// Same remote, same cwd/token: the warm authoritative cache is the same namespace.
+			expect((await resolveFor("team-a/app")).cacheProviderId).toBe(first.cacheProviderId);
+
+			const second = await resolveFor("team-b/app");
+			expect(second.cacheProviderId).not.toBe(first.cacheProviderId);
+			expect(second.ids).toEqual(["model_b"]);
+			for (const secret of [TEST_TOKEN, workDir, "team-a", "team-b"]) {
+				expect(second.cacheProviderId).not.toContain(secret);
+			}
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 });
