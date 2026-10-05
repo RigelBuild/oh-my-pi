@@ -160,14 +160,8 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 );
 
 /**
- * Every provider {@link ModelRegistry.refresh} can discover through a built-in
- * model manager, rather than a models.yml `discovery:` block or an extension's
- * runtime manager: the standard descriptors, the bespoke special managers, and
- * the bundled catalog-only providers that get the shared models.dev layer with
- * no endpoint manager of their own. Mirrors the three sources
- * `#collectBuiltInModelManagerOptions` draws from, so
- * {@link ModelRegistry.hasRefreshableProviders} cannot under-report what a
- * refresh would actually cover.
+ * Built-in refresh managers include descriptors, special managers, and
+ * bundled catalog-only providers; mirrors manager construction.
  */
 const REFRESHABLE_BUILT_IN_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(
@@ -998,12 +992,8 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		// `#providerLookupSnapshots` is keyed by the folded provider spelling
-		// (`#modelsForProviderLookup` stores under `provider.trim().toLowerCase()`),
-		// so a mixed-case registration (`MyGateway`) would otherwise leave its cold,
-		// pre-discovery snapshot behind under the lowercase key while this deleted a
-		// key that never existed — and the post-refresh `find` kept returning the
-		// empty catalog.
+		// Lookup snapshots use the folded provider key; deleting the mixed-case
+		// registration leaves the stale snapshot, so find() keeps returning empty.
 		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
@@ -2861,21 +2851,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Whether {@link refresh} has any catalog left to discover: a config-declared
-	 * discovery provider, a runtime provider an extension registered through
-	 * `fetchDynamicModels`, or an eligible built-in model manager. `refresh`
-	 * covers all three — {@link getDiscoverableProviders} reports only the
-	 * config-declared half, so a guard written against it skips the refresh for a
-	 * catalog only an extension or a built-in descriptor supplies, exactly the
-	 * case whose cache is cold at session creation.
-	 *
-	 * A built-in provider counts only when its discoveries could actually be
-	 * selected: {@link getAvailable} drops every model whose provider has no
-	 * credential, so an uncredentialed descriptor can never contribute a
-	 * candidate however much it discovers. Gating on the same availability test
-	 * keeps a credential-less cold start off a pointless synchronous online
-	 * pass, while a newly-discovered Codex or Copilot model — whose provider is
-	 * authed by definition — still gets one.
+	 * Includes config discovery, extension managers, and available built-ins.
+	 * Unavailable built-ins cannot contribute models.
 	 */
 	hasRefreshableProviders(): boolean {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
@@ -2910,14 +2887,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Whether a refresh scoped to `providerId` would actually fetch a catalog.
-	 *
-	 * Wider than {@link hasProvider}, which answers "is this provider known" and
-	 * so omits a BUILT-IN manager provider with no static rows and no live models
-	 * — a configured vLLM endpoint, say. `#collectBuiltInModelManagerOptions`
-	 * builds a manager for those, so a caller gating a provider-scoped refresh on
-	 * `hasProvider` skips the very fetch that would populate them. Same union the
-	 * unscoped {@link hasRefreshableProviders} takes, narrowed to one provider.
+	 * Unlike hasProvider, includes built-in managers without static rows and
+	 * excludes static-only providers; narrows hasRefreshableProviders to one.
 	 */
 	canRefreshProvider(providerId: string): boolean {
 		if (this.#hasDiscoveryManager(providerId)) return true;
@@ -2928,21 +2899,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * The provider's key as the registry actually stores it, resolved from a
-	 * possibly differently-cased spelling.
-	 *
-	 * `find` resolves a model reference case-insensitively, but
-	 * {@link canRefreshProvider} and {@link refreshDiscoverableProviders} do
-	 * exact map/set lookups keyed by the registered spelling — the runtime
-	 * managers an extension registers, and a models.yml `discovery:` entry,
-	 * preserve whatever case they were registered with, while built-ins are
-	 * canonical lowercase. So a saved selector spelled `Dynamic/router:low`
-	 * against a `dynamic` provider AND a `MyGateway/...` selector against a
-	 * mixed-case-registered `MyGateway` are both wrong to force to either raw or
-	 * lowercase: fold the input the same way `resolveProviderModelReference`
-	 * keys every provider (`trim().toLowerCase()`) and return the registered key
-	 * that folds to it. Falls back to the trimmed input when nothing matches, so
-	 * a genuinely unknown provider stays a no-op at the refreshability check.
+	 * Return stored spelling for case-insensitive references so exact discovery
+	 * lookups use registered casing; unknown providers retain trimmed input.
 	 */
 	resolveProviderKey(provider: string): string {
 		const normalized = provider.trim().toLowerCase();
@@ -2960,15 +2918,8 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Whether a scoped refresh of `providerId` could discover an ID it does not
-	 * already hold.
-	 *
-	 * Deliberately NOT `hasProvider`, which answers yes for a STATIC-ONLY
-	 * provider purely because one of its models is registered — a `custom/base`
-	 * declared in models.yml with no `discovery:` entry. A caller gating a fetch
-	 * on that awaited every in-flight discovery pass to perform a refresh that
-	 * cannot add anything, so an unrelated cold catalog delayed startup by its
-	 * full discovery timeout.
+	 * Whether config or extension managers can discover this provider; static-only
+	 * registrations are excluded because they add no models.
 	 */
 	#hasDiscoveryManager(providerId: string): boolean {
 		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;

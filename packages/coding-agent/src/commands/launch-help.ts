@@ -57,7 +57,7 @@ export const launchHelp = {
 		}),
 		"reapply-config": Flags.boolean({
 			description:
-				"On CLI startup resume (--resume/--continue), use config-selected model, thinking, and service tiers instead of restoring the session's; apply per knob (and per family for tiers), keeping unspecified values from the session (default off)",
+				"On CLI startup resume or fork (--resume/--continue/--fork), use config-selected model, thinking, and service tiers instead of restoring the session's; apply per knob (and per family for tiers), keeping unspecified values from the session (default off)",
 		}),
 		"add-dir": Flags.string({
 			description: "Add a workspace directory beyond the working directory (repeatable)",

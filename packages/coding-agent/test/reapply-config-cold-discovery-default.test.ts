@@ -94,9 +94,13 @@ describe("--reapply-config cold-discovery configured default", () => {
 		return sessionFile;
 	}
 
-	async function loadOverlay(defaultRole: string): Promise<Settings> {
+	async function loadOverlay(defaultRole: string, enabledModels?: readonly string[]): Promise<Settings> {
 		const overlayPath = path.join(tempDir.path(), `overlay-${Bun.nanoseconds()}.yml`);
-		await Bun.write(overlayPath, `modelRoles:\n  default: "${defaultRole}"\n`);
+		const overlay = {
+			modelRoles: { default: defaultRole },
+			...(enabledModels ? { enabledModels: [{ path: tempDir.path(), models: enabledModels }] } : {}),
+		};
+		await Bun.write(overlayPath, JSON.stringify(overlay));
 		return Settings.loadIsolated({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
@@ -185,13 +189,8 @@ describe("--reapply-config cold-discovery configured default", () => {
 	}
 
 	it("skips the discovery retry when no unresolved candidate could become available", async () => {
-		// `static-only/missing,anthropic/<real-id>`: the first entry is unresolvable
-		// and its provider is declared in models.yml with static rows and no
-		// `discovery:` entry, so no refresh can ever produce that ID. The old guard
-		// asked only `hasRefreshableProviders()` — true here, since the ollama
-		// provider IS refreshable — so a match at index 1 still forced a
-		// synchronous online catalog request on behalf of a candidate discovery
-		// cannot help, charging startup up to the discovery timeout.
+		// The first candidate belongs to a static-only provider; ollama discovery
+		// cannot resolve it, so this case must not trigger a refresh.
 		const later = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(later));
 
@@ -249,11 +248,8 @@ describe("--reapply-config cold-discovery configured default", () => {
 		const laterCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
-		// `pi/slow,anthropic/<real-id>`: the higher-priority entry is a LEGACY role
-		// alias whose `slow` role points at a cold discovery-backed model. Splitting
-		// the raw `pi/slow` reads `pi` as a provider — `canRefreshProvider("pi")` is
-		// false — so the guard skipped the discovery pass that would have resolved
-		// the alias, and the resume kept the later already-available fallback.
+		// `pi/slow` is a legacy alias to cold ollama. Treating `pi` as the provider
+		// skips discovery needed to resolve that higher-priority model.
 		const settings = await loadOverlayRoles({
 			default: `pi/slow,${modelValue(laterCandidate)}`,
 			slow: `ollama/${DISCOVERED_MODEL}`,
@@ -270,14 +266,9 @@ describe("--reapply-config cold-discovery configured default", () => {
 		const laterCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
-		// `default: "@slow"` where `slow` expands to an ordered chain whose FIRST
-		// link is a cold discovery-backed model and whose SECOND is already
-		// available. The static pass matches the second link, but the match's RAW
-		// index stays 0 (the single `@slow` entry). A guard scanning only raw
-		// patterns AHEAD of index 0 stops before the unresolved first link, skips
-		// discovery, and keeps the lower-priority anthropic fallback — even though
-		// a refresh would have made `ollama/phi3` selectable. The guard must bound
-		// the scan inside the matched alias by the EXPANDED match position instead.
+		// `@slow` expands to cold ollama followed by a static model. Since the
+		// static pass matches the second link at raw index 0, discovery must scan
+		// expanded links through the match to find the earlier candidate.
 		const settings = await loadOverlayRoles({
 			default: "@slow",
 			slow: `ollama/${DISCOVERED_MODEL},${modelValue(laterCandidate)}`,
@@ -290,13 +281,8 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	it("discovers a cold provider's only model when no default role is configured", async () => {
-		// No `modelRoles.default` at all, and the only authenticated provider is a
-		// COLD discovery-only ollama (keyless, no static rows). `defaultRolePatterns`
-		// is therefore empty, so the candidate filter refuses unconditionally — but
-		// the arbitrary-model fallback has no candidate list to filter and genuinely
-		// wants the refresh. With the filter wrongly gating that fallback, discovery
-		// never runs and startup reports no available model; the fallback must opt
-		// out of the filter and discover the provider's single model instead.
+		// With no default role, the only authenticated provider has no static models.
+		// Discovery remains necessary for this arbitrary fallback.
 		const bakedModel = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -322,9 +308,29 @@ describe("--reapply-config cold-discovery configured default", () => {
 			noAuthDir.removeSync();
 		}
 	});
+
+	it("skips a saved model excluded by the path-scoped enabledModels list", async () => {
+		const forbiddenModel = anthropicModel("claude-opus-4-1");
+		const allowedModel = anthropicModel("claude-sonnet-4-5");
+		const sessionFile = await writeBakedSession(modelValue(forbiddenModel));
+		const settings = await loadOverlay("static-only/not-discovered", [modelValue(allowedModel)]);
+
+		const resumed = await resume(sessionFile, settings, {
+			"static-only": {
+				baseUrl: "https://static.example.invalid/v1",
+				api: "openai-completions",
+				auth: "none",
+				models: [{ id: "present", name: "Present" }],
+			},
+		});
+
+		expect(resumed.model?.provider).toBe(allowedModel.provider);
+		expect(fallbackMessage).toContain(`${modelValue(forbiddenModel)} could not be restored`);
+	});
+
 	it("restores a saved model from cold discovery when the configured default is unresolved", async () => {
 		const sessionFile = await writeBakedSession(`ollama/${DISCOVERED_MODEL}`);
-		const settings = await loadOverlay("static-only/not-discovered");
+		const settings = await loadOverlay("static-only/not-discovered", [`ollama/${DISCOVERED_MODEL}`]);
 
 		const resumed = await resume(sessionFile, settings, {
 			"static-only": {

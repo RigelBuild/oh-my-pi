@@ -592,7 +592,7 @@ export interface CreateAgentSessionOptions {
 	 * of re-deriving tiers from settings.
 	 */
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
-	/** Reapply config-selected model, thinking, and tiers on CLI startup resume; not in-session `/resume`. */
+	/** Reapply config-selected model, thinking, and tiers on CLI startup resume or fork; not in-session `/resume`. */
 	reapplyConfig?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
@@ -3390,7 +3390,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// did not resolve, so fall back to the session's own model rather than an
 			// arbitrary pick, fetching a cold discovery-backed provider once if needed.
 			if (!model && adoptConfigModel() && sessionModelStrings.length > 0) {
-				const restoreSavedSessionModel = (): boolean => {
+				const restoreSavedSessionModel = async (): Promise<boolean> => {
+					const enabledModelPatterns = cfgEnabledModels.get(settings);
+					const allowedModels =
+						enabledModelPatterns.length > 0
+							? await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences)
+							: undefined;
 					for (let i = 0; i < sessionModelStrings.length; i++) {
 						const parsedModel = parseModelString(sessionModelStrings[i], {
 							allowMaxSuffix: true,
@@ -3399,7 +3404,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						});
 						if (!parsedModel) continue;
 						const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-						if (restoredModel && hasModelAuth(restoredModel)) {
+						if (
+							restoredModel &&
+							(!allowedModels ||
+								allowedModels.some(
+									allowed => allowed.provider === restoredModel.provider && allowed.id === restoredModel.id,
+								)) &&
+							hasModelAuth(restoredModel)
+						) {
 							model = restoredModel;
 							restoredSessionModelIndex = i;
 							restoredSessionThinkingLevel = parsedModel.thinkingLevel;
@@ -3410,7 +3422,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 					return false;
 				};
-				if (!logger.time("restoreSessionModelReapplyFallback", restoreSavedSessionModel)) {
+				if (!(await logger.time("restoreSessionModelReapplyFallback", restoreSavedSessionModel))) {
 					const candidateProviders = new Set<string>();
 					for (const sessionModelStr of sessionModelStrings) {
 						const parsedModel = parseModelString(sessionModelStr, {
@@ -3428,7 +3440,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						await logger.time("restoreSessionModelReapplyDiscoveryFallback", () =>
 							modelRegistry.refreshDiscoverableProviders(candidateProviders, "online-if-uncached"),
 						);
-						restoreSavedSessionModel();
+						await restoreSavedSessionModel();
 					}
 				}
 			}

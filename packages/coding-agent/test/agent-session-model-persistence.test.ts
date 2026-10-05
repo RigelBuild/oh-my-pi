@@ -379,12 +379,9 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.model?.id).toBe(bakedModel.id);
 	});
 
-	// `modelRoles.default` set to a self alias — `*`, `@default`, or the legacy
-	// `pi/default` — names the default role rather than a model, so the resolver
-	// resolves it to nothing. `--reapply-config` must therefore treat it as an
-	// UNSET model knob (like the bare `default` sentinel) and restore the
-	// session's model normally, instead of counting it as a configured model,
-	// discarding the session model, and reporting a broken config default.
+	// Self aliases (`*`, `@default`, and `pi/default`) name a role, not a model,
+	// so they resolve to nothing. Reapply treats them as an unset model knob and
+	// keeps the baked model without reporting a broken config default.
 	for (const selfAlias of ["*", "@default", "pi/default"]) {
 		it(`treats a "${selfAlias}" default role as an unset model knob under reapplyConfig`, async () => {
 			const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
@@ -405,13 +402,9 @@ describe("AgentSession model persistence", () => {
 		});
 	}
 
-	// The same self aliases carrying a thinking suffix. The alias parser accepts
-	// these as the default role (`resolveExplicitModelRole("*:low")` -> `default`),
-	// so the selector still names the role rather than a model and still resolves
-	// to nothing. Classified on the unsplit string they look like a concrete model
-	// knob, which sends the resume down the "config named a model" path: it
-	// discards the early restore, cannot resolve the circular selector, and
-	// reports a broken config default that config never named.
+	// Suffixed self aliases still name the default role, not a model. Their suffix
+	// supplies the thinking knob while the model knob stays unset; treating the
+	// full string as a model discards restore and reports a false config failure.
 	for (const selfAlias of ["*:xhigh", "@default:low", "pi/default:max"]) {
 		it(`treats a "${selfAlias}" default role as an unset model knob under reapplyConfig`, async () => {
 			const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
@@ -431,11 +424,8 @@ describe("AgentSession model persistence", () => {
 		});
 	}
 
-	// `default` is not only the sentinel spelling: it is also a concrete bundled
-	// model id (`cursor/default`). Only the exact UNSUFFIXED `default` is
-	// reserved, so `default:<level>` names that model at that tier and
-	// `--reapply-config` must adopt it over the baked session model — the same
-	// as any other resolvable config default.
+	// Only exact unsuffixed `default` is the sentinel. `default:<level>` resolves
+	// to `cursor/default`, a concrete bundled model, which reapply must adopt.
 	it("adopts a resolvable suffixed bare `default` config model under reapplyConfig", async () => {
 		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const cursorDefault = getBundledModel("cursor", "default");
@@ -494,13 +484,9 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.Medium);
 	});
 
-	// A saved model string ending in an effort name can be the model's own ID
-	// (`nanogpt/coding-router:low` ships alongside the bare `nanogpt/coding-router`).
-	// The saved entry then encodes IDENTITY ONLY, no thinking selection — so
-	// adopting a different config model must leave the thinking knob unset and
-	// let the adopted model's own default stand. Reading `:low` off it as the
-	// session's tier starts the adopted model at `low` on a session that never
-	// chose one.
+	// A model ID can end in a thinking-level name, such as coding-router:low.
+	// That saved selector encodes identity only; treating its suffix as thinking
+	// would retier the adopted config model without a session thinking choice.
 	it("does not adopt a literal model id's own suffix as the session thinking level", async () => {
 		const suffixedModelId = "coding-router:low";
 		const modelsPath = path.join(tempDir.path(), `models-literal-${Bun.nanoseconds()}.yml`);
@@ -595,12 +581,9 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.Minimal);
 	});
 
-	// A saved model selector carries two knobs at once: the model identity and
-	// its thinking suffix. A session whose only thinking selection lives in that
-	// suffix — a legacy `model_change` of `provider/model:xhigh` with no
-	// `thinking_level_change` — must keep the level when config names a model
-	// but no thinking knob. Per-knob means the suffix parse cannot be coupled to
-	// whether the identity is being restored.
+	// A saved selector can encode both model identity and thinking. If its suffix
+	// is the session's only thinking choice, reapply preserves it when adopting a
+	// config model with no thinking setting; parsing must not depend on restoration.
 	it("keeps a saved selector's thinking suffix when reapplyConfig adopts only the config model", async () => {
 		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		// Both models support `xhigh`, so the assertion reads the adopted knob
@@ -661,12 +644,9 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.Low);
 	});
 
-	// `--model` pins the model identity only, so a session whose thinking choice
-	// lives ONLY in its saved selector (a legacy `model_change` of
-	// `provider/model:xhigh` with no `thinking_level_change`) must keep that
-	// level: neither `--model` nor a config default that names no thinking knob
-	// has anything to replace it with. Falling through to the pinned model's own
-	// default silently re-tiers the resumed session.
+	// Explicit --model pins identity only. Without a configured thinking knob, the
+	// saved suffix remains the session's choice; the pinned model default would
+	// silently change it.
 	it("keeps a saved selector's thinking suffix when reapplyConfig is combined with an explicit model", async () => {
 		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const explicitModel = getAnthropicModelOrThrow("claude-opus-4-5");
@@ -739,11 +719,8 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.serviceTierByFamily.openai).toBe("priority");
 	});
 
-	// `tier.<family>: none` is a CONFIGURED value meaning "send no service_tier",
-	// not an absent knob. `serviceTierSettingToTier` maps it to `undefined` and
-	// `buildServiceTierByFamily` omits the key, so an explicit `none` is
-	// indistinguishable from an unspecified family in the config map alone —
-	// the per-knob contract has to consult `isConfigured` to tell them apart.
+	// tier.<family>: none is configured, but serviceTierSettingToTier maps it to
+	// undefined and the config map omits it. isConfigured distinguishes it from omission.
 	it("clears the baked session tier when the config explicitly configures that family to none", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const targetSessionFile = await writeServiceTierSession(modelValue(model), "priority");

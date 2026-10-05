@@ -300,7 +300,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		expect(modelRegistry.canRefreshProvider("custom")).toBe(false);
 	});
 
-	test("resolves a late provider self-alias list on a fresh session with reapply disabled", async () => {
+	test("resolves a late provider after a self-alias on a fresh session with reapply disabled", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "fresh-self-alias-models.yml"));
@@ -323,7 +323,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			});
 		};
 		const settings = Settings.isolated();
-		settings.setModelRole("default", "default,@default");
+		settings.setModelRole("default", "@default,runtime-provider/default");
 		const sessionManager = SessionManager.inMemory(tempDir);
 
 		const { session } = await createAgentSession({
@@ -357,12 +357,10 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	});
 
 	test("does not block startup on a cold catalog a persisted thinking entry outranks", async () => {
-		// The reparse exists to correct `restoredSessionThinkingLevel`, and
-		// `pickInitialThinkingLevel` reads that at ONE precedence step, behind
-		// `!hasThinkingEntry`. A branch that already recorded its own level
-		// discards the corrected value — so AWAITING a cold dynamic provider's
-		// catalog for it charges startup the full discovery timeout and buys
-		// nothing. The background pass still runs; startup must not wait on it.
+		// The suffix reparse updates restoredSessionThinkingLevel, but a persisted
+		// thinking entry outranks it in pickInitialThinkingLevel. Waiting on the cold
+		// provider delays startup without changing the selected level; discovery
+		// continues in the background.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
@@ -582,19 +580,13 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	}, 30000);
 
-	// The third cell, and the one both fixes above miss: the config/CLI model is
-	// STATICALLY visible, so `model` is resolved before the reparse — while the
-	// saved id lives only in the cold dynamic catalog, so only the reparse can
-	// learn it is a literal. Correcting `restoredSessionThinkingLevel` alone left
-	// the misread `low` in `thinkingLevel`/`effectiveThinkingLevel`, because the
-	// later recomputation is gated on `!model` and never ran.
+	// The config model is static, but the saved literal ID exists only after cold
+	// discovery. Correcting only restoredSessionThinkingLevel misses it because
+	// the resolved model prevents later recomputation, leaving the suffix applied.
 	test("discovers a cold provider whose casing differs from the saved selector's", async () => {
-		// `modelRegistry.find` resolves a reference case-insensitively, but
-		// `canRefreshProvider` and `refreshDiscoverableProviders` are exact
-		// map/set lookups. A saved selector spelled with different provider casing
-		// therefore skipped the discovery that proves `router:low` is a literal id,
-		// and `:low` was transferred to the config-selected model as a thinking
-		// level.
+		// Provider lookup is case-insensitive, but refresh APIs use registered keys.
+		// A differently-cased selector skipped discovery, so the registry never
+		// proved router:low was literal and its suffix became a thinking level.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
@@ -686,14 +678,9 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	});
 
-	// The counterpart the lowercase test above cannot catch: a provider whose
-	// REGISTERED identity is itself mixed-case (`MyGateway`). Forcing the parsed
-	// provider to lowercase — the fix the lowercase case needed — makes the exact
-	// `canRefreshProvider`/`refreshDiscoverableProviders` lookups MISS a manager
-	// keyed `MyGateway`, so the cold catalog is never fetched, the config default
-	// never resolves, and the saved `:low` stays misparsed and rides onto the
-	// adopted model. Resolving the parsed provider to the registry's own stored
-	// key instead is right for both.
+	// This catches the converse: the registered key is mixed-case. Lowercasing the
+	// parsed key misses exact refresh lookups, leaving the cold catalog unavailable
+	// and the suffix misparsed. Resolve the stored key for both casing directions.
 	test("discovers a cold provider registered with mixed-case identity", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -791,12 +778,9 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	});
 
 	test("matches a pinned model whose saved selector differs only in provider casing", async () => {
-		// The caller's own `options.model` counts as literal, so an id the registry
-		// has never seen is still recognized whole. But that comparison was
-		// case-SENSITIVE while every other model reference resolves case-
-		// insensitively (`resolveProviderModelReference` lowercases both halves),
-		// so a saved `Runtime-Provider/router:low` missed its own pinned model and
-		// the parser split the literal id's `:low` tail off as persisted thinking.
+		// options.model must count as literal before registry discovery. Its old
+		// comparison was case-sensitive, unlike provider/model lookup, so a saved
+		// selector with different casing parsed the literal :low tail as thinking.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
@@ -956,13 +940,9 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	}, 20000);
 
-	// A non-UI session starts the deferred runtime pass at creation
-	// (`hasUI: false`), so the suffix reparse below can run while a discovery
-	// over the same provider is still in flight. Coalescing does NOT save it:
-	// `#discoverProviderModelsCoalesced` shares only configured `discovery:`
-	// providers, and an extension's `fetchDynamicModels` is a runtime manager
-	// with no in-flight map — so both passes hit the remote and race each
-	// other's catalog and cache writes.
+	// Non-UI sessions start background discovery immediately, so suffix reparsing
+	// can overlap. Runtime extension managers lack the configured coalescing map,
+	// allowing both passes to fetch and race catalog and cache writes.
 	test("does not fetch the saved provider's catalog twice in a non-UI session", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -1044,14 +1024,9 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	}, 20000);
 
 	test("reparses a cold saved suffix when the final retry makes it readable again", async () => {
-		// The early guard marks the saved suffix unreadable whenever the default
-		// role that won AT THAT MOMENT names the thinking knob (`…:xhigh`), and so
-		// skips the cold-catalog reparse. But the winner can still change: the
-		// discovery retry below can hand the role to an earlier candidate that
-		// names no thinking knob, and `pickInitialThinkingLevel` then starts
-		// consulting `restoredSessionThinkingLevel` again. Without redoing the
-		// reparse the stale early split applies `low` -- the tail of a literal
-		// model id -- to the new default.
+		// The early guard skips reparsing when the current default names a thinking
+		// suffix. A retry can select a candidate without one, making the saved suffix
+		// relevant again; reparse after retry to avoid applying the stale split.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, `late-models-${Bun.nanoseconds()}.yml`);
@@ -1157,12 +1132,9 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	});
 
 	test("drops a provisional default the post-discovery catalog no longer lists", async () => {
-		// `tryResolveDefaultRole()` runs twice with a discovery pass between them,
-		// and that pass calls `modelRegistry.refresh()`, which RELOADS models.yml.
-		// So the model the first call adopted can be gone by the second. Returning
-		// early on the empty re-resolution left it selected, and every restore and
-		// availability fallback below is gated on `!model` -- so the resume kept a
-		// model the refreshed catalog had explicitly removed, silently.
+		// Default resolution runs again after refresh reloads models.yml. Its earlier
+		// result may be gone; returning without a model skips restore and fallback,
+		// leaving a model the refreshed catalog removed.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, `withdrawn-models-${Bun.nanoseconds()}.yml`);
@@ -1349,16 +1321,9 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	}, 20000);
 
 	test("does not claim the config default failed when a late default won the adoption", async () => {
-		// Sibling of the flip test above, on the user-visible NOTICE. The early
-		// bare-resume restore (adoption reads false against `default,@default`
-		// before the extension loads) restores the baked `custom/router` and sets
-		// `restoredSessionModelIndex = 0`. When the extension registers a literal
-		// `default`, the config default resolves and REPLACES the model -- the
-		// session DID switch. But the stale index-0 marker made the notice take
-		// the "restored a saved model" branch and report
-		// `config default "default,@default" did not resolve; kept the session's
-		// custom/router`, contradicting the model the session actually runs. The
-		// marker must be re-settled when the config model wins.
+		// The first restore runs before extensions and marks the baked model restored.
+		// A late extension can make the configured default win; without updating the
+		// marker, the notice falsely says config resolution failed.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, `notice-models-${Bun.nanoseconds()}.yml`);

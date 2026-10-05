@@ -76,13 +76,13 @@ Argument handling:
 | `--profile <name>` | Use an isolated profile for auth, sessions, settings, and caches. |
 | `--alias <name>` | Create a shell shortcut for a named profile and exit; requires `--profile` or `OMP_PROFILE`. |
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
-| `--reapply-config` | Reapply config-selected model, thinking, and service tiers on CLI startup resume (`--resume`/`--continue`), per knob. Default off. |
+| `--reapply-config` | Reapply config-selected model, thinking, and service tiers when resuming or forking at CLI startup (`--resume`/`--continue`/`--fork`), per knob. Default off. |
 | `--session-dir <dir>` | Directory for session storage and lookup. |
 | `--no-session` | Don't save the session (ephemeral). |
 
-`--reapply-config` applies to CLI startup resumes, including `--continue` and
-`--resume`; it does not change an in-session `/resume`. It reapplies the
-`--config`/`--profile` settings over values baked into the session. Adoption is
+`--reapply-config` applies to CLI startup session resumes and forks, including
+`--continue`, `--resume`, and `--fork`; it does not change an in-session `/resume`.
+It reapplies `--config`/`--profile` settings over values baked into the session,
 per knob: a value the config does not specify keeps the session's own. Config
 model and thinking are adopted only without an explicit `--model`; that flag
 pins both, while `--thinking` still takes precedence for the thinking level.

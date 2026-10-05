@@ -2502,11 +2502,9 @@ export async function runRootCommand(
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
 
-			// A resolved model skips the no-model block below, but `notifs` is
-			// consumed only by `runInteractiveMode` — so under `-p` an adopted
-			// config model, or a config default that failed while the session
-			// model still restored, was reported nowhere. stderr keeps structured
-			// stdout clean.
+			// Resolved models bypass the no-model block, and notifs only reach the TUI.
+			// Report config adoption or failure to noninteractive callers on stderr;
+			// keep structured stdout clean.
 			const startupNotice = renderStartupModelNotice({
 				isInteractive,
 				hasModel: Boolean(session.model),
