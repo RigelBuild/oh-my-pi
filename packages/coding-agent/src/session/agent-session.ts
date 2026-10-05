@@ -10893,15 +10893,10 @@ export class AgentSession implements SettingsScope {
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
-			// A resumed session without a tier entry restores the empty map: a
-			// `tier.*` set after it was baked must not take effect on `/resume`.
-			// Only a target with no history falls through to config.
+			// Legacy sessions predate tier entries and keep configured tiers, as on startup.
+			// Once an entry exists, its value (including null) is authoritative.
 			this.#models.restoreServiceTiers(
-				hasServiceTierEntry
-					? (sessionContext.serviceTier ?? {})
-					: restoreBranch.length > 0
-						? {}
-						: configuredServiceTierByFamily,
+				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
 
 			if (switchingToDifferentSession) {

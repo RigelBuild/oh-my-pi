@@ -206,7 +206,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	});
 
-	test("discovers a cold built-in provider and preserves literal suffix identity", async () => {
+	test("reparses a cold vLLM suffix against a reasoning config model", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, `builtin-models-${Bun.nanoseconds()}.yml`);
@@ -214,7 +214,17 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			modelsPath,
 			JSON.stringify({
 				providers: {
-					vllm: { baseUrl: "https://vllm.example.invalid/v1", api: "openai-completions", auth: "none" },
+					vllm: {
+						baseUrl: "https://vllm.example.invalid/v1",
+						api: "openai-completions",
+						auth: "none",
+						modelOverrides: {
+							"config-pick": {
+								reasoning: true,
+								thinking: { mode: "effort", efforts: ["low", "high"], defaultLevel: "high" },
+							},
+						},
+					},
 				},
 			}),
 		);
@@ -259,19 +269,19 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			expect(discoveryCount).toBeGreaterThan(0);
 			expect(modelRegistry.find("vllm", "router:low")).toBeDefined();
 			expect(session.model?.id).toBe("config-pick");
-			expect(session.configuredThinkingLevel()).not.toBe("low");
+			expect(session.model?.reasoning).toBe(true);
+			expect(session.model?.thinking?.defaultLevel).toBe(ThinkingLevel.High);
+			expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
 		} finally {
 			await session.dispose();
 		}
 	});
 
-	test("does not await discovery for a static-only provider that cannot discover anything", async () => {
-		// A suffix is an effort only when no literal model ID matches it.
+	test("marks a static-only provider as non-refreshable", () => {
 		const authStorage = createInMemoryAuthStorage();
-
 		authStoragesToClose.push(authStorage);
 		const modelsPath = path.join(tempDir, `static-models-${Bun.nanoseconds()}.yml`);
-		await Bun.write(
+		fs.writeFileSync(
 			modelsPath,
 			JSON.stringify({
 				providers: {
@@ -286,10 +296,64 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		);
 		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
 
-		// The premise, measured: the provider IS known — its static row is right
-		// there — yet nothing about it is discoverable.
 		expect(modelRegistry.hasProvider("custom")).toBe(true);
 		expect(modelRegistry.canRefreshProvider("custom")).toBe(false);
+	});
+
+	test("resolves a late provider self-alias list on a fresh session with reapply disabled", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "fresh-self-alias-models.yml"));
+		const lateDefaultProvider: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "default",
+						name: "Late Default",
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "default,@default");
+		const sessionManager = SessionManager.inMemory(tempDir);
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings,
+			disableExtensionDiscovery: true,
+			extensions: [lateDefaultProvider],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: false,
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("default");
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("does not block startup on a cold catalog a persisted thinking entry outranks", async () => {

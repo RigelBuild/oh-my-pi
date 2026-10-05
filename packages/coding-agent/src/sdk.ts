@@ -592,7 +592,7 @@ export interface CreateAgentSessionOptions {
 	 * of re-deriving tiers from settings.
 	 */
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
-	/** Reapply config-selected model, thinking level, and service tiers on resume. */
+	/** Reapply config-selected model, thinking, and tiers on CLI startup resume; not in-session `/resume`. */
 	reapplyConfig?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
@@ -2890,11 +2890,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						(sameModelReference(options.model?.provider, provider) && sameModelReference(options.model?.id, id)),
 				});
 			let savedParse = reparseSavedSuffix();
-			// A dynamic-only provider has no models until its catalog is fetched, so
-			// a split parse may still be wrong. Fetch that one provider and ask again,
-			// but only when the suffix can still be read; otherwise the fetch costs a
-			// discovery timeout for a value nothing reads. Join in-flight passes first
-			// so the same catalog is not fetched twice.
+			// A cold dynamic catalog can hide a literal suffix. Refresh only when the suffix is readable,
+			// joining an in-flight pass before retrying.
 			if (
 				savedSuffixIsReadable &&
 				savedParse?.thinkingLevel !== undefined &&

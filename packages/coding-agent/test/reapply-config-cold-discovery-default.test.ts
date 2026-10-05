@@ -1,16 +1,4 @@
-/**
- * `--reapply-config` must give the configured `modelRoles.default` a
- * cold-discovery retry BEFORE any lower-priority fallback claims the model.
- *
- * A discovery-backed provider (models.yml `discovery:`, LM Studio/Ollama/
- * llama.cpp, an openai-compat proxy) ships no static models, so on a cache-cold
- * boot the configured default resolves to nothing. Two lower-priority pickers
- * sit downstream of that failure — the session's own baked model and the
- * arbitrary availability pick — and both are reached only while `model` is
- * still unset. So whichever one runs first permanently shadows the discovery
- * refresh, and the resume lands on it even though `omp models` (which awaits
- * discovery) lists the configured default.
- */
+/** Configured model-role candidates get cold discovery before session or arbitrary fallbacks. */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
@@ -27,12 +15,15 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 const OLLAMA_ENDPOINT = "http://127.0.0.1:11434";
 const DISCOVERED_MODEL = "phi3";
 
+let discoveryFetches = 0;
+
 describe("--reapply-config cold-discovery configured default", () => {
 	let tempDir: TempDir;
 	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
 	let observed: { fallbackSawJoin: boolean | undefined } | undefined;
+	let fallbackMessage: string | undefined;
 
 	beforeAll(async () => {
 		sharedDir = TempDir.createSync("@omp-reapply-cold-shared-");
@@ -46,9 +37,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	beforeEach(() => {
-		// No ambient-ollama guard is needed: the env endpoint only feeds the
-		// IMPLICIT ollama provider, and `models.yml` here configures ollama
-		// explicitly, so `#addImplicitDiscoverableProviders` never adds one.
+		discoveryFetches = 0;
 		tempDir = TempDir.createSync("@omp-reapply-cold-");
 	});
 
@@ -57,6 +46,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 			await session.dispose();
 			session = undefined;
 		}
+		fallbackMessage = undefined;
 		tempDir.removeSync();
 	});
 
@@ -73,6 +63,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 	const mockOllamaDiscovery: FetchImpl = async input => {
 		const url = String(input);
 		if (url === `${OLLAMA_ENDPOINT}/api/tags`) {
+			discoveryFetches++;
 			return Response.json({ models: [{ name: DISCOVERED_MODEL }] });
 		}
 		if (url === `${OLLAMA_ENDPOINT}/api/show`) {
@@ -128,11 +119,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 		});
 	}
 
-	/**
-	 * Resume against a registry whose ollama catalog is reachable ONLY through a
-	 * discovery fetch: models.yml declares the provider with no static models and
-	 * the cache starts cold, so nothing resolves until a refresh runs.
-	 */
+	/** Resume against an ollama catalog that is empty until discovery fetches it. */
 	async function resume(
 		sessionFile: string,
 		settings: Settings,
@@ -176,17 +163,11 @@ describe("--reapply-config cold-discovery configured default", () => {
 			reapplyConfig: true,
 		});
 		session = result.session;
+		fallbackMessage = result.modelFallbackMessage;
 		return result.session;
 	}
 
-	/**
-	 * Records whether the startup background refresh had been JOINED by the time
-	 * the cold-cache fallback started its own `refresh`. Both fetch the same
-	 * built-in dynamic catalogs, so a fallback that runs while the background
-	 * pass is still in flight duplicates the remote call and races its cache
-	 * write. Instance spies only — never the prototype — so the suite stays
-	 * parallel-safe.
-	 */
+	/** Records whether the cold fallback joined startup discovery before refreshing. */
 	function observeRefreshOrder(registry: ModelRegistry): { fallbackSawJoin: boolean | undefined } {
 		const state: { fallbackSawJoin: boolean | undefined } = { fallbackSawJoin: undefined };
 		let joined = false;
@@ -340,5 +321,23 @@ describe("--reapply-config cold-discovery configured default", () => {
 			noAuth.close();
 			noAuthDir.removeSync();
 		}
+	});
+	it("restores a saved model from cold discovery when the configured default is unresolved", async () => {
+		const sessionFile = await writeBakedSession(`ollama/${DISCOVERED_MODEL}`);
+		const settings = await loadOverlay("static-only/not-discovered");
+
+		const resumed = await resume(sessionFile, settings, {
+			"static-only": {
+				baseUrl: "https://static.example.invalid/v1",
+				api: "openai-completions",
+				auth: "none",
+				models: [{ id: "present", name: "Present" }],
+			},
+		});
+
+		expect(discoveryFetches).toBeGreaterThan(0);
+		expect(resumed.model?.provider).toBe("ollama");
+		expect(resumed.model?.id).toBe(DISCOVERED_MODEL);
+		expect(fallbackMessage).toContain("kept the session's");
 	});
 });

@@ -1144,6 +1144,22 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(smolModel.id);
 	});
 
+	it("restores configured tiers when switching to a legacy session without a tier entry", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeRoleModelSession(modelValue(model), modelValue(model), "default");
+
+		const created = await createSession({
+			initialModel: model,
+			modelRoles: { default: modelValue(model) },
+			persist: true,
+		});
+		cfgTierOpenai.override(created.settings, "priority");
+
+		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
+
+		expect(created.session.serviceTierByFamily.openai).toBe("priority");
+	});
+
 	it("does not enable a config tier when switching to a session that recorded none", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const targetSessionFile = await writeServiceTierSession(modelValue(model), null);
