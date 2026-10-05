@@ -157,13 +157,18 @@ describe("assessModelCache and assessModelCacheVerdict parity with resolveProvid
 				const assessment = assessModelCache(options, staticCatalog, cache, nowMs);
 				const verdict = modelCacheNeedsFetch(assessment, "online-if-uncached");
 				const verdictOnly = assessModelCacheVerdict(options, staticCatalog, cache, nowMs);
-				await resolveProviderModels(options, "online-if-uncached");
+				const resolved = await resolveProviderModels(options, "online-if-uncached");
 
 				expect(verdict).toBe(scenario.expectFetch);
 				expect(modelCacheNeedsFetch(verdictOnly, "online-if-uncached")).toBe(verdict);
 				expect(verdictOnly.hasUsableFreshCache).toBe(assessment.hasUsableFreshCache);
 				expect(verdictOnly.hasUnresolvedHeaders).toBe(assessment.hasUnresolvedHeaders);
 				expect(fetches > 0).toBe(verdict);
+				if (scenario.name === "headers restored from local config") {
+					expect(resolved.models.find(model => model.id === "header-only")?.headers).toEqual({
+						"X-Key": "configured",
+					});
+				}
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true });
 			}

@@ -189,17 +189,9 @@ function cachedHeaderRestorePolicy<TApi extends Api, TModelsDevPayload>(
 }
 
 /**
- * Trusted header source for one header-omitted cached row: the static model,
- * the provider fallback constant, a configured patch, or undefined when none.
- *
- * A same-id static match is trusted only when the row did not flag the model
- * unrestorable (its live headers matched static when cached). Request-model
- * fallback also honors that marker for current rows. Only legacy rows written
- * before request-model header matching may bypass it: their id-only writer
- * necessarily marked every synthesized variant unrestorable (#6037, #6284).
- * Header-bearing models without a trusted source cannot be reconstructed
- * safely without persisting arbitrary credential values; callers must refetch
- * them online or omit them rather than return a broken model.
+ * Current unrestorable markers forbid static header recovery; legacy markers
+ * may recover by requestModelId. Without a trusted source, omit the model
+ * rather than return it without the headers required for authorization.
  */
 function cachedHeaderSource<TApi extends Api>(
 	model: Model<TApi>,
