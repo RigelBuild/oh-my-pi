@@ -52,16 +52,17 @@ import {
 	resolveGatewayApiKey,
 } from "./dispatch";
 import {
+	callerSessionId,
 	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
 	hasMisplacedBearer,
+	isCallerIdentity,
 	json,
 	presentedBearer,
-	SHARED_TOKEN_CALLER,
-	UNAUTHENTICATED_CALLER,
 	resolveClientIdentity,
 	resolvePeer,
+	UNAUTHENTICATED_CALLER,
 	withCors,
 } from "./http";
 import { handleEmbeddings } from "./routes/embeddings";
@@ -345,7 +346,7 @@ async function handleFormatEndpoint(
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
 	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const sessionId = callerSessionId(caller, clientKey ?? deriveSessionId(parsed.modelId, parsed.context));
 	parsed.options.promptCacheKey = sessionId;
 
 	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
@@ -544,7 +545,7 @@ async function handlePiNative(
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const sessionId = callerSessionId(caller, clientKey ?? deriveSessionId(parsed.modelId, parsed.context));
 	parsed.options.sessionId = sessionId;
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
@@ -801,13 +802,18 @@ function loggablePath(pathname: string): string {
 	return Object.hasOwn(FORMAT_ROUTES, pathname) || Object.hasOwn(LOGGABLE_PATHS, pathname) ? pathname : "<unrouted>";
 }
 
+/** An injected callback's error class, never its message, which may echo a credential. */
+function errorName(error: unknown): string {
+	return error instanceof Error ? error.name : typeof error;
+}
+
 /** The gateway's `/v1/*` routes, for a transport that has already admitted the caller. */
 export interface AuthGatewayRouter {
 	/**
-	 * Answers one request; `peer` names the caller in logs. `caller` selects the
-	 * credential pool and defaults to {@link SHARED_TOKEN_CALLER}. Never rejects: a crashed route answers 500.
+	 * Answers one request; `peer` names the caller in logs and `caller` selects
+	 * the credential pool. Never rejects: a crashed route answers 500.
 	 */
-	route(req: Request, peer: string, caller?: CallerIdentity): Promise<Response>;
+	route(req: Request, peer: string, caller: CallerIdentity): Promise<Response>;
 	/**
 	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
 	 * workflows), whose sockets and timers would otherwise keep the process alive.
@@ -821,13 +827,26 @@ export interface AuthGatewayRouter {
  */
 export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
 	const sessionStates = new AuthGatewaySessionStateStore();
-	const route = async (req: Request, peer: string, caller = SHARED_TOKEN_CALLER): Promise<Response> => {
+	const route = async (req: Request, peer: string, caller: CallerIdentity): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
 		try {
-			const resolveStorage = opts.resolveStorage;
-			const scoped: AuthGatewayRouteOptions = resolveStorage
-				? { ...opts, storage: await resolveStorage(caller) }
-				: opts;
+			// The model catalog touches no credentials, so it skips the pool lookup.
+			if (req.method === "GET" && pathname === "/v1/models") {
+				return handleModelsList(opts);
+			}
+			let scoped = opts;
+			if (opts.resolveStorage) {
+				try {
+					scoped = { ...opts, storage: await opts.resolveStorage(caller) };
+				} catch (error) {
+					logger.warn("auth-gateway credential pool unavailable", {
+						path: loggablePath(pathname),
+						peer,
+						error: errorName(error),
+					});
+					return json(503, { error: "credential pool unavailable" });
+				}
+			}
 			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
 			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
 			// same client struct.
@@ -903,11 +922,6 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 				return await handler(scoped, req, peer, gatewayId);
 			}
 
-			// Model catalog.
-			if (req.method === "GET" && pathname === "/v1/models") {
-				return handleModelsList(scoped);
-			}
-
 			// Route-table miss: no format module to defer to, so we emit a
 			// plain JSON 404 rather than guessing at a protocol-specific envelope.
 			return json(404, { error: `No route: ${req.method} ${pathname}` });
@@ -946,19 +960,22 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			if (req.method === "GET" && pathname === "/healthz") {
 				return withCors(json(200, { ok: true, version }), req);
 			}
-			let caller: CallerIdentity | null;
+			let admitted: unknown;
 			try {
-				caller = await authorize(req);
+				admitted = await authorize(req);
 			} catch (error) {
+				// The error text may echo the presented credential, so only its class is logged.
 				logger.warn("auth-gateway authorizer failed", {
 					method: req.method,
 					path: loggablePath(pathname),
 					peer: socketPeer,
-					error: String(error),
+					error: errorName(error),
 				});
 				return withCors(json(503, { error: "authorization unavailable" }), req);
 			}
-			if (caller === null) {
+			const bearer = admitted === UNAUTHENTICATED_CALLER ? undefined : presentedBearer(req);
+			// Only an `Authorization: Bearer` admission can be confined, so any other is refused.
+			if (!isCallerIdentity(admitted) || (bearer === undefined && admitted !== UNAUTHENTICATED_CALLER)) {
 				logger.info("auth-gateway request unauthorized", {
 					method: req.method,
 					path: loggablePath(pathname),
@@ -966,12 +983,12 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				});
 				return withCors(json(401, { error: "unauthorized" }), req);
 			}
-			const bearer = caller === UNAUTHENTICATED_CALLER ? undefined : presentedBearer(req);
 			if (bearer !== undefined && hasMisplacedBearer(req, url, bearer)) {
 				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
 			}
+			if (req.signal.aborted) return new Response(null, { status: 499 });
 			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
-			return withCors(await router.route(req, peer, caller), req);
+			return withCors(await router.route(req, peer, admitted), req);
 		},
 		// Max-out Bun's idle timeout. Long thinking-budget calls can sit idle
 		// for minutes before the first token arrives; the default kills them.

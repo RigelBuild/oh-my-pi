@@ -12,11 +12,11 @@ import {
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { logger } from "@oh-my-pi/pi-utils";
 
 interface Harness {
 	handle: AuthGatewayServerHandle;
 	mock: MockModel;
-	pools: Map<string, AuthStorage>;
 	resolved: string[];
 	close(): Promise<void>;
 }
@@ -30,6 +30,11 @@ const agentAuthorizer: AuthGatewayAuthorizer = req => {
 	return agentAccountId ? { agentAccountId } : null;
 };
 
+/** An authorizer as a careless RPC adapter would write it: whatever the lookup returns. */
+function rawAuthorizer(result: unknown): AuthGatewayAuthorizer {
+	return () => result as CallerIdentity | null;
+}
+
 async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Promise<Harness> {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-authorize-"));
@@ -39,6 +44,8 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 	for (const agent of ["agent-a", "agent-b"]) {
 		const pool = await AuthStorage.create(path.join(dir, `${agent}.db`));
 		pool.keys.setRuntime("openrouter", `key-${agent}`);
+		// A stored row names the pool in `/v1/credentials/check`, which lists stored rows only.
+		await pool.credentials.set(`pool-${agent}`, { type: "api_key", key: `stored-${agent}` });
 		pools.set(agent, pool);
 	}
 	const resolved: string[] = [];
@@ -61,7 +68,6 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 	return {
 		handle,
 		mock,
-		pools,
 		resolved,
 		close: async () => {
 			await handle.close();
@@ -72,22 +78,57 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 	};
 }
 
-function chat(harness: Harness, headers: Record<string, string>, url = "/v1/chat/completions"): Promise<Response> {
+function chat(
+	harness: Harness,
+	headers: Record<string, string>,
+	extra: Record<string, unknown> = {},
+	url = "/v1/chat/completions",
+): Promise<Response> {
 	return fetch(`${harness.handle.url}${url}`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", ...headers },
-		body: JSON.stringify({ model: "mock/authorize", messages: [{ role: "user", content: "hi" }], stream: false }),
+		body: JSON.stringify({
+			model: "mock/authorize",
+			messages: [{ role: "user", content: "hi" }],
+			stream: false,
+			...extra,
+		}),
 	});
 }
 
-function apiKeyOfLastCall(mock: MockModel): unknown {
-	return mock.calls.at(-1)?.options?.apiKey;
+function piNative(harness: Harness, token: string): Promise<Response> {
+	return fetch(`${harness.handle.url}/v1/pi/stream`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+		body: JSON.stringify({
+			modelId: "mock/authorize",
+			context: { messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			options: { sessionId: "shared-session" },
+			stream: false,
+		}),
+	});
 }
 
-async function resolvedKey(apiKey: unknown): Promise<unknown> {
+async function keyOfLastCall(mock: MockModel): Promise<unknown> {
+	const apiKey: unknown = mock.calls.at(-1)?.options?.apiKey;
 	if (typeof apiKey !== "function") return apiKey;
 	const resolved: unknown = await apiKey({ lastChance: false });
 	return resolved && typeof resolved === "object" && "apiKey" in resolved ? resolved.apiKey : resolved;
+}
+
+async function checkedProviders(harness: Harness, token: string): Promise<string[]> {
+	const response = await fetch(`${harness.handle.url}/v1/credentials/check`, {
+		headers: { Authorization: `Bearer ${token}` },
+	});
+	expect(response.status).toBe(200);
+	const body = (await response.json()) as { credentials: { provider: string }[] };
+	return body.credentials.map(row => row.provider);
+}
+
+function captureWarnings(): { events: logger.LogEvent[]; dispose(): void } {
+	const events: logger.LogEvent[] = [];
+	const dispose = logger.registerLogSink(event => events.push(event));
+	return { events, dispose };
 }
 
 let harness: Harness | undefined;
@@ -114,6 +155,26 @@ describe("auth-gateway authorize seam", () => {
 		expect(harness.mock.calls).toHaveLength(0);
 	});
 
+	it.each([
+		["undefined", undefined],
+		["an empty object", {}],
+		["an empty id", { agentAccountId: "" }],
+		["a non-string id", { agentAccountId: 7 }],
+		["the reserved shared id", { agentAccountId: "\u0000shared" }],
+	])("answers 401 when the authorizer returns %s, never a default caller", async (_label, result) => {
+		harness = await boot(rawAuthorizer(result));
+		const response = await fetch(`${harness.handle.url}/v1/usage`, { headers: { Authorization: "Bearer token-a" } });
+		expect(response.status).toBe(401);
+		expect(harness.resolved).toEqual([]);
+	});
+
+	it("answers 401 to an admission that carried no Authorization bearer", async () => {
+		harness = await boot(req => (req.headers.get("x-api-key") === "token-a" ? { agentAccountId: "agent-a" } : null));
+		const response = await chat(harness, { "x-api-key": "token-a" }, {}, "/v1/chat/completions?k=token-a");
+		expect(response.status).toBe(401);
+		expect(harness.resolved).toEqual([]);
+	});
+
 	it("keeps healthz and CORS preflight outside the authorizer", async () => {
 		let calls = 0;
 		harness = await boot(req => {
@@ -125,39 +186,84 @@ describe("auth-gateway authorize seam", () => {
 		expect(calls).toBe(0);
 	});
 
-	it("routes each agent to its own credential pool", async () => {
-		harness = await boot(agentAuthorizer);
+	it("routes each agent's chat to its own credential pool, through an async authorizer", async () => {
+		harness = await boot(async req => agentAuthorizer(req));
 		harness.mock.push({ content: ["a"] });
 		harness.mock.push({ content: ["b"] });
 		expect((await chat(harness, { Authorization: "Bearer token-a" })).status).toBe(200);
-		expect(await resolvedKey(apiKeyOfLastCall(harness.mock))).toBe("key-agent-a");
+		expect(await keyOfLastCall(harness.mock)).toBe("key-agent-a");
 		expect((await chat(harness, { Authorization: "Bearer token-b" })).status).toBe(200);
-		expect(await resolvedKey(apiKeyOfLastCall(harness.mock))).toBe("key-agent-b");
-		expect(harness.resolved).toEqual(["agent-a", "agent-b"]);
+		expect(await keyOfLastCall(harness.mock)).toBe("key-agent-b");
 	});
 
-	it("scopes non-chat routes to the caller's pool too", async () => {
+	it("routes pi-native requests to the caller's pool", async () => {
 		harness = await boot(agentAuthorizer);
-		const usage = await fetch(`${harness.handle.url}/v1/credentials/check`, {
-			headers: { Authorization: "Bearer token-b" },
-		});
-		expect(usage.status).toBe(200);
-		expect(harness.resolved).toEqual(["agent-b"]);
+		harness.mock.push({ content: ["b"] });
+		expect((await piNative(harness, "token-b")).status).toBe(200);
+		expect(await keyOfLastCall(harness.mock)).toBe("key-agent-b");
 	});
 
-	it("answers 503, not 401, when the authorizer itself fails", async () => {
+	it("lists only the caller's own credentials", async () => {
+		harness = await boot(agentAuthorizer);
+		expect(await checkedProviders(harness, "token-a")).toEqual(["pool-agent-a"]);
+		expect(await checkedProviders(harness, "token-b")).toEqual(["pool-agent-b"]);
+	});
+
+	it("gives two agents sending the same session key distinct provider sessions", async () => {
+		harness = await boot(agentAuthorizer);
+		harness.mock.push({ content: ["a"] });
+		harness.mock.push({ content: ["b"] });
+		const extra = { prompt_cache_key: "same-key" };
+		expect((await chat(harness, { Authorization: "Bearer token-a" }, extra)).status).toBe(200);
+		expect((await chat(harness, { Authorization: "Bearer token-b" }, extra)).status).toBe(200);
+		const [first, second] = harness.mock.calls.map(call => call.options?.sessionId);
+		expect(first).toBeString();
+		expect(second).toBeString();
+		expect(first).not.toBe(second);
+	});
+
+	it("keeps a shared-token caller's session key verbatim", async () => {
+		harness = await boot(bearerTokenAuthorizer(["shared-token"]), false);
+		harness.mock.push({ content: ["ok"] });
+		const extra = { prompt_cache_key: "client-key" };
+		expect((await chat(harness, { Authorization: "Bearer shared-token" }, extra)).status).toBe(200);
+		expect(harness.mock.calls[0]?.options?.sessionId).toBe("client-key");
+	});
+
+	it("answers 503 without logging the error text when the authorizer fails", async () => {
 		harness = await boot(() => {
 			throw new Error("verify RPC down: token-a");
 		});
+		const log = captureWarnings();
+		try {
+			const response = await chat(harness, { Authorization: "Bearer token-a" });
+			expect(response.status).toBe(503);
+			expect(await response.text()).not.toContain("token-a");
+		} finally {
+			log.dispose();
+		}
+		expect(log.events.some(event => event.message === "auth-gateway authorizer failed")).toBe(true);
+		expect(JSON.stringify(log.events)).not.toContain("token-a");
+		expect(harness.mock.calls).toHaveLength(0);
+	});
+
+	it("answers 503 when the caller's pool cannot be resolved", async () => {
+		harness = await boot(() => ({ agentAccountId: "agent-unknown" }));
 		const response = await chat(harness, { Authorization: "Bearer token-a" });
 		expect(response.status).toBe(503);
-		expect(await response.text()).not.toContain("token-a");
 		expect(harness.mock.calls).toHaveLength(0);
+	});
+
+	it("serves the model catalog without resolving a pool", async () => {
+		harness = await boot(agentAuthorizer);
+		const response = await fetch(`${harness.handle.url}/v1/models`, { headers: { Authorization: "Bearer token-a" } });
+		expect(response.status).toBe(200);
+		expect(harness.resolved).toEqual([]);
 	});
 
 	it("rejects the admitting bearer when it is echoed outside Authorization", async () => {
 		harness = await boot(agentAuthorizer);
-		const response = await chat(harness, { Authorization: "Bearer token-a" }, "/v1/chat/completions?k=token-a");
+		const response = await chat(harness, { Authorization: "Bearer token-a" }, {}, "/v1/chat/completions?k=token-a");
 		expect(response.status).toBe(400);
 		expect(harness.mock.calls).toHaveLength(0);
 	});
@@ -166,14 +272,14 @@ describe("auth-gateway authorize seam", () => {
 		harness = await boot(bearerTokenAuthorizer(["shared-token"]), false);
 		harness.mock.push({ content: ["ok"] });
 		expect((await chat(harness, { Authorization: "Bearer shared-token" })).status).toBe(200);
-		expect(await resolvedKey(apiKeyOfLastCall(harness.mock))).toBe("key-shared");
+		expect(await keyOfLastCall(harness.mock)).toBe("key-shared");
 		expect((await chat(harness, { Authorization: "Bearer token-a" })).status).toBe(401);
 	});
 
 	it("admits every request when the shared token set is empty", async () => {
 		harness = await boot(bearerTokenAuthorizer([]), false);
 		harness.mock.push({ content: ["ok"] });
-		const response = await chat(harness, { Authorization: "Bearer anything" }, "/v1/chat/completions?k=anything");
+		const response = await chat(harness, {}, {}, "/v1/chat/completions?k=anything");
 		expect(response.status).toBe(200);
 	});
 });

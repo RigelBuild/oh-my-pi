@@ -153,7 +153,10 @@ export interface CallerIdentity {
 
 /**
  * Admits a request: the caller it belongs to, or `null` to answer 401. A throw
- * answers 503, so a verifier outage never reads as a bad credential.
+ * answers 503, so a verifier outage never reads as a bad credential. Admit only
+ * on the `Authorization: Bearer` token: the gateway keeps that token out of the
+ * URL and logged headers, and answers 401 to an admission that carried none.
+ * Honor `req.signal` and bound any remote call; a timeout should throw.
  */
 export type AuthGatewayAuthorizer = (req: Request) => CallerIdentity | null | Promise<CallerIdentity | null>;
 

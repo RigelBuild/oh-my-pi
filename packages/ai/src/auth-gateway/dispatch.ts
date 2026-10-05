@@ -27,6 +27,8 @@ export interface AuthGatewayRouteOptions {
 	/**
 	 * The admitted caller's credential pool. When set it replaces `storage` for
 	 * every request, so one caller's requests never select another's credential.
+	 * Return the same instance for an account on every call (stickiness, backoff
+	 * and the usage cache live on it); the embedder owns and closes it. A throw answers 503.
 	 */
 	resolveStorage?: (caller: CallerIdentity) => AuthStorage | Promise<AuthStorage>;
 	/**

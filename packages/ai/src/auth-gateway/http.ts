@@ -8,6 +8,7 @@ import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import * as os from "node:os";
 import { getInstallId } from "@oh-my-pi/pi-utils";
 import type { Api, Model } from "../types";
+import { deterministicUuid } from "../utils/deterministic-id";
 import type { ClientUsageIdentity } from "../usage";
 import type { AuthGatewayAuthorizer, CallerIdentity } from "./types";
 
@@ -126,14 +127,38 @@ export function presentedBearer(req: Request): string | undefined {
 	return token ? token : undefined;
 }
 
-/** The one caller every request is admitted as under shared bearer tokens. */
-export const SHARED_TOKEN_CALLER: CallerIdentity = Object.freeze({ agentAccountId: "default" });
+/**
+ * The one caller every request is admitted as under shared bearer tokens. The
+ * NUL in its id keeps any real account from colliding with it.
+ */
+export const SHARED_TOKEN_CALLER: CallerIdentity = Object.freeze({ agentAccountId: "\u0000shared" });
 
 /**
  * The caller an empty token set admits. The server matches it by reference: its
  * bearer, if any, was never checked, so there is no credential to keep out of the URL.
  */
-export const UNAUTHENTICATED_CALLER: CallerIdentity = Object.freeze({ agentAccountId: "default" });
+export const UNAUTHENTICATED_CALLER: CallerIdentity = Object.freeze({ agentAccountId: "\u0000shared" });
+
+/**
+ * Whether an authorizer result names a caller. Anything else (`undefined`, `{}`,
+ * an empty or NUL-bearing id) is answered 401, never mapped to a default caller.
+ */
+export function isCallerIdentity(value: unknown): value is CallerIdentity {
+	if (value === SHARED_TOKEN_CALLER || value === UNAUTHENTICATED_CALLER) return true;
+	if (typeof value !== "object" || value === null || !("agentAccountId" in value)) return false;
+	const id = value.agentAccountId;
+	return typeof id === "string" && id !== "" && !id.includes("\u0000");
+}
+
+/**
+ * The session id providers key their process-wide caches by. Per-account callers
+ * get their own namespace, so two agents sending the same key never share one;
+ * the shared caller keeps the key verbatim so existing caches stay warm.
+ */
+export function callerSessionId(caller: CallerIdentity, sessionId: string): string {
+	if (caller.agentAccountId === SHARED_TOKEN_CALLER.agentAccountId) return sessionId;
+	return deterministicUuid(`${caller.agentAccountId}\u0000${sessionId}`);
+}
 
 /**
  * Authorizer for a static shared-token set: any listed token admits the request
