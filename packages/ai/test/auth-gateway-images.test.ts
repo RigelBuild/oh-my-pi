@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { generateImage } from "@oh-my-pi/pi-ai/images";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -36,7 +36,7 @@ async function withGateway(
 	for (const model of models) storage.keys.setRuntime(model.provider, `key-${model.provider}`);
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["gateway-token"],
+		authorize: bearerTokenAuthorizer(["gateway-token"]),
 		storage,
 		resolveModel: requested =>
 			models.find(model => requested === model.id || requested === `${model.provider}/${model.id}`),

@@ -56,8 +56,10 @@ import {
 	corsHeaders,
 	gatewayResponseHeaders,
 	hasMisplacedBearer,
-	isAuthorized,
 	json,
+	presentedBearer,
+	SHARED_TOKEN_CALLER,
+	UNAUTHENTICATED_CALLER,
 	resolveClientIdentity,
 	resolvePeer,
 	withCors,
@@ -72,6 +74,7 @@ import { handleVideoContent, handleVideoPoll, handleVideoSubmit } from "./routes
 import { AuthGatewaySessionStateStore } from "./session-state";
 import type {
 	AuthGatewayServerHandle,
+	CallerIdentity,
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
 } from "./types";
@@ -256,6 +259,7 @@ async function handleFormatEndpoint(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -362,6 +366,7 @@ async function handleFormatEndpoint(
 	// it, so it MUST be released on every exit path.
 	const lease = sessionStates.acquire({
 		clientKey,
+		agentAccountId: caller.agentAccountId,
 		model,
 		context: parsed.context,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
@@ -500,6 +505,7 @@ async function handlePiNative(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -552,6 +558,7 @@ async function handlePiNative(
 	// request is done with it, so it MUST be released on every exit path.
 	const lease = sessionStates.acquire({
 		clientKey,
+		agentAccountId: caller.agentAccountId,
 		model,
 		context: parsed.context,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
@@ -796,8 +803,11 @@ function loggablePath(pathname: string): string {
 
 /** The gateway's `/v1/*` routes, for a transport that has already admitted the caller. */
 export interface AuthGatewayRouter {
-	/** Answers one request; `peer` names the caller in logs. Never rejects: a crashed route answers 500. */
-	route(req: Request, peer: string): Promise<Response>;
+	/**
+	 * Answers one request; `peer` names the caller in logs. `caller` selects the
+	 * credential pool and defaults to {@link SHARED_TOKEN_CALLER}. Never rejects: a crashed route answers 500.
+	 */
+	route(req: Request, peer: string, caller?: CallerIdentity): Promise<Response>;
 	/**
 	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
 	 * workflows), whose sockets and timers would otherwise keep the process alive.
@@ -811,87 +821,91 @@ export interface AuthGatewayRouter {
  */
 export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
 	const sessionStates = new AuthGatewaySessionStateStore();
-	const route = async (req: Request, peer: string): Promise<Response> => {
+	const route = async (req: Request, peer: string, caller = SHARED_TOKEN_CALLER): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
 		try {
+			const resolveStorage = opts.resolveStorage;
+			const scoped: AuthGatewayRouteOptions = resolveStorage
+				? { ...opts, storage: await resolveStorage(caller) }
+				: opts;
 			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
 			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
 			// same client struct.
 			if (req.method === "GET" && pathname === "/v1/usage") {
-				return await handleUsage(opts.storage, req.signal);
+				return await handleUsage(scoped.storage, req.signal);
 			}
 
 			// Per-credential auth probe — diagnoses which row in a multi-account
 			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
 			// credentials, so we need a separate endpoint that captures errors.
 			if (req.method === "GET" && pathname === "/v1/credentials/check") {
-				return await handleCredentialsCheck(opts.storage, req.signal);
+				return await handleCredentialsCheck(scoped.storage, req.signal);
 			}
 
 			// Provider-format dispatch.
 			const formatRoute = FORMAT_ROUTES[pathname];
 			if (formatRoute && req.method === "POST") {
-				return await handleFormatEndpoint(formatRoute, opts, req, peer, sessionStates);
+				return await handleFormatEndpoint(formatRoute, scoped, req, peer, sessionStates, caller);
 			}
 
 			// Pi-native fast path. Same auth + provider plumbing as the
 			// foreign-wire routes, just without the wire-format translation.
 			if (req.method === "POST" && pathname === "/v1/pi/stream") {
-				return await handlePiNative(opts, req, peer, sessionStates);
+				return await handlePiNative(scoped, req, peer, sessionStates, caller);
 			}
 
 			// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
 			// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
 			// reach the same handler through their Decisions path.
 			if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
-				return await handleSystemOne(opts, req, peer);
+				return await handleSystemOne(scoped, req, peer);
 			}
 
 			// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
 			// (JSON), and OpenAI multipart / OpenRouter JSON edits.
 			if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
-				return await handleImageGenerations(opts, req, peer);
+				return await handleImageGenerations(scoped, req, peer);
 			}
 			if (req.method === "POST" && pathname === "/v1/images/edits") {
-				return await handleImageEdits(opts, req, peer);
+				return await handleImageEdits(scoped, req, peer);
 			}
 
 			// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
 			if (req.method === "POST" && pathname === "/v1/audio/speech") {
-				return await handleSpeech(opts, req, peer);
+				return await handleSpeech(scoped, req, peer);
 			}
 
 			// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
 			if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
-				return await handleTranscriptions(opts, req, peer);
+				return await handleTranscriptions(scoped, req, peer);
 			}
 
 			// Embeddings, OpenAI wire (OpenRouter is compatible).
 			if (req.method === "POST" && pathname === "/v1/embeddings") {
-				return await handleEmbeddings(opts, req, peer);
+				return await handleEmbeddings(scoped, req, peer);
 			}
 
 			// Rerank, OpenRouter wire.
 			if (req.method === "POST" && pathname === "/v1/rerank") {
-				return await handleRerank(opts, req, peer);
+				return await handleRerank(scoped, req, peer);
 			}
 
 			// Video generation, OpenRouter's asynchronous wire: submit, then poll
 			// and download by the gateway-issued job id (stateless — the id
 			// encodes provider, model, and upstream job).
 			if (req.method === "POST" && pathname === "/v1/videos") {
-				return await handleVideoSubmit(opts, req, peer);
+				return await handleVideoSubmit(scoped, req, peer);
 			}
 			const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
 			if (videoJob) {
 				const gatewayId = decodeURIComponent(videoJob[1]);
 				const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
-				return await handler(opts, req, peer, gatewayId);
+				return await handler(scoped, req, peer, gatewayId);
 			}
 
 			// Model catalog.
 			if (req.method === "GET" && pathname === "/v1/models") {
-				return handleModelsList(opts);
+				return handleModelsList(scoped);
 			}
 
 			// Route-table miss: no format module to defer to, so we emit a
@@ -912,7 +926,7 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
-	const tokens = new Set<string>(opts.bearerTokens);
+	const authorize = opts.authorize;
 	const version = opts.version;
 	const router = createAuthGatewayRouter(opts);
 
@@ -932,7 +946,19 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			if (req.method === "GET" && pathname === "/healthz") {
 				return withCors(json(200, { ok: true, version }), req);
 			}
-			if (!isAuthorized(req, tokens)) {
+			let caller: CallerIdentity | null;
+			try {
+				caller = await authorize(req);
+			} catch (error) {
+				logger.warn("auth-gateway authorizer failed", {
+					method: req.method,
+					path: loggablePath(pathname),
+					peer: socketPeer,
+					error: String(error),
+				});
+				return withCors(json(503, { error: "authorization unavailable" }), req);
+			}
+			if (caller === null) {
 				logger.info("auth-gateway request unauthorized", {
 					method: req.method,
 					path: loggablePath(pathname),
@@ -940,11 +966,12 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				});
 				return withCors(json(401, { error: "unauthorized" }), req);
 			}
-			if (hasMisplacedBearer(req, url, tokens)) {
+			const bearer = caller === UNAUTHENTICATED_CALLER ? undefined : presentedBearer(req);
+			if (bearer !== undefined && hasMisplacedBearer(req, url, bearer)) {
 				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
 			}
 			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
-			return withCors(await router.route(req, peer), req);
+			return withCors(await router.route(req, peer, caller), req);
 		},
 		// Max-out Bun's idle timeout. Long thinking-budget calls can sit idle
 		// for minutes before the first token arrives; the default kills them.

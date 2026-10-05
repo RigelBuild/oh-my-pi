@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
@@ -247,7 +247,7 @@ describe("pi-native gateway cache controls", () => {
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-cache" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => mock,
 			version: "test",
@@ -291,7 +291,7 @@ describe("pi-native gateway reasoning flags", () => {
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-reasoning" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => mock,
 			version: "test",
@@ -344,7 +344,7 @@ describe("pi-native gateway usage attribution", () => {
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-usage" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => mock,
 			version: "test",

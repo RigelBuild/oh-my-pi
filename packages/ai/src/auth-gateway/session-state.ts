@@ -65,6 +65,8 @@ export interface AuthGatewaySessionStateRequest {
 	 * authoritative: the client is telling us which conversation this is.
 	 */
 	clientKey: string | undefined;
+	/** The admitted caller. Two callers never share an entry, whatever keys they send. */
+	agentAccountId: string;
 	model: Model<Api>;
 	/**
 	 * System prompt, tools and message history of this request. Used only when
@@ -156,7 +158,7 @@ function closeSessionState(
  */
 function sessionKeys(request: AuthGatewaySessionStateRequest): string[] {
 	const { model } = request;
-	const scope = `${model.provider}\u0000${model.id}`;
+	const scope = `${request.agentAccountId}\u0000${model.provider}\u0000${model.id}`;
 	if (request.clientKey !== undefined) return [`c\u0000${scope}\u0000${request.clientKey}`];
 	const { context } = request;
 	// NUL separates the components so none of them can forge the boundary.

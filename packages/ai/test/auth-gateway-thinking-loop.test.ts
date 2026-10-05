@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
@@ -39,7 +39,7 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["gw-test-token"],
+			authorize: bearerTokenAuthorizer(["gw-test-token"]),
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -77,7 +77,7 @@ describe("auth-gateway non-streaming thinking-loop retries", () => {
 		mock.push({ throw: "upstream exploded" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["gw-test-token"],
+			authorize: bearerTokenAuthorizer(["gw-test-token"]),
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -131,7 +131,7 @@ describe("auth-gateway auth retry", () => {
 		});
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["gw-test-token"],
+			authorize: bearerTokenAuthorizer(["gw-test-token"]),
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",

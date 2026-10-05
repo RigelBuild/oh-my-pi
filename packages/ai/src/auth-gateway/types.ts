@@ -145,11 +145,23 @@ export interface AuthGatewayFormatModule {
 	formatError(status: number, type: string, message: string): Response;
 }
 
+/** The caller a request was admitted as. */
+export interface CallerIdentity {
+	/** Selects the caller's credential pool; requests from one account never see another's. */
+	agentAccountId: string;
+}
+
+/**
+ * Admits a request: the caller it belongs to, or `null` to answer 401. A throw
+ * answers 503, so a verifier outage never reads as a bad credential.
+ */
+export type AuthGatewayAuthorizer = (req: Request) => CallerIdentity | null | Promise<CallerIdentity | null>;
+
 export interface AuthGatewayServerOptions {
 	/** Listen address. Default `127.0.0.1:4000`. */
 	bind?: string;
-	/** Accept any of these bearer tokens. Empty allows unauthenticated calls. */
-	bearerTokens: string[];
+	/** Inbound auth. `bearerTokenAuthorizer` gives the static shared-token behavior. */
+	authorize: AuthGatewayAuthorizer;
 	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
 	trustProxyHeaders?: boolean;
 	/** Version surfaced on `/healthz`. */

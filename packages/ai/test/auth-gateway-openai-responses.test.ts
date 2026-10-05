@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
@@ -1395,7 +1395,7 @@ describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
 		mock.push({ content: ["unexpected provider call"] });
 		const gateway = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
@@ -1438,7 +1438,7 @@ describe("auth-gateway OpenAI Responses computer option bridge", () => {
 		mock.push({ content: ["ok"] });
 		const gateway = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",

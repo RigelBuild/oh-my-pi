@@ -2,11 +2,16 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `startAuthGateway` takes an `authorize(req)` function in place of `bearerTokens`. It returns the caller's identity (`{ agentAccountId }`) or `null` to answer 401; a throw answers 503. Use `bearerTokenAuthorizer(tokens)` to keep the shared-token behavior.
+
 ### Added
 
 - Added per-model `compat.statefulResponses` to enable or disable stored Responses chaining (`previous_response_id` with `store: true`) for one endpoint without the official-only request fields that `compat.officialEndpoint` implies ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
 - Added Snowflake Cortex with browser OAuth, token refresh, PAT environment authentication, and streaming Claude/OpenAI models with local tool execution ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
 - `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `resolveStorage(caller)` to the auth-gateway options, which serves each admitted caller from its own credential pool. Retained provider session state is also kept per caller.
 
 ### Changed
 

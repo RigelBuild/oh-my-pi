@@ -16,7 +16,7 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { extractProviderRetryHint } from "../utils/retry-after";
-import type { AuthGatewayServerOptions } from "./types";
+import type { AuthGatewayServerOptions, CallerIdentity } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
 
@@ -24,6 +24,11 @@ export type ModelResolver = (modelId: string) => Model<Api> | undefined;
 export interface AuthGatewayRouteOptions {
 	/** Source of credentials: broker-backed for `serve`, the CLI's own for `stdio`. */
 	storage: AuthStorage;
+	/**
+	 * The admitted caller's credential pool. When set it replaces `storage` for
+	 * every request, so one caller's requests never select another's credential.
+	 */
+	resolveStorage?: (caller: CallerIdentity) => AuthStorage | Promise<AuthStorage>;
 	/**
 	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
 	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse

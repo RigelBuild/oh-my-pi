@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -20,7 +20,7 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 		});
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["gw-test-token"],
+			authorize: bearerTokenAuthorizer(["gw-test-token"]),
 			storage,
 			resolveModel: () => mock.model,
 			version: "test",
