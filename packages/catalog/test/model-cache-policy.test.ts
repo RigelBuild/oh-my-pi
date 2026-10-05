@@ -6,6 +6,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	assessModelCache,
+	assessModelCacheVerdict,
 	type ModelManagerOptions,
 	modelCacheNeedsFetch,
 	resolveModelManagerStaticCatalog,
@@ -127,7 +128,7 @@ const scenarios: Scenario[] = [
 	},
 ];
 
-describe("assessModelCache parity with resolveProviderModels", () => {
+describe("assessModelCache and assessModelCacheVerdict parity with resolveProviderModels", () => {
 	for (const scenario of scenarios) {
 		it(`agrees on fetch for ${scenario.name}`, async () => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-cache-policy-"));
@@ -153,13 +154,15 @@ describe("assessModelCache parity with resolveProviderModels", () => {
 				const cache = readModelCache<"openai-completions">(PROVIDER, TTL_MS, () => nowMs, dbPath);
 				expect(cache).not.toBeNull();
 
-				const verdict = modelCacheNeedsFetch(
-					assessModelCache(options, staticCatalog, cache, nowMs),
-					"online-if-uncached",
-				);
+				const assessment = assessModelCache(options, staticCatalog, cache, nowMs);
+				const verdict = modelCacheNeedsFetch(assessment, "online-if-uncached");
+				const verdictOnly = assessModelCacheVerdict(options, staticCatalog, cache, nowMs);
 				await resolveProviderModels(options, "online-if-uncached");
 
 				expect(verdict).toBe(scenario.expectFetch);
+				expect(modelCacheNeedsFetch(verdictOnly, "online-if-uncached")).toBe(verdict);
+				expect(verdictOnly.hasUsableFreshCache).toBe(assessment.hasUsableFreshCache);
+				expect(verdictOnly.hasUnresolvedHeaders).toBe(assessment.hasUnresolvedHeaders);
 				expect(fetches > 0).toBe(verdict);
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true });

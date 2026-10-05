@@ -8,6 +8,7 @@ import { Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -519,6 +520,64 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		});
 		return session;
 	}
+
+	test("does not block on cached ids awaiting a shared-catalog migration refresh", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("google", "google-test-key");
+		const modelsPath = path.join(tempDir, `cached-google-${Bun.nanoseconds()}.yml`);
+		const cached = getBundledModels("google");
+		const preMigrationFingerprint = fingerprintStaticModels(cached);
+		writeModelCache("google", Date.now(), cached, true, preMigrationFingerprint, path.join(tempDir, "models.db"));
+		const fetched: string[] = [];
+		const networkStarted = Promise.withResolvers<void>();
+		const networkGate = Promise.withResolvers<void>();
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				fetched.push(String(input));
+				networkStarted.resolve();
+				await networkGate.promise;
+				throw new Error("network held");
+			},
+		});
+
+		const providerModels = modelRegistry.getProviderModels("google");
+		expect(providerModels.some(model => model.id === "gemini-3.7-flash")).toBe(true);
+		expect(modelRegistry.canRefreshProvider("google")).toBe(true);
+		expect(modelRegistry.getProviderDiscoveryState("google")).toMatchObject({
+			status: "idle",
+			source: "bundled",
+			stale: false,
+		});
+		expect(modelRegistry.getProviderDiscoveryState("google")?.models).toContain("gemini-3.7-flash");
+
+		const created = reapplyOverSaved(
+			modelRegistry,
+			authStorage,
+			"google/gemini-3.7-flash",
+			"google/gemini-3.7-flash:low",
+		);
+		let session: Awaited<typeof created> | undefined;
+		try {
+			const startupResult = await Promise.race([
+				created.then(() => "startup"),
+				networkStarted.promise.then(() => "network"),
+			]);
+			expect(startupResult).toBe("startup");
+			session = await created;
+			expect(fetched).toEqual([]);
+			expect(session.model?.id).toBe("gemini-3.7-flash");
+			expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+		} finally {
+			networkGate.resolve();
+			if (session) await session.dispose();
+			else
+				await created.then(
+					createdSession => createdSession.dispose(),
+					() => {},
+				);
+		}
+	}, 30000);
 
 	test("does not fetch a stale models.yml discovery catalog just to read a saved suffix", async () => {
 		const authStorage = createInMemoryAuthStorage();

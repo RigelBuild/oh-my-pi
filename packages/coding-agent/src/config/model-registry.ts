@@ -27,7 +27,7 @@ import {
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
-	assessModelCache,
+	assessModelCacheVerdict,
 	createModelManager,
 	fingerprintStaticModels,
 	type ModelManagerOptions,
@@ -2980,7 +2980,7 @@ export class ModelRegistry {
 			this.#cacheDbPath,
 		);
 		return modelCacheNeedsFetch(
-			assessModelCache(probe.options, probe.staticCatalog, cache, Date.now()),
+			assessModelCacheVerdict(probe.options, probe.staticCatalog, cache, Date.now()),
 			"online-if-uncached",
 		);
 	}

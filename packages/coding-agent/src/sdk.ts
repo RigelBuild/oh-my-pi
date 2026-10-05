@@ -1985,13 +1985,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
 	// Exact-lookup registry APIs need the registered provider spelling.
 	const registeredProviderKey = (provider: string): string => modelRegistry.resolveProviderKey(provider);
-	// Refresh for a saved suffix only when the catalog holds no cached ids: stale rows
-	// already settle a literal suffix. Hydration marks a cacheless credential-scoped built-in `bundled`.
+	// Stale rows already settle a literal suffix; only a catalog without ids is cold.
+	// Hydration marks a cacheless credential-scoped built-in `bundled`.
 	const hasColdCatalog = (provider: string): boolean => {
 		const state = modelRegistry.getProviderDiscoveryState(provider);
 		const discoveryManager = modelRegistry.getDiscoveryProviderId(provider) !== undefined;
 		if (state === undefined) return discoveryManager;
-		if (state.status === "idle") return true;
+		if (state.status === "idle") return state.models.length === 0;
 		if (discoveryManager) return state.models.length === 0;
 		return isCredentialScopedModelCacheProvider(provider) && state.source === "bundled";
 	};
