@@ -86,19 +86,9 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 	let fallbackRacedEagerFetch = false;
 
 	/**
-	 * When set, holds the eager discovery fetch open until the resume reaches
-	 * the cold-cache fallback, so what the fallback does next is observed while
-	 * a pass over the same runtime manager is genuinely in flight. A real remote
-	 * stays open that long on its own; an in-process fake settles long before
-	 * the fallback is reached, which would hide the overlap rather than test it.
-	 *
-	 * The hold is released at `hasRefreshableProviders()` — the fallback's own
-	 * guard, which every implementation reaches before it awaits anything — so
-	 * a fallback that joins the in-flight pass always makes progress instead of
-	 * deadlocking. Releasing only schedules the parked fetch's continuation; a
-	 * fallback that instead starts its own refresh does so in the same
-	 * synchronous step, and is caught with the eager fetch provably unsettled.
-	 * Nothing here waits on wall-clock time.
+	 * Hold eager discovery until the fallback guard runs. Releasing the gate
+	 * schedules the first fetch, so a second refresh before it settles reveals
+	 * an overlap without timing assumptions.
 	 */
 	let overlapGate: { wait: Promise<void>; open: () => void } | undefined;
 

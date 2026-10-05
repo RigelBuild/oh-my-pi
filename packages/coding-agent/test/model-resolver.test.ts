@@ -1276,6 +1276,7 @@ describe("resolveAgentModelPatterns", () => {
 			const selection = resolveAgentModelSelection({
 				requestModel: "@default:high",
 				activeModelPattern: `example/runtime:${suffix}`,
+				availableModels: [baseModel, literalModel],
 			});
 			const result = resolveModelOverride(selection.patterns, { getAvailable: () => [baseModel, literalModel] });
 
@@ -1284,6 +1285,29 @@ describe("resolveAgentModelPatterns", () => {
 			expect(result.explicitThinkingLevel).toBe(true);
 			expect(selection.role).toBeUndefined();
 		}
+	});
+
+	test("inherited thinking replaces a :max or :auto selector instead of stacking a second suffix", () => {
+		for (const suffix of ["auto", "max"]) {
+			expect(
+				resolveAgentModelPatterns({
+					requestModel: "@default:high",
+					activeModelPattern: `zai/glm-5.2:${suffix}`,
+					availableModels: [],
+				}),
+			).toEqual(["zai/glm-5.2:high"]);
+		}
+	});
+
+	test("inherited thinking keeps a literal suffix id whose casing differs from the catalog", () => {
+		const [, , routerLow] = mockMaxSuffixModels;
+		expect(
+			resolveAgentModelPatterns({
+				requestModel: "@default:xhigh",
+				activeModelPattern: "NanoGPT/Coding-Router:low",
+				availableModels: [routerLow!],
+			}),
+		).toEqual(["NanoGPT/Coding-Router:low:xhigh"]);
 	});
 
 	test("comma request inheritance uses the switched parent before role fallbacks", () => {

@@ -1375,12 +1375,10 @@ function withThinkingSuffix(
 	availableModels: readonly Model<Api>[],
 ): string[] {
 	return patterns.map(pattern => {
-		const split = splitThinkingSuffix(pattern);
+		const split = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
 		if (
 			split.level !== undefined &&
-			isWholeLiteralModelId(pattern, (provider, id) =>
-				availableModels.some(model => model.provider === provider && model.id === id),
-			)
+			isWholeLiteralModelId(pattern, (provider, id) => hasProviderModelId(provider, id, availableModels))
 		) {
 			return `${pattern}:${level}`;
 		}

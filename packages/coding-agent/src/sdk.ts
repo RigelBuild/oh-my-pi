@@ -1984,6 +1984,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
 	// Exact-lookup registry APIs need the registered provider spelling.
 	const registeredProviderKey = (provider: string): string => modelRegistry.resolveProviderKey(provider);
+	// A built-in's expired cache still lists ids, enough to settle a literal suffix;
+	// only a cold built-in or a pending discovery manager is worth a suffix refresh.
+	const canRefreshForSavedSuffix = (provider: string): boolean =>
+		modelRegistry.canRefreshProvider(provider) &&
+		(modelRegistry.getDiscoveryProviderId(provider) !== undefined ||
+			modelRegistry.isProviderDiscoveryPending(provider));
 	// Notices interpolate config and session selectors; keep each on one line.
 	const singleLine = (value: string): string => value.replace(/[\t\n\r]/g, " ");
 	const sameModelReference = (left: string | undefined, right: string | undefined): boolean =>
@@ -2067,12 +2073,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const taskDepth = options.taskDepth ?? 0;
 
-	// Resolves the session/agent thinking level using the same precedence we
-	// apply at startup: explicit option → persisted session entry → restored
-	// model selector suffix → default role's explicit selector → selected
-	// model's defaultLevel → global settings default. Run again after extension
-	// role reclaim so the final model's own defaults aren't masked by an earlier
-	// fallback model's.
+	// Startup thinking precedence: explicit option → persisted session entry →
+	// restored selector suffix → default role selector → model defaultLevel →
+	// global default. Under reapply, a config-named knob outranks the session's
+	// entry and suffix. Rerun after reclaim so a fallback's defaults don't stick.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		// Under reapply, a thinking knob config names (role selector, suffixed self
 		// alias, or `defaultThinkingLevel`) outranks the session's; `inherit` names none.
@@ -2910,7 +2914,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				savedSuffixIsReadable &&
 				savedParse?.thinkingLevel !== undefined &&
-				modelRegistry.canRefreshProvider(registeredProviderKey(savedParse.provider))
+				canRefreshForSavedSuffix(registeredProviderKey(savedParse.provider))
 			) {
 				const savedProvider = registeredProviderKey(savedParse.provider);
 				await runtimeDiscoveryPromise;
@@ -2925,7 +2929,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				!savedSuffixIsReadable &&
 				savedParse?.thinkingLevel !== undefined &&
-				modelRegistry.canRefreshProvider(registeredProviderKey(savedParse.provider))
+				canRefreshForSavedSuffix(registeredProviderKey(savedParse.provider))
 			) {
 				const savedProvider = registeredProviderKey(savedParse.provider);
 				retrySavedSuffixParse = async (): Promise<void> => {

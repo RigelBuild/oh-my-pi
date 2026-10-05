@@ -6,6 +6,9 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -377,6 +380,100 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			expect(session.model?.reasoning).toBe(true);
 			expect(session.model?.thinking?.defaultLevel).toBe(ThinkingLevel.High);
 			expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("does not fetch a stale built-in catalog just to read a saved suffix", async () => {
+		// An expired built-in cache still lists its ids, so it can already tell a
+		// literal suffix from a thinking one; startup must not wait on the network.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const baseUrl = "https://vllm.example.invalid/v1";
+		const modelsPath = path.join(tempDir, `stale-builtin-${Bun.nanoseconds()}.yml`);
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({ providers: { vllm: { baseUrl, api: "openai-completions", auth: "none" } } }),
+		);
+		const cached = buildModel({
+			id: "config-pick",
+			name: "Config Pick",
+			api: "openai-completions",
+			provider: "vllm",
+			baseUrl,
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.High },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+		writeModelCache(
+			resolveModelCacheProviderId("vllm", { baseUrl }),
+			Date.now() - 3 * 24 * 60 * 60 * 1000,
+			[cached],
+			true,
+			fingerprintStaticModels([]),
+			path.join(tempDir, "models.db"),
+		);
+		const fetched: string[] = [];
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				fetched.push(String(input));
+				throw new Error("network disabled");
+			},
+		});
+		// The premise, measured: the expired row makes vllm due for a refresh.
+		expect(modelRegistry.canRefreshProvider("vllm")).toBe(true);
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "vllm/config-pick");
+		const sessionFile = path.join(tempDir, `stale-builtin-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: "stale-builtin-session", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default-model",
+					parentId: null,
+					timestamp,
+					model: "vllm/config-pick:low",
+					role: "default",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-stale-builtin"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+
+		try {
+			expect(fetched).toEqual([]);
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
 		} finally {
 			await session.dispose();
 		}
