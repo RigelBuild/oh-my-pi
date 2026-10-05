@@ -3326,8 +3326,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// match selectable. Avoids a full discovery timeout on behalf of a
 			// candidate that only lacks credentials.
 			const unresolvedCandidateCanDiscover = (): boolean => {
-				// Raw index orders top-level entries; the expanded index bounds the
-				// scan inside an alias that expands to an ordered chain.
 				const matchedRawIndex = defaultRoleSpec.model
 					? (defaultRoleSpec.matchedRawPatternIndex ?? defaultRoleSpec.matchedPatternIndex ?? 0)
 					: defaultRolePatterns.length;
@@ -3337,17 +3335,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				let expandedIndex = 0;
 				for (const [index, pattern] of defaultRolePatterns.entries()) {
 					if (index > matchedRawIndex) break;
-					// A self alias can gain a model from a late provider, unless the
-					// match itself landed on it.
 					if (isDefaultModelRoleSelfAlias(pattern)) {
 						if (index >= matchedRawIndex) break;
 						return true;
 					}
-					// Expand role aliases first: `pi/slow` is not a `pi` provider.
 					for (const candidate of resolveConfiguredModelPatterns([pattern], settings)) {
 						if (expandedIndex >= matchedExpandedIndex) return false;
 						const provider = candidate.split("/")[0];
-						// A wildcard or bare id names no provider; any refresh could supply it.
 						if (!provider || provider === candidate || provider.includes("*")) return true;
 						if (modelRegistry.canRefreshProvider(registeredProviderKey(provider))) return true;
 						expandedIndex++;
@@ -3355,15 +3349,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 				return false;
 			};
-			// `filterCandidates` gates only the configured-default retry. The
-			// arbitrary-model fallback has no candidate list but still needs a cold
-			// discovery-only provider fetched.
+			// The arbitrary-model fallback has no candidate list but still needs cold discovery.
 			const refreshDiscoveryOnce = async (filterCandidates: boolean): Promise<boolean> => {
 				if (discoveryRefreshed || !modelRegistry.hasRefreshableProviders()) return false;
 				if (filterCandidates && !unresolvedCandidateCanDiscover()) return false;
 				discoveryRefreshed = true;
-				// Join in-flight passes so the same catalog is not fetched twice. Never
-				// start runtime discovery here: a UI session defers it deliberately.
 				await runtimeDiscoveryPromise;
 				await modelRegistry.awaitBackgroundRefresh();
 				await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));

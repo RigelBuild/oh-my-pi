@@ -1398,7 +1398,10 @@ export class ModelHubComponent implements Component {
 			parseModelString(pattern, {
 				allowMaxSuffix: true,
 				allowAutoAlias: true,
-				isLiteralModelId: (provider, id) => this.#findFallbackModel(provider, id) !== undefined,
+				// Literal only when lookup resolves to that exact id, not an alias or routed wire id.
+				isLiteralModelId: (provider, id) =>
+					this.#findFallbackModel(provider, id)?.selector.toLowerCase() ===
+					`${provider.trim()}/${id.trim()}`.toLowerCase(),
 			});
 		const literal = parse(trimmed);
 		if (literal && this.#findFallbackModel(literal.provider, literal.id)) return { ...literal, upstream: undefined };

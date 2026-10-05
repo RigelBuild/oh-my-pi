@@ -1,17 +1,4 @@
-/**
- * `--reapply-config` must give a configured `modelRoles.default` supplied by an
- * EXTENSION its cold-cache discovery retry, not just one supplied by a
- * config-declared discovery provider.
- *
- * An extension that registers a provider with `fetchDynamicModels` installs a
- * RUNTIME model manager. `modelRegistry.refresh()` discovers those, but
- * `getDiscoverableProviders()` reports only the config-declared half of the
- * discovery surface. So with every implicit/config discovery provider disabled
- * or absent, a guard written against that list sees an empty array and returns
- * before the refresh can run — even though a runtime manager is registered and
- * holds the configured default. The resume then falls through to the baked
- * session model, which is exactly what the flag was asked to override.
- */
+/** Reapplying a configured default discovers extension-provided models from a cold cache. */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -303,9 +290,6 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 
 		const resumed = await resume(sessionFile, settings);
 
-		// RED (pre-fix): the unmatched bare `default` counted as a reached self
-		// alias, so `hasConfigDefaultRole` returned false and the baked model was
-		// kept instead of the resolved Anthropic fallback.
 		expect(resumed.model?.provider).toBe(fallback.provider);
 		expect(resumed.model?.id).toBe(fallback.id);
 	});

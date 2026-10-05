@@ -3580,7 +3580,7 @@ export class ModelRegistry {
 	 */
 	suppressSelector(selector: string, untilMs: number): void {
 		this.#suppressedSelectors.set(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
+			normalizeSuppressedSelector(selector, (provider, id) => this.hasModelId(provider, id)),
 			untilMs,
 		);
 	}
@@ -3589,10 +3589,7 @@ export class ModelRegistry {
 	 * Check if a model selector is currently suppressed due to rate limits.
 	 */
 	isSelectorSuppressed(selector: string): boolean {
-		const normalizedSelector = normalizeSuppressedSelector(
-			selector,
-			(provider, id) => this.find(provider, id) !== undefined,
-		);
+		const normalizedSelector = normalizeSuppressedSelector(selector, (provider, id) => this.hasModelId(provider, id));
 		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
 		if (!suppressedUntil) return false;
 		if (suppressedUntil <= Date.now()) {
@@ -3607,7 +3604,7 @@ export class ModelRegistry {
 	 */
 	clearSuppressedSelector(selector: string): void {
 		this.#suppressedSelectors.delete(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
+			normalizeSuppressedSelector(selector, (provider, id) => this.hasModelId(provider, id)),
 		);
 	}
 

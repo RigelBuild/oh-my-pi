@@ -5,6 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
+	parseRetryFallbackSelector,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
@@ -357,5 +358,29 @@ describe("retry fallback kind-role validation", () => {
 		});
 
 		expect(warnings).toEqual([]);
+	});
+});
+
+describe("retry fallback selector literal ids", () => {
+	const base = getBundledModel("openai", "gpt-4o-mini")!;
+	const router: Model = { ...base, provider: "runtime", id: "router" };
+	const literal: Model = { ...base, provider: "runtime", id: "router:low" };
+
+	it("keeps the effort suffix when lookup only routes the suffixed id to its base model", () => {
+		const routedLookup = { find: (_provider: string, id: string) => (id.startsWith("router") ? router : undefined) };
+		expect(parseRetryFallbackSelector("runtime/router:low", routedLookup)).toMatchObject({
+			provider: "runtime",
+			id: "router",
+			thinkingLevel: ThinkingLevel.Low,
+		});
+	});
+
+	it("keeps a real suffixed catalog id literal", () => {
+		const literalLookup = {
+			find: (_provider: string, id: string) => (id.toLowerCase() === "router:low" ? literal : undefined),
+		};
+		const parsed = parseRetryFallbackSelector("Runtime/Router:Low", literalLookup);
+		expect(parsed).toMatchObject({ provider: "Runtime", id: "Router:Low" });
+		expect(parsed?.thinkingLevel).toBeUndefined();
 	});
 });

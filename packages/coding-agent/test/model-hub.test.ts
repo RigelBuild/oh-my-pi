@@ -1526,6 +1526,26 @@ describe("ModelHub", () => {
 			hub.handleInput("\n");
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [`${selector}:off`]);
 		});
+
+		test("t on an entry whose suffix is only a routed wire id keeps that effort", () => {
+			const base = getBundledModel("openai", "gpt-5.5");
+			if (!base?.thinking) throw new Error("Expected bundled reasoning model openai/gpt-5.5");
+			const router: Model = { ...base, provider: "test", id: "router" };
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: ["test/router:low"] } });
+			const { hub, onFallbackChainChange } = createHub({
+				models: [router],
+				scoped: true,
+				settings,
+				// Alias-aware lookup reaches `router` through its `router:low` wire route.
+				registry: { find: (provider, id) => (provider === "test" && id.startsWith("router") ? router : undefined) },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default → its fallback entry
+			hub.handleInput("t");
+			hub.handleInput("\n"); // confirm the preselected level
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/router:low"]);
+		});
 	});
 
 	describe("mouse wheel", () => {

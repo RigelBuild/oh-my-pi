@@ -19,12 +19,14 @@ import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	factoryDroidModelManagerOptions,
+	gitLabDuoWorkflowModelManagerOptions,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
 	PROVIDER_DESCRIPTORS,
 	resolveModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { formatRoleModelValue } from "@oh-my-pi/pi-coding-agent/session/role-models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -1750,6 +1752,37 @@ describe("ModelRegistry runtime provider registration", () => {
 		}
 	});
 
+	// The manager scopes its cache by credential and workspace, so only scoped hydration can see it warm.
+	test("a GitLab Duo agent is due until its scoped cache is hydrated warm", async () => {
+		const token = "glpat-duo-test-token";
+		authStorage.keys.setRuntime("gitlab-duo-agent", token);
+		try {
+			const cold = await builtInOnly("gitlab-duo-agent");
+			await cold.hydrateCredentialScopedModelCaches();
+			expect(cold.canRefreshProvider("gitlab-duo-agent")).toBe(true);
+			expect(cold.hasRefreshableProviders()).toBe(true);
+
+			const options = gitLabDuoWorkflowModelManagerOptions({ apiKey: token });
+			expect(options.cacheProviderId).not.toBe("gitlab-duo-agent");
+			const seed = (options.staticModels ?? []).map(spec => buildModel(spec));
+			writeModelCache(
+				options.cacheProviderId!,
+				Date.now(),
+				seed,
+				true,
+				fingerprintStaticModels(seed, true),
+				path.join(tempDir, "models.db"),
+			);
+			const warm = await builtInOnly("gitlab-duo-agent");
+			await warm.hydrateCredentialScopedModelCaches();
+			expect(warm.getProviderDiscoveryState("gitlab-duo-agent")?.stale).toBe(false);
+			expect(warm.canRefreshProvider("gitlab-duo-agent")).toBe(false);
+			expect(warm.hasRefreshableProviders()).toBe(false);
+		} finally {
+			authStorage.keys.removeRuntime("gitlab-duo-agent");
+		}
+	});
+
 	// `find` routes a dotted revision spelling onto the dashed id; whole-id
 	// literal checks need exact membership or `x-5.1:high`-style keys mis-split.
 	test("hasModelId is exact membership while find routes spelling aliases", () => {
@@ -1768,5 +1801,46 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find(providerName, "router-5.1")?.id).toBe("router-5-1");
 		expect(registry.hasModelId(providerName, "router-5.1")).toBe(false);
 		expect(registry.hasModelId(providerName, "ROUTER-5-1")).toBe(true);
+	});
+
+	// Exact membership keeps a real suffix-shaped id literal; a routed wire id still parses as a suffix.
+	test("selector suppression and role saves split routed suffixes but keep literal ids", () => {
+		const providerName = "routed-suppression-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://routed.example.com/v1",
+				apiKey: "ROUTED_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						...baseModel,
+						id: "router",
+						reasoning: true,
+						thinking: {
+							mode: "effort",
+							efforts: [Effort.Low, Effort.High],
+							effortRouting: { [Effort.Low]: "router:low" },
+						},
+					},
+					{ ...baseModel, id: "literal:low" },
+				],
+			},
+			"ext://routed",
+		);
+		const router = registry.find(providerName, "router:low");
+		expect(router?.id).toBe("router");
+
+		registry.suppressSelector(`${providerName}/router:low`, Date.now() + 60_000);
+		expect(registry.isSelectorSuppressed(`${providerName}/router:high`)).toBe(true);
+		registry.suppressSelector(`${providerName}/literal:low`, Date.now() + 60_000);
+		expect(registry.isSelectorSuppressed(`${providerName}/literal:low`)).toBe(true);
+		expect(registry.isSelectorSuppressed(`${providerName}/literal`)).toBe(false);
+
+		const settings = Settings.isolated({ modelRoles: { smol: `${providerName}/router:low` } });
+		expect(formatRoleModelValue(settings, registry, "smol", router!)).toBe(`${providerName}/router:low`);
+		const literal = registry.find(providerName, "literal:low")!;
+		settings.setModelRole("smol", `${providerName}/literal:low`);
+		expect(formatRoleModelValue(settings, registry, "smol", literal)).toBe(`${providerName}/literal:low`);
 	});
 });

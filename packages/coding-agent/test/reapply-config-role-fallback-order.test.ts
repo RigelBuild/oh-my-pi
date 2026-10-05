@@ -1,17 +1,4 @@
-/**
- * `--reapply-config` must resume on the FIRST configured `modelRoles.default`
- * candidate, not on whichever candidate happened to be visible before extension
- * providers registered.
- *
- * The startup role resolution in `sdk.ts` runs before extension factories drain
- * their `pi.registerProvider(...)` queue into the registry. With an ordered
- * fallback list whose first candidate lives behind such a provider, that early
- * pass can only match a later candidate. `--reapply-config` adopts it, and the
- * post-registration retry is gated on `!model` — so without re-resolving, the
- * resume silently lands on the lower-priority configured fallback even though
- * the preferred model became available moments later.
- */
-
+/** Reapplying config preserves the configured default candidate order. */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
