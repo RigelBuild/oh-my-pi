@@ -1616,4 +1616,85 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(authStorage.credentials.has("openai-codex")).toBe(false);
 		expect(scoped.hasRefreshableProviders()).toBe(false);
 	});
+
+	// A credentialed seed-only built-in (`local`) has no fetcher, so it must not
+	// make a typo/wildcard default pay a blocking full-registry refresh.
+	test("hasRefreshableProviders ignores a credentialed fetcherless built-in", async () => {
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== "local"),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+		authStorage.keys.setRuntime("local", "local-test-key");
+		try {
+			expect(scoped.hasRefreshableProviders()).toBe(false);
+			expect(scoped.canRefreshProvider("local")).toBe(false);
+		} finally {
+			authStorage.keys.removeRuntime("local");
+		}
+	});
+
+	// A runtime provider whose catalog is already fresh adds nothing to a retry;
+	// only a cold one (no cache row yet) is worth the blocking pass.
+	test("a runtime provider stops counting once its catalog is hydrated fresh", async () => {
+		const providerName = "dynamic-warm-provider";
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [...scoped0Providers(), ...builtInProviderIds()],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+		scoped.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-responses",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "dynamic-warm-model" }],
+			},
+			"ext://runtime",
+		);
+		expect(scoped.canRefreshProvider(providerName)).toBe(true);
+
+		await scoped.refreshRuntimeProviders("online");
+		expect(scoped.find(providerName, "dynamic-warm-model")).toBeDefined();
+		await scoped.refreshRuntimeProviders("offline");
+
+		expect(scoped.canRefreshProvider(providerName)).toBe(false);
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+	});
+
+	// `find` routes a dotted revision spelling onto the dashed id; whole-id
+	// literal checks need exact membership or `x-5.1:high`-style keys mis-split.
+	test("hasModelId is exact membership while find routes spelling aliases", () => {
+		const providerName = "exact-membership-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://exact.example.com/v1",
+				apiKey: "EXACT_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "router-5-1" }],
+			},
+			"ext://exact",
+		);
+
+		expect(registry.find(providerName, "router-5.1")?.id).toBe("router-5-1");
+		expect(registry.hasModelId(providerName, "router-5.1")).toBe(false);
+		expect(registry.hasModelId(providerName, "ROUTER-5-1")).toBe(true);
+	});
 });

@@ -88,7 +88,8 @@ model and thinking are adopted only without an explicit `--model`; that flag
 pins both, while `--thinking` still takes precedence for the thinking level.
 Service tiers reapply per family regardless of `--model`; omitted families
 keep the session's tier, and `--service-tier` overrides the OpenAI tier. Without
-the flag, startup resume restores the session's own values.
+the flag, startup resume restores saved values; a legacy session without a saved
+service-tier entry instead uses the configured tiers.
 
 #### Session history
 

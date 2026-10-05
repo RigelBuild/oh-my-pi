@@ -82,7 +82,12 @@ import {
 	resolveModelRoleValue,
 	type ResolvedModelRoleValue,
 } from "./config/model-resolver";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import {
+	formatModelSelectorValue,
+	MAX_THINKING_SUFFIX_OPTIONS,
+	parseModelString,
+	splitThinkingSuffix,
+} from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily, SERVICE_TIER_FAMILIES } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
@@ -1866,6 +1871,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasExistingSession = existingBranch.length > 0;
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
+	// Reapply overrides saved knobs, so a fresh session keeps fresh precedence.
+	const reapplyConfig = options.reapplyConfig === true && hasExistingSession;
 
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
@@ -1944,18 +1951,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			defaultRoleSpec.model !== undefined
 		);
 	};
-	const adoptConfigModel = (): boolean =>
-		options.reapplyConfig === true && !hasExplicitModel && hasConfigDefaultRole();
-	/**
-	 * Whether config, with `spec` as the default role, names the thinking knob.
-	 * An `inherit` selector names none, even on a resolved role.
-	 */
+	const adoptConfigModel = (): boolean => reapplyConfig && !hasExplicitModel && hasConfigDefaultRole();
+	// Under reapply, an unresolved role still names its thinking knob by suffix:
+	// the first suffixed candidate ahead of any self alias.
+	const unresolvedRoleThinkingLevel = (): ConfiguredThinkingLevel | undefined => {
+		for (const rawPattern of defaultRolePatterns) {
+			if (!isListItemConcreteDefault(rawPattern) && parseDefaultModelRoleSelfAlias(rawPattern)) return undefined;
+			for (const pattern of resolveConfiguredModelPatterns([rawPattern], settings)) {
+				const { level } = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
+				if (level !== undefined && level !== ThinkingLevel.Inherit) return level;
+			}
+		}
+		return undefined;
+	};
+	/** The thinking level the default role names for `spec`. */
+	const configRoleThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined => {
+		if (spec.explicitThinkingLevel) return spec.thinkingLevel;
+		return reapplyConfig && !spec.model ? unresolvedRoleThinkingLevel() : undefined;
+	};
+	/** Whether config, with `spec` as the default role, names the thinking knob; `inherit` names none. */
 	const adoptsConfigThinking = (spec: ResolvedModelRoleValue): boolean => {
-		if (!options.reapplyConfig || hasExplicitModel) return false;
-		const roleLevel =
-			spec.explicitThinkingLevel && spec.thinkingLevel !== ThinkingLevel.Inherit ? spec.thinkingLevel : undefined;
+		if (!reapplyConfig || hasExplicitModel) return false;
+		const roleLevel = configRoleThinkingLevelFor(spec);
 		return (
-			roleLevel !== undefined ||
+			(roleLevel !== undefined && roleLevel !== ThinkingLevel.Inherit) ||
 			selfAliasThinkingLevelFor(spec) !== undefined ||
 			cfgDefaultThinkingLevel.isConfigured(settings)
 		);
@@ -1965,6 +1984,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
 	// Exact-lookup registry APIs need the registered provider spelling.
 	const registeredProviderKey = (provider: string): string => modelRegistry.resolveProviderKey(provider);
+	// Notices interpolate config and session selectors; keep each on one line.
+	const singleLine = (value: string): string => value.replace(/[\t\n\r]/g, " ");
 	const sameModelReference = (left: string | undefined, right: string | undefined): boolean =>
 		left !== undefined && right !== undefined && left.trim().toLowerCase() === right.trim().toLowerCase();
 	let savedSuffixIsReadable = true;
@@ -1978,7 +1999,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Under `reapplyConfig` they back an unresolved config default. A flag-off
 	// `--model` pins identity and thinking, so it reads no saved selector.
 	const sessionModelStrings =
-		hasExistingSession && (!hasExplicitModel || options.reapplyConfig === true)
+		hasExistingSession && (!hasExplicitModel || reapplyConfig)
 			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
 	let restoredSessionModelIndex = -1;
@@ -2038,7 +2059,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// was a lower-priority candidate, or when config names a default that has not
 	// been adopted yet (an all-self-alias list can gain a model later).
 	const reResolveConfigDefault = (): boolean => {
-		if (hasExplicitModel || !options.reapplyConfig) return false;
+		if (hasExplicitModel || !reapplyConfig) return false;
 		if (!settings.getModelRole("default")) return false;
 		if (!adoptConfigModel()) return true;
 		return model !== undefined && (defaultRoleSpec.matchedPatternIndex ?? 0) > 0;
@@ -2053,15 +2074,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// role reclaim so the final model's own defaults aren't masked by an earlier
 	// fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
-		// Under `reapplyConfig`, a thinking knob config names (role selector,
-		// suffixed self alias, or `defaultThinkingLevel`) outranks the session's.
-		// `defaultRoleSpec` is read live: it is re-resolved post-extension.
-		const configRoleThinkingLevel =
-			defaultRoleSpec.explicitThinkingLevel && defaultRoleSpec.thinkingLevel !== ThinkingLevel.Inherit
-				? defaultRoleSpec.thinkingLevel
-				: undefined;
-		const selfAliasThinkingLevel = selfAliasThinkingLevelFor(defaultRoleSpec);
+		// Under reapply, a thinking knob config names (role selector, suffixed self
+		// alias, or `defaultThinkingLevel`) outranks the session's; `inherit` names none.
+		const roleLevel = configRoleThinkingLevelFor(defaultRoleSpec);
 		const adoptConfigThinking = adoptsConfigThinking(defaultRoleSpec);
+		const configRoleThinkingLevel =
+			adoptConfigThinking && roleLevel === ThinkingLevel.Inherit ? undefined : roleLevel;
+		const selfAliasThinkingLevel = selfAliasThinkingLevelFor(defaultRoleSpec);
 		// Recorded so the saved-suffix discovery reparse asks the same question.
 		savedSuffixIsReadable = options.thinkingLevel === undefined && !hasThinkingEntry && !adoptConfigThinking;
 		let level = options.thinkingLevel;
@@ -3251,6 +3270,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// user's configured default with a bundled provider's default whenever
 			// a stray `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issues #3569, #6162)
+
 			// Whether `model` holds a value THIS resolver adopted, and so may be
 			// withdrawn when discovery refreshes the catalog behind it.
 			let adoptedDefaultRoleModel = false;
@@ -3270,18 +3290,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					if (model && adoptedDefaultRoleModel) {
 						model = undefined;
 						adoptedDefaultRoleModel = false;
-						modelFallbackMessage = `Model role "default" (${settings.getModelRole("default")}) is no longer available`;
+						modelFallbackMessage = `Model role "default" (${singleLine(settings.getModelRole("default") ?? "")}) is no longer available`;
 					}
 					defaultRoleSpec = reResolvedRoleSpec;
 					return false;
 				}
 				// Under `reapplyConfig`, a self alias reached first means "keep the
 				// session model": adopt nothing. With no saved model there is none to keep.
-				if (
-					options.reapplyConfig === true &&
-					sessionModelStrings.length > 0 &&
-					reachedSelfAlias(reResolvedRoleSpec)
-				) {
+				if (reapplyConfig && sessionModelStrings.length > 0 && reachedSelfAlias(reResolvedRoleSpec)) {
 					defaultRoleSpec = reResolvedRoleSpec;
 					return false;
 				}
@@ -3386,7 +3402,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// cold discovery-backed provider once if needed.
 			const keepsSessionModel =
 				adoptConfigModel() ||
-				(options.reapplyConfig === true && !hasExplicitModel && reachedSelfAlias(defaultRoleSpec) !== undefined);
+				(reapplyConfig && !hasExplicitModel && reachedSelfAlias(defaultRoleSpec) !== undefined);
 			if (!model && keepsSessionModel && sessionModelStrings.length > 0) {
 				const restoreSavedSessionModel = async (): Promise<boolean> => {
 					const enabledModelPatterns = cfgEnabledModels.get(settings);
@@ -3482,14 +3498,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `reapplyConfig` notice: the resolution above is silent, so report whether
 		// the config default was adopted or fell back. Only an adoption starts with
 		// `--reapply-config: resumed on ` (see `buildModelFallbackNotification`).
-		const bakedSessionModel = sessionModelStrings[0];
+		const bakedSessionModel = sessionModelStrings[0] === undefined ? undefined : singleLine(sessionModelStrings[0]);
 		if (adoptConfigModel() && model && bakedSessionModel) {
 			const configDefaultResolved =
 				defaultRoleSpec.model !== undefined &&
 				defaultRoleSpec.model.provider === model.provider &&
 				defaultRoleSpec.model.id === model.id;
-			const unresolvedDefault = `--reapply-config: config default "${defaultRoleValue}" did not resolve${
-				defaultRoleSpec.warning ? ` (${defaultRoleSpec.warning})` : ""
+			const unresolvedDefault = `--reapply-config: config default "${singleLine(defaultRoleValue ?? "")}" did not resolve${
+				defaultRoleSpec.warning ? ` (${singleLine(defaultRoleSpec.warning)})` : ""
 			}`;
 			if (restoredSessionModelIndex >= 0) {
 				// Index 0 is the session's active model; a later index means that one
@@ -4536,7 +4552,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// is authoritative; a session predating tier entries keeps config as before.
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
-			(options.reapplyConfig
+			(reapplyConfig
 				? mergeConfigServiceTier()
 				: hasServiceTierEntry
 					? (existingSession.serviceTier ?? {})
@@ -4749,11 +4765,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			// Recorded even when empty, as `null`, so a resume can tell "baked no
-			// tier" from a pre-tier session and does not adopt later config.
-			sessionManager.appendServiceTierChange(
-				Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
-			);
+			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
+				sessionManager.appendServiceTierChange(
+					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+				);
+			}
 		}
 
 		// Advisors share this session's extension runner (for the approval gate
@@ -4852,6 +4868,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
+			reappliedConfig: reapplyConfig,
 			sessionManager,
 			settings,
 			additionalExtensionPaths: options.additionalExtensionPaths,

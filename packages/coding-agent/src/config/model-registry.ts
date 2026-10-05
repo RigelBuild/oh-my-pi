@@ -47,7 +47,7 @@ import {
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
-import { resolveProviderModelReference } from "../config/model-resolver";
+import { hasProviderModelId, resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -179,6 +179,24 @@ const REFRESHABLE_BUILT_IN_PROVIDER_IDS: Readonly<Record<string, true>> = Object
 		})(),
 	),
 );
+
+const builtInRemoteFetcherCache = new Map<string, boolean>();
+/** Whether a credentialed built-in manager can ever fetch (seed-only `local`/`web`/`firepass` cannot). */
+function builtInProviderHasRemoteFetcher(providerId: string): boolean {
+	let hasFetcher = builtInRemoteFetcherCache.get(providerId);
+	if (hasFetcher === undefined) {
+		const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+		// `sk-` satisfies key-shape checks (alibaba-token-plan); the probe never fetches.
+		const options = descriptor?.createModelManagerOptions({ apiKey: "sk-probe", authenticated: true });
+		hasFetcher =
+			descriptor === undefined ||
+			options?.fetchDynamicModels !== undefined ||
+			options?.modelsDev !== undefined ||
+			modelsDevCatalogFallback(providerId) !== undefined;
+		builtInRemoteFetcherCache.set(providerId, hasFetcher);
+	}
+	return hasFetcher;
+}
 
 /**
  * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
@@ -2851,18 +2869,22 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Includes config discovery, extension managers, and available built-ins.
-	 * Unavailable built-ins cannot contribute models.
+	 * Whether a refresh could still change any enabled catalog: a config or
+	 * extension manager not yet hydrated fresh, or a credentialed built-in
+	 * whose fetcher is due. Warm and fetcherless providers never count.
 	 */
 	hasRefreshableProviders(): boolean {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
-		if (this.#discoverableProviders.some(provider => !disabledProviders.has(provider.provider))) return true;
+		for (const { provider } of this.#discoverableProviders) {
+			if (!disabledProviders.has(provider) && this.#isDiscoveryRefreshPending(provider)) return true;
+		}
 		for (const provider of this.#runtimeModelManagers.keys()) {
-			if (!disabledProviders.has(provider)) return true;
+			if (!disabledProviders.has(provider) && this.#isDiscoveryRefreshPending(provider)) return true;
 		}
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
 		for (const provider in REFRESHABLE_BUILT_IN_PROVIDER_IDS) {
-			if (isProviderAvailable(provider)) return true;
+			if (this.#hasDiscoveryManager(provider)) continue;
+			if (isProviderAvailable(provider) && this.#isBuiltInRefreshPending(provider)) return true;
 		}
 		return false;
 	}
@@ -2888,14 +2910,40 @@ export class ModelRegistry {
 
 	/**
 	 * Unlike hasProvider, includes built-in managers without static rows and
-	 * excludes static-only providers; narrows hasRefreshableProviders to one.
+	 * excludes static-only, fetcherless, and warm providers; narrows
+	 * hasRefreshableProviders to one.
 	 */
 	canRefreshProvider(providerId: string): boolean {
-		if (this.#hasDiscoveryManager(providerId)) return true;
+		if (this.#hasDiscoveryManager(providerId)) return this.#isDiscoveryRefreshPending(providerId);
 		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
 		return (
-			REFRESHABLE_BUILT_IN_PROVIDER_IDS[providerId] === true && this.#createProviderAvailabilityCheck()(providerId)
+			REFRESHABLE_BUILT_IN_PROVIDER_IDS[providerId] === true &&
+			this.#createProviderAvailabilityCheck()(providerId) &&
+			this.#isBuiltInRefreshPending(providerId)
 		);
+	}
+
+	/** Not hydrated from a fresh cache. A live `ok` counts: it may land after resolution, and its re-read is local. */
+	#isDiscoveryRefreshPending(providerId: string): boolean {
+		const state = this.#providerDiscoveryStates.get(providerId);
+		return state?.status !== "cached" || state.stale;
+	}
+
+	/** Mirrors the built-in manager's fetch decision under `online-if-uncached`. */
+	#isBuiltInRefreshPending(providerId: string): boolean {
+		if (!builtInProviderHasRemoteFetcher(providerId)) return false;
+		// Credential-scoped namespaces need the key; hydration records the outcome.
+		if (isCredentialScopedModelCacheProvider(providerId)) {
+			return this.#providerDiscoveryStates.get(providerId)?.stale !== false;
+		}
+		const cache = readModelCache<Api>(
+			this.#resolveStartupModelCacheProviderId(providerId),
+			BUILT_IN_DISCOVERY_CACHE_TTL_MS,
+			Date.now,
+			this.#cacheDbPath,
+		);
+		if (!cache?.fresh) return true;
+		return !cache.authoritative && Date.now() - cache.updatedAt >= BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS;
 	}
 
 	/**
@@ -2953,6 +3001,12 @@ export class ModelRegistry {
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+	}
+
+	/** Exact catalog membership for whole-id literal checks; `find` also routes aliases. */
+	hasModelId(provider: string, modelId: string): boolean {
+		if (this.#isProviderDisabled(provider)) return false;
+		return hasProviderModelId(provider, modelId, this.#modelsForProviderLookup(provider));
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */

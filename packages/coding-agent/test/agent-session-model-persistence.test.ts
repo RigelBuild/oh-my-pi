@@ -549,19 +549,84 @@ describe("AgentSession model persistence", () => {
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.Medium);
 	});
 
-	it("keeps the baked session model and thinking when reapplyConfig names an unresolvable default", async () => {
+	it("keeps the baked model but adopts an unresolved default's thinking suffix under reapplyConfig", async () => {
 		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const targetSessionFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
 
-		// Overlay names a default that resolves to no catalog model (a typo, or a
-		// model behind a provider that never registered on this boot).
 		const settings = await loadOverlaySettings({ default: "anthropic/no-such-model-xyz:xhigh" });
 		expect(settings.getModelRole("default")).toBe("anthropic/no-such-model-xyz:xhigh");
 
 		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
 
-		// Config resolved nothing, so the resume falls back to its own baked model
-		// and thinking level — never an arbitrary pickDefaultAvailableModel choice.
+		// The model knob falls back to the session's; the suffix still names thinking.
+		expect(result.session.model?.id).toBe(bakedModel.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.XHigh);
+	});
+
+	it("keeps a newline-bearing config default on one notice line", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const targetSessionFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: "anthropic/no-such-model\\nWARNING: spoofed\\tline"\n`,
+		);
+		expect(settings.getModelRole("default")).toContain("\n");
+
+		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
+
+		expect(result.modelFallbackMessage).toContain("did not resolve");
+		expect(result.modelFallbackMessage).not.toMatch(/[\n\t]/);
+	});
+
+	it("lets a resolved later candidate decide thinking over an unresolved earlier suffix", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const configModel = getAnthropicModelOrThrow("claude-opus-4-5");
+		const bareFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
+		const suffixedFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
+
+		const bare = await createStartupResumeSession(
+			bareFile,
+			await loadOverlaySettings({ default: `anthropic/no-such-model-xyz:xhigh,${modelValue(configModel)}` }),
+			{ reapplyConfig: true },
+		);
+		expect(bare.session.model?.id).toBe(configModel.id);
+		expect(bare.session.configuredThinkingLevel()).toBe(Effort.Medium);
+		await bare.session.dispose();
+		session = undefined;
+
+		const suffixed = await createStartupResumeSession(
+			suffixedFile,
+			await loadOverlaySettings({
+				default: `anthropic/no-such-model-xyz:xhigh,${modelValue(configModel)}:${Effort.Low}`,
+			}),
+			{ reapplyConfig: true },
+		);
+		expect(suffixed.session.model?.id).toBe(configModel.id);
+		expect(suffixed.session.configuredThinkingLevel()).toBe(Effort.Low);
+	});
+
+	it("keeps adopted model and thinking across a same-session reload, but not across a switch", async () => {
+		const bakedModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const configModel = getAnthropicModelOrThrow("claude-opus-4-5");
+		const reappliedFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Medium);
+		const otherFile = await writeThinkingModelSession(modelValue(bakedModel), Effort.Low);
+		const settings = await loadOverlaySettingsRaw(
+			`modelRoles:\n  default: ${modelValue(configModel)}\ndefaultThinkingLevel: ${Effort.XHigh}\n`,
+		);
+
+		const result = await createStartupResumeSession(reappliedFile, settings, { reapplyConfig: true });
+		expect(result.session.model?.id).toBe(configModel.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.XHigh);
+
+		await result.session.reload();
+		expect(result.session.model?.id).toBe(configModel.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.XHigh);
+
+		await expect(result.session.switchSession(otherFile)).resolves.toBe(true);
+		expect(result.session.model?.id).toBe(bakedModel.id);
+		expect(result.session.configuredThinkingLevel()).toBe(Effort.Low);
+
+		// Coming back is a plain resume of that transcript, not the reapplied startup.
+		await expect(result.session.switchSession(reappliedFile)).resolves.toBe(true);
 		expect(result.session.model?.id).toBe(bakedModel.id);
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.Medium);
 	});
@@ -687,6 +752,33 @@ describe("AgentSession model persistence", () => {
 			// Fresh precedence: the model's own default outranks `defaultThinkingLevel`.
 			expect(started.model?.id).toBe("claude-sonnet-4-5");
 			expect(started.configuredThinkingLevel()).toBe(Effort.Low);
+		});
+
+		it("keeps fresh-session thinking precedence for a direct SDK reapplyConfig", async () => {
+			const modelRegistry = await createDefaultLevelRegistry();
+			const settings = await loadOverlaySettingsRaw(configYaml);
+
+			const result = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage: sharedAuthStorage,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				reapplyConfig: true,
+			});
+			session = result.session;
+
+			expect(result.session.model?.id).toBe("claude-sonnet-4-5");
+			expect(result.session.configuredThinkingLevel()).toBe(Effort.Low);
 		});
 
 		it("adopts config thinking on a scoped --fork without a user --model", async () => {
@@ -878,6 +970,43 @@ describe("AgentSession model persistence", () => {
 
 		expect(result.session.serviceTierByFamily.openai).toBe("priority");
 	});
+
+	it("lets a default-off fresh session adopt a tier configured before its resume", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const freshSettings = await loadOverlaySettings({ default: modelValue(model) });
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "fresh-tier"));
+		const fresh = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
+			sessionManager,
+			settings: freshSettings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = fresh.session;
+		expect(sessionManager.getBranch().some(entry => entry.type === "service_tier_change")).toBe(false);
+		await sessionManager.ensureOnDisk();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted fresh session file");
+		await fresh.session.dispose();
+		session = undefined;
+
+		const resumed = await createStartupResumeSession(
+			sessionFile,
+			await loadOverlaySettingsRaw(`modelRoles:\n  default: ${modelValue(model)}\ntier:\n  openai: priority\n`),
+		);
+
+		expect(resumed.session.serviceTierByFamily.openai).toBe("priority");
+	});
+
 	it("restores a recorded empty tier instead of adopting later config on bare resume", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const targetSessionFile = await writeServiceTierSession(modelValue(model), null);

@@ -1,12 +1,6 @@
 /**
- * `--reapply-config` and the `inherit` thinking spelling.
- *
- * `inherit` means "name no thinking knob". A configured default role carrying
- * it resolves to a real model, so the resolver reports `explicitThinkingLevel`
- * — which would otherwise make `--reapply-config` treat config as having named
- * the knob, skip the session's persisted level, and then map `inherit` to no
- * provider effort. The session would come back with reasoning disabled by a
- * selector that asked to inherit it.
+ * `--reapply-config` and the `inherit` thinking spelling: `inherit` names no
+ * thinking knob, so the session's persisted level must survive it.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -133,9 +127,7 @@ describe("--reapply-config inherit thinking selector", () => {
 		const configured = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(anthropicModel("claude-opus-4-1")), "high");
 
-		// The role names a model AND resolves, so the resolver reports an explicit
-		// thinking level — but the level it reports is `inherit`, which names no
-		// knob. The session's own `high` must survive.
+		// A resolved role reports `inherit` as explicit, yet it names no knob.
 		const settings = await loadOverlay(`${modelValue(configured)}:inherit`);
 
 		const resumed = await resume(sessionFile, settings);
@@ -145,8 +137,7 @@ describe("--reapply-config inherit thinking selector", () => {
 	});
 
 	it("still adopts a configured thinking level that names a real knob", async () => {
-		// The inverse: a genuine suffix must keep overriding the session's level,
-		// so the fix above cannot be "ignore the role's suffix entirely".
+		// The inverse: a genuine suffix still overrides the session's level.
 		const configured = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(anthropicModel("claude-opus-4-1")), "high");
 
@@ -156,5 +147,17 @@ describe("--reapply-config inherit thinking selector", () => {
 
 		expect(resumed.model?.id).toBe(configured.id);
 		expect(resumed.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+	});
+
+	it("keeps the session's thinking level when an unresolved configured default carries inherit", async () => {
+		const baked = anthropicModel("claude-opus-4-1");
+		const sessionFile = await writeBakedSession(modelValue(baked), "high");
+
+		const settings = await loadOverlay("anthropic/no-such-model-xyz:inherit");
+
+		const resumed = await resume(sessionFile, settings);
+
+		expect(resumed.model?.id).toBe(baked.id);
+		expect(resumed.configuredThinkingLevel()).toBe(ThinkingLevel.High);
 	});
 });

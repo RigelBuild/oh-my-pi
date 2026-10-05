@@ -393,7 +393,7 @@ import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -644,6 +644,18 @@ type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
+/** Session file plus the last model/thinking/tier entry ids a reapplied startup overrode. */
+interface ReappliedConfigBaseline {
+	sessionFile: string;
+	model: string | undefined;
+	thinking: string | undefined;
+	tier: string | undefined;
+}
+
+function lastEntryId(branch: readonly SessionEntry[], type: SessionEntry["type"]): string | undefined {
+	return branch.findLast(entry => entry.type === type)?.id;
+}
+
 /**
  * Translate a `power.sleepPrevention` mode into `PowerAssertion.start` options,
  * or `undefined` when the mode asks for no assertion at all.
@@ -857,6 +869,8 @@ export class AgentSession implements SettingsScope {
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
+	/** Last model/thinking/tier entry ids after a reapplied startup; a same-session reload keeps unchanged knobs live. */
+	#reappliedConfigBaseline: ReappliedConfigBaseline | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
@@ -1587,6 +1601,16 @@ export class AgentSession implements SettingsScope {
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
+		const startupSessionFile = this.sessionManager.getSessionFile();
+		if (config.reappliedConfig && startupSessionFile) {
+			const branch = this.sessionManager.getBranch();
+			this.#reappliedConfigBaseline = {
+				sessionFile: path.resolve(startupSessionFile),
+				model: lastEntryId(branch, "model_change"),
+				thinking: lastEntryId(branch, "thinking_level_change"),
+				tier: lastEntryId(branch, "service_tier_change"),
+			};
+		}
 
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
@@ -10733,6 +10757,7 @@ export class AgentSession implements SettingsScope {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const previousReappliedConfigBaseline = this.#reappliedConfigBaseline;
 
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
@@ -10823,11 +10848,22 @@ export class AgentSession implements SettingsScope {
 				this.#closeAllProviderSessions("session reload");
 			}
 
+			// A reload of the reapplied startup session keeps each knob no new entry has changed since.
+			const reapplied =
+				!switchingToDifferentSession && this.#reappliedConfigBaseline?.sessionFile === path.resolve(sessionPath)
+					? this.#reappliedConfigBaseline
+					: undefined;
+			const reloadBranch = this.sessionManager.getBranch();
+			const keepLiveModel = reapplied !== undefined && lastEntryId(reloadBranch, "model_change") === reapplied.model;
+			const keepLiveThinking =
+				reapplied !== undefined && lastEntryId(reloadBranch, "thinking_level_change") === reapplied.thinking;
+			const keepLiveTier =
+				reapplied !== undefined && lastEntryId(reloadBranch, "service_tier_change") === reapplied.tier;
+
 			// Restore model if saved
-			const targetModelStrings = getRestorableSessionModels(
-				sessionContext.models,
-				this.sessionManager.getLastModelChangeRole(),
-			);
+			const targetModelStrings = keepLiveModel
+				? []
+				: getRestorableSessionModels(sessionContext.models, this.sessionManager.getLastModelChangeRole());
 			if (targetModelStrings.length > 0) {
 				const availableModels = this.#modelRegistry.getAvailable();
 				let match: Model | undefined;
@@ -10892,14 +10928,16 @@ export class AgentSession implements SettingsScope {
 						? AUTO_THINKING
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
-			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			if (!keepLiveThinking) this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			// Legacy sessions predate tier entries and keep configured tiers, as on startup.
 			// Once an entry exists, its value (including null) is authoritative.
-			this.#models.restoreServiceTiers(
-				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
-			);
-
+			if (!keepLiveTier) {
+				this.#models.restoreServiceTiers(
+					hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				);
+			}
 			if (switchingToDifferentSession) {
+				this.#reappliedConfigBaseline = undefined;
 				await this.#memory.resetContextForNewTranscript();
 			}
 			if (switchingToDifferentSession || didReloadConversationChange) {
@@ -10967,6 +11005,7 @@ export class AgentSession implements SettingsScope {
 			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
 			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
 			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
+			this.#reappliedConfigBaseline = previousReappliedConfigBaseline;
 			this.#checkpointState = previousCheckpointState;
 			this.#pendingRewindReport = previousPendingRewindReport;
 			this.#lastCompletedRewind = previousLastCompletedRewind;

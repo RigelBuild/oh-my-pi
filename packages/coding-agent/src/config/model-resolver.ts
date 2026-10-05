@@ -125,11 +125,8 @@ export interface ScopedModel {
 }
 
 /**
- * Whether the WHOLE `provider/id` value is a shipped model id.
- *
- * A real id can end in an effort name, so splitting the suffix first and then
- * asking about the stripped base answers for a different model. Callers that
- * classify a trailing effort suffix must check the full value first.
+ * Whether the WHOLE `provider/id` value is a shipped model id. A real id can
+ * end in an effort name, so check it before splitting a suffix.
  */
 function isWholeLiteralModelId(value: string, isLiteralModelId?: (provider: string, id: string) => boolean): boolean {
 	if (isLiteralModelId === undefined) return false;
@@ -432,6 +429,12 @@ function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<
 	}
 	tagged[kProviderWireRouteIndex] = index;
 	return index;
+}
+
+/** Exact (case-insensitive) `provider/id` membership, without aliases, routing, or spelling fallbacks. */
+export function hasProviderModelId(provider: string, modelId: string, availableModels: readonly Model<Api>[]): boolean {
+	const key = `${provider.trim().toLowerCase()}\u0000${modelId.trim().toLowerCase()}`;
+	return getProviderModelIndex(availableModels).has(key);
 }
 
 export function resolveProviderModelReference(
@@ -1123,10 +1126,9 @@ function isDefaultRolePattern(value: string): boolean {
 }
 
 /**
- * Parse a `modelRoles.default` entry that refers back to the default role
- * instead of naming a model. A suffixed alias (`*:xhigh`) still names the
- * thinking knob; `inherit` names none. The bare `default` sentinel takes no
- * suffix: `default:low` is the concrete `cursor/default` model.
+ * Parse a `modelRoles.default` entry that refers back to the default role.
+ * `*:xhigh` still names thinking; `inherit` names none; bare `default` takes no
+ * suffix (`default:low` is the concrete `cursor/default` model).
  */
 export function parseDefaultModelRoleSelfAlias(
 	value: string,
@@ -1328,9 +1330,8 @@ export function resolveConfiguredModelPatterns(
 }
 
 /**
- * As {@link resolveConfiguredModelPatterns}, but each expanded pattern keeps the
- * index of the raw pattern it came from: an alias expanding to several
- * candidates shifts every later expanded position.
+ * As {@link resolveConfiguredModelPatterns}, but each expanded pattern keeps
+ * the index of the raw pattern it came from.
  */
 export function resolveConfiguredModelPatternOrigins(
 	value: string | string[] | undefined,
@@ -1350,9 +1351,8 @@ export interface AgentModelPatternResolutionOptions {
 	activeModelPattern?: string;
 	fallbackModelPattern?: string;
 	/**
-	 * Catalog used to tell a literal model id from a thinking selector when a
-	 * requested level re-tiers an inherited pattern. Spawn paths pass
-	 * {@link modelCatalogForClassification}; omitted means no id is literal.
+	 * Catalog that tells a literal id from a thinking selector when a requested
+	 * level re-tiers an inherited pattern; omitted means no id is literal.
 	 */
 	availableModels?: readonly Model<Api>[];
 }
@@ -1365,10 +1365,9 @@ interface EffectiveAgentModelSelection {
 }
 
 /**
- * Point inherited patterns at an explicitly requested thinking level. A
- * selector suffix is replaced; a pattern that is itself a literal catalog id
- * ending in an effort name (`nanogpt/coding-router:low`) keeps its identity and
- * gets the level appended, which the recursive pattern parser reads as thinking.
+ * Point inherited patterns at a requested thinking level. A selector suffix is
+ * replaced; a literal id ending in an effort name (`nanogpt/coding-router:low`)
+ * keeps its identity and gets the level appended.
  */
 function withThinkingSuffix(
 	patterns: string[],
