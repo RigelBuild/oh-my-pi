@@ -31,6 +31,7 @@ import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-co
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { isCredentialScopedModelCacheProvider } from "@oh-my-pi/pi-catalog/provider-models";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
@@ -1984,12 +1985,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
 	// Exact-lookup registry APIs need the registered provider spelling.
 	const registeredProviderKey = (provider: string): string => modelRegistry.resolveProviderKey(provider);
-	// A built-in's expired cache still lists ids, enough to settle a literal suffix;
-	// only a cold built-in or a pending discovery manager is worth a suffix refresh.
+	// Refresh for a saved suffix only when the catalog holds no cached ids: stale rows
+	// already settle a literal suffix. Hydration marks a cacheless credential-scoped built-in `bundled`.
+	const hasColdCatalog = (provider: string): boolean => {
+		const state = modelRegistry.getProviderDiscoveryState(provider);
+		const discoveryManager = modelRegistry.getDiscoveryProviderId(provider) !== undefined;
+		if (state === undefined) return discoveryManager;
+		if (state.status === "idle") return true;
+		if (discoveryManager) return state.models.length === 0;
+		return isCredentialScopedModelCacheProvider(provider) && state.source === "bundled";
+	};
 	const canRefreshForSavedSuffix = (provider: string): boolean =>
-		modelRegistry.canRefreshProvider(provider) &&
-		(modelRegistry.getDiscoveryProviderId(provider) !== undefined ||
-			modelRegistry.isProviderDiscoveryPending(provider));
+		modelRegistry.canRefreshProvider(provider) && hasColdCatalog(provider);
 	// Notices interpolate config and session selectors; keep each on one line.
 	const singleLine = (value: string): string => value.replace(/[\t\n\r]/g, " ");
 	const sameModelReference = (left: string | undefined, right: string | undefined): boolean =>

@@ -479,6 +479,137 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		}
 	});
 
+	/** Reapply `defaultRole` over a session saved on `savedModel`, with no extensions. */
+	async function reapplyOverSaved(
+		modelRegistry: ModelRegistry,
+		authStorage: AuthStorage,
+		defaultRole: string,
+		savedModel: string,
+	) {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", defaultRole);
+		const sessionFile = path.join(tempDir, `saved-${Bun.nanoseconds()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		const entries = [
+			{ type: "session", version: 3, id: "saved-session", timestamp, cwd: tempDir },
+			{ type: "model_change", id: "m", parentId: null, timestamp, model: savedModel, role: "default" },
+		];
+		await Bun.write(sessionFile, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, `startup-${Bun.nanoseconds()}`));
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings,
+			disableExtensionDiscovery: true,
+			extensions: [],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+		});
+		return session;
+	}
+
+	test("does not fetch a stale models.yml discovery catalog just to read a saved suffix", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const baseUrl = "http://gateway.example.invalid";
+		const modelsPath = path.join(tempDir, `stale-config-${Bun.nanoseconds()}.yml`);
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					gateway: { baseUrl, api: "openai-completions", auth: "none", discovery: { type: "openai-models-list" } },
+				},
+			}),
+		);
+		const cached = buildModel({
+			id: "config-pick",
+			name: "Config Pick",
+			api: "openai-completions",
+			provider: "gateway",
+			baseUrl,
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.High },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+		writeModelCache(
+			"gateway:openai-models-list-context-v3",
+			Date.now() - 3 * 24 * 60 * 60 * 1000,
+			[cached],
+			true,
+			fingerprintStaticModels([]),
+			path.join(tempDir, "models.db"),
+		);
+		const fetched: string[] = [];
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async input => {
+				fetched.push(String(input));
+				throw new Error("network disabled");
+			},
+		});
+		// The premise, measured: the stale row makes the gateway due for a refresh.
+		expect(modelRegistry.canRefreshProvider("gateway")).toBe(true);
+
+		const session = await reapplyOverSaved(
+			modelRegistry,
+			authStorage,
+			"gateway/config-pick",
+			"gateway/config-pick:low",
+		);
+		try {
+			expect(fetched).toEqual([]);
+			expect(session.model?.id).toBe("config-pick");
+			expect(session.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("refreshes a cold credential-scoped built-in to keep a literal suffixed id", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("opencode-go", "go-test-key");
+		const listed: string[] = [];
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), {
+			fetch: async input => {
+				const url = String(input);
+				if (url !== "https://opencode.ai/zen/go/v1/models") return new Response("", { status: 404 });
+				listed.push(url);
+				return Response.json({ data: [{ id: "router:low" }, { id: "deepseek-v4-flash" }] });
+			},
+		});
+
+		const session = await reapplyOverSaved(
+			modelRegistry,
+			authStorage,
+			"opencode-go/deepseek-v4-flash",
+			"opencode-go/router:low",
+		);
+		try {
+			// Hydration found no cached ids, so only the suffix refresh can list the catalog.
+			expect(listed.length).toBeGreaterThan(0);
+			expect(modelRegistry.hasModelId("opencode-go", "router:low")).toBe(true);
+			expect(session.model?.id).toBe("deepseek-v4-flash");
+			expect(session.configuredThinkingLevel()).not.toBe(ThinkingLevel.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("marks a static-only provider as non-refreshable", () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

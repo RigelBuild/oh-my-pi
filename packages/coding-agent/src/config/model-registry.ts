@@ -25,12 +25,16 @@ import {
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
-import { type CacheEntry, getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
+	assessModelCache,
 	createModelManager,
 	fingerprintStaticModels,
 	type ModelManagerOptions,
+	type ModelManagerStaticCatalog,
 	type ModelRefreshStrategy,
+	modelCacheNeedsFetch,
+	resolveModelManagerStaticCatalog,
 } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -183,8 +187,7 @@ const REFRESHABLE_BUILT_IN_PROVIDER_IDS: Readonly<Record<string, true>> = Object
 /** The manager inputs a credentialed built-in refresh would use to decide whether to fetch. */
 interface BuiltInRefreshProbe {
 	options: ModelManagerOptions<Api>;
-	staticById: ReadonlyMap<string, Model<Api>>;
-	staticFingerprint: string;
+	staticCatalog: ModelManagerStaticCatalog<Api>;
 }
 
 const builtInRefreshProbeCache = new Map<string, BuiltInRefreshProbe | null>();
@@ -219,61 +222,11 @@ function builtInRefreshProbe(providerId: string, baseUrl: string | undefined): B
 		if (!options || (options.fetchDynamicModels === undefined && options.modelsDev === undefined)) {
 			probe = null;
 		} else {
-			// Same static slice and cache identity as `resolveProviderModels`.
-			const staticModels = options.staticModels
-				? options.staticModels.map(model => ("identity" in model ? model : buildModel(model)))
-				: (getBundledModels(providerId as Parameters<typeof getBundledModels>[0]) as Model<Api>[]);
-			const catalogFingerprint = fingerprintStaticModels(staticModels, options.dynamicModelsAuthoritative ?? false);
-			const dropIds = options.dropCachedModelIdsOnStaticMismatch;
-			probe = {
-				options,
-				staticById: new Map(staticModels.map(model => [model.id, model])),
-				staticFingerprint:
-					dropIds && dropIds.length > 0
-						? `${catalogFingerprint}:drop:${Bun.hash(dropIds.join("\0")).toString(36)}`
-						: catalogFingerprint,
-			};
+			probe = { options, staticCatalog: resolveModelManagerStaticCatalog(options) };
 		}
 		builtInRefreshProbeCache.set(key, probe);
 	}
 	return probe;
-}
-
-/** Mirrors `resolveProviderModels` under `online-if-uncached`: whether a cache row still forces a fetch. */
-function builtInCacheNeedsFetch(probe: BuiltInRefreshProbe, cache: CacheEntry<Api>, now: number): boolean {
-	const { options } = probe;
-	const fingerprintMatches = probe.staticFingerprint.length > 0 && cache.staticFingerprint === probe.staticFingerprint;
-	const omittedIds = new Set(cache.headerOmittedModelIds);
-	const unrestorableIds = new Set(cache.unrestorableHeaderModelIds);
-	const unresolvedIds = new Set<string>();
-	for (const model of cache.models) {
-		if (!omittedIds.has(model.id)) continue;
-		const unrestorable = unrestorableIds.has(model.id);
-		const source = unrestorable
-			? cache.legacyHeaderRestoreMarkers && model.requestModelId
-				? probe.staticById.get(model.requestModelId)
-				: undefined
-			: (probe.staticById.get(model.id) ??
-				(model.requestModelId ? probe.staticById.get(model.requestModelId) : undefined));
-		if (source?.headers || source?.resolveHeaders) continue;
-		if (!unrestorable && options.restorableHeaderFallback) continue;
-		const configured = options.restoreCachedHeaders?.(model);
-		if (configured?.headers || configured?.resolveHeaders) continue;
-		unresolvedIds.add(model.id);
-	}
-	const dropIds = options.dropCachedModelIdsOnStaticMismatch;
-	const needsMigration =
-		!fingerprintMatches &&
-		dropIds !== undefined &&
-		cache.models.some(model => !unresolvedIds.has(model.id) && dropIds.includes(model.id));
-	const usableFresh =
-		cache.fresh &&
-		unresolvedIds.size === 0 &&
-		!needsMigration &&
-		(!options.dynamicModelsAuthoritative || fingerprintMatches);
-	if (!usableFresh) return true;
-	if (cache.authoritative) return false;
-	return now - cache.updatedAt >= BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS;
 }
 
 /**
@@ -3026,7 +2979,10 @@ export class ModelRegistry {
 			Date.now,
 			this.#cacheDbPath,
 		);
-		return cache === null || builtInCacheNeedsFetch(probe, cache, Date.now());
+		return modelCacheNeedsFetch(
+			assessModelCache(probe.options, probe.staticCatalog, cache, Date.now()),
+			"online-if-uncached",
+		);
 	}
 
 	/**
