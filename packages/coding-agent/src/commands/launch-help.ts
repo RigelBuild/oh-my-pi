@@ -57,7 +57,7 @@ export const launchHelp = {
 		}),
 		"reapply-config": Flags.boolean({
 			description:
-				"On CLI startup resume or fork (--resume/--continue/--fork), use config-selected model, thinking, and service tiers instead of restoring the session's; apply per knob (and per family for tiers), keeping unspecified values from the session (default off)",
+				"On CLI startup resume or fork (--resume/--continue/--fork), use config-selected model, thinking, and service tiers instead of restoring the session's; apply per knob (and per family for tiers), keeping unspecified values from the session. An explicit --model pins model and thinking; --thinking still wins for thinking (default off)",
 		}),
 		"add-dir": Flags.string({
 			description: "Add a workspace directory beyond the working directory (repeatable)",
@@ -66,6 +66,7 @@ export const launchHelp = {
 		print: Flags.boolean({ char: "p", description: "Non-interactive mode: process prompt and exit" }),
 		continue: Flags.boolean({ char: "c", description: "Continue previous session" }),
 		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, path, or picker if omitted)" }),
+		fork: Flags.string({ description: "Fork a saved session (by ID prefix or path) into a new session" }),
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),

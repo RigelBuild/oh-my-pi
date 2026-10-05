@@ -303,7 +303,10 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	test("resolves a late provider after a self-alias on a fresh session with reapply disabled", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
+		// An authenticated bundled provider makes the arbitrary fallback pick differ.
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "fresh-self-alias-models.yml"));
+		expect(modelRegistry.getAvailable().some(model => model.provider === "anthropic")).toBe(true);
 		const lateDefaultProvider: ExtensionFactory = pi => {
 			pi.registerProvider("runtime-provider", {
 				baseUrl: "https://runtime.example.com/v1",

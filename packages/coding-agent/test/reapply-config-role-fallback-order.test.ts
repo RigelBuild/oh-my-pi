@@ -15,7 +15,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -28,6 +28,8 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 const EXTENSION_PROVIDER = "reapply-order-gw";
 const EXTENSION_MODEL = "reapply-order-model";
+const DYNAMIC_PROVIDER = "reapply-order-dynamic";
+const DYNAMIC_MODEL = "reapply-order-dynamic-model";
 
 describe("--reapply-config configured default fallback order", () => {
 	let tempDir: TempDir;
@@ -83,6 +85,27 @@ describe("--reapply-config configured default fallback order", () => {
 					id: EXTENSION_MODEL,
 					name: "Reapply Order Model",
 					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 8192,
+				},
+			],
+		});
+	};
+
+	/** A dynamic-only provider: its model exists only after a discovery pass. */
+	const registerDynamicProvider: ExtensionFactory = pi => {
+		pi.registerProvider(DYNAMIC_PROVIDER, {
+			baseUrl: "https://reapply-order-dynamic.example.invalid/v1",
+			apiKey: "literal-test-key",
+			api: "openai-completions",
+			fetchDynamicModels: async () => [
+				{
+					id: DYNAMIC_MODEL,
+					name: "Reapply Order Dynamic Model",
+					reasoning: true,
+					thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
 					input: ["text"],
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					contextWindow: 128_000,
@@ -172,6 +195,7 @@ describe("--reapply-config configured default fallback order", () => {
 		sessionFile: string,
 		settings: Settings,
 		reapplyConfig: boolean,
+		extensions: ExtensionFactory[] = [registerLateProvider],
 	): Promise<{ session: AgentSession; modelFallbackMessage?: string }> {
 		// A registry private to this resume: the extension provider registration
 		// must not leak into any other test's catalog.
@@ -184,7 +208,7 @@ describe("--reapply-config configured default fallback order", () => {
 			modelRegistry,
 			sessionManager,
 			settings,
-			extensions: [registerLateProvider],
+			extensions,
 			disableExtensionDiscovery: true,
 			skills: [],
 			rules: [],
@@ -341,6 +365,21 @@ describe("--reapply-config configured default fallback order", () => {
 
 		expect(resumed.model?.id).toBe(bakedModel.id);
 		expect(resumed.configuredThinkingLevel()).toBe(ThinkingLevel.Low);
+	});
+
+	it("restores a cold dynamic saved model under a self-alias-only default before any arbitrary pick", async () => {
+		// The saved provider is refreshable but not config-discoverable, so only
+		// the post-discovery fallback can restore it. RED (pre-fix): that fallback
+		// required a config-named default, so startup picked an Anthropic model.
+		const sessionFile = await writeBakedSession(`${DYNAMIC_PROVIDER}/${DYNAMIC_MODEL}`);
+		const settings = await loadOverlay("*:high");
+
+		const result = await resumeResult(sessionFile, settings, true, [registerDynamicProvider]);
+
+		expect(result.session.model?.provider).toBe(DYNAMIC_PROVIDER);
+		expect(result.session.model?.id).toBe(DYNAMIC_MODEL);
+		expect(result.session.configuredThinkingLevel()).toBe(ThinkingLevel.High);
+		expect(result.modelFallbackMessage).toBeUndefined();
 	});
 
 	it("reports that the active session model failed to restore, not that it was kept", async () => {

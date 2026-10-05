@@ -232,11 +232,9 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
-			// `hasUI: true` keeps online runtime discovery deferred to the
-			// post-paint starter, so nothing populates the runtime catalog before
-			// the guard under test runs. Without it the background pass would mask
-			// the bug. A non-UI resume instead starts that pass eagerly, which is
-			// the case the single-fetch test below covers.
+			// `hasUI: true` defers online runtime discovery past the guard under
+			// test, so no background pass masks the bug. The single-fetch test
+			// below covers the eager non-UI pass.
 			hasUI: options?.hasUI ?? true,
 			reapplyConfig: true,
 		});
@@ -262,12 +260,9 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 	});
 
 	it("adopts an all-self-alias default a late provider registration resolves", async () => {
-		// `"default,@default"` is every-pattern-a-self-alias, so before extensions
-		// register it names no model and classifies as "no config default". An
-		// extension can then register a provider whose bare id IS `default`, which
-		// makes the same list resolve — so the classification has to be re-asked
-		// after registration rather than captured at startup. Captured, the baked
-		// model was restored and the retry skipped for having a model already.
+		// `"default,@default"` names no model until an extension registers a
+		// provider whose bare id is `default`. Classification must be re-asked
+		// after registration; captured early, the baked model won.
 		dynamicFetches = 0;
 		const bakedModel = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
@@ -296,15 +291,9 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 	});
 
 	it("adopts a later candidate when a bare default list item did not resolve", async () => {
-		// `default,anthropic/<real-id>`: the bare `default` is a concrete selector
-		// inside a LIST — `resolveModelRoleValue` reserves the self-reference
-		// meaning for the whole unsplit value only. This suite's auth store holds
-		// no cursor key, so the bundled `cursor/default` is unavailable and the
-		// bare `default` falls through; the resolver correctly matches the later
-		// Anthropic candidate. The self-alias scan must NOT reclassify the
-		// unmatched bare `default` as a reached self alias — doing so made
-		// `--reapply-config` retain the baked session model instead of adopting
-		// the configured fallback.
+		// Inside a list, bare `default` is a concrete selector, not a self alias.
+		// No cursor key exists, so it falls through to the Anthropic candidate;
+		// the self-alias scan must not reclassify it and keep the baked model.
 		dynamicFetches = 0;
 		const bakedModel = anthropicModel("claude-opus-4-1");
 		const fallback = anthropicModel("claude-sonnet-4-5");
@@ -322,16 +311,10 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 	});
 
 	it("discovers a cold provider named with different casing than the candidate's", async () => {
-		// `<PROVIDER-UPPERCASED>/model,anthropic/<fallback>`: the higher-priority
-		// candidate names the cold runtime provider but in a DIFFERENT case than it
-		// was registered (`reapply-runtime-gw`). The static pass matches the
-		// already-available anthropic fallback at index 1, leaving the cold
-		// candidate ahead of the match. The discovery filter extracts its provider
-		// and asks `canRefreshProvider`, which does exact map/set lookups while
-		// model resolution is case-insensitive — so the uppercased spelling was
-		// judged non-refreshable, the retry skipped, and the lower-priority
-		// fallback kept. Normalizing the provider before the check restores the
-		// discovery pass, which resolves the candidate case-insensitively.
+		// The higher-priority candidate names the cold runtime provider in a
+		// different case. `canRefreshProvider` does exact lookups while model
+		// resolution is case-insensitive, so the provider must be normalized
+		// before the check or discovery is skipped and the fallback kept.
 		dynamicFetches = 0;
 		const bakedModel = anthropicModel("claude-opus-4-1");
 		const fallback = anthropicModel("claude-sonnet-4-5");
@@ -349,11 +332,9 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 		expect(resumed.model?.id).toBe(RUNTIME_MODEL);
 	});
 
-	// A non-UI resume starts online runtime discovery eagerly, so by the time the
-	// cold-cache fallback runs, a pass over the very same runtime manager is
-	// already in flight. The fallback must reuse that pass rather than launch a
-	// second one: two concurrent discoveries fetch the extension's remote twice
-	// and race each other's catalog and cache writes.
+	// A non-UI resume starts runtime discovery eagerly, so the cold-cache
+	// fallback must reuse that in-flight pass. A second pass fetches the remote
+	// twice and races the first one's catalog and cache writes.
 	it("reuses the in-flight non-UI discovery instead of launching a second pass", async () => {
 		const bakedModel = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));

@@ -1641,12 +1641,9 @@ describe("resolveAgentModelPatterns", () => {
 		});
 	});
 
-	// The re-tiering above splits a trailing effort name off the inherited
-	// pattern, but a real model id can END in one. `nanogpt/coding-router:low`
-	// and the bare `nanogpt/coding-router` are BOTH shipped, so REPLACING the
-	// suffix does not re-tier the inherited model — it silently selects a
-	// different one. Availability is the discriminator, and the requested tier
-	// is appended instead of replacing identity.
+	// A real model id can end in an effort name: `nanogpt/coding-router:low` and
+	// `nanogpt/coding-router` both ship, so replacing the suffix selects another
+	// model. Availability decides; the requested tier is appended, not swapped in.
 	describe("suffixed self alias inheriting a literal model id", () => {
 		const routerLow = createOpusModel("nanogpt", "coding-router:low", "Coding Router Low");
 		const routerBare = createOpusModel("nanogpt", "coding-router", "Coding Router");
@@ -1685,11 +1682,9 @@ describe("resolveAgentModelPatterns", () => {
 		});
 	});
 
-	// `default` is also a concrete model id (`cursor/default`), so a bare
-	// `default:<level>` names that model at that tier — not the default role.
-	// `resolveModelRoleValue` reserves only the exact unsuffixed `default` as the
-	// sentinel, so an agent using the suffixed selector must spawn on the
-	// resolvable model rather than inheriting the session's.
+	// `default` is also a concrete id (`cursor/default`), and only exact unsuffixed
+	// `default` is the sentinel. An agent using `default:<level>` must spawn on
+	// that resolvable model, not inherit the session's.
 	describe("suffixed bare `default` agent models", () => {
 		const cursorDefault = getBundledModel("cursor", "default");
 		if (!cursorDefault) throw new Error("Expected cursor/default to exist in the bundled catalog");
@@ -2524,11 +2519,9 @@ describe("parseModelString", () => {
 			expect(result).toEqual({ provider: "nanogpt", id: "coding-router:max" });
 		});
 
-		// `:low` is a STRICT effort name, so the split runs without any opt-in
-		// flag. A literal id ending in one must still win: the whole-id check has
-		// to precede the split, or the parse reports the stripped base
-		// (`coding-router`) at `low` — a different model, and a thinking level the
-		// value never named.
+		// `:low` is a strict effort name, so the split needs no opt-in. The whole-id
+		// check must run first, or the parse reports `coding-router` at `low`:
+		// a different model and a thinking level the value never named.
 		test("preserves literal model ids ending in a strict effort name", () => {
 			const result = parseModelString("nanogpt/coding-router:low", {
 				isLiteralModelId: (provider, id) => provider === "nanogpt" && id === "coding-router:low",
@@ -2643,12 +2636,9 @@ describe("isDefaultModelRoleSelfAlias", () => {
 		expect(isDefaultModelRoleSelfAlias(`${LEGACY_MODEL_ROLE_ALIAS_PREFIX}default`)).toBe(true);
 	});
 
-	// A thinking suffix is allowed on the ALIAS spellings, which name no model of
-	// their own: `resolveExplicitModelRole("*:low")` resolves to `default`, so the
-	// selector still names the default role and still resolves to no model. A
-	// predicate that compares the unsplit string would call `*:low` a concrete
-	// model knob and send `--reapply-config` down the "config named a model"
-	// path, where the circular selector cannot resolve.
+	// Alias spellings accept a thinking suffix: `*:low` still names the default
+	// role and resolves to no model. Comparing the unsplit string would call it a
+	// concrete model knob and send `--reapply-config` down the config-model path.
 	test("classifies suffixed alias spellings the alias parser accepts", () => {
 		for (const suffix of ["low", "xhigh", "max", "auto"]) {
 			expect(isDefaultModelRoleSelfAlias(`${DEFAULT_MODEL_ROLE_ALIAS}:${suffix}`)).toBe(true);
@@ -2657,13 +2647,9 @@ describe("isDefaultModelRoleSelfAlias", () => {
 		}
 	});
 
-	// The bare `default` sentinel is the one spelling that does NOT take a
-	// suffix: `default` is also a real bundled model id (`cursor/default`), and
-	// only the exact unsuffixed string is reserved as the sentinel — see
-	// `resolveModelRoleValue`, which resolves `default:low` as that concrete
-	// model at low. Classifying it as a self alias makes `--reapply-config`
-	// retain the session model instead of adopting the config-resolved one, and
-	// makes an agent definition using the selector inherit the parent's model.
+	// Bare `default` takes no suffix: `default:low` resolves to the concrete
+	// `cursor/default` model. Calling it a self alias would make reapply keep the
+	// session model and make agent definitions inherit the parent's model.
 	test("does not classify a suffixed bare `default` as a self alias", () => {
 		for (const suffix of ["low", "xhigh", "max", "auto"]) {
 			expect(isDefaultModelRoleSelfAlias(`default:${suffix}`)).toBe(false);

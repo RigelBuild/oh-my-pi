@@ -16,6 +16,8 @@ const OLLAMA_ENDPOINT = "http://127.0.0.1:11434";
 const DISCOVERED_MODEL = "phi3";
 
 let discoveryFetches = 0;
+/** Provider ids passed to scoped `refreshDiscoverableProviders` calls. */
+let refreshedProviders: string[] = [];
 
 describe("--reapply-config cold-discovery configured default", () => {
 	let tempDir: TempDir;
@@ -38,6 +40,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 
 	beforeEach(() => {
 		discoveryFetches = 0;
+		refreshedProviders = [];
 		tempDir = TempDir.createSync("@omp-reapply-cold-");
 	});
 
@@ -185,6 +188,12 @@ describe("--reapply-config cold-discovery configured default", () => {
 			state.fallbackSawJoin ??= joined;
 			return await realRefresh(strategy);
 		});
+		const realScopedRefresh = registry.refreshDiscoverableProviders.bind(registry);
+		spyOn(registry, "refreshDiscoverableProviders").mockImplementation(async (providerIds, strategy) => {
+			const ids = [...providerIds];
+			refreshedProviders.push(...ids);
+			return await realScopedRefresh(ids, strategy);
+		});
 		return state;
 	}
 
@@ -326,6 +335,9 @@ describe("--reapply-config cold-discovery configured default", () => {
 
 		expect(resumed.model?.provider).toBe(allowedModel.provider);
 		expect(fallbackMessage).toContain(`${modelValue(forbiddenModel)} could not be restored`);
+		// RED (pre-fix): the saved-model retry refreshed `anthropic` although the
+		// catalog already held the excluded model, so discovery could not help.
+		expect(refreshedProviders).not.toContain(forbiddenModel.provider);
 	});
 
 	it("restores a saved model from cold discovery when the configured default is unresolved", async () => {

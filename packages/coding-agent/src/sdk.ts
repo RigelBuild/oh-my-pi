@@ -1916,11 +1916,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// is a concrete selector (`cursor/default`) like any other candidate.
 	const isListItemConcreteDefault = (pattern: string): boolean =>
 		pattern === DEFAULT_MODEL_ROLE && defaultRolePatterns.length > 1;
-	// The first self alias the fallback reached before the matched entry, by RAW
-	// position (an alias expanding to several candidates shifts expanded indexes).
-	// A reached alias means "keep the session model", optionally at its suffix
-	// level. The winner's own entry counts only when its expansion matched, not
-	// the entry itself (`default` can directly match `cursor/default`).
+	// The first self alias reached before the matched entry, by RAW position
+	// (alias expansion shifts expanded indexes). It means "keep the session
+	// model", optionally at its suffix level. The winner's own entry counts only
+	// when its expansion matched (`default` can directly match `cursor/default`).
 	const reachedSelfAlias = (spec: ResolvedModelRoleValue): { level?: ConfiguredThinkingLevel } | undefined => {
 		const matchedIndex = spec.model
 			? (spec.matchedRawPatternIndex ?? spec.matchedPatternIndex ?? 0)
@@ -1974,12 +1973,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
-	// Identify session model strings to restore in fallback order. We do an
-	// initial pass here so model-dependent setup (thinking-level resolution,
-	// host preconnect) can use the restored model; extension-registered
-	// providers aren't visible yet, so we retry the preferred candidates once
-	// extensions register below. Under `reapplyConfig` the config default wins
-	// first, and these stay the fallback when it resolves to nothing. A flag-off
+	// Session model strings in fallback order. The early pass feeds model-dependent
+	// setup; extension providers register later, so candidates are retried below.
+	// Under `reapplyConfig` they back an unresolved config default. A flag-off
 	// `--model` pins identity and thinking, so it reads no saved selector.
 	const sessionModelStrings =
 		hasExistingSession && (!hasExplicitModel || options.reapplyConfig === true)
@@ -3305,11 +3301,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return true;
 			};
 
-			// Cold-cache discovery race (issues #6114, #6162): a discovery provider
-			// ships no static models, so the static+cached catalog could not see the
-			// configured default. Take at most one cache-aware pass per session
-			// creation. `hasRefreshableProviders()` also covers extension runtime
-			// providers, which `getDiscoverableProviders()` omits.
+			// Cold-cache discovery race (#6114, #6162): a discovery provider ships no
+			// static models, so take at most one cache-aware pass per session creation.
+			// `hasRefreshableProviders()` also covers extension runtime providers,
+			// which `getDiscoverableProviders()` omits.
 			let discoveryRefreshed = false;
 			// Whether discovery could still make a candidate AHEAD of the current
 			// match selectable. Avoids a full discovery timeout on behalf of a
@@ -3386,10 +3381,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			}
 
-			// Under `reapplyConfig` the early restore was skipped. The config default
-			// did not resolve, so fall back to the session's own model rather than an
-			// arbitrary pick, fetching a cold discovery-backed provider once if needed.
-			if (!model && adoptConfigModel() && sessionModelStrings.length > 0) {
+			// Under `reapplyConfig`, an unresolved config default or a reached self
+			// alias keeps the session's own model over an arbitrary pick, fetching a
+			// cold discovery-backed provider once if needed.
+			const keepsSessionModel =
+				adoptConfigModel() ||
+				(options.reapplyConfig === true && !hasExplicitModel && reachedSelfAlias(defaultRoleSpec) !== undefined);
+			if (!model && keepsSessionModel && sessionModelStrings.length > 0) {
 				const restoreSavedSessionModel = async (): Promise<boolean> => {
 					const enabledModelPatterns = cfgEnabledModels.get(settings);
 					const allowedModels =
@@ -3413,6 +3411,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							hasModelAuth(restoredModel)
 						) {
 							model = restoredModel;
+							modelFallbackMessage = undefined;
 							restoredSessionModelIndex = i;
 							restoredSessionThinkingLevel = parsedModel.thinkingLevel;
 							adoptThinkingForModel(restoredModel);
@@ -3431,6 +3430,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
 						});
 						if (!parsedModel) continue;
+						// Already in the catalog: discovery cannot make an excluded model eligible.
+						if (modelRegistry.find(parsedModel.provider, parsedModel.id)) continue;
 						const providerKey = registeredProviderKey(parsedModel.provider);
 						if (modelRegistry.canRefreshProvider(providerKey)) candidateProviders.add(providerKey);
 					}

@@ -1512,20 +1512,14 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
 	});
 
-	// The cold-cache discovery guard in `createAgentSession` asks this predicate.
-	// `getDiscoverableProviders()` projects only the CONFIG-declared half, so an
-	// extension supplying the configured default through `fetchDynamicModels`
-	// left the guard blind: with every config provider disabled that list
-	// contributes nothing, the guard skipped the refresh that DOES cover runtime
-	// managers, and the resume fell through to the baked-model fallback.
+	// The cold-cache discovery guard asks this predicate. `getDiscoverableProviders()`
+	// covers only config-declared providers, so a runtime `fetchDynamicModels`
+	// provider left the guard blind and resume fell back to the baked model.
 	test("hasRefreshableProviders counts a runtime provider when every other provider is disabled", async () => {
 		const providerName = "dynamic-refreshable-provider";
-		// Disable every config-declared discovery provider AND every built-in
-		// manager, so ONLY a runtime manager can make the registry refreshable —
-		// the exact case the guard's old `getDiscoverableProviders().length === 0`
-		// test got wrong. The built-in half has to go too: an ambient credential
-		// for any descriptor-backed provider would otherwise open the gate on its
-		// own and the runtime registration below would prove nothing.
+		// Disable every config and built-in provider so only the runtime manager
+		// can make the registry refreshable; an ambient built-in credential would
+		// otherwise open the gate and prove nothing.
 		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
 			fetch: offlineFetch,
 			settings: await Settings.loadIsolated({
@@ -1554,13 +1548,9 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(scoped.hasRefreshableProviders()).toBe(true);
 	});
 
-	// `refresh()` also discovers descriptor-backed providers through its built-in
-	// model managers, which neither the config-declared list nor the runtime
-	// managers report. A configured default that exists only in a built-in
-	// dynamic catalog — a newly discovered Codex or Copilot model on a cold
-	// cache — therefore looked unrefreshable: the guard skipped the only
-	// synchronous online pass, the resume restored its baked model, and the
-	// later background refresh does not redo model selection.
+	// `refresh()` also discovers descriptor-backed built-in providers, which neither
+	// list reports. A default only in a cold built-in catalog (new Codex/Copilot
+	// model) looked unrefreshable, so resume kept its baked model.
 	test("hasRefreshableProviders counts a credentialed built-in provider", async () => {
 		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
 			fetch: offlineFetch,

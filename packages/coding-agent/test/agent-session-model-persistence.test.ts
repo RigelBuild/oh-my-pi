@@ -3,8 +3,11 @@ import { type Api, type AssistantMessage, Effort, type Model, type ServiceTier }
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { ScopedModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -604,6 +607,121 @@ describe("AgentSession model persistence", () => {
 		// named stays the session's own, not the adopted model's default.
 		expect(result.session.model?.id).toBe(overlayModel.id);
 		expect(result.session.configuredThinkingLevel()).toBe(Effort.XHigh);
+	});
+
+	describe("CLI --reapply-config startup scope", () => {
+		const bakedSelector = "anthropic/claude-sonnet-4-5";
+		const configYaml = `modelRoles:\n  default: ${bakedSelector}\ndefaultThinkingLevel: ${Effort.XHigh}\n`;
+
+		/** A registry whose baked model carries its own `thinking.defaultLevel`. */
+		async function createDefaultLevelRegistry(): Promise<ModelRegistry> {
+			const baseline = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			if (!baseline.thinking) throw new Error("Expected claude-sonnet-4-5 to support thinking");
+			const modelsPath = path.join(tempDir.path(), `models-default-level-${Bun.nanoseconds()}.yml`);
+			await Bun.write(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						anthropic: {
+							modelOverrides: {
+								[baseline.id]: { thinking: { ...baseline.thinking, defaultLevel: Effort.Low } },
+							},
+						},
+					},
+				}),
+			);
+			const registry = new ModelRegistry(sharedAuthStorage, modelsPath);
+			expect(registry.find("anthropic", baseline.id)?.thinking?.defaultLevel).toBe(Effort.Low);
+			return registry;
+		}
+
+		async function startFromCli(
+			argv: string[],
+			sessionManager: SessionManager,
+			modelRegistry: ModelRegistry,
+			settings: Settings,
+			scopedModels: ScopedModel[] = [],
+		): Promise<AgentSession> {
+			const options = await buildSessionOptions(
+				parseArgs(["--cwd", tempDir.path(), ...argv]),
+				scopedModels,
+				sessionManager,
+				modelRegistry,
+				settings,
+			);
+			const result = await createAgentSession({
+				...options,
+				agentDir: tempDir.path(),
+				authStorage: sharedAuthStorage,
+				modelRegistry,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+			session = result.session;
+			return result.session;
+		}
+
+		async function forkBakedSession(): Promise<SessionManager> {
+			const sourceFile = await writeThinkingModelSession(bakedSelector, Effort.Medium);
+			return SessionManager.forkFrom(sourceFile, tempDir.path(), path.join(tempDir.path(), "forked"));
+		}
+
+		it("keeps fresh-session thinking precedence when --reapply-config is passed", async () => {
+			const modelRegistry = await createDefaultLevelRegistry();
+			const settings = await loadOverlaySettingsRaw(configYaml);
+
+			const started = await startFromCli(
+				["--reapply-config"],
+				SessionManager.inMemory(tempDir.path()),
+				modelRegistry,
+				settings,
+			);
+
+			// Fresh precedence: the model's own default outranks `defaultThinkingLevel`.
+			expect(started.model?.id).toBe("claude-sonnet-4-5");
+			expect(started.configuredThinkingLevel()).toBe(Effort.Low);
+		});
+
+		it("adopts config thinking on a scoped --fork without a user --model", async () => {
+			const modelRegistry = await createDefaultLevelRegistry();
+			const settings = await loadOverlaySettingsRaw(configYaml);
+			const scopedModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			if (!scopedModel) throw new Error("Expected the scoped model in the registry");
+
+			const started = await startFromCli(
+				["--fork", "parent", "--models", bakedSelector, "--reapply-config"],
+				await forkBakedSession(),
+				modelRegistry,
+				settings,
+				[{ model: scopedModel, explicitThinkingLevel: false }],
+			);
+
+			// The scope's own pick is not a user `--model`, so the thinking knob reapplies.
+			expect(started.model?.id).toBe("claude-sonnet-4-5");
+			expect(started.configuredThinkingLevel()).toBe(Effort.XHigh);
+		});
+
+		it("keeps the forked thinking level when the user pins --model", async () => {
+			const modelRegistry = await createDefaultLevelRegistry();
+			const settings = await loadOverlaySettingsRaw(configYaml);
+
+			const started = await startFromCli(
+				["--fork", "parent", "--model", bakedSelector, "--reapply-config"],
+				await forkBakedSession(),
+				modelRegistry,
+				settings,
+			);
+
+			expect(started.model?.id).toBe("claude-sonnet-4-5");
+			expect(started.configuredThinkingLevel()).toBe(Effort.Medium);
+		});
 	});
 
 	it("adopts the config thinking level over a saved selector suffix when config names both knobs", async () => {
