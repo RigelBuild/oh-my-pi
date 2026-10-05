@@ -1,0 +1,1 @@
+- RIG-4608: In Progress — fork half of RIG-2864 (authorize(req) → CallerIdentity seam replacing bearerTokens); ws-rig2864 off fork main 6d8552d7; unblocks RIG-3118
