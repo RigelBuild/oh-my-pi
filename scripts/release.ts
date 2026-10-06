@@ -282,10 +282,7 @@ export function bumpCanaryVersion(current: string): string {
 	}
 	return `${major}.${minor}.${patch + 1}-canary.1`;
 }
-export function resolveReleaseVersion(
-	versionOrBump: string,
-	latestTag: string,
-): { version: string; note: string } {
+export function resolveReleaseVersion(versionOrBump: string, latestTag: string): { version: string; note: string } {
 	if (versionOrBump === "major" || versionOrBump === "minor" || versionOrBump === "patch") {
 		if (!latestTag)
 			throw new Error(`cannot ${versionOrBump}-bump with no prior v* tag; pass an explicit version first.`);

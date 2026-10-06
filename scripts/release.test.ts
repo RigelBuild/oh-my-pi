@@ -115,10 +115,13 @@ describe("release reliability helpers", () => {
 	test("does not retry permanent GitHub failures", async () => {
 		let attempts = 0;
 		await expect(
-			runWithTransientRetry(async () => {
-				attempts++;
-				throw new Error("HTTP 404 Not Found");
-			}, { sleep: async () => {} }),
+			runWithTransientRetry(
+				async () => {
+					attempts++;
+					throw new Error("HTTP 404 Not Found");
+				},
+				{ sleep: async () => {} },
+			),
 		).rejects.toThrow("HTTP 404");
 		expect(attempts).toBe(1);
 		expect(isTransientGhError("HTTP 404 Not Found")).toBe(false);
