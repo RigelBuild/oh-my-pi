@@ -284,6 +284,10 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 				if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) i++;
 				continue;
 			}
+			if (arg === "--session-id" && (i + 1 >= args.length || args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG)) {
+				result.invalidFlagValues.push("--session-id requires an id.");
+				continue;
+			}
 			if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) {
 				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
 				i = consumed.index;

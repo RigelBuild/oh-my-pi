@@ -131,10 +131,12 @@ export function mintSessionId(): string {
 
 // Caller-chosen ids become part of the session file name.
 const SESSION_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+// The atomic writer prefixes '.' and appends a Snowflake plus '.tmp' to the timestamped JSONL name.
+const MAX_SESSION_ID_LENGTH = 202;
 
 /** Throw unless `id` is safe to use as a caller-chosen session id. */
 export function assertValidSessionId(id: string): void {
-	if (!SESSION_ID_RE.test(id)) {
+	if (id.length > MAX_SESSION_ID_LENGTH || !SESSION_ID_RE.test(id)) {
 		throw new Error(
 			`Invalid session id "${id}": use letters, digits, '.', '_' and '-', starting and ending with a letter or digit`,
 		);

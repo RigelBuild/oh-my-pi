@@ -253,6 +253,13 @@ describe("--session-id", () => {
 		expect(equals.messages).toEqual(["hello"]);
 		expect(equals.unrecognizedFlags).toEqual([]);
 	});
+	it("rejects a missing ID instead of starting an unrelated session", () => {
+		const parsed = parseArgs(["--session-id"]);
+		let stderr = "";
+		expect(reportInvalidFlagValues(parsed, text => (stderr += text))).toBe(true);
+		expect(stderr).toContain("--session-id requires an id");
+		expect(parsed.sessionId).toBeUndefined();
+	});
 });
 
 describe("restartArgv (/restart relaunch argv)", () => {

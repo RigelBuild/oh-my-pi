@@ -145,6 +145,18 @@ describe("--session-id", () => {
 		});
 	});
 
+	it("accepts the longest filename-safe ID and rejects the next length", async () => {
+		const longest = "a".repeat(202);
+		const manager = await createSessionManager(args({ sessionId: longest, sessionDir }), cwd, stubSettings);
+		if (!manager) throw new Error("Expected a session manager");
+		managers.push(manager);
+		manager.appendMessage({ role: "user", content: "persist", timestamp: Date.now() });
+		await manager.rewriteEntries();
+		expect((await jsonlFiles(sessionDir))[0]?.length).toBe(233);
+		await expect(
+			createSessionManager(args({ sessionId: `${longest}a`, sessionDir }), cwd, stubSettings),
+		).rejects.toThrow(/Invalid session id/);
+	});
 	it("validates caller-chosen IDs at SessionManager APIs", async () => {
 		expect(() => SessionManager.create(cwd, sessionDir, undefined, { id: "x/../../escape" })).toThrow();
 		const source = SessionManager.create(cwd, sessionDir);
