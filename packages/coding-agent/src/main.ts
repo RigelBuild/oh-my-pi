@@ -111,7 +111,12 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import {
+	assertValidSessionId,
+	ForkSourceNotFoundError,
+	SessionManager,
+	SessionMoveRefusedError,
+} from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -851,8 +856,12 @@ function exitForSessionResolutionError(error: SessionResolutionError): never {
 	process.exit(1);
 }
 
-function resolveForeignSessionSource(
-	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume">,
+type SessionIdArgs = Args & { sessionId?: string };
+
+export function resolveForeignSessionSource(
+	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume"> & {
+		sessionId?: string;
+	},
 ): ForeignSessionSource | undefined {
 	if (parsed.fromClaude && parsed.fromCodex) {
 		throw new SessionResolutionError("--from-claude and --from-codex cannot be used together");
@@ -862,8 +871,10 @@ function resolveForeignSessionSource(
 	if (parsed.noSession) {
 		throw new SessionResolutionError(`--from-${source} requires session persistence`);
 	}
-	if (parsed.continue || parsed.resume || parsed.fork) {
-		throw new SessionResolutionError(`--from-${source} cannot be combined with --continue, --resume, or --fork`);
+	if (parsed.continue || parsed.resume || parsed.fork || parsed.sessionId !== undefined) {
+		throw new SessionResolutionError(
+			`--from-${source} cannot be combined with --continue, --resume, --fork, or --session-id`,
+		);
 	}
 	return source;
 }
@@ -1174,6 +1185,29 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
 		throw new SessionResolutionError("--continue requires session persistence");
 	}
 }
+
+function validateSessionIdArgs(parsed: SessionIdArgs): void {
+	if (parsed.sessionId === undefined) return;
+	const conflicts = [
+		parsed.continue ? "--continue" : undefined,
+		parsed.resume !== undefined ? "--resume" : undefined,
+		parsed.noSession ? "--no-session" : undefined,
+	].filter(flag => flag !== undefined);
+	if (conflicts.length > 0) {
+		throw new SessionResolutionError(`--session-id cannot be combined with ${conflicts.join(", ")}`);
+	}
+	try {
+		assertValidSessionId(parsed.sessionId);
+	} catch (err) {
+		throw new SessionResolutionError(`--session-id: ${err instanceof Error ? err.message : String(err)}`);
+	}
+}
+
+async function findLocalSessionById(id: string, cwd: string, sessionDir?: string): Promise<string | undefined> {
+	const sessions = await SessionManager.list(cwd, sessionDir);
+	return sessions.find(session => session.id === id)?.path;
+}
+
 /**
  * Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager.
  *
@@ -1181,20 +1215,27 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
  * before extensions establish whether a built-in-named flag belongs to them.
  */
 export async function createSessionManager(
-	parsed: Args,
+	parsed: SessionIdArgs,
 	cwd: string,
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,
 	options: { nativeFlagOwnership?: "preliminary" | "resolved" } = {},
 ): Promise<SessionManager | undefined> {
+	validateSessionIdArgs(parsed);
+	const sessionId = parsed.sessionId;
+
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
 		}
+		if (sessionId !== undefined && (await findLocalSessionById(sessionId, cwd, parsed.sessionDir))) {
+			throw new SessionResolutionError(`Session already exists with id "${sessionId}".`);
+		}
+		const forkOptions = sessionId === undefined ? undefined : { id: sessionId };
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			try {
-				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir, undefined, forkOptions);
 			} catch (err) {
 				if (err instanceof ForkSourceNotFoundError) {
 					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
@@ -1207,7 +1248,7 @@ export async function createSessionManager(
 			throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 		}
 		try {
-			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, forkOptions);
 		} catch (err) {
 			if (err instanceof ForkSourceNotFoundError) {
 				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
@@ -1271,6 +1312,16 @@ export async function createSessionManager(
 	}
 	if (parsed.continue) {
 		return await SessionManager.continueRecent(cwd, parsed.sessionDir);
+	}
+	if (sessionId !== undefined) {
+		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
+		if (existing) {
+			const manager = await SessionManager.open(existing, parsed.sessionDir);
+			// Reopening is a restore: keep the saved model and thinking level.
+			if (manager.getEntries().length > 0) parsed.continue = true;
+			return manager;
+		}
+		return SessionManager.create(cwd, parsed.sessionDir, undefined, { id: sessionId });
 	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there
