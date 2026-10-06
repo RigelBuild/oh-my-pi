@@ -295,27 +295,34 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 /** Resolve a Linux browser launcher to the executable its final exec invokes. */
 async function resolveWrapperTarget(wrapperPath: string): Promise<string | null> {
 	if (process.platform !== "linux") return null;
-	const stat = await fs.stat(wrapperPath).catch(() => null);
-	if (!stat || !stat.isFile() || stat.size > 65_536) return null;
-	const content = await Bun.file(wrapperPath)
-		.text()
-		.catch(() => null);
-	if (!content || content.charCodeAt(0) === 0x7f) return null;
 	const relativeExec = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
 	const absoluteExec =
 		/^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?(?:(["'])(\/[^"'`\r\n]+)\1|(\/[^\s"'`;$}]+))(?=\s|$)/;
-	let target: string | null = null;
-	for (const line of content.split("\n")) {
-		const relative = relativeExec.exec(line);
-		const absolute = absoluteExec.exec(line);
-		if (relative?.[1]) target = path.join(path.dirname(wrapperPath), relative[1]);
-		else if (absolute) target = absolute[2] ?? absolute[3] ?? null;
+	let current = wrapperPath;
+	const seen = new Set<string>();
+	for (let depth = 0; depth < 4; depth++) {
+		const resolved = await fs.realpath(current).catch(() => null);
+		if (!resolved || seen.has(resolved)) return null;
+		seen.add(resolved);
+		const stat = await fs.stat(resolved).catch(() => null);
+		if (!stat?.isFile()) return null;
+		if (stat.size > 65_536) return depth > 0 ? resolved : null;
+		const content = await Bun.file(resolved)
+			.text()
+			.catch(() => null);
+		if (!content) return null;
+		if (content.charCodeAt(0) === 0x7f) return depth > 0 ? resolved : null;
+		let target: string | null = null;
+		for (const line of content.split("\n")) {
+			const relative = relativeExec.exec(line);
+			const absolute = absoluteExec.exec(line);
+			if (relative?.[1]) target = path.join(path.dirname(resolved), relative[1]);
+			else if (absolute) target = absolute[2] ?? absolute[3] ?? null;
+		}
+		if (!target || target.includes("$") || target.includes("\\")) return null;
+		current = target;
 	}
-	if (!target) return null;
-	const resolved = await fs.realpath(target).catch(() => null);
-	if (!resolved) return null;
-	const executable = await fs.stat(resolved).catch(() => null);
-	return executable?.isFile() ? resolved : null;
+	return null;
 }
 
 /**
