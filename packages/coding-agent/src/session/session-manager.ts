@@ -143,6 +143,14 @@ export function assertValidSessionId(id: string): void {
 	}
 }
 
+/** Another live omp process already holds a caller-chosen session id. */
+export class SessionIdCollisionError extends Error {
+	constructor(readonly sessionId: string) {
+		super(`Session id "${sessionId}" is in use by another live omp process.`);
+		this.name = "SessionIdCollisionError";
+	}
+}
+
 /**
  * `moveTo` refused before anything moved: another live omp process writes the
  * session, or the session file at the destination.
@@ -1903,6 +1911,12 @@ export class SessionManager {
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
+			// A caller-chosen id is reserved now, not at first write, so a
+			// competing launch fails instead of silently moving to a fresh id.
+			if (sessionId !== undefined && this.#storage.claimSession) {
+				this.#claimSession();
+				if (this.#sessionClaim?.release === undefined) throw new SessionIdCollisionError(sessionId);
+			}
 		} else {
 			this.#sessionFile = undefined;
 		}

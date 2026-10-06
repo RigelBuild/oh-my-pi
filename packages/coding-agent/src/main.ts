@@ -114,6 +114,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import {
 	assertValidSessionId,
 	ForkSourceNotFoundError,
+	SessionIdCollisionError,
 	SessionManager,
 	SessionMoveRefusedError,
 } from "./session/session-manager";
@@ -1233,6 +1234,7 @@ export async function createSessionManager(
 			try {
 				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir, undefined, forkOptions);
 			} catch (err) {
+				if (err instanceof SessionIdCollisionError) throw new SessionResolutionError(err.message);
 				if (err instanceof ForkSourceNotFoundError) {
 					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
 				}
@@ -1246,6 +1248,7 @@ export async function createSessionManager(
 		try {
 			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, forkOptions);
 		} catch (err) {
+			if (err instanceof SessionIdCollisionError) throw new SessionResolutionError(err.message);
 			if (err instanceof ForkSourceNotFoundError) {
 				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 			}
@@ -1317,7 +1320,12 @@ export async function createSessionManager(
 			if (manager.getEntries().length > 0) parsed.continue = true;
 			return manager;
 		}
-		return SessionManager.create(cwd, parsed.sessionDir, undefined, { id: sessionId });
+		try {
+			return SessionManager.create(cwd, parsed.sessionDir, undefined, { id: sessionId });
+		} catch (err) {
+			if (err instanceof SessionIdCollisionError) throw new SessionResolutionError(err.message);
+			throw err;
+		}
 	}
 	// --resume without value is handled separately (needs picker UI)
 	// If --session-dir provided without --continue/--resume, create new session there

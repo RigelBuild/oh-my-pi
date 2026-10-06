@@ -167,6 +167,49 @@ describe("--session-id", () => {
 			SessionManager.forkFrom(source.getSessionFile()!, cwd, sessionDir, undefined, { id: "../escape" }),
 		).rejects.toThrow();
 	});
+
+	it("fails a competing launch while another process holds the requested id", async () => {
+		const id = `seat-held-${process.pid}-${Date.now()}`;
+		// The lease is per process, so only a second process can contend for it.
+		const holder = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+const release = new FileSessionStorage().claimSession(process.argv[1], process.argv[2]);
+console.log(release ? "held" : "busy");
+for await (const _ of Bun.stdin.stream()) {}
+release?.();`,
+				id,
+				path.join(sessionDir, `held_${id}.jsonl`),
+			],
+			// Explicit env: the spawn default misses the test lease dir set at module load.
+			{ cwd: import.meta.dir, env: { ...process.env }, stdin: "pipe", stdout: "pipe", stderr: "inherit" },
+		);
+		try {
+			const reader = holder.stdout.getReader();
+			const { value } = await reader.read();
+			reader.releaseLock();
+			expect(new TextDecoder().decode(value).trim()).toBe("held");
+
+			await expect(
+				createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings),
+			).rejects.toMatchObject({
+				name: "SessionResolutionError",
+				message: expect.stringContaining("in use by another live omp process"),
+			});
+			expect(await jsonlFiles(sessionDir).catch(() => [])).toEqual([]);
+		} finally {
+			holder.stdin.end();
+			await holder.exited;
+		}
+
+		// Once the holder exits, the same id is free again.
+		const manager = await createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings);
+		if (!manager) throw new Error("Expected a session manager");
+		managers.push(manager);
+		expect(manager.getSessionId()).toBe(id);
+	});
 });
 
 describe("--session-id with a foreign session import", () => {

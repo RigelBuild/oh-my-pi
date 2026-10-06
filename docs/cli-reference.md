@@ -100,7 +100,7 @@ service-tier entry instead uses the configured tiers.
 | `--continue`, `-c` | Continue the previous session. |
 | `--resume [id]`, `-r`, `--session [id]` | Resume a session by ID prefix or path, or open the picker when no value is given. |
 | `--fork <session>` | Fork a saved session (by ID prefix or path) into a new session. See [session operations](./session-operations-export-share-fork-resume.md). |
-| `--session-id <id>` | Open a local session with this exact ID, or create one if it does not exist. With `--fork`, use it as the new session ID. |
+| `--session-id <id>` | Open a local session with this exact ID, or create one if it does not exist. With `--fork`, use it as the new session ID. Fails if another live omp process holds that ID. |
 | `--from-claude` | Import a Claude Code session into OMP. |
 | `--from-codex` | Import a Codex session into OMP. |
 | `--export <session>` | Export a session file to HTML and exit. |
