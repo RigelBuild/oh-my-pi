@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { bumpCanaryVersion, bumpVersion, validateExplicitVersion } from "./release";
+import {
+	applyCargoWorkspaceVersion,
+	applyPackageVersion,
+	bumpCanaryVersion,
+	bumpVersion,
+	isTransientGhError,
+	resolveReleaseVersion,
+	runWithTransientRetry,
+	validateExplicitVersion,
+} from "./release";
 
 describe("validateExplicitVersion", () => {
 	test("rejects malformed versions", () => {
@@ -53,5 +62,65 @@ describe("release version bumps", () => {
 
 	test("bumps the core version when applying a minor bump to a canary", () => {
 		expect(bumpVersion("0.13.0-canary.2", "minor")).toBe("0.14.0");
+	});
+});
+
+describe("release reliability helpers", () => {
+	test("accepts an explicit first release without a prior tag", () => {
+		expect(resolveReleaseVersion("18.0.3", "")).toEqual({
+			version: "18.0.3",
+			note: "First release: no prior v* tag; releasing 18.0.3",
+		});
+	});
+
+	test("requires a prior tag for version bump keywords", () => {
+		expect(() => resolveReleaseVersion("patch", "")).toThrow("no prior v* tag");
+		expect(() => resolveReleaseVersion("canary", "")).toThrow("no prior v* tag");
+	});
+
+	test("rewrites package and workspace versions in process", () => {
+		expect(applyPackageVersion('{"version": "1.0.0"}', "2.0.0")).toBe('{"version": "2.0.0"}');
+		expect(applyCargoWorkspaceVersion('version = "1.0.0"\n', "2.0.0")).toBe('version = "2.0.0"\n');
+	});
+
+	test("retries transient GitHub failures until the request succeeds", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				async () => {
+					attempts++;
+					if (attempts < 3) throw new Error("HTTP 502 Bad Gateway");
+					return "ok";
+				},
+				{ sleep: async () => {} },
+			),
+		).resolves.toBe("ok");
+		expect(attempts).toBe(3);
+	});
+
+	test("caps transient GitHub retries", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				async () => {
+					attempts++;
+					throw new Error("HTTP 502 Bad Gateway");
+				},
+				{ sleep: async () => {} },
+			),
+		).rejects.toThrow("HTTP 502");
+		expect(attempts).toBe(6);
+	});
+
+	test("does not retry permanent GitHub failures", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(async () => {
+				attempts++;
+				throw new Error("HTTP 404 Not Found");
+			}, { sleep: async () => {} }),
+		).rejects.toThrow("HTTP 404");
+		expect(attempts).toBe(1);
+		expect(isTransientGhError("HTTP 404 Not Found")).toBe(false);
 	});
 });

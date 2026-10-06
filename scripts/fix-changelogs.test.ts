@@ -364,6 +364,36 @@ const RELEASED_PLUS_RECOVERED = `# Changelog
 - Recovered bullet.
 `;
 
+describe("runChangelogFixer without a version tag", () => {
+	it("returns no promotable diff when the repository has no baseline tag", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-no-tag-"));
+		const git = (...args: string[]) =>
+			$`git ${args}`
+				.cwd(repoRoot)
+				.quiet()
+				.env({
+					...process.env,
+					GIT_CONFIG_GLOBAL: "/dev/null",
+					GIT_CONFIG_SYSTEM: "/dev/null",
+					GIT_AUTHOR_NAME: "t",
+					GIT_AUTHOR_EMAIL: "t@t",
+					GIT_COMMITTER_NAME: "t",
+					GIT_COMMITTER_EMAIL: "t@t",
+				});
+		try {
+			await git("init", "-b", "main");
+			await Bun.write(path.join(repoRoot, "packages/foo/CHANGELOG.md"), RELEASED_PLUS_RECOVERED);
+			await git("add", "-A");
+			await git("commit", "-m", "initial release without a tag");
+
+			const result = await runChangelogFixer({ repoRoot, write: false });
+			expect(result.since).toBe("");
+			expect(result.changedFiles).toHaveLength(0);
+		} finally {
+			await fs.rm(repoRoot, { recursive: true, force: true });
+		}
+	});
+});
 describe("runChangelogFixer baseline pin", () => {
 	it("uses the clog baseline ref as the diff floor so a recovered released bullet is not re-promoted", async () => {
 		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-fix-"));
