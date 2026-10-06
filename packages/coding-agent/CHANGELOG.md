@@ -14,6 +14,7 @@
 
 - Fixed `RpcClient.stop()` occasionally waiting forever because the agent process was never signaled.
 - Fixed `read` re-listing an archive rewritten in place with the same size and mtime within the same instant.
+- Browser attach now reuses a running Chromium launched through a Linux wrapper whose final `exec` names an absolute executable, including NixOS launchers. It still matches the requested profile before attaching.
 
 ## [18.9.2] - 2026-10-11
 

@@ -292,15 +292,7 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 	return status !== null && status >= 200 && status < 300;
 }
 
-/**
- * Resolve a distro wrapper script to its exec target (e.g.
- * /opt/google/chrome/google-chrome is bash ending in
- * `exec -a "$0" "$HERE/chrome" "$@"` with $HERE = dirname of the wrapper).
- * Scans line-by-line for the final `exec ... $HERE/...` command so helper
- * invocations are never mistaken for the application. Returns null for
- * binaries and wrappers without an exec command. Size-guarded so real
- * binaries are never read into memory.
- */
+/** Resolve a Linux browser launcher to the executable its final exec invokes. */
 async function resolveWrapperTarget(wrapperPath: string): Promise<string | null> {
 	if (process.platform !== "linux") return null;
 	const stat = await fs.stat(wrapperPath).catch(() => null);
@@ -309,15 +301,20 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 		.text()
 		.catch(() => null);
 	if (!content || content.charCodeAt(0) === 0x7f) return null;
+	const relativeExec = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
+	const absoluteExec = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?(["'])(\/[^"'`\r\n]+)\1(?:\s|$)/;
 	let target: string | null = null;
-	const execRegex = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
 	for (const line of content.split("\n")) {
-		const match = execRegex.exec(line);
-		if (match?.[1]) target = match[1];
+		const relative = relativeExec.exec(line);
+		const absolute = absoluteExec.exec(line);
+		if (relative?.[1]) target = path.join(path.dirname(wrapperPath), relative[1]);
+		else if (absolute?.[2]) target = absolute[2];
 	}
 	if (!target) return null;
-	const joined = path.join(path.dirname(wrapperPath), target);
-	return fs.realpath(joined).catch(() => joined);
+	const resolved = await fs.realpath(target).catch(() => null);
+	if (!resolved) return null;
+	const executable = await fs.stat(resolved).catch(() => null);
+	return executable?.isFile() ? resolved : null;
 }
 
 /**
