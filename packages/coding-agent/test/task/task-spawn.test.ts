@@ -172,12 +172,18 @@ describe("task spawn routing", () => {
 		const session = createSession({ manager });
 		const auth = createInMemoryAuthStorage();
 		try {
-			const deps = createAgentsHubDeps(session.cwd, session.settings, new ModelRegistry(auth), () => ({
-				explicit: [],
-				configured: [],
-				configuredLevel: "user",
-				mode: "explicit-only",
-			}));
+			const deps = createAgentsHubDeps(
+				session.cwd,
+				session.settings,
+				new ModelRegistry(auth),
+				() => ({
+					explicit: [],
+					configured: [],
+					configuredLevel: "user",
+					mode: "explicit-only",
+				}),
+				() => undefined,
+			);
 			const tool = await TaskTool.create(session);
 
 			cfgTaskAgentModelOverrides.override(session.settings, { task: "anthropic/claude-opus-5" });

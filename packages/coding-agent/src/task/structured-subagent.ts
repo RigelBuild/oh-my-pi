@@ -10,6 +10,7 @@ import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
+	modelCatalogForClassification,
 	modelSelectionInheritsSessionModel,
 	normalizeModelPatternList,
 	resolveAgentModelSelection,
@@ -400,6 +401,10 @@ export async function resolveEffectiveSubagentPolicy(
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
+		availableModels: modelCatalogForClassification(
+			request.session.modelRegistry?.getAvailable(),
+			request.session.getActiveModel?.(),
+		),
 	};
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the

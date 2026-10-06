@@ -10,7 +10,11 @@ import {
 	fetchFactoryDroidModels,
 } from "../discovery/factory-droid";
 import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
-import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
+import {
+	buildGitLabDuoWorkflowFallbackModel,
+	fetchGitLabDuoWorkflowModels,
+	readGitLabDuoWorkflowRemoteProjectPathSync,
+} from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
@@ -302,17 +306,8 @@ export function gitLabDuoWorkflowModelManagerOptions(
 	const apiKey = config.apiKey;
 	return {
 		providerId: "gitlab-duo-agent",
-		// GitLab Duo discovery is credential- and namespace-specific
-		// (`aiChatAvailableModels(rootNamespaceId:)` also surfaces namespace-pinned
-		// models), so the default provider-id cache namespace would let a second
-		// account/namespace load the first one's authoritative model list at startup
-		// and skip refetching. Partition the cache by a non-reversible fingerprint of
-		// the exact inputs `fetchGitLabDuoWorkflowModels` resolves the namespace from
-		// (credential + base URL + namespace/project config + the same env vars + the
-		// effective workspace cwd whose git remote drives auto-discovery). Built-in
-		// discovery only passes apiKey/baseUrl/fetch, so the cwd/env terms — not the
-		// empty config fields — are what actually separate workspace A from B here.
-		// Falls back to the bare provider id when no credential is present.
+		// Discovery (and namespace-pinned models) depend on credential + namespace inputs,
+		// so the cache is partitioned by a hash of those; no credential → bare provider id.
 		...(apiKey ? { cacheProviderId: gitLabDuoWorkflowModelCacheProviderId(apiKey, config) } : undefined),
 		dynamicModelsAuthoritative: true,
 		staticModels: [buildGitLabDuoWorkflowFallbackModel(config.baseUrl)],
@@ -333,14 +328,13 @@ export function gitLabDuoWorkflowModelManagerOptions(
 }
 
 function gitLabDuoWorkflowModelCacheProviderId(apiKey: string, config: GitLabDuoWorkflowModelManagerConfig): string {
-	// Mirror the exact inputs `discoverGitLabDuoWorkflowNamespace` keys off: explicit
-	// namespace/project config OR the same env vars, then the git remote at the
-	// effective cwd. Built-in discovery leaves the config fields empty, so the env +
-	// resolved cwd terms are what actually distinguish two workspaces sharing a token.
+	// Same inputs discovery resolves from: config/env overrides, then the workspace
+	// Git remote's project (read now, so an in-place remote change misses the cache).
 	const namespaceId = config.namespaceId ?? Bun.env.GITLAB_DUO_NAMESPACE_ID ?? "";
 	const projectId = config.projectId ?? Bun.env.GITLAB_DUO_PROJECT_ID ?? Bun.env.GITLAB_DUO_PROJECT_PATH ?? "";
 	const cwd = config.cwd ?? process.cwd();
-	const scope = [config.baseUrl ?? "", namespaceId, projectId, cwd].join("\u0000");
+	const remoteProjectPath = readGitLabDuoWorkflowRemoteProjectPathSync(cwd, config.baseUrl) ?? "";
+	const scope = [config.baseUrl ?? "", namespaceId, projectId, cwd, remoteProjectPath].join("\u0000");
 	return `gitlab-duo-agent:${Bun.hash(`${apiKey}\u0000${scope}`).toString(36)}`;
 }
 

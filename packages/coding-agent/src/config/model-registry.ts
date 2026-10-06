@@ -27,10 +27,14 @@ import {
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { getModelCacheWriteStats, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
+	assessModelCacheVerdict,
 	createModelManager,
 	fingerprintStaticModels,
 	type ModelManagerOptions,
+	type ModelManagerStaticCatalog,
 	type ModelRefreshStrategy,
+	modelCacheNeedsFetch,
+	resolveModelManagerStaticCatalog,
 } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -47,7 +51,7 @@ import {
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
-import { resolveProviderModelReference } from "../config/model-resolver";
+import { hasProviderModelId, resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -158,6 +162,72 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 		).map(providerId => [providerId, true as const]),
 	),
 );
+
+/**
+ * Built-in refresh managers include descriptors, special managers, and
+ * bundled catalog-only providers; mirrors manager construction.
+ */
+const REFRESHABLE_BUILT_IN_PROVIDER_IDS: Readonly<Record<string, true>> = Object.freeze(
+	Object.fromEntries(
+		(() => {
+			const bundledProviderIds: Record<string, true> = Object.create(null);
+			for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
+			return [
+				...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+				...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
+				...MODELS_DEV_CATALOG_PROVIDER_IDS.filter(
+					providerId =>
+						BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] !== true && bundledProviderIds[providerId] === true,
+				),
+			].map(providerId => [providerId, true as const]);
+		})(),
+	),
+);
+
+/** The manager inputs a credentialed built-in refresh would use to decide whether to fetch. */
+interface BuiltInRefreshProbe {
+	options: ModelManagerOptions<Api>;
+	staticCatalog: ModelManagerStaticCatalog<Api>;
+}
+
+const builtInRefreshProbeCache = new Map<string, BuiltInRefreshProbe | null>();
+
+/** Probe-credential options matching manager construction; seed-only `local`/`web`/`firepass` have no fetcher. */
+function builtInProbeOptions(providerId: string, baseUrl: string | undefined): ModelManagerOptions<Api> | undefined {
+	const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+	if (descriptor) {
+		// `sk-` satisfies key-shape checks (alibaba-token-plan); the probe never fetches.
+		const options = descriptor.createModelManagerOptions({ apiKey: "sk-probe", baseUrl, authenticated: true });
+		const modelsDev = options.modelsDev ?? modelsDevCatalogFallback(providerId);
+		return modelsDev ? { ...options, modelsDev } : options;
+	}
+	switch (providerId) {
+		case "google-antigravity":
+			return googleAntigravityModelManagerOptions({ oauthToken: "probe", endpoint: baseUrl });
+		case "google-gemini-cli":
+			return googleGeminiCliModelManagerOptions({ oauthToken: "probe", endpoint: baseUrl });
+		case "openai-codex":
+			return openaiCodexModelManagerOptions({ baseUrl, resolveAccounts: async () => [] });
+	}
+	const modelsDev = modelsDevCatalogFallback(providerId);
+	return modelsDev ? { providerId, modelsDev } : undefined;
+}
+
+/** Null when the provider's manager has no remote fetcher, so a refresh cannot change its catalog. */
+function builtInRefreshProbe(providerId: string, baseUrl: string | undefined): BuiltInRefreshProbe | null {
+	const key = `${providerId}\u0000${baseUrl ?? ""}`;
+	let probe = builtInRefreshProbeCache.get(key);
+	if (probe === undefined) {
+		const options = builtInProbeOptions(providerId, baseUrl);
+		if (!options || (options.fetchDynamicModels === undefined && options.modelsDev === undefined)) {
+			probe = null;
+		} else {
+			probe = { options, staticCatalog: resolveModelManagerStaticCatalog(options) };
+		}
+		builtInRefreshProbeCache.set(key, probe);
+	}
+	return probe;
+}
 
 /**
  * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
@@ -971,7 +1041,9 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		this.#providerLookupSnapshots.delete(providerName);
+		// Lookup snapshots use the folded provider key; deleting the mixed-case
+		// registration leaves the stale snapshot, so find() keeps returning empty.
+		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
 	/**
@@ -2824,6 +2896,27 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Whether a refresh could still change any enabled catalog: a config or
+	 * extension manager not yet hydrated fresh, or a credentialed built-in
+	 * whose fetcher is due. Warm and fetcherless providers never count.
+	 */
+	hasRefreshableProviders(): boolean {
+		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+		for (const { provider } of this.#discoverableProviders) {
+			if (!disabledProviders.has(provider) && this.#isDiscoveryRefreshPending(provider)) return true;
+		}
+		for (const provider of this.#runtimeModelManagers.keys()) {
+			if (!disabledProviders.has(provider) && this.#isDiscoveryRefreshPending(provider)) return true;
+		}
+		const isProviderAvailable = this.#createProviderAvailabilityCheck();
+		for (const provider in REFRESHABLE_BUILT_IN_PROVIDER_IDS) {
+			if (this.#hasDiscoveryManager(provider)) continue;
+			if (isProviderAvailable(provider) && this.#isBuiltInRefreshPending(provider)) return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Whether `providerId` is known to the registry: it has at least one live
 	 * model, or it is configured for dynamic discovery (models.yml `discovery:`
 	 * or a runtime extension provider) and is not disabled. Discovery-only
@@ -2835,6 +2928,83 @@ export class ModelRegistry {
 	hasProvider(providerId: string): boolean {
 		const providerModels = this.#hasFullSnapshot ? this.#models : this.#composeStaticModels(new Set([providerId]));
 		if (providerModels.some(model => model.provider === providerId)) return true;
+		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
+		return (
+			this.#discoverableProviders.some(provider => provider.provider === providerId) ||
+			this.#runtimeModelManagers.has(providerId)
+		);
+	}
+
+	/**
+	 * Unlike hasProvider, includes built-in managers without static rows and
+	 * excludes static-only, fetcherless, and warm providers; narrows
+	 * hasRefreshableProviders to one.
+	 */
+	canRefreshProvider(providerId: string): boolean {
+		if (this.#hasDiscoveryManager(providerId)) return this.#isDiscoveryRefreshPending(providerId);
+		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
+		return (
+			REFRESHABLE_BUILT_IN_PROVIDER_IDS[providerId] === true &&
+			this.#createProviderAvailabilityCheck()(providerId) &&
+			this.#isBuiltInRefreshPending(providerId)
+		);
+	}
+
+	/** Not hydrated from a fresh cache. A live `ok` counts: it may land after resolution, and its re-read is local. */
+	#isDiscoveryRefreshPending(providerId: string): boolean {
+		const state = this.#providerDiscoveryStates.get(providerId);
+		return state?.status !== "cached" || state.stale;
+	}
+
+	/** Mirrors the built-in manager's fetch decision under `online-if-uncached`. */
+	#isBuiltInRefreshPending(providerId: string): boolean {
+		const probe = builtInRefreshProbe(providerId, this.#descriptorBaseUrl(providerId));
+		if (!probe) return false;
+		if (probe.options.alwaysRefetchDynamicModels) {
+			// Every refresh refetches; only a live result already merged here is warm.
+			const state = this.#providerDiscoveryStates.get(providerId);
+			return state?.stale !== false || (state.source !== "provider" && state.source !== "models.dev");
+		}
+		// Credential-scoped namespaces need the key; hydration records the outcome.
+		if (isCredentialScopedModelCacheProvider(providerId)) {
+			return this.#providerDiscoveryStates.get(providerId)?.stale !== false;
+		}
+		const cache = readModelCache<Api>(
+			this.#resolveStartupModelCacheProviderId(providerId),
+			probe.options.cacheTtlMs ?? BUILT_IN_DISCOVERY_CACHE_TTL_MS,
+			Date.now,
+			this.#cacheDbPath,
+		);
+		return modelCacheNeedsFetch(
+			assessModelCacheVerdict(probe.options, probe.staticCatalog, cache, Date.now()),
+			"online-if-uncached",
+		);
+	}
+
+	/**
+	 * Return stored spelling for case-insensitive references so exact discovery
+	 * lookups use registered casing; unknown providers retain trimmed input.
+	 */
+	resolveProviderKey(provider: string): string {
+		const normalized = provider.trim().toLowerCase();
+		if (!normalized) return provider.trim();
+		for (const key of this.#runtimeModelManagers.keys()) {
+			if (key.toLowerCase() === normalized) return key;
+		}
+		for (const discoverable of this.#discoverableProviders) {
+			if (discoverable.provider.toLowerCase() === normalized) return discoverable.provider;
+		}
+		for (const key of this.#knownStaticProviders()) {
+			if (key.toLowerCase() === normalized) return key;
+		}
+		return provider.trim();
+	}
+
+	/**
+	 * Whether config or extension managers can discover this provider; static-only
+	 * registrations are excluded because they add no models.
+	 */
+	#hasDiscoveryManager(providerId: string): boolean {
 		if (getDisabledProviderIdsFromSettings(this.#settings).has(providerId)) return false;
 		return (
 			this.#discoverableProviders.some(provider => provider.provider === providerId) ||
@@ -2866,6 +3036,12 @@ export class ModelRegistry {
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+	}
+
+	/** Exact catalog membership for whole-id literal checks; `find` also routes aliases. */
+	hasModelId(provider: string, modelId: string): boolean {
+		if (this.#isProviderDisabled(provider)) return false;
+		return hasProviderModelId(provider, modelId, this.#modelsForProviderLookup(provider));
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */
@@ -3356,7 +3532,7 @@ export class ModelRegistry {
 	 */
 	suppressSelector(selector: string, untilMs: number): void {
 		this.#suppressedSelectors.set(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
+			normalizeSuppressedSelector(selector, (provider, id) => this.hasModelId(provider, id)),
 			untilMs,
 		);
 	}
@@ -3365,10 +3541,7 @@ export class ModelRegistry {
 	 * Check if a model selector is currently suppressed due to rate limits.
 	 */
 	isSelectorSuppressed(selector: string): boolean {
-		const normalizedSelector = normalizeSuppressedSelector(
-			selector,
-			(provider, id) => this.find(provider, id) !== undefined,
-		);
+		const normalizedSelector = normalizeSuppressedSelector(selector, (provider, id) => this.hasModelId(provider, id));
 		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
 		if (!suppressedUntil) return false;
 		if (suppressedUntil <= Date.now()) {
@@ -3383,7 +3556,7 @@ export class ModelRegistry {
 	 */
 	clearSuppressedSelector(selector: string): void {
 		this.#suppressedSelectors.delete(
-			normalizeSuppressedSelector(selector, (provider, id) => this.find(provider, id) !== undefined),
+			normalizeSuppressedSelector(selector, (provider, id) => this.hasModelId(provider, id)),
 		);
 	}
 

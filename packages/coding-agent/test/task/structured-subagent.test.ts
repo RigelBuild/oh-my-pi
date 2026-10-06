@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -371,6 +372,89 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.modelRole).toBe("reviewer");
 		expect(settled.result.modelRole).toBe("reviewer");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	// A trailing effort name can belong to the model id itself
+	// (`nanogpt/coding-router:low` ships beside `nanogpt/coding-router`). A
+	// suffixed self alias replaces an inherited selector's suffix but appends to
+	// an inherited literal id, and only the catalog tells them apart.
+	describe("inherited literal model id with an effort-shaped suffix", () => {
+		const routerLow = buildModel({
+			id: "coding-router:low",
+			name: "Coding Router Low",
+			api: "anthropic-messages",
+			provider: "nanogpt",
+			baseUrl: "https://nano-gpt.com/api/v1",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 64000,
+		});
+		const routerBare = { ...routerLow, id: "coding-router", name: "Coding Router" };
+
+		/** Spawn `agentModel` off a parent running `activePattern` and return the child's dispatched patterns. */
+		async function dispatchedPatterns(
+			agentModel: string,
+			activePattern: string,
+			availableModels: Model<Api>[],
+		): Promise<string | string[] | undefined> {
+			mockDiscovery({ ...AGENT, model: [agentModel] });
+			const withCatalog = {
+				...session(),
+				getActiveModelString: () => activePattern,
+				modelRegistry: { getAvailable: () => availableModels },
+			} as unknown as ToolSession;
+			const dispatched: executorModule.ExecutorOptions[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				dispatched.push(options);
+				return result();
+			});
+
+			const settled = await runStructuredSubagent(request({ session: withCatalog, retainArtifacts: true }));
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+			return dispatched[0]?.modelOverride;
+		}
+
+		it("appends the requested tier to the inherited id rather than re-tiering the bare model", async () => {
+			expect(await dispatchedPatterns("*:xhigh", "nanogpt/coding-router:low", [routerLow, routerBare])).toEqual([
+				"nanogpt/coding-router:low:xhigh",
+			]);
+		});
+
+		it("still re-tiers an inherited pattern the catalog does not ship as an id", async () => {
+			expect(await dispatchedPatterns("*:xhigh", "nanogpt/coding-router:medium", [routerLow, routerBare])).toEqual([
+				"nanogpt/coding-router:xhigh",
+			]);
+		});
+
+		it("re-tiers an inherited pattern with no effort-shaped suffix at all", async () => {
+			expect(await dispatchedPatterns("*:xhigh", "nanogpt/coding-router", [routerLow, routerBare])).toEqual([
+				"nanogpt/coding-router:xhigh",
+			]);
+		});
+
+		it("classifies the active id even when the registry projection omits it", async () => {
+			// A caller-authenticated pinned model need not appear in `getAvailable()`.
+			mockDiscovery({ ...AGENT, model: ["*:xhigh"] });
+			const pinned = {
+				...session(),
+				getActiveModelString: () => "nanogpt/coding-router:low",
+				getActiveModel: () => routerLow,
+				modelRegistry: { getAvailable: () => [] },
+			} as unknown as ToolSession;
+			const dispatched: executorModule.ExecutorOptions[] = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				dispatched.push(options);
+				return result();
+			});
+
+			const settled = await runStructuredSubagent(request({ session: pinned, retainArtifacts: true }));
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+
+			expect(dispatched[0]?.modelOverride).toEqual(["nanogpt/coding-router:low:xhigh"]);
+		});
 	});
 	it("does not treat a spawn handle as the HUD description", async () => {
 		mockDiscovery();

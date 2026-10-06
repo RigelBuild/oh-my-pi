@@ -4533,6 +4533,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.session.model
 					? formatModelSelectorValue(formatModelStringWithRouting(this.session.model), this.session.thinkingLevel)
 					: undefined,
+			// The rehydration path must classify the inherited model against the
+			// same catalog as task spawning, including an active model omitted by it.
+			modelRegistry: this.session.modelRegistry,
+			getActiveModel: () => this.session.model,
 		};
 	}
 
