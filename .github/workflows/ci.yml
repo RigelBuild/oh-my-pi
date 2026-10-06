@@ -233,11 +233,11 @@ jobs:
 
    # Provides the linux-x64 addon pair every downstream TS job installs.
    #
-   # PRs never build. They restore the pair rigel-release built for the same native
-   # sources from actions/cache (key = hash of every native build input, the
+   # PRs never build. They restore the pair their base branch built (rigel-release for
+   # release PRs) from actions/cache (key = hash of every native build input, the
    # same file set as the bazel-cache action's config+source hashes). With no
-   # exact entry (the PR changes native inputs, or main has not built this
-   # state yet) they take main's newest entry, and with no entry at all the
+   # exact entry (the PR changes native inputs, or the base has not built this
+   # state yet) they take the base's newest entry, and with no entry at all the
    # latest npm release. The workspace loader skips its version sentinel for
    # workspace loads, so any of these load under a newer checkout. Testing
    # against main's build instead of the last release keeps merged-but-
