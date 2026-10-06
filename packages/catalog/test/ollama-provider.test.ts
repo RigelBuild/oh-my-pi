@@ -131,7 +131,7 @@ describe("ollama tool forcing", () => {
 		let requestBody: OllamaRequestBody | undefined;
 		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
 			requestBody = JSON.parse(String(init?.body ?? "{}")) as OllamaRequestBody;
-			return new Response(`${JSON.stringify({ done: true })}\n`, {
+			return new Response(`${JSON.stringify({ message: { content: "tool selected" }, done: true })}\n`, {
 				status: 200,
 				headers: { "Content-Type": "application/x-ndjson" },
 			});
