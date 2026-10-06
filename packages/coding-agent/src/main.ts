@@ -1316,6 +1316,13 @@ export async function createSessionManager(
 		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
 		if (existing) {
 			const manager = await SessionManager.open(existing, parsed.sessionDir);
+			try {
+				manager.reserveExactId();
+			} catch (err) {
+				await manager.close();
+				if (err instanceof SessionIdCollisionError) throw new SessionResolutionError(err.message);
+				throw err;
+			}
 			// Reopening is a restore: keep the saved model and thinking level.
 			if (manager.getEntries().length > 0) parsed.continue = true;
 			return manager;

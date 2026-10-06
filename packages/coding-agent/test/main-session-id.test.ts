@@ -6,6 +6,7 @@ import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, resolveForeignSessionSource } from "@oh-my-pi/pi-coding-agent/main";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 const stubSettings = Settings.isolated();
 
@@ -168,9 +169,8 @@ describe("--session-id", () => {
 		).rejects.toThrow();
 	});
 
-	it("fails a competing launch while another process holds the requested id", async () => {
-		const id = `seat-held-${process.pid}-${Date.now()}`;
-		// The lease is per process, so only a second process can contend for it.
+	/** Hold `id`'s ownership lease in a second process; the lease is per process. */
+	async function holdLease(id: string): Promise<{ release: () => Promise<void> }> {
 		const holder = Bun.spawn(
 			[
 				process.execPath,
@@ -186,22 +186,35 @@ release?.();`,
 			// Explicit env: the spawn default misses the test lease dir set at module load.
 			{ cwd: import.meta.dir, env: { ...process.env }, stdin: "pipe", stdout: "pipe", stderr: "inherit" },
 		);
-		try {
-			const reader = holder.stdout.getReader();
-			const { value } = await reader.read();
-			reader.releaseLock();
-			expect(new TextDecoder().decode(value).trim()).toBe("held");
-
-			await expect(
-				createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings),
-			).rejects.toMatchObject({
-				name: "SessionResolutionError",
-				message: expect.stringContaining("in use by another live omp process"),
-			});
-			expect(await jsonlFiles(sessionDir).catch(() => [])).toEqual([]);
-		} finally {
+		const reader = holder.stdout.getReader();
+		const { value } = await reader.read();
+		reader.releaseLock();
+		const release = async () => {
 			holder.stdin.end();
 			await holder.exited;
+		};
+		if (new TextDecoder().decode(value).trim() !== "held") {
+			await release();
+			throw new Error(`Expected the holder to take the lease for ${id}`);
+		}
+		return { release };
+	}
+
+	const collision = {
+		name: "SessionResolutionError",
+		message: expect.stringContaining("in use by another live omp process"),
+	};
+
+	it("fails a competing launch while another process holds the requested id", async () => {
+		const id = `seat-held-${process.pid}-${Date.now()}`;
+		const holder = await holdLease(id);
+		try {
+			await expect(
+				createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings),
+			).rejects.toMatchObject(collision);
+			expect(await jsonlFiles(sessionDir).catch(() => [])).toEqual([]);
+		} finally {
+			await holder.release();
 		}
 
 		// Once the holder exits, the same id is free again.
@@ -209,6 +222,42 @@ release?.();`,
 		if (!manager) throw new Error("Expected a session manager");
 		managers.push(manager);
 		expect(manager.getSessionId()).toBe(id);
+	});
+
+	it("fails to reopen a saved id another process holds", async () => {
+		const id = `seat-reopen-${process.pid}-${Date.now()}`;
+		const saved = SessionManager.create(cwd, sessionDir, undefined, { id });
+		saved.appendMessage({ role: "user", content: "saved", timestamp: Date.now() });
+		await saved.rewriteEntries();
+		await saved.close();
+
+		const holder = await holdLease(id);
+		try {
+			await expect(
+				createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings),
+			).rejects.toMatchObject(collision);
+		} finally {
+			await holder.release();
+		}
+	});
+
+	it("releases a fork's reserved id when the fork fails", async () => {
+		const id = `seat-fork-${process.pid}-${Date.now()}`;
+		const source = SessionManager.create(cwd, sessionDir);
+		managers.push(source);
+		source.appendMessage({ role: "user", content: "source", timestamp: Date.now() });
+		await source.rewriteEntries();
+		class FailingWrites extends FileSessionStorage {
+			override writeTextAtomic(): Promise<void> {
+				return Promise.reject(new Error("disk full"));
+			}
+		}
+		await expect(
+			SessionManager.forkFrom(source.getSessionFile()!, cwd, sessionDir, new FailingWrites(), { id }),
+		).rejects.toThrow("disk full");
+
+		const holder = await holdLease(id);
+		await holder.release();
 	});
 });
 

@@ -1023,6 +1023,23 @@ export class SessionManager {
 	}
 
 	/**
+	 * Take this session's ownership lease now, failing closed, for a caller
+	 * that selected it by exact id. Throws {@link SessionIdCollisionError} when
+	 * another live process holds it or the lease cannot be probed.
+	 */
+	reserveExactId(): void {
+		const sessionId = this.#sessionId;
+		const sessionFile = this.#sessionFile;
+		if (!this.#persist || !sessionFile || !this.#storage.claimSession) return;
+		const current = this.#sessionClaim;
+		if (current?.sessionId === sessionId && current.release) return;
+		if (current && current.sessionId !== sessionId) current.release?.();
+		const release = this.#storage.claimSession(sessionId, sessionFile, { strict: true }) ?? undefined;
+		this.#sessionClaim = { sessionId, release };
+		if (!release) throw new SessionIdCollisionError(sessionId);
+	}
+
+	/**
 	 * Whether another live omp process owns this session, claiming it first
 	 * when it is free. A non-owner never writes the session's file: its next
 	 * write moves this session to a sibling with a new id instead, so two
@@ -1913,10 +1930,7 @@ export class SessionManager {
 			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
 			// A caller-chosen id is reserved now, not at first write, so a
 			// competing launch fails instead of silently moving to a fresh id.
-			if (sessionId !== undefined && this.#storage.claimSession) {
-				this.#claimSession();
-				if (this.#sessionClaim?.release === undefined) throw new SessionIdCollisionError(sessionId);
-			}
+			if (sessionId !== undefined) this.reserveExactId();
 		} else {
 			this.#sessionFile = undefined;
 		}
@@ -3911,9 +3925,16 @@ export class SessionManager {
 			manager.#index.rebuild(history);
 		}
 		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		if (options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		try {
+			await manager.#rewriteAtomically();
+			if (options?.copyArtifacts !== false) {
+				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			}
+		} catch (err) {
+			// The caller never receives this manager, so drop any lease it reserved.
+			manager.#sessionClaim?.release?.();
+			manager.#sessionClaim = undefined;
+			throw err;
 		}
 		return manager;
 	}
