@@ -114,7 +114,11 @@ jobs:
               esac
               if [ -n "$release_tag" ]; then
                 # A tag dispatch can name any commit; release only what the gated branch holds.
-                git fetch --quiet --unshallow origin rigel-release
+                if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+                  git fetch --quiet --unshallow origin rigel-release
+                else
+                  git fetch --quiet origin rigel-release
+                fi
                 if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
                   echo "::error::$release_tag is not on rigel-release; refusing to release."
                   exit 1
@@ -251,7 +255,7 @@ jobs:
    # against main's build instead of the last release keeps merged-but-
    # unreleased native fixes from failing every PR that did not touch Rust
    # (a merged grep fix plus its TS test failed 75 PR runs against the
-   # 18.3.1 addon). Only main saves; see the save step for why.
+   # 18.3.1 addon). Only rigel-release saves; see the save step for why.
    #
    # Main (kata, cluster remote cache) builds only the pair here so the TS
    # fan-out starts as soon as it links; native_addons_cross builds the other
@@ -260,7 +264,7 @@ jobs:
    native_addons:
       name: Build native addons (bazel)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
-      # actions: write lets main prune superseded addon cache entries.
+      # actions: write lets rigel-release prune superseded addon cache entries.
       permissions:
          contents: read
          actions: write
@@ -432,12 +436,12 @@ jobs:
                   echo "::warning title=Native addon stash::could not stash $rel; consumers will download the artifact"
                 fi
               done
-         # Only main saves: an entry saved on any other ref is readable by
+         # Only rigel-release saves: an entry saved on any other ref is readable by
          # that ref alone yet counts against the shared 10 GB repo quota,
          # whose LRU eviction has already cost the darwin release archives.
          # Probe first so an existing entry is not re-uploaded, then keep
          # only the newest two entries so the footprint stays ~100 MB.
-         # The three steps below run only on main (never exercised by PR or
+         # The three steps below run only on rigel-release (never exercised by PR or
          # branch runs) and are pure optimization for later PRs: a failure
          # must never fail native_addons and with it every test job.
          - name: Probe native addon cache entry
@@ -866,7 +870,7 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
-         # Main-only save, after the build so it is off the leg's critical
+         # rigel-release-only save, after the build so it is off the leg's critical
          # path: caches saved on a tag or branch are readable only by that ref
          # yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
@@ -998,7 +1002,7 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
-         # Main-only save, after the build so it is off the critical path.
+         # rigel-release-only save, after the build so it is off the critical path.
          - name: Save bun store
            if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            continue-on-error: true
@@ -1076,7 +1080,7 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
+         # rigel-release-only save: caches saved on a tag or branch are readable only by
          # that ref yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
            if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
@@ -1270,7 +1274,7 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
+         # rigel-release-only save: caches saved on a tag or branch are readable only by
          # that ref yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
            if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
