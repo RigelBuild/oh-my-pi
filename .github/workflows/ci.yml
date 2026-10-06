@@ -48,7 +48,7 @@ on:
 # time via the release-script commit subject (`chore: bump version to vX.Y.Z`),
 # via `v*` tag-ref dispatches, and via manual dispatches whose tag-on-HEAD
 # status is only known after checkout; scope them to a per-sha group with no
-# cancellation. Every other event keeps branch-wide cancellation for PR/main churn.
+# cancellation. Every other event keeps branch-wide cancellation for PR/branch churn.
 concurrency:
    group: "${{ github.workflow }}-${{ (startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && format('release-{0}', github.sha) || github.ref }}"
    cancel-in-progress: "${{ !(startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}"
@@ -87,11 +87,8 @@ jobs:
          # the GitHub release prerelease, and skip the stable-only brew tap.
          channel: ${{ steps.detect.outputs.channel }}
       steps:
-         # Only a release-branch run needs tags fetched, so `git tag --points-at
-         # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
-         # tag straight from `github.ref_name`, and fetching `--tags` while
-         # checkout uses an explicit tag refspec makes git refuse — so scope
-         # fetch-tags to the release branch.
+         # Release-branch runs fetch tags so `git tag --points-at HEAD` sees the new `v*`.
+         # A tag-ref dispatch reads `github.ref_name`; fetching `--tags` with a tag refspec fails.
          - uses: actions/checkout@v4
            with:
               fetch-tags: ${{ github.ref == 'refs/heads/rigel-release' }}
@@ -113,16 +110,7 @@ jobs:
                   ;;
               esac
               if [ -n "$release_tag" ]; then
-                # A tag dispatch can name any commit; release only what the gated branch holds.
-                if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-                  git fetch --quiet --unshallow origin rigel-release
-                else
-                  git fetch --quiet origin rigel-release
-                fi
-                if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
-                  echo "::error::$release_tag is not on rigel-release; refusing to release."
-                  exit 1
-                fi
+                .github/scripts/release-on-branch.sh "$release_tag"
                 echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
                 is_release=true
               fi
@@ -202,7 +190,7 @@ jobs:
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (kata remote cache, warm) and again at
+   # validated post-merge on rigel-release (kata remote cache, warm) and again at
    # release. A skipped required check still satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
@@ -245,7 +233,7 @@ jobs:
 
    # Provides the linux-x64 addon pair every downstream TS job installs.
    #
-   # PRs never build. They restore the pair main built for the same native
+   # PRs never build. They restore the pair rigel-release built for the same native
    # sources from actions/cache (key = hash of every native build input, the
    # same file set as the bazel-cache action's config+source hashes). With no
    # exact entry (the PR changes native inputs, or main has not built this
@@ -257,7 +245,7 @@ jobs:
    # (a merged grep fix plus its TS test failed 75 PR runs against the
    # 18.3.1 addon). Only rigel-release saves; see the save step for why.
    #
-   # Main (kata, cluster remote cache) builds only the pair here so the TS
+   # rigel-release (kata, cluster remote cache) builds only the pair here so the TS
    # fan-out starts as soon as it links; native_addons_cross builds the other
    # Linux-hosted targets in parallel. Job name says "bazel" for continuity
    # with required checks.
@@ -278,7 +266,7 @@ jobs:
            id: natives-key
            shell: bash
            env:
-              # Must stay identical on every event: PRs look up the entry main
+              # Must stay identical on every event: PRs look up the entry rigel-release
               # saved for the same inputs. Mirrors the bazel-cache hash inputs.
               NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
            run: |
@@ -290,7 +278,7 @@ jobs:
          # cache version hashes the literal path list, so kata (save) and
          # hosted (restore) must spell it identically, and upload-artifact
          # skips dot-directories by default.
-         - name: Restore main-built native addons
+         - name: Restore release-branch-built native addons
            id: natives-cache
            if: github.event_name == 'pull_request'
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -322,12 +310,12 @@ jobs:
               if [ "$EXACT" = true ]; then
                 echo "Using main's addons for this exact native source state ($MATCHED)."
               elif [ -n "$MATCHED" ]; then
-                echo "::notice title=Native addons not source-matched::No main build matches this PR's native sources; testing against main's newest addon build ($MATCHED). Native changes are validated post-merge on main and at release."
+                echo "::notice title=Native addons not source-matched::No rigel-release build matches this PR's native sources; testing against rigel-release's newest addon build ($MATCHED). Native changes are validated post-merge on rigel-release and at release."
               else
                 echo "::notice title=Native addons from npm::No main-built addon cache entry is available; testing against the latest npm release addons."
               fi
 
-         # ---- main path: bazel build of the linux-x64 pair ----
+         # ---- rigel-release path: bazel build of the linux-x64 pair ----
          - id: cache
            if: github.event_name != 'pull_request'
            uses: ./.github/actions/bazel-cache
@@ -486,7 +474,7 @@ jobs:
    # The remaining Linux-hosted targets (arm64, musl, win32 cross). Only
    # release jobs consume them, so they build beside the TS fan-out instead of
    # ahead of it: serially after the pair they held every test job back ~10
-   # min on native-changing main pushes. Non-PR only, like rust_validate;
+   # min on native-changing rigel-release pushes. Non-PR only, like rust_validate;
    # the build also keeps the remote cache warm for release runs.
    native_addons_cross:
       name: Build native addons (bazel, cross targets)
@@ -714,7 +702,9 @@ jobs:
       steps:
          - uses: actions/checkout@v4
          - name: Gate tests
-           run: .github/scripts/ci-gate.test.sh
+           run: |
+              .github/scripts/ci-gate.test.sh
+              .github/scripts/release-on-branch.test.sh
          - name: Require every validation job to pass
            env:
               RESULTS: ${{ toJSON(needs) }}
