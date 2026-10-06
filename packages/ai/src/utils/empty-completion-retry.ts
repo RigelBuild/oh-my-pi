@@ -102,7 +102,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 		let providerErrorRetries = 0;
 		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
-			let committed = options?.acceptEmptyResponse === true;
+			let committed = false;
 			let terminal: AssistantMessageEvent | undefined;
 			const flush = (): void => {
 				for (const event of buffered) outer.push(event);

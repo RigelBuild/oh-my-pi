@@ -405,6 +405,38 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	it("accepts a silent stop while retrying a pre-output transient error", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ acceptEmptyResponse: true, providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				const message = assistant();
+				if (attempts === 1) {
+					message.stopReason = "error";
+					message.errorMessage = "The socket connection was closed unexpectedly";
+					return streamFromEvents([
+						{ type: "start", partial: message },
+						{ type: "error", reason: "error", error: message },
+					]);
+				}
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "done", reason: "stop", message },
+				]);
+			},
+			{ retryEmptyCompletion: true, retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+		expect(attempts).toBe(2);
+		expect(events.filter(event => event.type === "start")).toHaveLength(1);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([]);
+	});
 	it("does not retry a transient provider error after output commits", async () => {
 		let attempts = 0;
 		const message = assistant(["partial"]);
