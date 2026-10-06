@@ -580,6 +580,13 @@ describe("pickElectronTarget", () => {
 						await fs.chmod(wrapper, 0o755);
 						expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
 					}
+					for (const script of [
+						`#!/usr/bin/env bash\nexec "${target}" "$@"\nexec "$BROWSER" "$@"\n`,
+						`#!/usr/bin/env bash\nexec '$HERE/chrome' "$@"\n`,
+					]) {
+						await Bun.write(wrapper, script);
+						expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
+					}
 				} finally {
 					child.kill();
 					await child.exited;
