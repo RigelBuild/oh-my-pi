@@ -246,11 +246,7 @@ describe("--reapply-config configured default fallback order", () => {
 	});
 
 	it("retains the session model when every fallback candidate is a self alias", async () => {
-		// `Settings.getModelRole()` flattens a list into `"*,@default"`, which
-		// matches no alias spelling — so the whole string read as a real
-		// configured default even though every pattern resolves to no model.
-		// Startup then skipped the session restore and reported a broken config
-		// default instead of retaining the session's own model.
+		// A list of only self aliases is not a configured default; keep the session model.
 		const bakedModel = anthropicModel("claude-opus-4-1");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -263,11 +259,8 @@ describe("--reapply-config configured default fallback order", () => {
 	});
 
 	it("still adopts a list that mixes a self alias with a real candidate", async () => {
-		// The other direction: one non-alias pattern makes it a genuine configured
-		// default, so classifying per pattern must not turn every list into "no
-		// config default". The alias sits LAST because a LEADING `*` is resolved
-		// as a real candidate by the role resolver and stalls on its own
-		// circularity — existing behaviour, independent of this classification.
+		// One real pattern makes the list a configured default. The alias sits last
+		// because a leading `*` stalls the role resolver on its own circularity.
 		const bakedModel = anthropicModel("claude-opus-4-1");
 		const realCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
@@ -281,12 +274,8 @@ describe("--reapply-config configured default fallback order", () => {
 	});
 
 	it("adopts a self-alias-only list that still resolved to a model", async () => {
-		// The `default` sentinel is applied to the WHOLE unsplit role value, so a
-		// `default` inside a list is matched like any other selector — and the
-		// bundled `cursor/default` is a real model once Cursor credentials exist.
-		// Measured: `"default,@default"` classifies as all-self-alias yet resolves
-		// to `cursor/default`. Classifying by spelling alone restored the session
-		// model over a model config genuinely resolved.
+		// Classify by resolution, not spelling: `default,@default` resolves to the
+		// bundled `cursor/default` once Cursor credentials exist.
 		const bakedModel = anthropicModel("claude-opus-4-1");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -335,13 +324,8 @@ describe("--reapply-config configured default fallback order", () => {
 	});
 
 	it("stops at a reached self alias ahead of a later resolvable model", async () => {
-		// `missing/model,*:low,<anthropic>`: the concrete first entry does not
-		// resolve, so `*:low` at index 1 is the first entry the fallback REACHES —
-		// and an alias means "keep the session's model at this level". But
-		// `resolveModelRoleValue` walks past an alias (a circular selector resolves
-		// to no model) and returns the index-2 Anthropic model, so gating on "did
-		// anything match" classified the alias as unreached: the resume adopted the
-		// lower-priority model and dropped its `low`.
+		// The first reached entry is `*:low`, so keep the session model at low even
+		// though a later concrete model resolves.
 		const bakedModel = anthropicModel("claude-opus-4-1");
 		const later = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
@@ -418,12 +402,7 @@ describe("--reapply-config configured default fallback order", () => {
 	});
 
 	it("compares the winning candidate's position in the configured pattern space", async () => {
-		// `spec.matchedPatternIndex` indexes the EXPANDED pattern list, while the
-		// self-alias scan walks the configured one. An earlier role alias that
-		// expands to several candidates therefore shifts every later position, so
-		// a win at expanded index 2 read the raw pattern at index 1 as "reached" —
-		// and `--reapply-config` kept the baked model plus the alias's `:low`
-		// even though the alias never won.
+		// Positions must use the configured pattern list, not the alias-expanded one.
 		const bakedModel = anthropicModel("claude-opus-4-1");
 		const winner = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
