@@ -8,12 +8,24 @@ import { isLoopbackHost } from "../src/utils/parse-bind";
 import { removeWithRetries } from "../../utils/src/temp";
 
 describe("isLoopbackHost", () => {
-	test.each(["127.0.0.1", "127.0.0.2", "127.255.255.254", "::1", "[::1]", "localhost", "LOCALHOST"])(
-		"%s is loopback",
-		host => {
-			expect(isLoopbackHost(host)).toBe(true);
-		},
-	);
+	test.each([
+		"127.0.0.1",
+		"127.0.0.2",
+		"127.255.255.254",
+		"127.1",
+		"127.0.1",
+		"0x7f.1",
+		"2130706433",
+		"::1",
+		"[::1]",
+		"0:0:0:0:0:0:0:1",
+		"[::0001]",
+		"[::ffff:127.0.0.1]",
+		"localhost",
+		"LOCALHOST",
+	])("%s is loopback", host => {
+		expect(isLoopbackHost(host)).toBe(true);
+	});
 
 	test.each([
 		"0.0.0.0",
@@ -22,7 +34,7 @@ describe("isLoopbackHost", () => {
 		"10.0.0.1",
 		"128.0.0.1",
 		"127.0.0.256",
-		"127.1",
+		"[::ffff:10.0.0.1]",
 		"broker.internal",
 		"localhost.evil",
 		"",
@@ -58,6 +70,12 @@ describe("auth-broker with an empty token set", () => {
 
 	test("loopback bind serves vault routes without a bearer", async () => {
 		const broker = await start("127.0.0.1:0");
+		const res = await fetch(`http://127.0.0.1:${broker.port}/v1/snapshot`);
+		expect(res.status).toBe(200);
+	});
+
+	test("a loopback alias bind serves vault routes without a bearer", async () => {
+		const broker = await start("127.1:0");
 		const res = await fetch(`http://127.0.0.1:${broker.port}/v1/snapshot`);
 		expect(res.status).toBe(200);
 	});
