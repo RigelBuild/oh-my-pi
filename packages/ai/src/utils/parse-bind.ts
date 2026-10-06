@@ -54,3 +54,14 @@ export function parseBind(raw: string): ParsedBind {
 	}
 	return { hostname: hostPart, port: parsePort(portPart, raw) };
 }
+
+const OCTET = "(25[0-5]|2[0-4]\\d|1?\\d?\\d)";
+const IPV4_LOOPBACK = new RegExp(`^127\\.${OCTET}\\.${OCTET}\\.${OCTET}$`);
+
+/** True when `host` (as returned by `parseBind`) accepts connections only from this machine. */
+export function isLoopbackHost(host: string): boolean {
+	const normalized = host.toLowerCase();
+	return (
+		normalized === "localhost" || normalized === "::1" || normalized === "[::1]" || IPV4_LOOPBACK.test(normalized)
+	);
+}
