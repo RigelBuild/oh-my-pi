@@ -54,6 +54,12 @@ export const cfgAuthBrokerToken = register({
 	credential: true,
 });
 
+export const cfgAuthBrokerMetrics = register({
+	id: "auth.broker.metrics",
+	type: "boolean",
+	default: false,
+});
+
 export const cfgAuthAccountPolicies = register({
 	id: "auth.accountPolicies",
 	type: "array",
