@@ -20,6 +20,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { EXHAUSTED_EMPTY_COMPLETION_MESSAGE } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
@@ -960,7 +961,11 @@ export class TurnRecovery {
 			return undefined;
 		}
 
-		if (this.#acceptTerminalEmptyStopForPrompt && assistantMessage.stopReason === "stop") {
+		// Replay-wrapped providers report an empty stop as an error once their retries run out.
+		const terminalEmpty =
+			assistantMessage.stopReason === "stop" ||
+			(providerEmptyOutput && assistantMessage.errorMessage === EXHAUSTED_EMPTY_COMPLETION_MESSAGE);
+		if (this.#acceptTerminalEmptyStopForPrompt && terminalEmpty) {
 			this.#acceptTerminalEmptyStopForPrompt = false;
 			this.#discardAcceptedTerminalEmptyStop(assistantMessage);
 			this.#emptyStopRetryCount = 0;

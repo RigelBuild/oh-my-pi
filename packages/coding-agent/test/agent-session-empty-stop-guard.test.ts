@@ -4,6 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ThinkingContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { EXHAUSTED_EMPTY_COMPLETION_MESSAGE } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -349,6 +350,24 @@ describe("AgentSession empty stop guard", () => {
 		expect(mock.calls).toHaveLength(1);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 		expect(session.agent.state.messages.at(-1)?.role).toBe("assistant");
+	});
+
+	it("accepts a replay-wrapper exhausted empty under acceptTerminalEmptyStop", async () => {
+		const { session, mock } = await createHarness([
+			{ content: [], stopReason: "error", errorMessage: EXHAUSTED_EMPTY_COMPLETION_MESSAGE },
+			{ content: ["must not be requested"], stopReason: "stop" },
+		]);
+
+		const started = await session.sendCustomMessage(
+			{ customType: "passive-check", content: "Reply only if needed", display: false, attribution: "agent" },
+			{ deliverAs: "nextTurn", triggerTurn: true, acceptTerminalEmptyStop: true },
+		);
+		await session.waitForIdle();
+
+		expect(started).toBe(true);
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+		expect(session.agent.state.messages.some(message => message.role === "assistant")).toBe(false);
 	});
 
 	it("removes orphaned tool-use stops even when retry cap is hit", async () => {

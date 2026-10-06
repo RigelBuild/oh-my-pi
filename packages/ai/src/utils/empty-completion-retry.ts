@@ -20,6 +20,8 @@ import { AssistantMessageEventStream } from "./event-stream";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
+/** Error text for a stop that stayed empty after every empty-completion retry. */
+export const EXHAUSTED_EMPTY_COMPLETION_MESSAGE = "Provider returned no visible output after empty-completion retries.";
 
 const NON_WHITESPACE_RE = /\S/;
 
@@ -188,7 +190,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				const errored: AssistantMessage = {
 					...completedMessage,
 					stopReason: "error",
-					errorMessage: "Provider returned no visible output after empty-completion retries.",
+					errorMessage: EXHAUSTED_EMPTY_COMPLETION_MESSAGE,
 				};
 				outer.push({ type: "error", reason: "error", error: errored });
 				return;
