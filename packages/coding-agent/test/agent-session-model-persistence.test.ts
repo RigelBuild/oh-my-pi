@@ -1207,27 +1207,17 @@ describe("AgentSession model persistence", () => {
 		expect(result.modelFallbackMessage).toBeUndefined();
 	});
 
-	it("reports the double failure when neither the config default nor the baked session model resolves", async () => {
-		// Session baked on an unresolvable model AND overlay names an unresolvable
-		// default: the model comes from an arbitrary availability pick, which must
-		// never be silent — the same case the bare-resume path warns about.
+	it("fails closed when neither the config default nor the baked session model resolves without a UI", async () => {
 		const targetSessionFile = await writeRoleModelSession(
 			"anthropic/no-such-baked-model-abc",
 			"anthropic/no-such-baked-model-abc",
 			"default",
 		);
-
 		const settings = await loadOverlaySettings({ default: "anthropic/no-such-model-xyz" });
 
-		const result = await createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true });
-
-		// A model was picked (some authed default), and the notice names both the
-		// unresolved config default and the unrestorable session model.
-		expect(result.session.model).toBeDefined();
-		expect(result.modelFallbackMessage).toContain("did not resolve");
-		expect(result.modelFallbackMessage).toContain("anthropic/no-such-model-xyz");
-		expect(result.modelFallbackMessage).toContain("anthropic/no-such-baked-model-abc");
-		expect(result.modelFallbackMessage).toContain("could not be restored");
+		await expect(createStartupResumeSession(targetSessionFile, settings, { reapplyConfig: true })).rejects.toThrow(
+			"Could not restore model anthropic/no-such-baked-model-abc",
+		);
 	});
 
 	it("stays silent under reapplyConfig when the session has no baked model to swap from", async () => {

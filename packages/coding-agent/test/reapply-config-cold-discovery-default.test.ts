@@ -329,14 +329,20 @@ describe("--reapply-config cold-discovery configured default", () => {
 		const sessionFile = await writeBakedSession(modelValue(forbiddenModel));
 		const settings = await loadOverlay("static-only/not-discovered", [modelValue(allowedModel)]);
 
-		const resumed = await resume(sessionFile, settings, {
-			"static-only": {
-				baseUrl: "https://static.example.invalid/v1",
-				api: "openai-completions",
-				auth: "none",
-				models: [{ id: "present", name: "Present" }],
+		const resumed = await resume(
+			sessionFile,
+			settings,
+			{
+				"static-only": {
+					baseUrl: "https://static.example.invalid/v1",
+					api: "openai-completions",
+					auth: "none",
+					models: [{ id: "present", name: "Present" }],
+				},
 			},
-		});
+			authStorage,
+			true,
+		);
 
 		expect(resumed.model?.provider).toBe(allowedModel.provider);
 		expect(fallbackMessage).toContain(`${modelValue(forbiddenModel)} could not be restored`);

@@ -3507,6 +3507,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
+		if (
+			reapplyConfig &&
+			!hasExplicitModel &&
+			sessionModelStrings.length > 0 &&
+			restoredSessionModelIndex < 0 &&
+			(!defaultRoleSpec.model ||
+				!model ||
+				defaultRoleSpec.model.provider !== model.provider ||
+				defaultRoleSpec.model.id !== model.id) &&
+			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
+		) {
+			throw new Error(`Could not restore model ${sessionModelStrings[0]}`);
+		}
+
 		// `reapplyConfig` notice: the resolution above is silent, so report whether
 		// the config default was adopted or fell back. Only an adoption starts with
 		// `--reapply-config: resumed on ` (see `buildModelFallbackNotification`).
