@@ -59,6 +59,7 @@ export interface UpdateCredentialOAuthRequest {
 	id: string;
 	token: GatewayOAuthTokenRequest;
 	expectedVersion: GatewayInt64;
+	agentAccountId: string;
 }
 
 export interface UpdateCredentialOAuthResponse {
@@ -69,6 +70,7 @@ export interface DisableCredentialRequest {
 	id: string;
 	cause: string;
 	expectedVersion: GatewayInt64;
+	agentAccountId: string;
 }
 
 export type DisableCredentialResponse = Record<string, never>;

@@ -93,8 +93,14 @@ function startFakeServer(initialRows: FakeRow[]): FakeServer {
 				return Response.json({ credentials: [...rows.values()] });
 			}
 			const id = typeof body.id === "string" ? body.id : "";
+			if (!body.agentAccountId) {
+				return Response.json({ code: "invalid_argument", message: "missing agent" }, { status: 400 });
+			}
 			const row = rows.get(id);
-			if (!row) return Response.json({ code: "not_found", message: "missing credential" }, { status: 404 });
+			// An id outside the agent's pool looks missing, so ids cannot be probed.
+			if (!row || body.agentAccountId !== ACCOUNT_ID) {
+				return Response.json({ code: "not_found", message: "missing credential" }, { status: 404 });
+			}
 			if (body.expectedVersion !== row.version) {
 				return Response.json({ code: "aborted", message: "version changed" }, { status: 409 });
 			}

@@ -364,6 +364,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 				id: row.serverId,
 				token: oauthToGateway(credential),
 				expectedVersion: state.version,
+				agentAccountId: this.#agentAccountId,
 			};
 			const response = await this.#request("UpdateCredentialOAuth", request, updateCredentialOAuthResponseSchema);
 			state.version = int64String(response.version);
@@ -397,7 +398,12 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	async #disable(row: CredentialRow, cause: string): Promise<boolean> {
 		const state = this.#stateFor(row.serverId);
-		const request: DisableCredentialRequest = { id: row.serverId, cause, expectedVersion: state.version };
+		const request: DisableCredentialRequest = {
+			id: row.serverId,
+			cause,
+			expectedVersion: state.version,
+			agentAccountId: this.#agentAccountId,
+		};
 		try {
 			await this.#request("DisableCredential", request, disableCredentialResponseSchema);
 		} catch (error) {
