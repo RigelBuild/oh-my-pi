@@ -1565,34 +1565,30 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		const sessionFile = await writeBakedSession();
 		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-withdrawn"));
 
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			authStorage,
-			modelRegistry,
-			settings,
-			sessionManager,
-			disableExtensionDiscovery: true,
-			extensions: [withdrawingExtension],
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			rules: [],
-			preloadedCustomToolPaths: [],
-			toolNames: ["read"],
-			reapplyConfig: true,
-		});
-
-		try {
-			expect(modelRegistry.find("vend", "going-away")).toBeUndefined();
-			expect(session.model?.id).not.toBe("going-away");
-		} finally {
-			await session.dispose();
-		}
+		await expect(
+			createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager,
+				disableExtensionDiscovery: true,
+				extensions: [withdrawingExtension],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+				reapplyConfig: true,
+			}),
+		).rejects.toThrow("Could not restore model runtime-provider/router:low");
+		expect(modelRegistry.find("vend", "going-away")).toBeUndefined();
 	});
 	test("reparses a saved suffix when a late default flips adoption false->true", async () => {
 		// Late extension resolution can invalidate an earlier suffix split.
