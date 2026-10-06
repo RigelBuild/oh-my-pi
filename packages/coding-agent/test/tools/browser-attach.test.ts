@@ -477,6 +477,43 @@ describe("pickElectronTarget", () => {
 		}
 	});
 
+	test.skipIf(process.platform !== "linux")("ignores a generic dispatcher reached through a wrapper", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-dispatcher-wrapper-"));
+		const wrapper = path.join(root, "chromium");
+		const dispatcher = path.join(root, "dispatcher");
+		const profile = path.join(root, "profile");
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		try {
+			await Bun.write(dispatcher, Bun.file(process.execPath));
+			await fs.chmod(dispatcher, 0o755);
+			await Bun.write(wrapper, `#!/usr/bin/env bash\nexec "${dispatcher}" "$@"\n`);
+			await fs.chmod(wrapper, 0o755);
+			const child = Bun.spawn(
+				[
+					dispatcher,
+					"--eval",
+					'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+					`--user-data-dir=${profile}`,
+					`--remote-debugging-port=${cdp.port}`,
+				],
+				{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+			);
+			try {
+				const readiness = child.stdout.getReader();
+				await readiness.read();
+				readiness.releaseLock();
+				expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
+				expect(await findReusableCdp(wrapper)).toBeNull();
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		} finally {
+			cdp.stop(true);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test.skipIf(process.platform !== "linux")(
 		"does not attach through a dynamic or concatenated exec target",
 		async () => {
@@ -502,7 +539,7 @@ describe("pickElectronTarget", () => {
 					const readiness = child.stdout.getReader();
 					await readiness.read();
 					readiness.releaseLock();
-					for (const execTarget of [`"${target}"suffix`, `"${target}\\${"$"}{SUFFIX}"`]) {
+					for (const execTarget of [`"${target}"suffix`, `"${target}${"$"}{SUFFIX}"`]) {
 						await Bun.write(wrapper, `#!/usr/bin/env bash\nexec ${execTarget} "$@"\n`);
 						await fs.chmod(wrapper, 0o755);
 						expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
