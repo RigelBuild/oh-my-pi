@@ -1,8 +1,9 @@
 name: CI
 
 on:
+   # `main` is the resettable upstream mirror; only the gated `rigel-release` builds and releases.
    push:
-      branches: [main]
+      branches: [rigel-release]
       paths:
          - "packages/**"
          - "crates/**"
@@ -30,32 +31,9 @@ on:
          - "package.json"
          - "patches/**"
          - ".github/**"
+   # No paths filter: the required `CI` check must post on every PR, or a docs-only PR never merges.
    pull_request:
-      branches: [main, omp2]
-      paths:
-         - "packages/**"
-         - "crates/**"
-         - "scripts/**"
-         - "bazel/**"
-         - "MODULE.bazel"
-         - "MODULE.bazel.lock"
-         - "BUILD.bazel"
-         - ".bazelrc"
-         - ".bazelignore"
-         - ".bazelversion"
-         - "Cargo.toml"
-         - "Cargo.lock"
-         - "deny.toml"
-         - "about.toml"
-         - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
-         - "rust-toolchain.toml"
-         - "rustfmt.toml"
-         - "bun.lock"
-         - "bunfig.toml"
-         - "package.json"
-         - "patches/**"
-         - ".github/**"
+      branches: [rigel-release, main, omp2]
    workflow_dispatch:
       inputs:
          skip_npm:
@@ -93,16 +71,9 @@ permissions:
    contents: read
 
 jobs:
-   # scripts/release.ts pushes the version-bump commit and its `v*` tag
-   # atomically (`git push --atomic origin refs/heads/main:refs/heads/main
-   # <sha>:refs/tags/v<version>`), so a release now arrives as a single `push` to
-   # `refs/heads/main` — we no longer trigger on the tag ref at all (see
-   # `on.push`). This one branch-push run is therefore authoritative: it runs the
-   # full build AND, when HEAD carries a release tag, the release/publish jobs.
-   # `release_metadata` resolves that tag once so downstream jobs switch on
-   # `is-release` and address the tag by name — `github.ref` is
-   # `refs/heads/main` here, not the tag. A `workflow_dispatch` from a `v*` tag
-   # ref (or from a tagged main HEAD) is also treated as a release.
+   # A release is a `v*` tag on a `rigel-release` commit: the branch-push run (or a
+   # dispatch from the tag) is authoritative and builds plus publishes. `release_metadata`
+   # resolves the tag once so downstream jobs switch on `is-release`.
    release_metadata:
       name: Resolve release metadata
       # Hosted, not omp-kata: this ~20 s git-tag probe gates the whole release
@@ -116,14 +87,14 @@ jobs:
          # the GitHub release prerelease, and skip the stable-only brew tap.
          channel: ${{ steps.detect.outputs.channel }}
       steps:
-         # Only a main-branch run needs tags fetched, so `git tag --points-at
+         # Only a release-branch run needs tags fetched, so `git tag --points-at
          # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
          # tag straight from `github.ref_name`, and fetching `--tags` while
          # checkout uses an explicit tag refspec makes git refuse — so scope
-         # fetch-tags to main refs.
+         # fetch-tags to the release branch.
          - uses: actions/checkout@v4
            with:
-              fetch-tags: ${{ github.ref == 'refs/heads/main' }}
+              fetch-tags: ${{ github.ref == 'refs/heads/rigel-release' }}
          - name: Detect release tag at HEAD
            id: detect
            shell: bash
@@ -135,13 +106,19 @@ jobs:
                 refs/tags/v[0-9]*)
                   release_tag="${{ github.ref_name }}"
                   ;;
-                refs/heads/main)
+                refs/heads/rigel-release)
                   if [ "${{ github.event_name }}" != "pull_request" ]; then
                     release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
                   fi
                   ;;
               esac
               if [ -n "$release_tag" ]; then
+                # A tag dispatch can name any commit; release only what the gated branch holds.
+                git fetch --quiet --unshallow origin rigel-release
+                if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+                  echo "::error::$release_tag is not on rigel-release; refusing to release."
+                  exit 1
+                fi
                 echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
                 is_release=true
               fi
@@ -465,7 +442,7 @@ jobs:
          # must never fail native_addons and with it every test job.
          - name: Probe native addon cache entry
            id: natives-cache-probe
-           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release'
            continue-on-error: true
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -473,14 +450,14 @@ jobs:
               key: ${{ steps.natives-key.outputs.key }}
               lookup-only: true
          - name: Save native addon cache entry
-           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
          - name: Prune superseded native addon cache entries
-           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            shell: bash
            env:
@@ -488,7 +465,7 @@ jobs:
               PREFIX: ${{ steps.natives-key.outputs.prefix }}
            run: |
               # Best-effort: a failed prune leaves eviction to GitHub's LRU.
-              gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIX" \
+              gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/rigel-release --key "$PREFIX" \
                   --sort created_at --order desc --limit 100 --json id --jq '.[2:][].id' \
                 | while read -r id; do
                     gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
@@ -723,6 +700,23 @@ jobs:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
            run: bun run ci:test:install-methods
 
+   # The single required check on `rigel-release` PRs. Any non-success fails it, except
+   # the two jobs that skip on pull_request by design.
+   ci:
+      name: CI
+      if: ${{ always() }}
+      needs: [check, bazel_lock, rust_validate, native_addons, native_addons_cross, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - name: Gate tests
+           run: .github/scripts/ci-gate.test.sh
+         - name: Require every validation job to pass
+           env:
+              RESULTS: ${{ toJSON(needs) }}
+              PR_SKIPPABLE: ${{ github.event_name == 'pull_request' && 'rust_validate native_addons_cross' || '' }}
+           run: .github/scripts/ci-gate.sh
+
    # Aggregates every validation job so publish-side release jobs gate on one
    # result. Binary BUILDS deliberately do not wait for this gate — they run
    # in parallel with the test fan-out and only publishing is held back.
@@ -876,7 +870,7 @@ jobs:
          # path: caches saved on a tag or branch are readable only by that ref
          # yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -1006,7 +1000,7 @@ jobs:
               path: ${{ matrix.binary_path }}
          # Main-only save, after the build so it is off the critical path.
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -1085,7 +1079,7 @@ jobs:
          # Main-only save: caches saved on a tag or branch are readable only by
          # that ref yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ~/.bun/install/cache
@@ -1279,7 +1273,7 @@ jobs:
          # Main-only save: caches saved on a tag or branch are readable only by
          # that ref yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ~/.bun/install/cache
