@@ -189,9 +189,10 @@ jobs:
 
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
-   # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on rigel-release (kata remote cache, warm) and again at
-   # release. A skipped required check still satisfies branch protection.
+   # Rust validation (native_addons builds only the addon pair on a cache
+   # miss): Rust is validated post-merge on rigel-release (kata remote cache,
+   # warm) and again at release. A skipped required check still satisfies
+   # branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
       if: github.event_name != 'pull_request'
@@ -233,17 +234,13 @@ jobs:
 
    # Provides the linux-x64 addon pair every downstream TS job installs.
    #
-   # PRs never build. They restore the pair their base branch built (rigel-release for
-   # release PRs) from actions/cache (key = hash of every native build input, the
-   # same file set as the bazel-cache action's config+source hashes). With no
-   # exact entry (the PR changes native inputs, or the base has not built this
-   # state yet) they take the base's newest entry, and with no entry at all the
-   # latest npm release. The workspace loader skips its version sentinel for
-   # workspace loads, so any of these load under a newer checkout. Testing
-   # against main's build instead of the last release keeps merged-but-
-   # unreleased native fixes from failing every PR that did not touch Rust
-   # (a merged grep fix plus its TS test failed 75 PR runs against the
-   # 18.3.1 addon). Only rigel-release saves; see the save step for why.
+   # PRs restore the pair rigel-release built for the exact same native inputs
+   # from actions/cache (key = hash of every native build input, the same file
+   # set as the bazel-cache action's config+source hashes). On a miss (the PR
+   # changes native inputs, or rigel-release has not built this state yet) the
+   # PR builds the pair itself on the hosted runner: a stale or npm addon lacks
+   # exports newer TS calls, so it would fail tests the diff did not break.
+   # Only rigel-release saves; see the save step for why.
    #
    # rigel-release (kata, cluster remote cache) builds only the pair here so the TS
    # fan-out starts as soon as it links; native_addons_cross builds the other
@@ -273,7 +270,7 @@ jobs:
               echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
               echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
 
-         # ---- PR path: main-built addons from actions/cache, else npm ----
+         # ---- PR path: rigel-release-built addons from actions/cache ----
          # `ci-natives` is a plain workspace-relative path on purpose: the
          # cache version hashes the literal path list, so kata (save) and
          # hosted (restore) must spell it identically, and upload-artifact
@@ -285,44 +282,26 @@ jobs:
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
-              restore-keys: |
-                 ${{ steps.natives-key.outputs.prefix }}
-         - name: Fetch release native addons (npm)
-           if: github.event_name == 'pull_request' && steps.natives-cache.outputs.cache-matched-key == ''
-           shell: bash
-           run: |
-              set -euo pipefail
-              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
-              echo "Fetching $tarball"
-              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
-              mkdir -p ci-natives/natives-linux-x64-baseline ci-natives/natives-linux-x64-modern
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" ci-natives/natives-linux-x64-baseline/
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" ci-natives/natives-linux-x64-modern/
-         # Make the addon source visible whenever it is not source-matched,
-         # instead of leaving a reviewer to wonder which addons the tests ran.
          - name: Report native addon source
            if: github.event_name == 'pull_request'
            shell: bash
            env:
               EXACT: ${{ steps.natives-cache.outputs.cache-hit }}
-              MATCHED: ${{ steps.natives-cache.outputs.cache-matched-key }}
            run: |
               if [ "$EXACT" = true ]; then
-                echo "Using main's addons for this exact native source state ($MATCHED)."
-              elif [ -n "$MATCHED" ]; then
-                echo "::notice title=Native addons not source-matched::No rigel-release build matches this PR's native sources; testing against rigel-release's newest addon build ($MATCHED). Native changes are validated post-merge on rigel-release and at release."
+                echo "Using rigel-release's addons for this exact native source state."
               else
-                echo "::notice title=Native addons from npm::No main-built addon cache entry is available; testing against the latest npm release addons."
+                echo "::notice title=Native addons built on PR::No rigel-release build matches this PR's native sources; building the linux-x64 pair here."
               fi
 
-         # ---- rigel-release path: bazel build of the linux-x64 pair ----
+         # ---- build path: rigel-release, or a PR cache miss ----
          - id: cache
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
          - name: Build linux-x64 native addons
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -345,7 +324,7 @@ jobs:
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            shell: bash
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI before
