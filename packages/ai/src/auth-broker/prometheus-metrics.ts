@@ -183,6 +183,19 @@ export function accountLabelOf(report: UsageReport): string {
 	return UNIDENTIFIED_ACCOUNT;
 }
 
+/** The primary account id {@link primaryIdentity} lifted into `account:`, or `undefined` when none was. */
+function liftedPrimaryId(report: UsageReport): string | undefined {
+	const metaId = report.metadata?.accountId;
+	const scopeAccount = uniqueScopeValue(report, limit => limit.scope.accountId);
+	const raw =
+		typeof metaId === "string" && metaId.trim().length > 0
+			? metaId.trim()
+			: scopeAccount === CONFLICTING_SCOPE
+				? undefined
+				: scopeAccount?.trim();
+	return raw !== undefined && primaryIdentity(raw) !== raw ? raw : undefined;
+}
+
 /**
  * {@link uniqueScopeValue}'s third outcome: the limits carry several different
  * values. Distinct from `undefined` (none carries one) because a caller must be
@@ -592,11 +605,9 @@ export function renderUsageMetrics(
 		// and renewal date to the other. The account chain deliberately never
 		// USES the email as an identity; this only stops one email's subscription
 		// facts being applied to a different email.
-		const lifted = account.startsWith("account:") ? account.slice("account:".length) : undefined;
-		const rawAccountId =
-			lifted !== undefined && (RESERVED_IDENTITY.test(lifted) || lifted === UNIDENTIFIED_ACCOUNT)
-				? lifted
-				: undefined;
+		// From the identity source, not the label: an `account:` alias fallback is not a raw id.
+		const lifted = liftedPrimaryId(report);
+		const rawAccountId = lifted !== undefined && account === `account:${lifted}` ? lifted : undefined;
 		const subscription = subscriptions.lookup(provider, account, org, email, rawAccountId);
 		if (subscription) {
 			const rawPlan = subscription.plan ?? report.metadata?.planType;

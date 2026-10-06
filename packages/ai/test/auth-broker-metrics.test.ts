@@ -719,6 +719,30 @@ describe("renderUsageMetrics", () => {
 		]);
 	});
 
+	test("an account alias with a reserved prefix is not treated as a raw accountId", () => {
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata: { account: "project:foo" },
+			limits: [],
+		};
+		const plans: Record<string, string> = { "project:foo": "max", "account:project:foo": "pro" };
+		const subscriptions: SubscriptionLookup = {
+			// Raw id first, as the broker config does.
+			lookup: (_provider, account, _org, _email, rawAccountId) => {
+				const plan = (rawAccountId !== undefined ? plans[rawAccountId] : undefined) ?? plans[account];
+				return plan ? { plan } : undefined;
+			},
+			plans: [],
+		};
+		const info = renderUsageMetrics([report], { subscriptions })
+			.split("\n")
+			.filter(line => line.startsWith("llm_subscription_info{"));
+		expect(info).toEqual([
+			'llm_subscription_info{provider="anthropic",account="account:project:foo",org="",email="",plan="pro"} 1',
+		]);
+	});
+
 	// A quota reset must not mint a new series set. The Gemini CLI path derives
 	// `window.id` from the reset INSTANT (`reset-${resetsAt}`) and folds it into
 	// the limit id (`usage/gemini.ts` parseWindow + the bucket loop), so emitting
