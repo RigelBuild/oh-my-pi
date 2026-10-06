@@ -302,13 +302,14 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 		.catch(() => null);
 	if (!content || content.charCodeAt(0) === 0x7f) return null;
 	const relativeExec = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
-	const absoluteExec = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?(["'])(\/[^"'`\r\n]+)\1(?:\s|$)/;
+	const absoluteExec =
+		/^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?(?:(["'])(\/[^"'`\r\n]+)\1|(\/[^\s"'`;$}]+))(?=\s|$)/;
 	let target: string | null = null;
 	for (const line of content.split("\n")) {
 		const relative = relativeExec.exec(line);
 		const absolute = absoluteExec.exec(line);
 		if (relative?.[1]) target = path.join(path.dirname(wrapperPath), relative[1]);
-		else if (absolute?.[2]) target = absolute[2];
+		else if (absolute) target = absolute[2] ?? absolute[3] ?? null;
 	}
 	if (!target) return null;
 	const resolved = await fs.realpath(target).catch(() => null);
