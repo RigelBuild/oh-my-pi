@@ -4,6 +4,7 @@
  * so output is never duplicated.
  */
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "@oh-my-pi/pi-ai/types";
 import { MAX_EMPTY_COMPLETION_RETRIES, withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -152,11 +153,36 @@ describe("withReplaySafeStreamRetry", () => {
 			reason: "error",
 			error: {
 				stopReason: "error",
-				errorMessage: `Provider returned an empty completion (no content, 0 generated tokens) after ${MAX_EMPTY_COMPLETION_RETRIES + 1} attempts.`,
+				errorMessage:
+					"Provider returned a thought-only response without final output after empty-completion retries.",
 			},
 		});
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain(`${MAX_EMPTY_COMPLETION_RETRIES + 1} attempts`);
+		const errorId = AIError.classify({ message: result.errorMessage });
+		expect(AIError.is(errorId, AIError.Flag.EmptyResponse)).toBe(true);
+		expect(AIError.retriable(errorId)).toBe(true);
+	});
+
+	it("preserves an aborted final empty attempt as a stop", async () => {
+		const controller = new AbortController();
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ signal: controller.signal, providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				if (attempts === MAX_EMPTY_COMPLETION_RETRIES + 1) controller.abort();
+				return emptyAttempt();
+			},
+			{ retryEmptyCompletion: true },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+		expect(attempts).toBe(MAX_EMPTY_COMPLETION_RETRIES + 1);
+		expect(events.at(-1)?.type).toBe("done");
+		expect(result.stopReason).toBe("stop");
 	});
 
 	it("does not retry an empty pause_turn completion", async () => {

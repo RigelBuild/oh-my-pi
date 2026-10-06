@@ -135,7 +135,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
-			const retryEmpty =
+			const eligibleEmpty =
 				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
@@ -145,8 +145,8 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				completedMessage.stopDetails?.type !== "compaction" &&
 				!completedMessage.errorMessage &&
 				(completedMessage.usage?.output ?? 0) <= 1 &&
-				!hasVisibleAssistantContent(completedMessage) &&
-				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
+				!hasVisibleAssistantContent(completedMessage);
+			const retryEmpty = eligibleEmpty && emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
 			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
@@ -184,25 +184,12 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 			flush();
 			// Exhausted empty retries must fail instead of delivering a benign stop.
-			if (
-				policy.retryEmptyCompletion === true &&
-				options?.acceptEmptyResponse !== true &&
-				!committed &&
-				emptyRetries >= MAX_EMPTY_COMPLETION_RETRIES &&
-				completedMessage !== undefined &&
-				completedMessage.stopReason === "stop" &&
-				completedMessage.stopDetails?.type !== "pause_turn" &&
-				completedMessage.stopDetails?.type !== "compaction" &&
-				!completedMessage.errorMessage &&
-				(completedMessage.usage?.output ?? 0) <= 1 &&
-				!hasVisibleAssistantContent(completedMessage)
-			) {
+			if (eligibleEmpty && !signal?.aborted && completedMessage) {
 				const errored: AssistantMessage = {
 					...completedMessage,
 					stopReason: "error",
 					errorMessage:
-						"Provider returned an empty completion (no content, 0 generated tokens) " +
-						`after ${MAX_EMPTY_COMPLETION_RETRIES + 1} attempts.`,
+						"Provider returned a thought-only response without final output after empty-completion retries.",
 				};
 				outer.push({ type: "error", reason: "error", error: errored });
 				return;
