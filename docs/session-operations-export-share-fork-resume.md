@@ -408,9 +408,12 @@ This is startup-only behavior; there is no interactive `/continue` slash command
 Interactive `/restart` performs normal teardown, flushes postmortem cleanup and
 stdout, then relaunches the CLI. `restartArgv()` preserves launch configuration
 flags but strips original prompts/`@file` positionals and one-shot session
-selectors (`--session`, `--resume`, `--continue`, `--fork`, and foreign imports).
-It adds `--resume <current-id>` only when the session actually exists on disk;
-an in-memory or never-materialized session restarts fresh.
+selectors (`--session`, `--resume`, `--continue`, `--fork`, `--session-id`, and
+foreign imports). It adds `--resume <current-id>` when the active session exists
+on disk. If the launch used `--session-id`, restart preserves that exact
+selector while it still names the active session; after an in-session switch,
+restart resumes the session that is now active. An active session without a
+file restarts fresh, or with its pinned ID if it remains active.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.

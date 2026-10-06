@@ -856,12 +856,8 @@ function exitForSessionResolutionError(error: SessionResolutionError): never {
 	process.exit(1);
 }
 
-type SessionIdArgs = Args & { sessionId?: string };
-
 export function resolveForeignSessionSource(
-	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume"> & {
-		sessionId?: string;
-	},
+	parsed: Pick<Args, "continue" | "fork" | "fromClaude" | "fromCodex" | "noSession" | "resume" | "sessionId">,
 ): ForeignSessionSource | undefined {
 	if (parsed.fromClaude && parsed.fromCodex) {
 		throw new SessionResolutionError("--from-claude and --from-codex cannot be used together");
@@ -1186,7 +1182,7 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
 	}
 }
 
-function validateSessionIdArgs(parsed: SessionIdArgs): void {
+function validateSessionIdArgs(parsed: Args): void {
 	if (parsed.sessionId === undefined) return;
 	const conflicts = [
 		parsed.continue ? "--continue" : undefined,
@@ -1215,7 +1211,7 @@ async function findLocalSessionById(id: string, cwd: string, sessionDir?: string
  * before extensions establish whether a built-in-named flag belongs to them.
  */
 export async function createSessionManager(
-	parsed: SessionIdArgs,
+	parsed: Args,
 	cwd: string,
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,

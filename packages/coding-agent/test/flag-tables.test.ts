@@ -241,6 +241,20 @@ describe("foreign session import flags", () => {
 	});
 });
 
+describe("--session-id", () => {
+	it("parses separate and equals values without leaking the value into the prompt", () => {
+		const separate = parseArgs(["--session-id", "seat-1", "hello"]);
+		const equals = parseArgs(["--session-id=seat-2", "hello"]);
+
+		expect(separate.sessionId).toBe("seat-1");
+		expect(separate.messages).toEqual(["hello"]);
+		expect(separate.unrecognizedFlags).toEqual([]);
+		expect(equals.sessionId).toBe("seat-2");
+		expect(equals.messages).toEqual(["hello"]);
+		expect(equals.unrecognizedFlags).toEqual([]);
+	});
+});
+
 describe("restartArgv (/restart relaunch argv)", () => {
 	it("keeps configuration flags, drops positionals, and appends --resume", () => {
 		expect(restartArgv(["--model", "gpt-5", "fix the bug", "@notes.md"], "sid")).toEqual([
@@ -253,7 +267,22 @@ describe("restartArgv (/restart relaunch argv)", () => {
 
 	it("drops every session-source flag, including inline = and value forms", () => {
 		expect(
-			restartArgv(["--resume=old", "-r", "old2", "--continue", "-c", "--fork", "xyz", "--from-claude"], "sid"),
+			restartArgv(
+				[
+					"--resume=old",
+					"-r",
+					"old2",
+					"--continue",
+					"-c",
+					"--fork",
+					"xyz",
+					"--session-id",
+					"old3",
+					"--from-claude",
+					"--from-codex",
+				],
+				"sid",
+			),
 		).toEqual(["--resume", "sid"]);
 	});
 
@@ -264,6 +293,26 @@ describe("restartArgv (/restart relaunch argv)", () => {
 			"--no-tools",
 			"--resume",
 			"sid",
+		]);
+	});
+	it("preserves a pinned id on restart only while that id remains active", () => {
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "seat-1")).toEqual([
+			"--model",
+			"m",
+			"--session-id",
+			"seat-1",
+		]);
+		expect(restartArgv(["--session-id=seat-1", "--model", "m"], undefined)).toEqual([
+			"--model",
+			"m",
+			"--session-id",
+			"seat-1",
+		]);
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "seat-2")).toEqual([
+			"--model",
+			"m",
+			"--resume",
+			"seat-2",
 		]);
 	});
 
