@@ -292,35 +292,47 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 	return status !== null && status >= 200 && status < 300;
 }
 
-/** Resolve a Linux browser launcher to the executable its final exec invokes. */
+/** Follow at most four unambiguous literal execs; never treat a generic dispatcher as Chromium. */
 async function resolveWrapperTarget(wrapperPath: string): Promise<string | null> {
 	if (process.platform !== "linux") return null;
 	const prefix = String.raw`^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?`;
-	const relativeExec = new RegExp(`${prefix}["']?\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)`);
+	const relativeExec = new RegExp(
+		`${prefix}(?:(["'])\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)\\1|\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+))(?=\\s|$)`,
+	);
 	const absoluteExec = new RegExp(`${prefix}(?:(["'])(/[^"'\x60\\r\\n]+)\\1|(/[^\\s"'\x60;$}>&|<]+))(?=\\s|$)`);
 	let current = wrapperPath;
 	const seen = new Set<string>();
-	for (let depth = 0; depth < 4; depth++) {
+	for (let depth = 0; depth <= 4; depth++) {
 		const resolved = await fs.realpath(current).catch(() => null);
 		if (!resolved || seen.has(resolved)) return null;
 		seen.add(resolved);
 		const stat = await fs.stat(resolved).catch(() => null);
 		if (!stat?.isFile()) return null;
 		if (stat.size > 65_536) {
-			return depth > 0 && CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) ? resolved : null;
+			return depth > 0 &&
+				(CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) || path.basename(resolved) === "vivaldi-bin")
+				? resolved
+				: null;
 		}
 		const content = await Bun.file(resolved)
 			.text()
 			.catch(() => null);
 		if (!content) return null;
 		if (content.charCodeAt(0) === 0x7f) {
-			return depth > 0 && CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) ? resolved : null;
+			return depth > 0 &&
+				(CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) || path.basename(resolved) === "vivaldi-bin")
+				? resolved
+				: null;
 		}
+		if (depth === 4) return null;
 		let target: string | null = null;
 		for (const line of content.split("\n")) {
 			const relative = relativeExec.exec(line);
 			const absolute = absoluteExec.exec(line);
-			const next = relative?.[1] ? path.join(path.dirname(resolved), relative[1]) : (absolute?.[2] ?? absolute?.[3]);
+			const next =
+				relative?.[2] || relative?.[3]
+					? path.join(path.dirname(resolved), relative[2] ?? relative[3]!)
+					: (absolute?.[2] ?? absolute?.[3]);
 			if (next) {
 				if (target) return null;
 				target = next;
