@@ -184,6 +184,66 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(advisor.state.error).toContain("socket connection was closed unexpectedly");
 	});
 
+	const responsesEmptyStop = (): Response => {
+		const events = [
+			{ type: "response.created", response: { id: "resp_1", status: "in_progress", output: [] } },
+			{
+				type: "response.completed",
+				response: {
+					id: "resp_1",
+					status: "completed",
+					output: [],
+					usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
+				},
+			},
+		];
+		const body = events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+		return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+	};
+	const googleEmptyStop = (): Response => {
+		const chunk = {
+			candidates: [{ content: { parts: [{ text: "" }] }, finishReason: "STOP" }],
+			usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 0, totalTokenCount: 10 },
+		};
+		return new Response(`data: ${JSON.stringify(chunk)}\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	};
+
+	it.each([
+		["google", "google/gemini-2.5-flash", googleEmptyStop],
+		["openai", "openai/gpt-4o-mini", responsesEmptyStop],
+	] as const)("accepts a silent %s advisor stop with one request", async (provider, role, response) => {
+		authStorage.keys.setRuntime(provider, "test-key");
+		let requestCount = 0;
+		const fetchMock: FetchImpl = async () => {
+			requestCount += 1;
+			return response();
+		};
+		const streamFn: StreamFn = (requestModel, context, opts) =>
+			streamSimple(requestModel, context, { ...opts, preferWebsockets: false, fetch: fetchMock });
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: settings(),
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: streamFn,
+		});
+		session.settings.setModelRole("advisor", role);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		await advisor.prompt("ping");
+
+		expect(requestCount).toBe(1);
+		expect(advisor.state.error).toBeUndefined();
+		const last = advisor.state.messages.at(-1);
+		expect(last?.role === "assistant" ? last.stopReason : undefined).toBe("stop");
+	});
+
 	it("reuses the main agent's providerPromptCacheKey unchanged so tan/shared sessions stay on the parent shard", () => {
 		// Regression for codex-connector review on #3640: when the SDK pins
 		// `agent.promptCacheKey` (tan/shared-session callers do this to share
