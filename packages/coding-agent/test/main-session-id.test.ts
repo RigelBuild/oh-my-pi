@@ -139,14 +139,11 @@ describe("--session-id", () => {
 		});
 	});
 
-	it.each(["", "-leading", "trailing-", "has/slash", "has space", "../escape"])(
-		"rejects unsafe ID %p",
-		async id => {
-			await expect(createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings)).rejects.toMatchObject({
-				name: "SessionResolutionError",
-			});
-		},
-	);
+	it.each(["", "-leading", "trailing-", "has/slash", "has space", "../escape"])("rejects unsafe ID %p", async id => {
+		await expect(createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings)).rejects.toMatchObject({
+			name: "SessionResolutionError",
+		});
+	});
 
 	it("validates caller-chosen IDs at SessionManager APIs", async () => {
 		expect(() => SessionManager.create(cwd, sessionDir, undefined, { id: "x/../../escape" })).toThrow();
