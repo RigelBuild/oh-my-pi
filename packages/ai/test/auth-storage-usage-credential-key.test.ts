@@ -102,6 +102,36 @@ describe("AuthStorage identity-less usage reports", () => {
 		}
 	}, 20_000);
 
+	it("stamps cached reports on later report passes", async () => {
+		const storage = new AuthStorage(makeStore([apiKeyRow(11), apiKeyRow(12)]), {
+			usageProviderResolver: provider => (provider === "synthetic" ? stubProvider(identitylessReport) : undefined),
+		});
+		await storage.reload();
+		try {
+			await storage.usage.reports();
+			const reports = (await storage.usage.reports()) ?? [];
+			expect(
+				reports.filter(report => report.provider === "synthetic").map(report => report.metadata?.credentialKey),
+			).toEqual(["11", "12"]);
+		} finally {
+			storage.close();
+		}
+	});
+	it("keeps non-org-scoped reports distinct when only org metadata exists", async () => {
+		const report = (): UsageReport => ({ ...identitylessReport(), metadata: { orgId: "shared-org" } });
+		const storage = new AuthStorage(makeStore([apiKeyRow(11), apiKeyRow(12)]), {
+			usageProviderResolver: provider => (provider === "synthetic" ? stubProvider(report) : undefined),
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.usage.reports()) ?? [];
+			expect(
+				reports.filter(item => item.provider === "synthetic").map(item => item.metadata?.credentialKey),
+			).toEqual(["11", "12"]);
+		} finally {
+			storage.close();
+		}
+	});
 	it("leaves a report that carries its own identity unstamped", async () => {
 		const withAccount = (): UsageReport => ({ ...identitylessReport(), metadata: { accountId: "acct-real" } });
 		const storage = new AuthStorage(makeStore([apiKeyRow(11)]), {

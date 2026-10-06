@@ -62,7 +62,8 @@ export function usageReportHasNoIdentity(report: UsageReport): boolean {
 	if (usageReportMetadataValue(report, "accountId")) return false;
 	if (hasConflictingScopeAccountId(report)) return true;
 	if (usageReportMetadataValue(report, "email")) return false;
-	if (usageReportMetadataValue(report, "orgId")) return false;
+	if (authPolicyFor(report.provider)?.orgScopedIdentity === true && usageReportMetadataValue(report, "orgId"))
+		return false;
 	if (usageReportMetadataValue(report, "projectId")) return false;
 	if (usageReportMetadataValue(report, "account")) return false;
 	if (usageReportMetadataValue(report, "user")) return false;

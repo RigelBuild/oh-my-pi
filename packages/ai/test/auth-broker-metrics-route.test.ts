@@ -31,6 +31,54 @@ function sampleReports(): UsageReport[] {
 	];
 }
 
+test("broker metrics preserve two identity-less SQLite credentials after a cached report pass", async () => {
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-metrics-local-"));
+	const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+	const storage = new AuthStorage(store, {
+		usageProviderResolver: provider =>
+			provider === "synthetic"
+				? {
+						id: "synthetic",
+						fetchUsage: async () => ({
+							provider: "synthetic",
+							fetchedAt: Date.now(),
+							limits: [
+								{
+									id: "monthly",
+									label: "Monthly",
+									scope: { provider: "synthetic" },
+									amount: { usedFraction: 0.25, unit: "percent" },
+								},
+							],
+						}),
+					}
+				: undefined,
+	});
+	let handle: AuthBrokerServerHandle | undefined;
+	try {
+		const first = (await storage.credentials.upsert("synthetic", { type: "api_key", key: "key-one" }))[0];
+		const second = (await storage.credentials.upsert("synthetic", { type: "api_key", key: "key-two" }))[0];
+		await storage.usage.reports();
+		handle = startAuthBroker({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [MASTER],
+			metricsEnabled: true,
+			disableRefresher: true,
+		});
+		const response = await fetch(`${handle.url}/metrics`, { headers: { authorization: `Bearer ${MASTER}` } });
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body).toContain(`account="credential:${first.id}"`);
+		expect(body).toContain(`account="credential:${second.id}"`);
+	} finally {
+		await handle?.close();
+		storage.close();
+		store.close();
+		await removeWithRetries(tempDir);
+	}
+});
+
 describe("auth-broker GET /metrics route", () => {
 	let tempDir: string | undefined;
 	let store: (SqliteAuthCredentialStore & AuthCredentialStore) | undefined;
