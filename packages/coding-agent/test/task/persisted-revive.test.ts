@@ -1238,6 +1238,8 @@ describe("cold revival replays the system prompt the last request sent", () => {
 				getApiKey: async () => "test-key",
 				getAvailable: () => [],
 				find: () => agent.state.model,
+				hasModelId: (provider: string, id: string) =>
+					agent.state.model?.provider === provider && agent.state.model.id === id,
 				hasConfiguredAuth: () => true,
 			} as never,
 			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
