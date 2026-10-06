@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 
@@ -7,9 +8,10 @@ interface RunnerFrame {
 	id?: string;
 	data?: string;
 	status?: string;
+	evalue?: string;
 }
 
-const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
+const pythonPath = Bun.env.PYTHON ?? $which("python3") ?? $which("python");
 const runnerPath = path.resolve(import.meta.dir, "../../../src/eval/py/runner.py");
 const repoRoot = path.resolve(import.meta.dir, "../../../../..");
 const encoder = new TextEncoder();
@@ -23,14 +25,15 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-async function runCell(code: string): Promise<RunnerFrame[]> {
+async function runCell(code: string, environment: NodeJS.ProcessEnv = process.env): Promise<RunnerFrame[]> {
+	if (!pythonPath) throw new Error("Python is required for runner shell tests");
 	const proc = Bun.spawn([pythonPath, "-u", runnerPath], {
 		cwd: repoRoot,
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
 		env: {
-			...process.env,
+			...environment,
 			PYTHONUNBUFFERED: "1",
 			PYTHONIOENCODING: "utf-8",
 		},
@@ -88,6 +91,22 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 		}
 	}
 }
+
+const describeMissingBash = process.platform === "win32" ? describe.skip : describe;
+
+describeMissingBash("Python runner Bash lookup", () => {
+	it("reports a missing Bash executable without running another shell", async () => {
+		const dir = await fs.mkdtemp(path.join(repoRoot, "bash-absent-"));
+		try {
+			const frames = await runCell("%%bash\necho should-not-run", { ...process.env, PATH: dir });
+			expect(frames.find(frame => frame.type === "error")?.evalue).toBe("%%bash requires bash on PATH");
+			expect(frames.find(frame => frame.type === "done")?.status).toBe("error");
+			expect(frames.filter(frame => frame.type === "stdout")).toEqual([]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("Python runner shell output streaming", () => {
 	it("streams !cmd output chunks before the child process exits", async () => {
