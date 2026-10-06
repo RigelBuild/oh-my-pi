@@ -295,9 +295,9 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 /** Resolve a Linux browser launcher to the executable its final exec invokes. */
 async function resolveWrapperTarget(wrapperPath: string): Promise<string | null> {
 	if (process.platform !== "linux") return null;
-	const relativeExec = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
-	const absoluteExec =
-		/^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?(?:(["'])(\/[^"'`\r\n]+)\1|(\/[^\s"'`;$}]+))(?=\s|$)/;
+	const prefix = String.raw`^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?`;
+	const relativeExec = new RegExp(`${prefix}["']?\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)`);
+	const absoluteExec = new RegExp(`${prefix}(?:(["'])(/[^"'\x60\\r\\n]+)\\1|(/[^\\s"'\x60;$}>&|<]+))(?=\\s|$)`);
 	let current = wrapperPath;
 	const seen = new Set<string>();
 	for (let depth = 0; depth < 4; depth++) {
@@ -306,18 +306,25 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 		seen.add(resolved);
 		const stat = await fs.stat(resolved).catch(() => null);
 		if (!stat?.isFile()) return null;
-		if (stat.size > 65_536) return depth > 0 ? resolved : null;
+		if (stat.size > 65_536) {
+			return depth > 0 && CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) ? resolved : null;
+		}
 		const content = await Bun.file(resolved)
 			.text()
 			.catch(() => null);
 		if (!content) return null;
-		if (content.charCodeAt(0) === 0x7f) return depth > 0 ? resolved : null;
+		if (content.charCodeAt(0) === 0x7f) {
+			return depth > 0 && CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) ? resolved : null;
+		}
 		let target: string | null = null;
 		for (const line of content.split("\n")) {
 			const relative = relativeExec.exec(line);
 			const absolute = absoluteExec.exec(line);
-			if (relative?.[1]) target = path.join(path.dirname(resolved), relative[1]);
-			else if (absolute) target = absolute[2] ?? absolute[3] ?? null;
+			const next = relative?.[1] ? path.join(path.dirname(resolved), relative[1]) : (absolute?.[2] ?? absolute?.[3]);
+			if (next) {
+				if (target) return null;
+				target = next;
+			}
 		}
 		if (!target || target.includes("$") || target.includes("\\")) return null;
 		current = target;
