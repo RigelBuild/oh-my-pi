@@ -324,6 +324,8 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 				? resolved
 				: null;
 		}
+		if (content.includes("<<")) return null;
+		if (/\b(?:then|else|do)\s+exec\s/.test(content)) return null;
 		if (depth === 4) return null;
 		let target: string | null = null;
 		for (const line of content.split("\n")) {

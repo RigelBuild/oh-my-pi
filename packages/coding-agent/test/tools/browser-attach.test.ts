@@ -583,6 +583,8 @@ describe("pickElectronTarget", () => {
 					for (const script of [
 						`#!/usr/bin/env bash\nexec "${target}" "$@"\nexec "$BROWSER" "$@"\n`,
 						`#!/usr/bin/env bash\nexec '$HERE/chrome' "$@"\n`,
+						`#!/usr/bin/env bash\nif [ "${"$"}{USE_ALT:-0}" = 1 ]; then exec "$BROWSER" "$@"; fi\nexec "${target}" "$@"\n`,
+						`#!/usr/bin/env bash\ncat <<'DOC'\nexec "${target}" "$@"\nDOC\nexec "$BROWSER" "$@"\n`,
 					]) {
 						await Bun.write(wrapper, script);
 						expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
