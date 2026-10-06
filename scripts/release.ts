@@ -42,6 +42,20 @@ export function validateExplicitVersion(version: string): string | null {
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
 }
+
+/** A failed describe is tagless only when the repository has no version tags. */
+export async function latestReachableVersionTag(cwd?: string): Promise<string> {
+	const describe = await git(["describe", "--tags", "--abbrev=0", "--match", "v*"])
+		.cwd(cwd ?? ".")
+		.quiet()
+		.nothrow();
+	if (describe.exitCode === 0) return describe.text().trim();
+	const tags = await git(["tag", "-l", "v*"])
+		.cwd(cwd ?? ".")
+		.quiet();
+	if (tags.text().trim()) throw new Error("Version tags exist but none is reachable from HEAD");
+	return "";
+}
 export function isTransientGhError(message: string): boolean {
 	return /\bHTTP 50[234]\b|server error|connection reset|econnreset|timed out|i\/o timeout|\btimeout\b|deadline exceeded|etimedout/i.test(
 		message,
@@ -382,8 +396,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log(`  Bazel: ${bazel}`);
 
-	const describe = await git(["describe", "--tags", "--abbrev=0", "--match", "v*"]).quiet().nothrow();
-	const latestTag = describe.exitCode === 0 ? describe.text().trim() : "";
+	const latestTag = await latestReachableVersionTag();
 	let version: string;
 	try {
 		const resolved = resolveReleaseVersion(versionOrBump, latestTag);

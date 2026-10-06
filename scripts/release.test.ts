@@ -1,3 +1,7 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
 import {
 	applyCargoWorkspaceVersion,
@@ -5,6 +9,7 @@ import {
 	bumpCanaryVersion,
 	bumpVersion,
 	isTransientGhError,
+	latestReachableVersionTag,
 	resolveReleaseVersion,
 	runWithTransientRetry,
 	validateExplicitVersion,
@@ -73,6 +78,43 @@ describe("release reliability helpers", () => {
 		});
 	});
 
+	test("allows only a truly tagless repository to prepare its first explicit version", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-release-tags-"));
+		const git = (...args: string[]) => $`git ${args}`.cwd(repo).quiet();
+		try {
+			await git("init", "-b", "main");
+			await git(
+				"-c",
+				"user.name=test",
+				"-c",
+				"user.email=test@example.com",
+				"commit",
+				"--allow-empty",
+				"-m",
+				"initial",
+			);
+			const first = validateExplicitVersion("v18.0.3");
+			if (first === null) throw new Error("expected a valid first release version");
+			expect(resolveReleaseVersion(first, await latestReachableVersionTag(repo)).version).toBe("18.0.3");
+			await git("tag", "v19.0.0");
+			expect(await latestReachableVersionTag(repo)).toBe("v19.0.0");
+			await git("checkout", "--orphan", "isolated");
+			await git(
+				"-c",
+				"user.name=test",
+				"-c",
+				"user.email=test@example.com",
+				"commit",
+				"--allow-empty",
+				"-m",
+				"isolated",
+			);
+			await expect(latestReachableVersionTag(repo)).rejects.toThrow("Version tags exist but none is reachable");
+		} finally {
+			await fs.rm(repo, { recursive: true, force: true });
+		}
+	});
+
 	test("requires a prior tag for version bump keywords", () => {
 		expect(() => resolveReleaseVersion("patch", "")).toThrow("no prior v* tag");
 		expect(() => resolveReleaseVersion("canary", "")).toThrow("no prior v* tag");
@@ -96,6 +138,21 @@ describe("release reliability helpers", () => {
 			),
 		).resolves.toBe("ok");
 		expect(attempts).toBe(3);
+	});
+
+	test("retries transient GitHub CLI stderr", async () => {
+		let attempts = 0;
+		await expect(
+			runWithTransientRetry(
+				async () => {
+					attempts++;
+					if (attempts === 1) throw { message: "gh failed", stderr: Buffer.from("HTTP 503 Service Unavailable") };
+					return "ok";
+				},
+				{ sleep: async () => {} },
+			),
+		).resolves.toBe("ok");
+		expect(attempts).toBe(2);
 	});
 
 	test("caps transient GitHub retries", async () => {
