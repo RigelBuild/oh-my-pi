@@ -76,8 +76,20 @@ Argument handling:
 | `--profile <name>` | Use an isolated profile for auth, sessions, settings, and caches. |
 | `--alias <name>` | Create a shell shortcut for a named profile and exit; requires `--profile` or `OMP_PROFILE`. |
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
+| `--reapply-config` | Reapply config-selected model, thinking, and service tiers when resuming or forking at CLI startup (`--resume`/`--continue`/`--fork`), per knob. Default off. |
 | `--session-dir <dir>` | Directory for session storage and lookup. |
 | `--no-session` | Don't save the session (ephemeral). |
+
+`--reapply-config` applies to CLI startup session resumes and forks, including
+`--continue`, `--resume`, and `--fork`; it does not change an in-session `/resume`.
+It reapplies `--config`/`--profile` settings over values baked into the session,
+per knob: a value the config does not specify keeps the session's own. Config
+model and thinking are adopted only without an explicit `--model`; that flag
+pins both, while `--thinking` still takes precedence for the thinking level.
+Service tiers reapply per family regardless of `--model`; omitted families
+keep the session's tier, and `--service-tier` overrides the OpenAI tier. Without
+the flag, startup resume restores saved values; a legacy session without a saved
+service-tier entry instead uses the configured tiers.
 
 #### Session history
 

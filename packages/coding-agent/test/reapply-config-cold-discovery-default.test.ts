@@ -132,6 +132,8 @@ describe("--reapply-config cold-discovery configured default", () => {
 		settings: Settings,
 		extraProviders: Record<string, unknown> = {},
 		authOverride: AuthStorage = authStorage,
+		// A no-UI resume fails closed on an unrestorable session model; opt into the TUI fallback.
+		allowSessionModelFallback = false,
 	): Promise<AgentSession> {
 		const modelsPath = path.join(tempDir.path(), "models.yml");
 		await Bun.write(
@@ -168,6 +170,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 			enableLsp: false,
 			skipPythonPreflight: true,
 			reapplyConfig: true,
+			...(allowSessionModelFallback ? { hasUI: true, allowSessionModelFallback: true } : {}),
 		});
 		session = result.session;
 		fallbackMessage = result.modelFallbackMessage;
@@ -290,8 +293,10 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	it("discovers a cold provider's only model when no default role is configured", async () => {
-		// With no default role, the only authenticated provider has no static models.
-		// Discovery remains necessary for this arbitrary fallback.
+		// With no default role, reapply adopts nothing and this is a plain restore of
+		// an unauthenticated saved model, which only a UI session may replace. The
+		// only authenticated provider has no static models, so discovery remains
+		// necessary for this arbitrary fallback.
 		const bakedModel = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -308,7 +313,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 				configFiles: [],
 			});
 
-			const resumed = await resume(sessionFile, settings, {}, noAuth);
+			const resumed = await resume(sessionFile, settings, {}, noAuth, true);
 
 			expect(resumed.model?.provider).toBe("ollama");
 			expect(resumed.model?.id).toBe(DISCOVERED_MODEL);

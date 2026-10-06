@@ -358,6 +358,24 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
+/** Returns the stderr notice for a resolved noninteractive startup model. */
+export function renderStartupModelNotice(input: {
+	isInteractive: boolean;
+	hasModel: boolean;
+	modelFallbackMessage: string | undefined;
+}): string | undefined {
+	if (input.isInteractive || !input.hasModel || !input.modelFallbackMessage) return undefined;
+	const { kind } = buildModelFallbackNotification(input.modelFallbackMessage);
+	const paint = kind === "info" ? chalk.cyan : chalk.yellow;
+	return `${paint(input.modelFallbackMessage)}\n`;
+}
+
+/** Config adoption is informational; unresolved restore failures remain warnings. */
+export function buildModelFallbackNotification(modelFallbackMessage: string): InteractiveModeNotify {
+	const configAdoption = modelFallbackMessage.startsWith("--reapply-config: resumed on ");
+	return { kind: configAdoption ? "info" : "warn", message: modelFallbackMessage };
+}
+
 export function buildModelScopeNotification(
 	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
 	startupQuiet: boolean,
@@ -1315,6 +1333,16 @@ export async function buildSessionOptions(
 		autoApprove: parsed.autoApprove ?? false,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
+	// Reapply only over a resumed or forked transcript; a fresh session keeps fresh precedence.
+	const reapplyConfig =
+		parsed.reapplyConfig === true &&
+		Boolean(parsed.continue || parsed.resume || parsed.fork) &&
+		(sessionManager?.getLeafId() ?? null) !== null;
+	if (reapplyConfig) {
+		options.reapplyConfig = true;
+	}
+	// Under reapply, scope-derived picks would read as an explicit `--model` in the SDK.
+	const restoringModelChoice = restoringSession || reapplyConfig;
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
 	}
@@ -1369,7 +1397,7 @@ export async function buildSessionOptions(
 		options.providerPromptCacheKeySource = "explicit";
 	} else {
 		const header = sessionManager?.getHeader();
-		const scopedModelOverride = scopedModels.length > 0 && !restoringSession;
+		const scopedModelOverride = scopedModels.length > 0 && !restoringModelChoice;
 		const forkCacheShapeChanged =
 			scopedModelOverride ||
 			parsed.model !== undefined ||
@@ -1378,7 +1406,9 @@ export async function buildSessionOptions(
 			parsed.systemPromptTemplate !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.noTools === true ||
+			// Reapply re-resolves model/thinking from config; explicit --prompt-cache-key never reaches here.
+			reapplyConfig;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
@@ -1446,7 +1476,7 @@ export async function buildSessionOptions(
 				options.thinkingLevel = resolved.thinkingLevel;
 			}
 		}
-	} else if (scopedModels.length > 0 && !restoringSession) {
+	} else if (scopedModels.length > 0 && !restoringModelChoice) {
 		const remembered = activeSettings.getModelRole("default");
 		if (remembered) {
 			const rememberedSpec = resolveModelRoleValue(
@@ -1491,7 +1521,7 @@ export async function buildSessionOptions(
 			options.model = scopedModels[0].model;
 			options.rebindModelAfterDiscovery = true;
 		}
-	} else if ((parsed.models?.length ?? 0) > 0 && !restoringSession) {
+	} else if ((parsed.models?.length ?? 0) > 0 && !restoringModelChoice) {
 		// A CLI `--models` scope that resolved to zero models at startup: its
 		// selectors name only models supplied by extension providers (or discovery)
 		// that register during createAgentSession, so nothing matched the
@@ -1590,7 +1620,7 @@ export async function buildSessionOptions(
 		// thinking suffix) after extensions register; seeding the fallback
 		// scoped model's level here would override it in createAgentSession.
 		!deferredDefaultRole &&
-		!restoringSession
+		!restoringModelChoice
 	) {
 		options.thinkingLevel = scopedModels[0].thinkingLevel;
 	}
@@ -2469,13 +2499,23 @@ export async function runRootCommand(
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
-				notifs.push({ kind: "warn", message: modelFallbackMessage });
+				notifs.push(buildModelFallbackNotification(modelFallbackMessage));
 			}
 
 			const modelRegistryError = modelRegistry.getError();
 			if (modelRegistryError) {
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}
+
+			// Resolved models bypass the no-model block, and notifs only reach the TUI.
+			// Report config adoption or failure to noninteractive callers on stderr;
+			// keep structured stdout clean.
+			const startupNotice = renderStartupModelNotice({
+				isInteractive,
+				hasModel: Boolean(session.model),
+				modelFallbackMessage,
+			});
+			if (startupNotice) process.stderr.write(startupNotice);
 
 			if (!isInteractive && !session.model) {
 				if (modelRegistryError) {
