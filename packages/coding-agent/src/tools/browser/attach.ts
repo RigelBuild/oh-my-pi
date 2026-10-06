@@ -297,7 +297,7 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 	if (process.platform !== "linux") return null;
 	const prefix = String.raw`^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?`;
 	const relativeExec = new RegExp(
-		`${prefix}(?:(["'])\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)\\1|\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+))(?=\\s|$)`,
+		`${prefix}(?:"\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)"|\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+))(?=\\s|$)`,
 	);
 	const absoluteExec = new RegExp(`${prefix}(?:(["'])(/[^"'\x60\\r\\n]+)\\1|(/[^\\s"'\x60;$}>&|<]+))(?=\\s|$)`);
 	let current = wrapperPath;
@@ -327,16 +327,15 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 		if (depth === 4) return null;
 		let target: string | null = null;
 		for (const line of content.split("\n")) {
+			if (!/^\s*exec\s/.test(line)) continue;
 			const relative = relativeExec.exec(line);
 			const absolute = absoluteExec.exec(line);
 			const next =
-				relative?.[2] || relative?.[3]
-					? path.join(path.dirname(resolved), relative[2] ?? relative[3]!)
+				relative?.[1] || relative?.[2]
+					? path.join(path.dirname(resolved), relative[1] ?? relative[2]!)
 					: (absolute?.[2] ?? absolute?.[3]);
-			if (next) {
-				if (target) return null;
-				target = next;
-			}
+			if (!next || target) return null;
+			target = next;
 		}
 		if (!target || target.includes("$") || target.includes("\\")) return null;
 		current = target;
