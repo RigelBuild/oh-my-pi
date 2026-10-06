@@ -80,6 +80,8 @@ Argument handling:
 | `--session-dir <dir>` | Directory for session storage and lookup. |
 | `--no-session` | Don't save the session (ephemeral). |
 
+#### Reapplying configuration at startup
+
 `--reapply-config` applies to CLI startup session resumes and forks, including
 `--continue`, `--resume`, and `--fork`; it does not change an in-session `/resume`.
 It reapplies `--config`/`--profile` settings over values baked into the session,
