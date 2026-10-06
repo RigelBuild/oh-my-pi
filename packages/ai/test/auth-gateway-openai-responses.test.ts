@@ -485,6 +485,14 @@ describe("openai-responses parseRequest", () => {
 		}
 	});
 
+	it("rejects malformed non-null Responses function tool fields", () => {
+		for (const field of [{ description: 3 }, { parameters: "invalid" }, { strict: "true" }]) {
+			expect(() =>
+				parseRequest({ model: "gpt-5.6-luna", input: "hi", tools: [{ type: "function", name: "read", ...field }] }),
+			).toThrow();
+		}
+	});
+
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
 		expect(() =>
 			parseRequest({
