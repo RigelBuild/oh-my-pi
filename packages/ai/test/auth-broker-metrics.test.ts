@@ -690,6 +690,35 @@ describe("renderUsageMetrics", () => {
 		expect(infoLines.length).toBe(2);
 	});
 
+	test("a reserved-prefix accountId resolves its subscription by the raw id", () => {
+		const report = (metadata: Record<string, string>): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt: 1,
+			metadata,
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "5h",
+					scope: { provider: "anthropic" },
+					amount: { usedFraction: 0.5, unit: "percent" },
+					status: "ok",
+				},
+			],
+		});
+		const subscriptions: SubscriptionLookup = {
+			lookup: (_provider, _account, _org, _email, rawAccountId) =>
+				rawAccountId === "project:foo" ? { plan: "max" } : undefined,
+			plans: [],
+		};
+		const out = renderUsageMetrics([report({ accountId: "project:foo" }), report({ accountId: "plain" })], {
+			subscriptions,
+		});
+		const info = out.split("\n").filter(line => line.startsWith("llm_subscription_info{"));
+		expect(info).toEqual([
+			'llm_subscription_info{provider="anthropic",account="account:project:foo",org="",email="",plan="max"} 1',
+		]);
+	});
+
 	// A quota reset must not mint a new series set. The Gemini CLI path derives
 	// `window.id` from the reset INSTANT (`reset-${resetsAt}`) and folds it into
 	// the limit id (`usage/gemini.ts` parseWindow + the bucket loop), so emitting
@@ -788,82 +817,33 @@ describe("renderUsageMetrics", () => {
 		expect(out).not.toContain("duplicate series dropped");
 	});
 
-	// The threshold itself is the branch: ten digits is the shortest epoch-second
-	// instant, and the longest legitimate run a provider emits is the 8-digit
-	// date in a model id. Nine must survive and ten must collapse, so a
-	// mis-tuned bound is caught from either side.
-	test("the digit threshold elides at ten and no earlier", () => {
-		// One below: kept, so a narrower id is never re-keyed.
-		expect(stableLabelId("reset-999999999")).toBe("reset-999999999");
-		// At and above: collapsed to the bounded placeholder.
-		expect(stableLabelId("reset-1000000000")).toBe("reset-ts");
+	test("only reset-derived id segments are normalized", () => {
 		expect(stableLabelId("reset-1700000900000")).toBe("reset-ts");
-		// Surrounding structure survives, so distinct windows stay distinct.
 		expect(stableLabelId("gemini-3-pro:reset-1700000900000")).toBe("gemini-3-pro:reset-ts");
-		// Several runs in one id each collapse independently.
-		expect(stableLabelId("1700000900000-to-1700086400000")).toBe("ts-to-ts");
+		// Opaque numeric ids and non-terminal matches pass through unchanged.
+		expect(stableLabelId("quota-1234567890")).toBe("quota-1234567890");
+		expect(stableLabelId("1700000900000-to-1700086400000")).toBe("1700000900000-to-1700086400000");
+		expect(stableLabelId("prereset-1700000900000")).toBe("prereset-1700000900000");
 	});
 
-	// Eliding the instant makes two ids that differ ONLY inside the digit run
-	// collide. The collision falls through to `add()`'s drop-and-note rather than
-	// being suffixed with the id's rank among its colliding peers: that rank is
-	// derived from the current report's membership, so a surviving series would
-	// silently inherit a departed peer's history.
-	test("a limit's series identity does not change when a colliding peer disappears", () => {
-		const forIds = (ids: readonly string[]): UsageReport => ({
-			provider: "anthropic",
-			fetchedAt: 1,
-			metadata: { accountId: "acct-1" },
-			limits: ids.map(id => ({
-				id,
-				label: "Quota",
-				scope: { provider: "anthropic" as const },
-				amount: { usedFraction: id.endsWith("0") ? 0.25 : 0.75, unit: "percent" as const },
-				status: "ok" as const,
-			})),
-		});
-		const labelsOf = (out: string): string[] =>
-			out
-				.split("\n")
-				.filter(line => line.startsWith("llm_usage_limit_used_fraction{"))
-				.map(line =>
-					line.slice(line.indexOf('limit_id="'), line.indexOf('"', line.indexOf('limit_id="') + 10) + 1),
-				);
-
-		// `quota-1234567891` alone, then with a lexically-earlier colliding peer.
-		const alone = renderUsageMetrics([forIds(["quota-1234567891"])]);
-		const withPeer = renderUsageMetrics([forIds(["quota-1234567890", "quota-1234567891"])]);
-
-		// Its label is the same in both, so adding or losing a peer never renames
-		// it into the other limit's series.
-		expect(labelsOf(alone)).toEqual(['limit_id="quota-ts"']);
-		expect(labelsOf(withPeer)).toEqual(['limit_id="quota-ts"']);
-		// The collision is surfaced, not silently absorbed into a renamed series.
-		expect(withPeer).toContain("duplicate series dropped");
-	});
-
-	test("a colliding id keeps its series identity when the provider reorders its limits", () => {
-		// Label identity must not depend on array order: a provider that reorders
-		// between fetches would otherwise swap two series' histories.
-		const forOrder = (ids: readonly string[]): UsageReport => ({
-			provider: "anthropic",
-			fetchedAt: 1,
-			metadata: { accountId: "acct-1" },
-			limits: ids.map(id => ({
-				id,
-				label: "Quota",
-				scope: { provider: "anthropic" as const },
-				amount: { usedFraction: 0.5, unit: "percent" as const },
-				status: "ok" as const,
-			})),
-		});
-		const fractions = (out: string): string[] =>
-			out.split("\n").filter(line => line.startsWith("llm_usage_limit_used_fraction{"));
-
-		const ascending = renderUsageMetrics([forOrder(["quota-1234567890", "quota-1234567891"])]);
-		const descending = renderUsageMetrics([forOrder(["quota-1234567891", "quota-1234567890"])]);
-
-		expect(fractions(ascending)).toEqual(fractions(descending));
+	test("distinct long numeric quota ids keep distinct series", () => {
+		const out = renderUsageMetrics([
+			{
+				provider: "anthropic",
+				fetchedAt: 1,
+				metadata: { accountId: "acct-1" },
+				limits: ["quota-1234567890", "quota-1234567891"].map((id, index) => ({
+					id,
+					label: "Quota",
+					scope: { provider: "anthropic" as const },
+					amount: { usedFraction: index === 0 ? 0.25 : 0.75, unit: "percent" as const },
+					status: "ok" as const,
+				})),
+			},
+		]);
+		expect(out).toContain('limit_id="quota-1234567890"');
+		expect(out).toContain('limit_id="quota-1234567891"');
+		expect(out).not.toContain("duplicate series dropped");
 	});
 });
 

@@ -738,11 +738,14 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 		// Prefer the exact org-scoped entry; fall back to an org-less config entry
 		// so a pre-org config (no `org` key) still resolves for every org of that
 		// account, matching the prior single-key behavior.
-		lookup: (provider, account, org, email) => {
+		lookup: (provider, account, org, email, rawAccountId) => {
 			// The `{provider, account, org}` entry, org-scoped then org-less.
-			const byAccount = () =>
-				accounts.get(`${provider}\x00${account}\x00${org}`) ??
-				(org.length > 0 ? accounts.get(`${provider}\x00${account}\x00`) : undefined);
+			const byKey = (key: string) =>
+				accounts.get(`${provider}\x00${key}\x00${org}`) ??
+				(org.length > 0 ? accounts.get(`${provider}\x00${key}\x00`) : undefined);
+			// Config keys name raw provider ids, so a lifted `account:<id>` label
+			// resolves by its raw id first.
+			const byAccount = () => (rawAccountId !== undefined ? byKey(rawAccountId) : undefined) ?? byKey(account);
 			// The report's email arrives already trimmed and lowercased
 			// (`emailLabelOf`), while an account key is stored trim-only so real
 			// account IDS stay case-sensitive. So an email-only entry written with

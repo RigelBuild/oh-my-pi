@@ -91,6 +91,15 @@ describe("parseSubscriptionsConfig", () => {
 		expect(config.lookup("anthropic", "ACCT-1", "")).toBeUndefined();
 	});
 
+	it("resolves a reserved-prefix raw account id before its lifted label", () => {
+		const config = parseSubscriptionsConfig(
+			JSON.stringify({ accounts: { "project:foo": { provider: "anthropic", plan: "max" } } }),
+			FILE,
+		);
+		expect(config.lookup("anthropic", "account:project:foo", "", "", "project:foo")?.plan).toBe("max");
+		expect(config.lookup("anthropic", "account:project:foo", "", "")).toBeUndefined();
+	});
+
 	it("does not case-fold a real account id through the email fallback", () => {
 		// Account ids are case-SENSITIVE, so the case-folded index must apply only
 		// to the unidentified-sentinel path: a report that recovered "ACCT-1" must

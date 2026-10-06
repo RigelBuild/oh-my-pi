@@ -282,51 +282,18 @@ export function orgLabelOf(report: UsageReport): string {
 }
 
 /**
- * Run of digits long enough to be a timestamp (or an equally unbounded
- * counter) rather than a window duration or a model version.
- *
- * Ten is the discriminating threshold: epoch seconds are 10 digits and epoch
- * milliseconds 13, while every bounded numeric run the providers actually put
- * in an id is far shorter — window durations (`5h`, `7d`, `1mo`, `3u7`),
- * billing periods (`billing-period`), and the longest legitimate run of all,
- * a dated model id (`claude-opus-4-20250514`, 8 digits).
+ * Known reset-derived id segment: Gemini's `reset-<epoch>` window id, also
+ * folded into its limit id (`<model>:reset-<epoch>`).
  */
-const TIMESTAMP_DIGITS = /\d{10,}/g;
-
-/** Fixed stand-in for an elided timestamp run; a bounded, PromQL-safe token. */
-const TIMESTAMP_PLACEHOLDER = "ts";
+const RESET_DERIVED_SEGMENT = /(^|:)reset-\d+$/;
 
 /**
- * Collapse the timestamp-bearing part of a provider-supplied id so it is safe
- * to use as a Prometheus label value.
- *
- * `limit.id` and `limit.window.id` are both provider-authored strings, and some
- * providers derive them from the window's reset instant: the Gemini CLI path
- * builds `window.id` as `reset-${resetsAt}` and folds it straight into the
- * limit id (`usage/gemini.ts` `parseWindow`). Emitted verbatim, EVERY quota
- * reset re-keys both labels and starts a brand-new set of time series, and the
- * abandoned ones linger for the whole retention window — the classic unbounded
- * cardinality footgun. The reset instant is already exported properly as a
- * VALUE on `llm_usage_limit_resets_at_seconds`, so eliding it from the identity
- * loses nothing.
- *
- * Deliberately a normalization of the provider's own id rather than a new
- * taxonomy: the surrounding structure survives, so `reset-<ms>` becomes
- * `reset-ts` and stays distinguishable from Gemini's own reset-less `quota`
- * window and from every other provider's window id. It is applied to whatever
- * flows through the emit site, so a provider added later cannot reintroduce the
- * same growth, and it is a no-op for the bounded ids every other provider
- * already produces (see {@link TIMESTAMP_DIGITS}).
- *
- * Unconditional by design. `UsageLimit.id` is opaque and providers are
- * extensible, so a provider MAY hold genuinely stable long numeric ids
- * (`quota-1234567890`) that this collapses together — but narrowing elision to
- * known reset-derived shapes would let the next provider reintroduce the
- * unbounded growth this exists to stop. The caller disambiguates a collision
- * with a bounded per-report suffix instead, so no limit's samples are dropped.
+ * Collapse a known reset-derived id segment so a quota reset does not mint a
+ * new series. Other opaque ids pass through unchanged, so distinct quotas never
+ * collapse; a new provider's reset shape needs its own rule here.
  */
 export function stableLabelId(id: string): string {
-	return id.replace(TIMESTAMP_DIGITS, TIMESTAMP_PLACEHOLDER);
+	return id.replace(RESET_DERIVED_SEGMENT, "$1reset-ts");
 }
 
 /** Numeric gauge value per usage status; absent AND `unknown` both map to -1. */
@@ -397,6 +364,11 @@ export interface SubscriptionLookup {
 		 * plan and renewal date apply to every other.
 		 */
 		email?: string,
+		/**
+		 * The provider's raw `accountId` when the `account` label lifted it into
+		 * `account:` (see {@link accountLabelOf}); config keys name raw ids.
+		 */
+		rawAccountId?: string,
 	): { plan?: string; renewsAtSeconds?: number } | undefined;
 	/** Per-plan facts; emitted once per `{provider, plan}`, outside the per-report loop. */
 	plans: ReadonlyArray<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }>;
@@ -620,7 +592,12 @@ export function renderUsageMetrics(
 		// and renewal date to the other. The account chain deliberately never
 		// USES the email as an identity; this only stops one email's subscription
 		// facts being applied to a different email.
-		const subscription = subscriptions.lookup(provider, account, org, email);
+		const lifted = account.startsWith("account:") ? account.slice("account:".length) : undefined;
+		const rawAccountId =
+			lifted !== undefined && (RESERVED_IDENTITY.test(lifted) || lifted === UNIDENTIFIED_ACCOUNT)
+				? lifted
+				: undefined;
+		const subscription = subscriptions.lookup(provider, account, org, email, rawAccountId);
 		if (subscription) {
 			const rawPlan = subscription.plan ?? report.metadata?.planType;
 			const plan = typeof rawPlan === "string" ? canonicalizePlan(rawPlan) : undefined;
@@ -642,28 +619,15 @@ export function renderUsageMetrics(
 			);
 		}
 
-		// Two limits whose ids differ ONLY inside an elided digit run collapse to
-		// the same `limit_id`. Elision has to stay unconditional — restricting it
-		// to known reset-derived shapes reopens the unbounded-cardinality hole for
-		// the next provider — so the collision falls through to `add()`, which
-		// drops the second and records a note.
-		//
-		// A rank suffix among the colliding ids is NOT an option: the rank is
-		// derived from the current report's collision membership, so a limit's
-		// series identity would change whenever a peer appears or disappears —
-		// `quota-ts#1` becoming `quota-ts` when its lexically-earlier peer drops
-		// out silently inherits the other limit's history, which is worse than a
-		// gap. Keeping `add()`'s drop-and-note leaves the surviving series' own
-		// identity invariant and surfaces the loss in the exposition.
+		// Only known reset-derived id shapes are normalized, so distinct quota ids
+		// keep distinct series; `add()` still drops and notes any true duplicate.
 		for (const limit of report.limits) {
 			const base: readonly Label[] = [
 				["provider", provider],
 				["account", account],
 				["org", org],
 				["email", email],
-				// Both ids are provider-authored and some providers derive them
-				// from the window's reset instant, which would re-key every
-				// series on each reset — see stableLabelId.
+				// Gemini derives these from the reset instant — see stableLabelId.
 				["limit_id", stableLabelId(limit.id)],
 				["window", limit.window === undefined ? "" : stableLabelId(limit.window.id)],
 			];
