@@ -188,8 +188,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				const errored: AssistantMessage = {
 					...completedMessage,
 					stopReason: "error",
-					errorMessage:
-						"Provider returned a thought-only response without final output after empty-completion retries.",
+					errorMessage: "Provider returned no visible output after empty-completion retries.",
 				};
 				outer.push({ type: "error", reason: "error", error: errored });
 				return;

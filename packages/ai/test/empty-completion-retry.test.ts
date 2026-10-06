@@ -153,8 +153,7 @@ describe("withReplaySafeStreamRetry", () => {
 			reason: "error",
 			error: {
 				stopReason: "error",
-				errorMessage:
-					"Provider returned a thought-only response without final output after empty-completion retries.",
+				errorMessage: "Provider returned no visible output after empty-completion retries.",
 			},
 		});
 		expect(result.stopReason).toBe("error");

@@ -143,6 +143,7 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(opts.promptCacheKey).toBe(advisor.sessionId);
 		expect(opts.providerSessionState).toBe(session.providerSessionState);
 		expect(opts.preferWebsockets).toBe(true);
+		expect(opts.acceptEmptyResponse).toBe(true);
 	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {
