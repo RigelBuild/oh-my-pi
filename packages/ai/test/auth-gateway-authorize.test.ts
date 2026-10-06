@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import {
+	type AgentCaller,
 	type AuthGatewayAuthorizer,
 	type AuthGatewayServerHandle,
 	bearerTokenAuthorizer,
@@ -31,7 +32,7 @@ const AGENT_TOKENS: Record<string, string> = { "token-a": "agent-a", "token-b": 
 const agentAuthorizer: AuthGatewayAuthorizer = req => {
 	const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
 	const agentAccountId = token ? AGENT_TOKENS[token] : undefined;
-	return agentAccountId ? { agentAccountId } : null;
+	return agentAccountId ? { kind: "agent", agentAccountId } : null;
 };
 
 /** An authorizer as a careless RPC adapter would write it: whatever the lookup returns. */
@@ -83,7 +84,7 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 		authorize,
 		storage: shared,
 		resolveStorage: perAgentPools
-			? (caller: CallerIdentity) => {
+			? (caller: AgentCaller) => {
 					const tenant = caller.ownerUserId ?? caller.agentAccountId;
 					resolved.push(tenant);
 					const pool = pools.get(tenant);
@@ -189,11 +190,13 @@ describe("auth-gateway authorize seam", () => {
 	it.each([
 		["undefined", undefined],
 		["an empty object", {}],
-		["an empty id", { agentAccountId: "" }],
-		["a non-string id", { agentAccountId: 7 }],
-		["the reserved shared id", { agentAccountId: "\u0000shared" }],
-		["an empty owner", { agentAccountId: "agent-a", ownerUserId: "" }],
-		["a non-string owner", { agentAccountId: "agent-a", ownerUserId: 7 }],
+		["an agent without its kind", { agentAccountId: "agent-a" }],
+		["an unknown kind", { kind: "admin" }],
+		["an empty id", { kind: "agent", agentAccountId: "" }],
+		["a non-string id", { kind: "agent", agentAccountId: 7 }],
+		["the reserved shared id", { kind: "agent", agentAccountId: "\u0000shared" }],
+		["an empty owner", { kind: "agent", agentAccountId: "agent-a", ownerUserId: "" }],
+		["a non-string owner", { kind: "agent", agentAccountId: "agent-a", ownerUserId: 7 }],
 	])("answers 401 when the authorizer returns %s, never a default caller", async (_label, result) => {
 		harness = await boot(rawAuthorizer(result));
 		const response = await fetch(`${harness.handle.url}/v1/usage`, { headers: { Authorization: "Bearer token-a" } });
@@ -203,8 +206,8 @@ describe("auth-gateway authorize seam", () => {
 
 	it("serves two agents of one owner from that owner's pool, in separate provider sessions", async () => {
 		const owned: Record<string, CallerIdentity> = {
-			"token-a": { agentAccountId: "agent-x", ownerUserId: "agent-a" },
-			"token-b": { agentAccountId: "agent-y", ownerUserId: "agent-a" },
+			"token-a": { kind: "agent", agentAccountId: "agent-x", ownerUserId: "agent-a" },
+			"token-b": { kind: "agent", agentAccountId: "agent-y", ownerUserId: "agent-a" },
 		};
 		harness = await boot(req => owned[req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? ""] ?? null);
 		harness.mock.push({ content: ["x"] });
@@ -220,7 +223,9 @@ describe("auth-gateway authorize seam", () => {
 	});
 
 	it("answers 401 to an admission that carried no Authorization bearer", async () => {
-		harness = await boot(req => (req.headers.get("x-api-key") === "token-a" ? { agentAccountId: "agent-a" } : null));
+		harness = await boot(req =>
+			req.headers.get("x-api-key") === "token-a" ? { kind: "agent", agentAccountId: "agent-a" } : null,
+		);
 		const response = await chat(harness, { "x-api-key": "token-a" }, {}, "/v1/chat/completions?k=token-a");
 		expect(response.status).toBe(401);
 		expect(harness.resolved).toEqual([]);
@@ -316,7 +321,7 @@ describe("auth-gateway authorize seam", () => {
 	});
 
 	it("answers 503 when the caller's pool cannot be resolved", async () => {
-		harness = await boot(() => ({ agentAccountId: "agent-unknown" }));
+		harness = await boot(() => ({ kind: "agent", agentAccountId: "agent-unknown" }));
 		const response = await chat(harness, { Authorization: "Bearer token-a" });
 		expect(response.status).toBe(503);
 		expect(harness.mock.calls).toHaveLength(0);

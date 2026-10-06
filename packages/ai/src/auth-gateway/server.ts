@@ -66,6 +66,7 @@ import {
 	withCors,
 } from "./http";
 import { handleEmbeddings } from "./routes/embeddings";
+import { ENROLL_PATH_PREFIX, handleEnroll } from "./routes/enroll";
 import { handleImageEdits, handleImageGenerations } from "./routes/images";
 import { handleRerank } from "./routes/rerank";
 import { handleSpeech } from "./routes/speech";
@@ -75,7 +76,7 @@ import { handleVideoContent, handleVideoPoll, handleVideoSubmit } from "./routes
 import { AuthGatewaySessionStateStore } from "./session-state";
 import type {
 	AuthGatewayServerHandle,
-	CallerIdentity,
+	AgentCaller,
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
 } from "./types";
@@ -260,7 +261,7 @@ async function handleFormatEndpoint(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
-	caller: CallerIdentity,
+	caller: AgentCaller,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -506,7 +507,7 @@ async function handlePiNative(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
-	caller: CallerIdentity,
+	caller: AgentCaller,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -797,6 +798,9 @@ const LOGGABLE_PATHS: Record<string, true> = {
 	"/v1/rerank": true,
 	"/v1/videos": true,
 	"/v1/models": true,
+	"/internal/enroll/providers": true,
+	"/internal/enroll/authorize-url": true,
+	"/internal/enroll/exchange": true,
 };
 
 /** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
@@ -815,7 +819,7 @@ export interface AuthGatewayRouter {
 	 * Answers one request; `peer` names the caller in logs and `caller` selects
 	 * the credential pool. Never rejects: a crashed route answers 500.
 	 */
-	route(req: Request, peer: string, caller: CallerIdentity): Promise<Response>;
+	route(req: Request, peer: string, caller: AgentCaller): Promise<Response>;
 	/**
 	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
 	 * workflows), whose sockets and timers would otherwise keep the process alive.
@@ -829,7 +833,7 @@ export interface AuthGatewayRouter {
  */
 export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
 	const sessionStates = new AuthGatewaySessionStateStore();
-	const route = async (req: Request, peer: string, caller: CallerIdentity): Promise<Response> => {
+	const route = async (req: Request, peer: string, caller: AgentCaller): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
 		try {
 			// The model catalog touches no credentials, so it skips the pool lookup.
@@ -941,6 +945,20 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 	return { route, close: () => sessionStates.close() };
 }
 
+/** Enrollment routes for an admitted enroll caller. Never rejects: a crash answers 500 and logs only its class. */
+async function enrollRoute(
+	req: Request,
+	pathname: string,
+	fetchImpl: AuthGatewayRouteOptions["fetch"],
+): Promise<Response> {
+	try {
+		return await handleEnroll(req, pathname, fetchImpl);
+	} catch (error) {
+		logger.error("auth-gateway enrollment route crashed", { path: loggablePath(pathname), error: errorName(error) });
+		return json(500, { error: "internal error" });
+	}
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const authorize = opts.authorize;
@@ -978,7 +996,12 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			}
 			const bearer = admitted === UNAUTHENTICATED_CALLER ? undefined : presentedBearer(req);
 			// Only an `Authorization: Bearer` admission can be confined, so any other is refused.
-			if (!isCallerIdentity(admitted) || (bearer === undefined && admitted !== UNAUTHENTICATED_CALLER)) {
+			// Each class reaches only its own surface: enroll callers `/internal/enroll/*`, agents the rest.
+			if (
+				!isCallerIdentity(admitted) ||
+				(bearer === undefined && admitted !== UNAUTHENTICATED_CALLER) ||
+				(admitted.kind === "enroll") !== pathname.startsWith(ENROLL_PATH_PREFIX)
+			) {
 				logger.info("auth-gateway request unauthorized", {
 					method: req.method,
 					path: loggablePath(pathname),
@@ -990,6 +1013,8 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
 			}
 			if (req.signal.aborted) return new Response(null, { status: 499 });
+			// Server-to-server only: enroll responses carry live credentials, so no browser CORS grant.
+			if (admitted.kind === "enroll") return await enrollRoute(req, pathname, opts.fetch);
 			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
 			return withCors(await router.route(req, peer, admitted), req);
 		},

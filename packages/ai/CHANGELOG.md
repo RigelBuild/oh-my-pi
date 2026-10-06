@@ -4,8 +4,9 @@
 
 ### Breaking Changes
 
-- `startAuthGateway` takes an `authorize(req)` function in place of `bearerTokens`. It returns the caller's identity (`{ agentAccountId }`) or `null` to answer 401; a throw answers 503. Any result that is not an identity with a non-empty id, or an admission with no `Authorization: Bearer` token, also answers 401. Use `bearerTokenAuthorizer(tokens)` to keep the shared-token behavior.
-- `createAuthGatewayRouter(...).route` takes the admitted caller as a required third argument. Pass `SHARED_TOKEN_CALLER` for a single-tenant transport.
+- `startAuthGateway` takes an `authorize(req)` function in place of `bearerTokens`. It returns the caller's identity (`{ kind: "agent", agentAccountId }` or the enroll caller) or `null` to answer 401; a throw answers 503. Any result that is not an identity with a non-empty id, or an admission with no `Authorization: Bearer` token, also answers 401. Use `bearerTokenAuthorizer(tokens)` to keep the shared-token behavior.
+- `createAuthGatewayRouter(...).route` takes the admitted agent caller as a required third argument. Pass `SHARED_TOKEN_CALLER` for a single-tenant transport.
+- `CallerIdentity` is a union of `AgentCaller` (`kind: "agent"`) and `EnrollCaller` (`kind: "enroll"`). An agent result without `kind: "agent"` answers 401.
 
 ### Added
 
@@ -13,6 +14,7 @@
 - Added Snowflake Cortex with browser OAuth, token refresh, PAT environment authentication, and streaming Claude/OpenAI models with local tool execution ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
 - `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `resolveStorage(caller)` to the auth-gateway options, which serves each admitted caller from its tenant's credential pool (keyed on the optional `CallerIdentity.ownerUserId`, else `agentAccountId`); a throw answers 503. Retained provider session state and the session id providers see are kept per caller.
+- Added the provider-enrollment routes `GET /internal/enroll/providers`, `POST /internal/enroll/authorize-url` and `POST /internal/enroll/exchange`. They build the authorize URL and exchange the code statelessly from the server's state and PKCE material. `withEnrollToken(token, authorize)` admits a server enroll token as the enroll caller, which reaches only these routes; agents get 401 there, and the enroll caller gets 401 on every other authenticated route. Enroll responses carry no CORS grant.
 
 ### Changed
 
