@@ -23,7 +23,7 @@ A 35 MiB raw image is about 47 MiB as base64 in JSON, so 48 MiB admits it. No se
 
 The main protocol, pi-native, and System One routes also use `req.json()`. Their sizing and a server-wide `maxRequestBodySize` backstop are separate scope decisions; do not claim this design caps all gateway routes. Existing transcription/embedding/rerank caps remain unchanged.
 
-Video-job access is separate: `resolveClientIdentity` reads caller-controlled attribution headers and cannot prove the submitting principal. RIG-4139 owns authorization design. Credential-affinity map growth is also separate from body parsing.
+Video-job access is separate: `resolveClientIdentity` reads caller-controlled attribution headers and cannot prove the submitting principal. Per RIG-4139 (option C, Matt 2026-10-07), every configured bearer may read every video job: all bearers are one trust domain, and video jobs are not used yet. Revisit before any multi-tenant use. Credential-affinity map growth is also separate from body parsing.
 
 ## Global Constraints
 
