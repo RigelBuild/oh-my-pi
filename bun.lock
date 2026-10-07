@@ -132,6 +132,16 @@
         "@types/react-dom": "catalog:",
       },
     },
+    "packages/compass-gateway": {
+      "name": "@oh-my-pi/compass-gateway",
+      "version": "0.1.0",
+      "dependencies": {
+        "@oh-my-pi/pi-ai": "catalog:",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/metaharness": {
       "name": "@oh-my-pi/pi-metaharness",
       "version": "0.0.1",
@@ -700,6 +710,8 @@
     "@oh-my-pi/browser-relay": ["@oh-my-pi/browser-relay@workspace:packages/browser-relay"],
 
     "@oh-my-pi/collab-web": ["@oh-my-pi/collab-web@workspace:packages/collab-web"],
+
+    "@oh-my-pi/compass-gateway": ["@oh-my-pi/compass-gateway@workspace:packages/compass-gateway"],
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@workspace:packages/stats"],
 
