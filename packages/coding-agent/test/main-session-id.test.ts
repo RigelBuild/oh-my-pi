@@ -259,6 +259,19 @@ release?.();`,
 		const holder = await holdLease(id);
 		await holder.release();
 	});
+
+	it("releases a fork's reserved id when fork setup fails before writing", async () => {
+		const id = `seat-fork-setup-${process.pid}-${Date.now()}`;
+		const sourceFile = path.join(cwd, "bad-source.jsonl");
+		await fsp.mkdir(cwd, { recursive: true });
+		// A non-array additionalDirectories passes the header check but breaks fork setup.
+		const header = { type: "session", version: 3, id: "bad-source", timestamp: new Date().toISOString(), cwd };
+		await Bun.write(sourceFile, `${JSON.stringify({ ...header, additionalDirectories: "bad" })}\n`);
+		await expect(SessionManager.forkFrom(sourceFile, cwd, sessionDir, undefined, { id })).rejects.toThrow();
+
+		const holder = await holdLease(id);
+		await holder.release();
+	});
 });
 
 describe("--session-id with a foreign session import", () => {

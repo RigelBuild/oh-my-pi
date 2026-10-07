@@ -3908,28 +3908,8 @@ export class SessionManager {
 			options?.sessionFile,
 			options?.id,
 		);
-		manager.#header.title = sourceHeader?.title;
-		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
-		manager.#header.additionalDirectories =
-			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
-		manager.#sessionName = manager.#header.title;
-		manager.#titleSource = manager.#header.titleSource;
-		manager.#titleUpdatedAt = nowIso();
-		manager.#hasTitleSlot = true;
-		manager.#entries = history;
-		manager.#index.rebuild(history);
-		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
-		if (options?.repairInterruptedTail) {
-			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
-			manager.#index.rebuild(history);
-		}
-		manager.#forceFileCreation = true;
 		try {
-			await manager.#rewriteAtomically();
-			if (options?.copyArtifacts !== false) {
-				await copySessionArtifacts(sourcePath, manager.#sessionFile!);
-			}
+			await manager.#finishFork(sourcePath, cwd, sourceHeader, history, options);
 		} catch (err) {
 			// The caller never receives this manager, so drop any lease it reserved.
 			manager.#sessionClaim?.release?.();
@@ -3937,6 +3917,36 @@ export class SessionManager {
 			throw err;
 		}
 		return manager;
+	}
+
+	async #finishFork(
+		sourcePath: string,
+		cwd: string,
+		sourceHeader: SessionHeader | undefined,
+		history: SessionEntry[],
+		options: { repairInterruptedTail?: boolean; copyArtifacts?: boolean } | undefined,
+	): Promise<void> {
+		this.#header.title = sourceHeader?.title;
+		this.#header.titleSource = sourceHeader?.titleSource;
+		this.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		this.#header.additionalDirectories =
+			this.#additionalDirectories.length > 0 ? this.#additionalDirectories : undefined;
+		this.#sessionName = this.#header.title;
+		this.#titleSource = this.#header.titleSource;
+		this.#titleUpdatedAt = nowIso();
+		this.#hasTitleSlot = true;
+		this.#entries = history;
+		this.#index.rebuild(history);
+		this.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		if (options?.repairInterruptedTail) {
+			SessionManager.#repairForkedInterruptedTail(history, this.#index.pathTo());
+			this.#index.rebuild(history);
+		}
+		this.#forceFileCreation = true;
+		await this.#rewriteAtomically();
+		if (options?.copyArtifacts !== false) {
+			await copySessionArtifacts(sourcePath, this.#sessionFile!);
+		}
 	}
 
 	/**
