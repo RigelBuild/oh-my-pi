@@ -1,8 +1,9 @@
 name: CI
 
 on:
+   # `main` is the resettable upstream mirror; only the gated `rigel-release` builds and releases.
    push:
-      branches: [main]
+      branches: [rigel-release]
       paths:
          - "packages/**"
          - "crates/**"
@@ -30,32 +31,9 @@ on:
          - "package.json"
          - "patches/**"
          - ".github/**"
+   # No paths filter: the required `CI` check must post on every PR, or a docs-only PR never merges.
    pull_request:
-      branches: [main, omp2]
-      paths:
-         - "packages/**"
-         - "crates/**"
-         - "scripts/**"
-         - "bazel/**"
-         - "MODULE.bazel"
-         - "MODULE.bazel.lock"
-         - "BUILD.bazel"
-         - ".bazelrc"
-         - ".bazelignore"
-         - ".bazelversion"
-         - "Cargo.toml"
-         - "Cargo.lock"
-         - "deny.toml"
-         - "about.toml"
-         - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
-         - "rust-toolchain.toml"
-         - "rustfmt.toml"
-         - "bun.lock"
-         - "bunfig.toml"
-         - "package.json"
-         - "patches/**"
-         - ".github/**"
+      branches: [rigel-release, main, omp2]
    workflow_dispatch:
       inputs:
          skip_npm:
@@ -70,7 +48,7 @@ on:
 # time via the release-script commit subject (`chore: bump version to vX.Y.Z`),
 # via `v*` tag-ref dispatches, and via manual dispatches whose tag-on-HEAD
 # status is only known after checkout; scope them to a per-sha group with no
-# cancellation. Every other event keeps branch-wide cancellation for PR/main churn.
+# cancellation. Every other event keeps branch-wide cancellation for PR/branch churn.
 concurrency:
    group: "${{ github.workflow }}-${{ (startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && format('release-{0}', github.sha) || github.ref }}"
    cancel-in-progress: "${{ !(startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}"
@@ -93,16 +71,9 @@ permissions:
    contents: read
 
 jobs:
-   # scripts/release.ts pushes the version-bump commit and its `v*` tag
-   # atomically (`git push --atomic origin refs/heads/main:refs/heads/main
-   # <sha>:refs/tags/v<version>`), so a release now arrives as a single `push` to
-   # `refs/heads/main` — we no longer trigger on the tag ref at all (see
-   # `on.push`). This one branch-push run is therefore authoritative: it runs the
-   # full build AND, when HEAD carries a release tag, the release/publish jobs.
-   # `release_metadata` resolves that tag once so downstream jobs switch on
-   # `is-release` and address the tag by name — `github.ref` is
-   # `refs/heads/main` here, not the tag. A `workflow_dispatch` from a `v*` tag
-   # ref (or from a tagged main HEAD) is also treated as a release.
+   # A release is a `v*` tag on a `rigel-release` commit: the branch-push run (or a
+   # dispatch from the tag) is authoritative and builds plus publishes. `release_metadata`
+   # resolves the tag once so downstream jobs switch on `is-release`.
    release_metadata:
       name: Resolve release metadata
       # Hosted, not omp-kata: this ~20 s git-tag probe gates the whole release
@@ -116,14 +87,11 @@ jobs:
          # the GitHub release prerelease, and skip the stable-only brew tap.
          channel: ${{ steps.detect.outputs.channel }}
       steps:
-         # Only a main-branch run needs tags fetched, so `git tag --points-at
-         # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
-         # tag straight from `github.ref_name`, and fetching `--tags` while
-         # checkout uses an explicit tag refspec makes git refuse — so scope
-         # fetch-tags to main refs.
+         # Release-branch runs fetch tags so `git tag --points-at HEAD` sees the new `v*`.
+         # A tag-ref dispatch reads `github.ref_name`; fetching `--tags` with a tag refspec fails.
          - uses: actions/checkout@v4
            with:
-              fetch-tags: ${{ github.ref == 'refs/heads/main' }}
+              fetch-tags: ${{ github.ref == 'refs/heads/rigel-release' }}
          - name: Detect release tag at HEAD
            id: detect
            shell: bash
@@ -135,13 +103,14 @@ jobs:
                 refs/tags/v[0-9]*)
                   release_tag="${{ github.ref_name }}"
                   ;;
-                refs/heads/main)
+                refs/heads/rigel-release)
                   if [ "${{ github.event_name }}" != "pull_request" ]; then
                     release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
                   fi
                   ;;
               esac
               if [ -n "$release_tag" ]; then
+                .github/scripts/release-on-branch.sh "$release_tag"
                 echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
                 is_release=true
               fi
@@ -220,9 +189,10 @@ jobs:
 
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
-   # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (kata remote cache, warm) and again at
-   # release. A skipped required check still satisfies branch protection.
+   # Rust validation (native_addons builds only the addon pair on a cache
+   # miss): Rust is validated post-merge on rigel-release (kata remote cache,
+   # warm) and again at release. A skipped required check still satisfies
+   # branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
       if: github.event_name != 'pull_request'
@@ -264,26 +234,22 @@ jobs:
 
    # Provides the linux-x64 addon pair every downstream TS job installs.
    #
-   # PRs never build. They restore the pair main built for the same native
-   # sources from actions/cache (key = hash of every native build input, the
-   # same file set as the bazel-cache action's config+source hashes). With no
-   # exact entry (the PR changes native inputs, or main has not built this
-   # state yet) they take main's newest entry, and with no entry at all the
-   # latest npm release. The workspace loader skips its version sentinel for
-   # workspace loads, so any of these load under a newer checkout. Testing
-   # against main's build instead of the last release keeps merged-but-
-   # unreleased native fixes from failing every PR that did not touch Rust
-   # (a merged grep fix plus its TS test failed 75 PR runs against the
-   # 18.3.1 addon). Only main saves; see the save step for why.
+   # PRs restore the pair rigel-release built for the exact same native inputs
+   # from actions/cache (key = hash of every native build input, the same file
+   # set as the bazel-cache action's config+source hashes). On a miss (the PR
+   # changes native inputs, or rigel-release has not built this state yet) the
+   # PR builds the pair itself on the hosted runner: a stale or npm addon lacks
+   # exports newer TS calls, so it would fail tests the diff did not break.
+   # Only rigel-release saves; see the save step for why.
    #
-   # Main (kata, cluster remote cache) builds only the pair here so the TS
+   # rigel-release (kata, cluster remote cache) builds only the pair here so the TS
    # fan-out starts as soon as it links; native_addons_cross builds the other
    # Linux-hosted targets in parallel. Job name says "bazel" for continuity
    # with required checks.
    native_addons:
       name: Build native addons (bazel)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
-      # actions: write lets main prune superseded addon cache entries.
+      # actions: write lets rigel-release prune superseded addon cache entries.
       permissions:
          contents: read
          actions: write
@@ -297,63 +263,45 @@ jobs:
            id: natives-key
            shell: bash
            env:
-              # Must stay identical on every event: PRs look up the entry main
+              # Must stay identical on every event: PRs look up the entry rigel-release
               # saved for the same inputs. Mirrors the bazel-cache hash inputs.
               NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
            run: |
               echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
               echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
 
-         # ---- PR path: main-built addons from actions/cache, else npm ----
+         # ---- PR path: rigel-release-built addons from actions/cache ----
          # `ci-natives` is a plain workspace-relative path on purpose: the
          # cache version hashes the literal path list, so kata (save) and
          # hosted (restore) must spell it identically, and upload-artifact
          # skips dot-directories by default.
-         - name: Restore main-built native addons
+         - name: Restore release-branch-built native addons
            id: natives-cache
            if: github.event_name == 'pull_request'
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
-              restore-keys: |
-                 ${{ steps.natives-key.outputs.prefix }}
-         - name: Fetch release native addons (npm)
-           if: github.event_name == 'pull_request' && steps.natives-cache.outputs.cache-matched-key == ''
-           shell: bash
-           run: |
-              set -euo pipefail
-              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
-              echo "Fetching $tarball"
-              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
-              mkdir -p ci-natives/natives-linux-x64-baseline ci-natives/natives-linux-x64-modern
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" ci-natives/natives-linux-x64-baseline/
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" ci-natives/natives-linux-x64-modern/
-         # Make the addon source visible whenever it is not source-matched,
-         # instead of leaving a reviewer to wonder which addons the tests ran.
          - name: Report native addon source
            if: github.event_name == 'pull_request'
            shell: bash
            env:
               EXACT: ${{ steps.natives-cache.outputs.cache-hit }}
-              MATCHED: ${{ steps.natives-cache.outputs.cache-matched-key }}
            run: |
               if [ "$EXACT" = true ]; then
-                echo "Using main's addons for this exact native source state ($MATCHED)."
-              elif [ -n "$MATCHED" ]; then
-                echo "::notice title=Native addons not source-matched::No main build matches this PR's native sources; testing against main's newest addon build ($MATCHED). Native changes are validated post-merge on main and at release."
+                echo "Using rigel-release's addons for this exact native source state."
               else
-                echo "::notice title=Native addons from npm::No main-built addon cache entry is available; testing against the latest npm release addons."
+                echo "::notice title=Native addons built on PR::No rigel-release build matches this PR's native sources; building the linux-x64 pair here."
               fi
 
-         # ---- main path: bazel build of the linux-x64 pair ----
+         # ---- build path: rigel-release, or a PR cache miss ----
          - id: cache
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
          - name: Build linux-x64 native addons
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -376,7 +324,7 @@ jobs:
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            shell: bash
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI before
@@ -455,17 +403,17 @@ jobs:
                   echo "::warning title=Native addon stash::could not stash $rel; consumers will download the artifact"
                 fi
               done
-         # Only main saves: an entry saved on any other ref is readable by
+         # Only rigel-release saves: an entry saved on any other ref is readable by
          # that ref alone yet counts against the shared 10 GB repo quota,
          # whose LRU eviction has already cost the darwin release archives.
          # Probe first so an existing entry is not re-uploaded, then keep
          # only the newest two entries so the footprint stays ~100 MB.
-         # The three steps below run only on main (never exercised by PR or
+         # The three steps below run only on rigel-release (never exercised by PR or
          # branch runs) and are pure optimization for later PRs: a failure
          # must never fail native_addons and with it every test job.
          - name: Probe native addon cache entry
            id: natives-cache-probe
-           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release'
            continue-on-error: true
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -473,14 +421,14 @@ jobs:
               key: ${{ steps.natives-key.outputs.key }}
               lookup-only: true
          - name: Save native addon cache entry
-           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
          - name: Prune superseded native addon cache entries
-           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            shell: bash
            env:
@@ -488,7 +436,7 @@ jobs:
               PREFIX: ${{ steps.natives-key.outputs.prefix }}
            run: |
               # Best-effort: a failed prune leaves eviction to GitHub's LRU.
-              gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIX" \
+              gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/rigel-release --key "$PREFIX" \
                   --sort created_at --order desc --limit 100 --json id --jq '.[2:][].id' \
                 | while read -r id; do
                     gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
@@ -505,7 +453,7 @@ jobs:
    # The remaining Linux-hosted targets (arm64, musl, win32 cross). Only
    # release jobs consume them, so they build beside the TS fan-out instead of
    # ahead of it: serially after the pair they held every test job back ~10
-   # min on native-changing main pushes. Non-PR only, like rust_validate;
+   # min on native-changing rigel-release pushes. Non-PR only, like rust_validate;
    # the build also keeps the remote cache warm for release runs.
    native_addons_cross:
       name: Build native addons (bazel, cross targets)
@@ -723,6 +671,25 @@ jobs:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
            run: bun run ci:test:install-methods
 
+   # The single required check on `rigel-release` PRs. Any non-success fails it, except
+   # the two jobs that skip on pull_request by design.
+   ci:
+      name: CI
+      if: ${{ always() }}
+      needs: [check, bazel_lock, rust_validate, native_addons, native_addons_cross, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - name: Gate tests
+           run: |
+              .github/scripts/ci-gate.test.sh
+              .github/scripts/release-on-branch.test.sh
+         - name: Require every validation job to pass
+           env:
+              RESULTS: ${{ toJSON(needs) }}
+              PR_SKIPPABLE: ${{ github.event_name == 'pull_request' && 'rust_validate native_addons_cross' || '' }}
+           run: .github/scripts/ci-gate.sh
+
    # Aggregates every validation job so publish-side release jobs gate on one
    # result. Binary BUILDS deliberately do not wait for this gate — they run
    # in parallel with the test fan-out and only publishing is held back.
@@ -872,11 +839,11 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
-         # Main-only save, after the build so it is off the leg's critical
+         # rigel-release-only save, after the build so it is off the leg's critical
          # path: caches saved on a tag or branch are readable only by that ref
          # yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -1004,9 +971,9 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
-         # Main-only save, after the build so it is off the critical path.
+         # rigel-release-only save, after the build so it is off the critical path.
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -1082,10 +1049,10 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
+         # rigel-release-only save: caches saved on a tag or branch are readable only by
          # that ref yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ~/.bun/install/cache
@@ -1276,10 +1243,10 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         # Main-only save: caches saved on a tag or branch are readable only by
+         # rigel-release-only save: caches saved on a tag or branch are readable only by
          # that ref yet count against the shared 10 GB quota (see bazel-cache).
          - name: Save bun store
-           if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+           if: github.ref == 'refs/heads/rigel-release' && steps.bun-cache.outputs.cache-hit != 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: ~/.bun/install/cache
