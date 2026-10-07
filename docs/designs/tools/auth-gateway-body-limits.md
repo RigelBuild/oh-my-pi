@@ -19,7 +19,9 @@ Caps (RIG-4140 option A, Matt 2026-10-07) keep 35 MiB images working:
 | Speech JSON | 25 MiB |
 | Video JSON | 25 MiB |
 
-A 35 MiB raw image is about 47 MiB as base64 in JSON, so 48 MiB admits it. No server-wide cap is added.
+A 35 MiB raw image is about 47 MiB as base64 in JSON, so 48 MiB admits it.
+
+Image multipart accepts at most 16 image files, counting `image` and `image[]` together; this matches the upstream images-edit limit. It accepts at most 24 parts in total: the 16 files plus the 6 named fields `parseMultipart` reads, with slack. Count boundary delimiters in the bounded bytes before calling `formData()`, so part expansion is bounded before parsing. No server-wide cap is added.
 
 The main protocol, pi-native, and System One routes also use `req.json()`. Their sizing and a server-wide `maxRequestBodySize` backstop are separate scope decisions; do not claim this design caps all gateway routes. Existing transcription/embedding/rerank caps remain unchanged.
 
