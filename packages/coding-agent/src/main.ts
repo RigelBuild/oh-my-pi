@@ -1315,9 +1315,12 @@ export async function createSessionManager(
 	if (sessionId !== undefined) {
 		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
 		if (existing) {
-			const manager = await SessionManager.open(existing, parsed.sessionDir);
+			// No breadcrumb until the lease is held, so a failed launch leaves it alone.
+			const manager = await SessionManager.open(existing, parsed.sessionDir, undefined, {
+				suppressBreadcrumb: true,
+			});
 			try {
-				manager.reserveExactId();
+				manager.reserveExactId({ rememberBreadcrumb: true });
 			} catch (err) {
 				await manager.close();
 				if (err instanceof SessionIdCollisionError) throw new SessionResolutionError(err.message);

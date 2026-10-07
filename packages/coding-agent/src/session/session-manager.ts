@@ -1026,17 +1026,25 @@ export class SessionManager {
 	 * Take this session's ownership lease now, failing closed, for a caller
 	 * that selected it by exact id. Throws {@link SessionIdCollisionError} when
 	 * another live process holds it or the lease cannot be probed.
+	 * `rememberBreadcrumb` records the terminal breadcrumb only after the lease
+	 * is held, for a reopen that suppressed it while loading.
 	 */
-	reserveExactId(): void {
+	reserveExactId(options?: { rememberBreadcrumb?: boolean }): void {
 		const sessionId = this.#sessionId;
 		const sessionFile = this.#sessionFile;
-		if (!this.#persist || !sessionFile || !this.#storage.claimSession) return;
-		const current = this.#sessionClaim;
-		if (current?.sessionId === sessionId && current.release) return;
-		if (current && current.sessionId !== sessionId) current.release?.();
-		const release = this.#storage.claimSession(sessionId, sessionFile, { strict: true }) ?? undefined;
-		this.#sessionClaim = { sessionId, release };
-		if (!release) throw new SessionIdCollisionError(sessionId);
+		if (this.#persist && sessionFile && this.#storage.claimSession) {
+			const current = this.#sessionClaim;
+			if (!(current?.sessionId === sessionId && current.release)) {
+				if (current && current.sessionId !== sessionId) current.release?.();
+				const release = this.#storage.claimSession(sessionId, sessionFile, { strict: true }) ?? undefined;
+				this.#sessionClaim = { sessionId, release };
+				if (!release) throw new SessionIdCollisionError(sessionId);
+			}
+		}
+		if (options?.rememberBreadcrumb && sessionFile) {
+			this.#suppressBreadcrumb = false;
+			this.#rememberBreadcrumb(this.#cwd, sessionFile);
+		}
 	}
 
 	/**

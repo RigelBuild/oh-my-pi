@@ -10,7 +10,7 @@ import { SessionIdCollisionError, SessionManager } from "@oh-my-pi/pi-coding-age
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { FileLock } from "@oh-my-pi/pi-natives";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
-import { getConfigRootDir, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const stubSettings = Settings.isolated();
 
@@ -296,33 +296,60 @@ release?.();`,
 		}
 	});
 
+	// Runs `fn` with a private agent dir and deterministic terminal id, so its breadcrumb is local to the test.
+	async function withPrivateCrumb(fn: (crumb: string, prior: string) => Promise<void>): Promise<void> {
+		const keys = ["TMUX_PANE", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+		const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+		try {
+			process.env.TMUX_PANE = `%session-id-crumb-${process.pid}`;
+			setAgentDir(path.join(cwd, "agent"));
+			const terminalId = getTerminalId();
+			if (!terminalId) throw new Error("Expected a terminal id");
+			const crumb = path.join(getTerminalSessionsDir(), terminalId);
+			fs.mkdirSync(path.dirname(crumb), { recursive: true });
+			const prior = `${cwd}\n${path.join(sessionDir, "prior.jsonl")}\n`;
+			fs.writeFileSync(crumb, prior);
+			await fn(crumb, prior);
+		} finally {
+			for (const key of keys) {
+				if (saved[key] === undefined) delete process.env[key];
+				else process.env[key] = saved[key];
+			}
+			__resetDirsFromEnvForTests();
+		}
+	}
+
 	it("leaves the terminal breadcrumb unchanged when the requested id is held", async () => {
 		const id = `seat-crumb-${process.pid}-${Date.now()}`;
-		const originalPane = process.env.TMUX_PANE;
-		const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-		// A deterministic terminal id and private agent dir keep the breadcrumb local to this test.
-		process.env.TMUX_PANE = `%session-id-crumb-${process.pid}`;
-		setAgentDir(path.join(cwd, "agent"));
-		const terminalId = getTerminalId();
-		if (!terminalId) throw new Error("Expected a terminal id");
-		const crumb = path.join(getTerminalSessionsDir(), terminalId);
-		fs.mkdirSync(path.dirname(crumb), { recursive: true });
-		const prior = `${cwd}\n${path.join(sessionDir, "prior.jsonl")}\n`;
-		fs.writeFileSync(crumb, prior);
-		const holder = await holdLease(id);
-		try {
-			expect(() => SessionManager.create(cwd, sessionDir, undefined, { id })).toThrow(SessionIdCollisionError);
-			expect(fs.readFileSync(crumb, "utf8")).toBe(prior);
-		} finally {
-			await holder.release();
-			if (originalPane === undefined) delete process.env.TMUX_PANE;
-			else process.env.TMUX_PANE = originalPane;
-			if (originalAgentDir) setAgentDir(originalAgentDir);
-			else {
-				setAgentDir(path.join(getConfigRootDir(), "agent"));
-				delete process.env.PI_CODING_AGENT_DIR;
+		await withPrivateCrumb(async (crumb, prior) => {
+			const holder = await holdLease(id);
+			try {
+				expect(() => SessionManager.create(cwd, sessionDir, undefined, { id })).toThrow(SessionIdCollisionError);
+				expect(fs.readFileSync(crumb, "utf8")).toBe(prior);
+			} finally {
+				await holder.release();
 			}
-		}
+		});
+	});
+
+	it("leaves the terminal breadcrumb unchanged when a held saved id fails to reopen", async () => {
+		const id = `seat-crumb-reopen-${process.pid}-${Date.now()}`;
+		await withPrivateCrumb(async (crumb, prior) => {
+			const saved = SessionManager.create(cwd, sessionDir, undefined, { id });
+			saved.appendMessage({ role: "user", content: "saved", timestamp: Date.now() });
+			await saved.rewriteEntries();
+			await saved.close();
+			fs.writeFileSync(crumb, prior);
+			const holder = await holdLease(id);
+			try {
+				await expect(
+					createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings),
+				).rejects.toMatchObject(collision);
+				expect(fs.readFileSync(crumb, "utf8")).toBe(prior);
+			} finally {
+				await holder.release();
+			}
+		});
 	});
 });
 
