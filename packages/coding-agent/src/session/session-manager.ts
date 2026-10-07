@@ -1927,10 +1927,11 @@ export class SessionManager {
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
-			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
 			// A caller-chosen id is reserved now, not at first write, so a
 			// competing launch fails instead of silently moving to a fresh id.
+			// Reserve first so a failed launch leaves the terminal breadcrumb alone.
 			if (sessionId !== undefined) this.reserveExactId();
+			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
 		} else {
 			this.#sessionFile = undefined;
 		}

@@ -1,12 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager, resolveForeignSessionSource } from "@oh-my-pi/pi-coding-agent/main";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionIdCollisionError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileLock } from "@oh-my-pi/pi-natives";
+import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { getConfigRootDir, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const stubSettings = Settings.isolated();
 
@@ -271,6 +275,54 @@ release?.();`,
 
 		const holder = await holdLease(id);
 		await holder.release();
+	});
+
+	it("fails an exact-id launch closed when the lease cannot be probed", async () => {
+		const id = `seat-probe-${process.pid}-${Date.now()}`;
+		const probe = spyOn(FileLock, "tryAcquire").mockImplementation(() => {
+			throw new Error("lock probe unavailable");
+		});
+		try {
+			const storage = new FileSessionStorage();
+			const file = path.join(sessionDir, `probe_${id}.jsonl`);
+			expect(storage.claimSession(id, file, { strict: true })).toBeNull();
+			// Ordinary writes keep the permissive no-op claim.
+			expect(typeof storage.claimSession(id, file)).toBe("function");
+			await expect(
+				createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings),
+			).rejects.toMatchObject(collision);
+		} finally {
+			probe.mockRestore();
+		}
+	});
+
+	it("leaves the terminal breadcrumb unchanged when the requested id is held", async () => {
+		const id = `seat-crumb-${process.pid}-${Date.now()}`;
+		const originalPane = process.env.TMUX_PANE;
+		const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		// A deterministic terminal id and private agent dir keep the breadcrumb local to this test.
+		process.env.TMUX_PANE = `%session-id-crumb-${process.pid}`;
+		setAgentDir(path.join(cwd, "agent"));
+		const terminalId = getTerminalId();
+		if (!terminalId) throw new Error("Expected a terminal id");
+		const crumb = path.join(getTerminalSessionsDir(), terminalId);
+		fs.mkdirSync(path.dirname(crumb), { recursive: true });
+		const prior = `${cwd}\n${path.join(sessionDir, "prior.jsonl")}\n`;
+		fs.writeFileSync(crumb, prior);
+		const holder = await holdLease(id);
+		try {
+			expect(() => SessionManager.create(cwd, sessionDir, undefined, { id })).toThrow(SessionIdCollisionError);
+			expect(fs.readFileSync(crumb, "utf8")).toBe(prior);
+		} finally {
+			await holder.release();
+			if (originalPane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = originalPane;
+			if (originalAgentDir) setAgentDir(originalAgentDir);
+			else {
+				setAgentDir(path.join(getConfigRootDir(), "agent"));
+				delete process.env.PI_CODING_AGENT_DIR;
+			}
+		}
 	});
 });
 
