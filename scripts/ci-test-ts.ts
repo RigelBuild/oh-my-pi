@@ -95,6 +95,13 @@ const fastWorkspacePackages = [
 	"packages/mnemopi",
 ];
 
+// Workspace packages run as this many `bun test` processes instead of one.
+// packages/ai: bun 1.4.2 (and 1.4.3-canary) sometimes spins its main thread at
+// 100% CPU and stops firing timers, so the whole package stalls until the watchdog.
+const workspaceChunkCounts: Record<string, number> = {
+	"packages/ai": 4,
+};
+
 // These suites cover the native package, TUI/browser-ish behavior, local servers,
 // or coding-agent-adjacent benchmark paths. Keep them low-concurrency and in jobs
 // that have downloaded the Linux x64 native addon artifacts.
@@ -208,6 +215,46 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 		command: ["bun", "test", ...extraArgs],
 		parallel,
 	};
+}
+
+/** Splits `files` into `count` contiguous groups whose sizes differ by at most one. */
+export function splitIntoChunks<T>(files: T[], count: number): T[][] {
+	if (!Number.isInteger(count) || count < 1) {
+		throw new Error(`Invalid chunk count ${count}`);
+	}
+	const chunks: T[][] = [];
+	let start = 0;
+	for (let i = 0; i < count; i++) {
+		const end = start + Math.floor(files.length / count) + (i < files.length % count ? 1 : 0);
+		if (end > start) chunks.push(files.slice(start, end));
+		start = end;
+	}
+	return chunks;
+}
+
+async function workspaceTestCommands(
+	pkg: string,
+	parallel: number,
+	options: { extraArgs?: string[] } = {},
+): Promise<TestCommand[]> {
+	const chunkCount = workspaceChunkCounts[pkg];
+	if (chunkCount === undefined) {
+		return [workspaceTestCommand(pkg, parallel, options)];
+	}
+	const pkgDir = path.join(repoRoot, pkg);
+	const testFiles = (await collectTestsUnder(path.join(pkgDir, "test"), pkgDir)).sort();
+	if (testFiles.length === 0) {
+		throw new Error(`No ${pkg} tests found under test/`);
+	}
+	const chunks = splitIntoChunks(testFiles, chunkCount);
+	return chunks.map((chunk, i) => {
+		const command = workspaceTestCommand(pkg, parallel, options);
+		return {
+			...command,
+			label: `${pkg} (chunk ${i + 1}/${chunks.length}; ${chunk.length} files)`,
+			command: [...command.command, ...chunk],
+		};
+	});
 }
 
 // The Rust suite as one pooled command, so root `bun run test` reports TS and
@@ -325,7 +372,7 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 	switch (mode) {
 		case "workspace":
-			return fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8));
+			return (await Promise.all(fastWorkspacePackages.map(pkg => workspaceTestCommands(pkg, 8)))).flat();
 		case "native":
 			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4));
 		case "coding-agent-singleton":
@@ -356,7 +403,11 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 		// one failure report. Repo script tests remain available via `test:scripts`.
 		case "local-ts":
 			return [
-				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
+				...(
+					await Promise.all(
+						fastWorkspacePackages.map(pkg => workspaceTestCommands(pkg, 8, { extraArgs: onlyFailuresArgs })),
+					)
+				).flat(),
 				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				...(await commandsForMode("coding-agent-heavy")),
