@@ -151,7 +151,12 @@ test("rejects drain durations that cannot be represented by a timer", async () =
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-drain-invalid-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	const gateway = startAuthGateway({ bind: "127.0.0.1:0", authorize: bearerTokenAuthorizer([]), storage, resolveModel: () => undefined });
+	const gateway = startAuthGateway({
+		bind: "127.0.0.1:0",
+		authorize: bearerTokenAuthorizer([]),
+		storage,
+		resolveModel: () => undefined,
+	});
 	try {
 		for (const duration of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2_147_483_648]) {
 			await expect(gateway.close(duration)).rejects.toThrow(RangeError);
