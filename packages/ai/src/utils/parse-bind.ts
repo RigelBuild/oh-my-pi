@@ -54,3 +54,25 @@ export function parseBind(raw: string): ParsedBind {
 	}
 	return { hostname: hostPart, port: parsePort(portPart, raw) };
 }
+
+const IPV4_LOOPBACK = /^127\.\d+\.\d+\.\d+$/;
+const IPV4_MAPPED_LOOPBACK = /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/;
+
+/** True when `host` (as returned by `parseBind`) accepts connections only from this machine. */
+export function isLoopbackHost(host: string): boolean {
+	if (host.length === 0) return false;
+	// URL canonicalizes IP literals, so `127.1`, `0x7f.1`, and `[0:0::1]` reduce to one spelling.
+	const literal = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+	let normalized: string;
+	try {
+		normalized = new URL(`http://${literal}`).hostname;
+	} catch {
+		return false;
+	}
+	return (
+		normalized === "localhost" ||
+		normalized === "[::1]" ||
+		IPV4_LOOPBACK.test(normalized) ||
+		IPV4_MAPPED_LOOPBACK.test(normalized)
+	);
+}
