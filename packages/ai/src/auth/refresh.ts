@@ -2,6 +2,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
+import { hasOAuthAccountIdentityConflict } from "../registry/oauth/google-antigravity";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
@@ -322,6 +323,12 @@ export class OAuthRefresher {
 			}
 			if (leaseRenewalError) throw leaseRenewalError;
 
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(current, refreshed)) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
+			}
 			const merged: T = options.mergeRefreshedCredential
 				? options.mergeRefreshedCredential(current, refreshed)
 				: mergeRefreshedCredential(current, refreshed);
@@ -664,6 +671,12 @@ export class OAuthRefresher {
 			}
 			// Preserve credential-subtype metadata, such as MCP token endpoints,
 			// that the provider's bare OAuth response cannot reproduce.
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(attempted, refreshed)) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
+			}
 			const updated = mergeRefreshedCredential(attempted, refreshed);
 			// Persist by id: the array may have been reordered/shrunk while the
 			// refresh was in flight, so the pre-await positional index is unsafe. A

@@ -2,6 +2,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
+import { hasOAuthAccountIdentityConflict } from "../registry/oauth/google-antigravity";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
@@ -728,6 +729,15 @@ export class CredentialSelector {
 						force ? options?.refreshReason : undefined,
 					);
 					const beforeRefresh = candidate.selection.credential;
+					if (
+						provider === "google-antigravity" &&
+						hasOAuthAccountIdentityConflict(beforeRefresh, refreshedCredentials)
+					) {
+						throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+							kind: "validation",
+							provider,
+						});
+					}
 					const updated = mergeRefreshedCredential(beforeRefresh, refreshedCredentials);
 					if (credentialId !== undefined && authCredentialEquals(beforeRefresh, updated)) {
 						// The await may have allowed a peer to replace/remove this row or
@@ -1018,6 +1028,15 @@ export class CredentialSelector {
 				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
 			}
 			if (!result) return undefined;
+			if (
+				provider === "google-antigravity" &&
+				hasOAuthAccountIdentityConflict(selection.credential, result.newCredentials)
+			) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
+			}
 			const updated = mergeRefreshedCredential(selection.credential, result.newCredentials);
 			if (credentialId !== undefined) {
 				const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
