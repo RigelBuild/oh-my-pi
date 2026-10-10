@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -31,7 +31,7 @@ test("draining leaves an active model response alive until it completes", async 
 	});
 	const gateway = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["test-token"],
+		authorize: bearerTokenAuthorizer(["test-token"]),
 		storage,
 		resolveModel: () => mock.model,
 	});
@@ -83,7 +83,7 @@ test("drain deadline aborts an in-flight request", async () => {
 	});
 	const gateway = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["test-token"],
+		authorize: bearerTokenAuthorizer(["test-token"]),
 		storage,
 		resolveModel: () => mock.model,
 	});
@@ -126,7 +126,7 @@ test("omitted drain duration immediately aborts an active request", async () => 
 	});
 	const gateway = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["test-token"],
+		authorize: bearerTokenAuthorizer(["test-token"]),
 		storage,
 		resolveModel: () => mock.model,
 	});
@@ -151,7 +151,12 @@ test("rejects drain durations that cannot be represented by a timer", async () =
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-drain-invalid-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	const gateway = startAuthGateway({ bind: "127.0.0.1:0", bearerTokens: [], storage, resolveModel: () => undefined });
+	const gateway = startAuthGateway({
+		bind: "127.0.0.1:0",
+		authorize: bearerTokenAuthorizer([]),
+		storage,
+		resolveModel: () => undefined,
+	});
 	try {
 		for (const duration of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2_147_483_648]) {
 			await expect(gateway.close(duration)).rejects.toThrow(RangeError);
