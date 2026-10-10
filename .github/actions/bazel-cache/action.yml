@@ -26,8 +26,8 @@ description: >
 
    Only rigel-release saves. actions/cache entries are scoped to the ref that
    saved them: a run reads its own ref and the default branch, and a PR also
-   reads its base branch. A copy saved on any other ref is readable only by
-   that same ref, while still counting against the
+   reads its base branch; sibling branches and other tags cannot read it. A
+   copy saved off rigel-release helps only its own ref, while still counting against the
    shared 10 GB repo quota. A tag-dispatched release saved a ~5 GB darwin
    archive under refs/tags/v18.2.10 and GitHub's LRU eviction then dropped
    the release branch's darwin archives, so the next release built cold.

@@ -1,7 +1,7 @@
 name: Warm bazel disk cache
 
-# GitHub-hosted runners cannot use the cluster remote cache and only see
-# actions/cache entries created on rigel-release or the default branch, and bazel action keys
+# GitHub-hosted runners cannot use the cluster remote cache and see only
+# actions/cache entries from their own ref, the default branch, or a PR's base branch, and bazel action keys
 # do not transfer across runner environments (a kata-produced disk cache
 # misses every action on a hosted image) — so seed each hosted consumer from
 # the same image it runs on:
