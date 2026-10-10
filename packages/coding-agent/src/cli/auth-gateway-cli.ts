@@ -80,6 +80,11 @@ export interface AuthGatewayCommandArgs {
 
 const ACTIONS: readonly AuthGatewayAction[] = ["serve", "stdio", "token", "status", "check"];
 
+/** Room after the drain for storage close before postmortem forces the exit. */
+const SHUTDOWN_MARGIN_MS = 2_000;
+/** Longest drain whose postmortem deadline still fits a timer. */
+export const MAX_GATEWAY_DRAIN_MS = 2_147_483_647 - SHUTDOWN_MARGIN_MS;
+
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
 }
@@ -365,13 +370,15 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 /**
  * Makes postmortem the only SIGTERM/SIGINT owner for a serving gateway: SIGTERM
  * drains in-flight responses for `drainMs`, other exits stop at once, and
- * postmortem then exits with its signal code (143 for SIGTERM).
+ * postmortem then exits with its signal code (143 for SIGTERM). A drain raises the
+ * postmortem deadline to cover it plus {@link SHUTDOWN_MARGIN_MS} for `release`.
  */
 export function registerGatewayShutdown(
 	handle: { close(drainMs?: number): Promise<void> },
 	drainMs: number | undefined,
 	release: () => void,
 ): () => void {
+	if (drainMs !== undefined) postmortem.setCleanupDeadline(drainMs + SHUTDOWN_MARGIN_MS);
 	return postmortem.register(
 		"auth-gateway",
 		async reason => {

@@ -4,9 +4,7 @@ import * as path from "node:path";
 import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { postmortem } from "@oh-my-pi/pi-utils";
 import { registerGatewayShutdown } from "../../../src/cli/auth-gateway-cli";
-import { gatewayCleanupDeadline } from "../../../src/cli/gateway-boot";
 
 const holdMs = Number(process.env.HOLD_MS);
 const drainMs = Number(process.env.DRAIN_MS);
@@ -28,9 +26,10 @@ const handle = startAuthGateway({
 	storage,
 	resolveModel: () => mock.model,
 });
-postmortem.setCleanupDeadline(gatewayCleanupDeadline(drainMs));
 registerGatewayShutdown(handle, drainMs, () => {
 	storage.close();
 	fs.rmSync(dir, { recursive: true, force: true });
+	// Runs only after close() returns, so it proves the drain ended before postmortem's deadline.
+	process.stdout.write("RELEASED\n");
 });
 process.stdout.write(`URL ${handle.url} MODEL ${mock.model.id}\n`);
