@@ -2,10 +2,11 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
+import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
 import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
-import type { BundledPiEntry } from "../../scripts/legacy-pi-virtual-module";
+import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "@oh-my-pi/pi-coding-agent/build";
+import type { BundledPiEntry } from "@oh-my-pi/pi-coding-agent/build";
 
 const bundledEntries = await collectBundledPiEntries();
 const bundledModuleKeys = new Set(bundledEntries.map(entry => entry.key));
@@ -34,6 +35,40 @@ async function runRegistryProbe(entries: BundledPiEntry[], source: string): Prom
 // the same `omp-legacy-pi-bundled:` virtual namespace as package roots without
 // a generated registry or duplicate key list.
 describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () => {
+	it("keeps the build-only plugin out of legacy runtime loaders", () => {
+		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/build")).toBe(false);
+	});
+
+	it("resolves virtual imports from the SDK package when the build runs elsewhere", async () => {
+		using tempDir = TempDir.createSync("@omp-legacy-pi-build-");
+		const entry = path.join(tempDir.path(), "entry.ts");
+		await Bun.write(entry, 'import "omp-legacy-pi-modules";\n');
+		const plugin = await createLegacyPiVirtualModulePlugin();
+		const paths: string[] = [];
+		const probe: Bun.BunPlugin = {
+			name: "capture-virtual-importer",
+			setup(build) {
+				build.onResolve({ filter: /^@oh-my-pi\/pi-ai\/oauth\/anthropic$/ }, args => {
+					paths.push(args.importer);
+					return { path: args.path, external: true };
+				});
+			},
+		};
+		const result = await Bun.build({
+			entrypoints: [entry],
+			target: "bun",
+			plugins: [plugin, probe],
+			external: bundledEntries
+				.map(entry => entry.importSpecifier)
+				.filter(specifier => specifier !== "@oh-my-pi/pi-ai/oauth/anthropic"),
+			throw: false,
+		});
+		expect(result.success, result.logs.map(log => log.message).join("\n")).toBe(true);
+		expect(paths).toHaveLength(1);
+		expect(path.isAbsolute(paths[0]!)).toBe(true);
+		expect(paths[0]!.startsWith(path.join(import.meta.dir, "..", "..", "src", "build"))).toBe(true);
+	});
+
 	it("does not evaluate unrelated host modules while loading the registry", async () => {
 		using tempDir = TempDir.createSync("@omp-legacy-pi-loaders-");
 		const alphaPath = path.join(tempDir.path(), "alpha.ts");
@@ -160,6 +195,20 @@ export const observed = buildModel({
 }).name;`,
 		);
 		expect(observed).toBe("Sample");
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
+	it("loads catalog .js aliases from the bundled graph", async () => {
+		const key = "@oh-my-pi/pi-catalog/build.js";
+		const entry = bundledEntries.find(candidate => candidate.key === key);
+		if (!entry) throw new Error("Catalog build.js alias is missing from the bundled registry");
+		const observed = await runRegistryProbe(
+			[entry],
+			`const { buildModel } = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
+export const observed = buildModel({ id: "alias", name: "OpenAI: Alias (latest)", api: "openai-completions", provider: "custom", baseUrl: "https://api.example.com/v1", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 8192 }).name;`,
+		);
+		expect(observed).toBe("Alias");
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});

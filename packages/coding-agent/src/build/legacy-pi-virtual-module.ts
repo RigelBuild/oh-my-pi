@@ -5,8 +5,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
 
 const VIRTUAL_NAMESPACE = "omp-legacy-pi-modules-build";
-const packageDir = path.resolve(import.meta.dir, "..");
-const repoRoot = path.resolve(packageDir, "..", "..");
+const packageDir = path.resolve(import.meta.dir, "..", "..");
 
 interface BundledPackage {
 	readonly dir: string;
@@ -116,8 +115,9 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	}
 
 	for (const pkg of BUNDLED_PACKAGES) {
-		const packageRoot = path.join(repoRoot, "packages", pkg.dir);
-		const manifestPath = path.join(packageRoot, "package.json");
+		const name = `@oh-my-pi/pi-${pkg.dir === "agent" ? "agent-core" : pkg.dir}`;
+		const manifestPath = Bun.resolveSync(`${name}/package.json`, packageDir);
+		const packageRoot = path.dirname(manifestPath);
 		const manifest: unknown = await Bun.file(manifestPath).json();
 		if (!isRecord(manifest) || typeof manifest.name !== "string") {
 			throw new Error(`Bundled Pi package manifest has no name: ${manifestPath}`);
@@ -127,7 +127,8 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 		addEntry(manifest.name, `bundled${pkg.identifier}`, rootSpecifier);
 
 		for (const exportKey in exportsField) {
-			if (!exportKey.startsWith("./") || exportKey === "." || exportKey.includes("*")) continue;
+			if (!exportKey.startsWith("./") || exportKey === "." || exportKey === "./build" || exportKey.includes("*"))
+				continue;
 			const subpath = exportKey.slice(2);
 			const key = `${manifest.name}/${subpath}`;
 			addEntry(key, bindingForSubpath(pkg.identifier, subpath), key);
@@ -139,7 +140,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			if (!sourcePattern) continue;
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
-			const catalogRootWildcard = pkg.dir === "catalog" && exportKey === "./*";
+			const catalogRootWildcard = pkg.dir === "catalog" && (exportKey === "./*" || exportKey === "./*.js");
 			if ((pattern.exportPrefix === "" || pattern.exportPrefix === "/") && !catalogRootWildcard) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
@@ -202,7 +203,7 @@ export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin
 		name: "omp:legacy-pi-modules",
 		setup(build) {
 			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({
-				path: LEGACY_PI_MODULES_SPECIFIER,
+				path: path.join(import.meta.dir, `${LEGACY_PI_MODULES_SPECIFIER}.virtual.ts`),
 				namespace: VIRTUAL_NAMESPACE,
 			}));
 			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));

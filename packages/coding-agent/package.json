@@ -52,6 +52,10 @@
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
 		},
+		"./build": {
+			"types": "./src/build/legacy-pi-virtual-module.ts",
+			"import": "./src/build/legacy-pi-virtual-module.ts"
+		},
 		"./*": {
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"

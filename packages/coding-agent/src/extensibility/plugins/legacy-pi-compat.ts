@@ -30,7 +30,7 @@ const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUND
 //
 // Compiled binaries and npm bundles retain lazy loaders for host packages and
 // serve requested surfaces through `omp-legacy-pi-bundled:<key>` synthetic modules.
-// `scripts/legacy-pi-virtual-module.ts` derives literal dynamic-import edges
+// `src/build/legacy-pi-virtual-module.ts` derives literal dynamic-import edges
 // from current package exports inside a Bun build plugin: no generated source
 // or duplicate key list exists on disk. Deferring each host module evaluation
 // avoids cycles with an extension-loading command that is itself in the
