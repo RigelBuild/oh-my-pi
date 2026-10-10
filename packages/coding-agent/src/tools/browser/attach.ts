@@ -300,6 +300,8 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 		`${prefix}(?:"\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)"|\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+))(?=\\s|$)`,
 	);
 	const absoluteExec = new RegExp(`${prefix}(?:(["'])(/[^"'\x60\\r\\n]+)\\1|(/[^\\s"'\x60;$}>&|<]+))(?=\\s|$)`);
+	// One leading redirection: optional fd/{var}/&, operator, then a word or process substitution.
+	const leadingRedirect = /^(?:\d+|\{\w+\}|&)?(?:<>|>>|>\||[<>]&?)\s*(?:[<>]\([^)]*\)|"[^"]*"|'[^']*'|[^\s"'<>]+)\s*/;
 	let current = wrapperPath;
 	const seen = new Set<string>();
 	for (let depth = 0; depth <= 4; depth++) {
@@ -328,9 +330,15 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 		if (/\b(?:then|else|do)\s+exec\s/.test(content)) return null;
 		if (depth === 4) return null;
 		let target: string | null = null;
-		for (const line of content.split("\n")) {
-			// `exec < /dev/null` / `exec 2> >(...)` only rewire fds (google-chrome does this); not a target.
-			if (!/^\s*exec\s/.test(line) || /^\s*exec\s+(?:\d*[<>]|&>)/.test(line)) continue;
+		for (const rawLine of content.split("\n")) {
+			if (!/^\s*exec\s/.test(rawLine)) continue;
+			// `exec < /dev/null` only rewires fds (google-chrome does this); drop leading redirections
+			// so `exec 2>/dev/null "$HERE/chrome"` still parses and fd-only execs are skipped.
+			let rest = rawLine.replace(/^\s*exec\s+/, "");
+			for (let m = leadingRedirect.exec(rest); m?.[0]; m = leadingRedirect.exec(rest))
+				rest = rest.slice(m[0].length);
+			if (!rest.trim()) continue;
+			const line = `exec ${rest}`;
 			const relative = relativeExec.exec(line);
 			const absolute = absoluteExec.exec(line);
 			const next =
