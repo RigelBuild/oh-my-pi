@@ -492,6 +492,103 @@ describe("Antigravity AuthStorage refresh persistence", () => {
 			storage.close();
 		}
 	});
+
+	it("rejects conflicting lease-backed delegate refresh before persistence", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store, {
+			refreshOAuthCredential: async () => ({
+				access: "conflicting-access",
+				refresh: "conflicting-refresh",
+				expires: Date.now() + 60_000,
+				accountId: "account-other",
+			}),
+		});
+		const original = {
+			type: "oauth" as const,
+			access: "old-access",
+			refresh: "old-refresh",
+			expires: Date.now() - 60_000,
+			accountId: "account-123",
+			email: "user@example.test",
+			projectId: "project-123",
+		};
+		try {
+			await storage.credentials.set("google-antigravity", original);
+
+			const [result] = await storage.health.check();
+			const persisted = store.listAuthCredentials("google-antigravity")[0]?.credential;
+
+			expect(result.ok).toBe(false);
+			expect(result.reason).toContain("account identity conflicts");
+			if (persisted?.type !== "oauth") throw new Error("expected persisted OAuth credential");
+			expect({
+				access: persisted.access,
+				refresh: persisted.refresh,
+				expires: persisted.expires,
+				accountId: persisted.accountId,
+				email: persisted.email,
+				projectId: persisted.projectId,
+			}).toEqual({
+				access: original.access,
+				refresh: original.refresh,
+				expires: original.expires,
+				accountId: original.accountId,
+				email: original.email,
+				projectId: original.projectId,
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("rejects peer-adopted Antigravity credentials with conflicting identity", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store, {
+			refreshOAuthCredential: async () => {
+				throw new Error("unexpected refresh");
+			},
+		});
+		try {
+			await storage.credentials.set("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: Date.now() - 60_000,
+				accountId: "account-123",
+				projectId: "project-123",
+			});
+			const listAuthCredentials = store.listAuthCredentials.bind(store);
+			let peerRotated = false;
+			vi.spyOn(store, "listAuthCredentials").mockImplementation(provider => {
+				if (provider === "google-antigravity" && !peerRotated) {
+					peerRotated = true;
+					const row = listAuthCredentials(provider)[0];
+					if (!row) throw new Error("missing Antigravity credential");
+					store.updateAuthCredential(row.id, {
+						type: "oauth",
+						access: "peer-access",
+						refresh: "peer-refresh",
+						expires: Date.now() + 120_000,
+						accountId: "account-other",
+						projectId: "project-123",
+					});
+				}
+				return listAuthCredentials(provider);
+			});
+
+			const [result] = await storage.health.check();
+			expect(result.ok).toBe(false);
+			expect(result.reason).toContain("account identity conflicts");
+			expect(store.listAuthCredentials("google-antigravity")[0]?.credential).toMatchObject({
+				type: "oauth",
+				access: "peer-access",
+				accountId: "account-other",
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
 	it("rejects conflicting delegate refreshes during credential health checks", async () => {
 		const storage = await makeLeaseFreeStorage(async () => ({
 			access: "conflicting-access",
