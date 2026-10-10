@@ -22,6 +22,11 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
 	snowflake: snowflakeTransport,
 };
 
+const SUBSCRIPTION_TOS_TIERS: Readonly<Record<string, "restricted">> = {
+	anthropic: "restricted",
+	"openai-codex": "restricted",
+};
+
 /**
  * The single per-provider list, derived from the compiled auth stratum
  * (`@oh-my-pi/pi-catalog` `rules/auth/*.kdl`) in `/login` display order.
@@ -31,7 +36,7 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
  * from this registry.
  */
 export const PROVIDER_REGISTRY: readonly ProviderDefinition[] = authProviders().map(policy =>
-	buildProviderDefinition(policy, TRANSPORTS[policy.id]),
+	buildProviderDefinition(policy, TRANSPORTS[policy.id], SUBSCRIPTION_TOS_TIERS[policy.id]),
 );
 
 const BY_ID: Record<string, ProviderDefinition> = Object.fromEntries(PROVIDER_REGISTRY.map(p => [p.id, p]));
