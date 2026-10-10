@@ -18,20 +18,34 @@ export async function readTokenFile(file: string): Promise<string | null> {
 	}
 }
 
-/** Write a token file readable only by the current user. */
-export async function writeTokenFile(file: string, token: string): Promise<void> {
-	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	await fs.writeFile(file, token, { mode: 0o600 });
+/** Replace the token at `file` atomically; the caller holds the file lock. */
+async function publishTokenFile(file: string, token: string): Promise<void> {
+	const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
 	try {
-		await fs.chmod(file, 0o600);
-	} catch {
-		// Best-effort (e.g. Windows).
+		await fs.writeFile(temp, token, { mode: 0o600 });
+		try {
+			await fs.chmod(temp, 0o600);
+		} catch {
+			// Best-effort (e.g. Windows).
+		}
+		await fs.rename(temp, file);
+	} finally {
+		await fs.rm(temp, { force: true });
 	}
 }
 
 /**
- * Read the token at `file`, or mint one. The check-and-write runs under a
- * cross-process lock, so concurrent first callers all return the same token.
+ * Write a token file readable only by the current user. Writers share a
+ * cross-process lock and replace the file atomically, so readers never see a partial token.
+ */
+export async function writeTokenFile(file: string, token: string): Promise<void> {
+	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+	await withFileLock(file, () => publishTokenFile(file, token));
+}
+
+/**
+ * Read the token at `file`, or mint one. The check-and-write runs under the
+ * writers' lock, so concurrent first callers and `--regenerate` agree on the token.
  */
 export async function ensureTokenFile(file: string): Promise<string> {
 	const existing = await readTokenFile(file);
@@ -41,7 +55,7 @@ export async function ensureTokenFile(file: string): Promise<string> {
 		const winner = await readTokenFile(file);
 		if (winner) return winner;
 		const token = generateToken();
-		await writeTokenFile(file, token);
+		await publishTokenFile(file, token);
 		return token;
 	});
 }
