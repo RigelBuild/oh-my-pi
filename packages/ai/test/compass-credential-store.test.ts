@@ -538,6 +538,118 @@ describe("CompassAuthCredentialStore", () => {
 		}
 	});
 
+	test("lands a queued write after two writes in a row lost their responses", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-a", refresh: "refresh-a" });
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-b", refresh: "refresh-b" });
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-c", refresh: "refresh-c" });
+			const commitThenLose = (access: string, refresh: string, version: string) => () => {
+				server.rows.set("cred/oauth", { ...oauthRow(), version, oauth: { ...oauthToken, access, refresh } });
+				return new Response("bad gateway", { status: 503 });
+			};
+			// A commits and loses its response; B adopts A, commits, and loses its response too.
+			server.failNext("UpdateCredentialOAuth", commitThenLose("access-a", "refresh-a", "2"));
+			held.release();
+			await Bun.sleep(0);
+			server.failNext("UpdateCredentialOAuth", commitThenLose("access-b", "refresh-b", "3"));
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-c");
+			expect(oauthOf(store).credential.refresh).toBe("refresh-c");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("does not adopt a peer write that kept the access token but rotated refresh", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-a", refresh: "refresh-a" });
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-b", refresh: "refresh-b" });
+			const peer = {
+				...oauthRow(),
+				version: "3",
+				oauth: { ...oauthToken, access: "access-a", refresh: "refresh-peer" },
+			};
+			server.rows.set("cred/oauth", peer);
+			server.failNext("UpdateCredentialOAuth", () => new Response("bad gateway", { status: 503 }));
+			held.release();
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-peer");
+			expect(oauthOf(store).credential.refresh).toBe("refresh-peer");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("a transient delete survives a later OAuth failure on the same row", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url, { refreshIntervalMs: 0 });
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("DisableCredential");
+			const deleted = store.deleteAuthCredential(row.id, "logout");
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-late" });
+			server.failNext("DisableCredential", () => new Response("bad gateway", { status: 503 }));
+			server.failNext("UpdateCredentialOAuth", () => new Response("bad gateway", { status: 503 }));
+			held.release();
+			expect(await deleted).toBe(true);
+			await store.flush();
+			store.pollExternalChanges();
+			await store.flush();
+			expect(server.rows.has("cred/oauth")).toBe(false);
+			expect(store.listAuthCredentials()).toEqual([]);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("a transient delete still lands after a peer bumps the row", async () => {
+		const server = startFakeServer([apiKeyRow()]);
+		const store = await storeFor(server.url, { refreshIntervalMs: 0 });
+		try {
+			server.failNext("DisableCredential", () => new Response("bad gateway", { status: 503 }));
+			expect(await store.deleteAuthCredential(1, "logout")).toBe(true);
+			server.rows.set("cred/key", { ...apiKeyRow(), version: "9" });
+			store.pollExternalChanges();
+			await store.flush();
+			expect(server.rows.has("cred/key")).toBe(false);
+			expect(store.listAuthCredentials()).toEqual([]);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("a parked delete survives a later OAuth write losing a race", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url, { refreshIntervalMs: 60_000 });
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("DisableCredential");
+			const deleted = store.deleteAuthCredential(row.id, "logout");
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-late" });
+			server.failNext("DisableCredential", () => new Response("bad gateway", { status: 503 }));
+			// The queued OAuth write then loses a CAS race to a peer.
+			server.rows.set("cred/oauth", { ...oauthRow(), version: "7" });
+			held.release();
+			expect(await deleted).toBe(true);
+			await store.flush();
+			expect(store.listAuthCredentials()).toEqual([]);
+		} finally {
+			store.close();
+		}
+	});
+
 	test("a peer write after a lost response still wins", async () => {
 		const server = startFakeServer([oauthRow()]);
 		const store = await storeFor(server.url);
