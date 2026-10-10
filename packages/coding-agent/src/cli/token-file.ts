@@ -5,6 +5,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, withFileLock } from "@oh-my-pi/pi-utils";
+import { replaceFileAtomically } from "../utils/atomic-file";
 
 /** Read a token file; `null` when it is missing or blank. */
 export async function readTokenFile(file: string): Promise<string | null> {
@@ -28,7 +29,7 @@ async function publishTokenFile(file: string, token: string): Promise<void> {
 		} catch {
 			// Best-effort (e.g. Windows).
 		}
-		await fs.rename(temp, file);
+		await replaceFileAtomically(temp, file);
 	} finally {
 		await fs.rm(temp, { force: true });
 	}
@@ -44,8 +45,9 @@ export async function writeTokenFile(file: string, token: string): Promise<void>
 }
 
 /**
- * Read the token at `file`, or mint one. The check-and-write runs under the
- * writers' lock, so concurrent first callers and `--regenerate` agree on the token.
+ * Read the token at `file`, or mint one. The missing-file check-and-mint runs
+ * under the writers' lock, so concurrent first callers return one token. A read
+ * that overlaps a rotation may return the pre-rotation token.
  */
 export async function ensureTokenFile(file: string): Promise<string> {
 	const existing = await readTokenFile(file);
