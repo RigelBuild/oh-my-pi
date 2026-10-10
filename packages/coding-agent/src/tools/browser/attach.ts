@@ -329,7 +329,8 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 		if (depth === 4) return null;
 		let target: string | null = null;
 		for (const line of content.split("\n")) {
-			if (!/^\s*exec\s/.test(line)) continue;
+			// `exec < /dev/null` / `exec 2> >(...)` only rewire fds (google-chrome does this); not a target.
+			if (!/^\s*exec\s/.test(line) || /^\s*exec\s+(?:\d*[<>]|&>)/.test(line)) continue;
 			const relative = relativeExec.exec(line);
 			const absolute = absoluteExec.exec(line);
 			const next =

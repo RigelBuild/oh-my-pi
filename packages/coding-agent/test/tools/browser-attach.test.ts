@@ -357,13 +357,17 @@ describe("pickElectronTarget", () => {
 		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
 		await Bun.write(target, Bun.file(process.execPath));
 		await fs.chmod(target, 0o755);
-		await Bun.write(wrapper, '#!/usr/bin/env bash\nHERE="$(dirname "$0")"\nexec -a "$0" "$HERE/chrome" "$@"\n');
+		// Mirrors /opt/google/chrome/google-chrome: fd-only execs precede the real one.
+		await Bun.write(
+			wrapper,
+			'#!/usr/bin/env bash\nHERE="$(dirname "$0")"\nexec < /dev/null\nexec > >(exec cat)\nexec 2> >(exec cat >&2)\nexec -a "$0" "$HERE/chrome" "$@"\n',
+		);
 		await fs.chmod(wrapper, 0o755);
 		const child = Bun.spawn(
 			[
 				wrapper,
 				"--eval",
-				'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+				'process.stdout.write("ready\\n"); setInterval(() => {}, 1 << 30)',
 				`--user-data-dir=${profile}`,
 				`--remote-debugging-port=${cdp.port}`,
 			],
