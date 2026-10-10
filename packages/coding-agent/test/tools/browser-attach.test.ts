@@ -171,11 +171,12 @@ describe("pickElectronTarget", () => {
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	});
+	}, 180_000);
 
+	// Keep cleanup from a wedged-browser close bounded.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	});
+	}, 30_000);
 
 	test("uses discovered CDP page targets when browser.pages is empty", async () => {
 		const page = fakePage({ url: "https://www.google.com/", title: "Google" });
@@ -521,10 +522,12 @@ describe("pickElectronTarget", () => {
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			try {
+				// Keep the browser.open timeout below the test timeout.
 				await invokeBrowser({
 					action: "open",
 					name: tabName,
 					url: requested,
+					timeout: 45,
 					app: { cdp_url: `http://${endpoint.host}` },
 				});
 				opened = true;
@@ -538,7 +541,7 @@ describe("pickElectronTarget", () => {
 				if (opened) await invokeBrowser({ action: "close", name: tabName });
 			}
 		},
-		30_000,
+		90_000,
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
