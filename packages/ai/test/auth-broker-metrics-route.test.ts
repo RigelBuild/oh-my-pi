@@ -282,6 +282,26 @@ describe("auth-broker GET /metrics route", () => {
 		expect(res.status).toBe(200);
 	});
 
+	test("a non-loopback bind still gates /metrics on the scrape token", async () => {
+		if (!storage) throw new Error("expected storage from beforeEach");
+		const exposed = startAuthBroker({
+			storage,
+			bind: "0.0.0.0:0",
+			metricsEnabled: true,
+			bearerTokens: [],
+			metricsTokens: [SCRAPE],
+			disableRefresher: true,
+		});
+		try {
+			const url = `http://127.0.0.1:${exposed.port}/metrics`;
+			expect((await fetch(url)).status).toBe(401);
+			const scrape = await fetch(url, { headers: { authorization: `Bearer ${SCRAPE}` } });
+			expect(scrape.status).toBe(200);
+		} finally {
+			await exposed.close();
+		}
+	});
+
 	test("no token and an unknown token are both 401", async () => {
 		expect((await fetch(`${handle!.url}/metrics`)).status).toBe(401);
 		const bad = await fetch(`${handle!.url}/metrics`, { headers: { authorization: "Bearer nope" } });
