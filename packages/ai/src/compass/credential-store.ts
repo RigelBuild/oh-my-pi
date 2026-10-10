@@ -130,7 +130,10 @@ function matchesSentToken(listed: GatewayOAuthToken, sent: GatewayOAuthTokenRequ
 	const stored = new Map<string, unknown>(Object.entries(listed));
 	return Object.entries(sent).every(
 		([key, value]) =>
-			value === undefined || value === "" || String(value) === "0" || String(stored.get(key)) === String(value),
+			value === undefined ||
+			value === "" ||
+			(key === "expiresUnixMs" && String(value) === "0") ||
+			String(stored.get(key)) === String(value),
 	);
 }
 
