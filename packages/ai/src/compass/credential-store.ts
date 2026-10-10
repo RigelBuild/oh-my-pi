@@ -22,6 +22,7 @@ import {
 	disableCredentialResponseSchema,
 	listCredentialPoolResponseSchema,
 	updateCredentialOAuthResponseSchema,
+	CLEARABLE_OAUTH_FIELDS,
 } from "./wire";
 
 export interface CompassAuthCredentialStoreOptions {
@@ -124,6 +125,14 @@ function oauthToGateway(credential: OAuthCredential): GatewayOAuthTokenRequest {
 		...(credential.inferenceRegion ? { inferenceRegion: credential.inferenceRegion } : {}),
 		...(credential.activeOrganizationId ? { activeOrganizationId: credential.activeOrganizationId } : {}),
 	};
+}
+
+/** Every optional field the token leaves empty; the write makes the stored row match it exactly. */
+function clearedFields(token: GatewayOAuthTokenRequest): string[] {
+	const sent = new Map<string, unknown>(Object.entries(token));
+	return Object.entries(CLEARABLE_OAUTH_FIELDS)
+		.filter(([key]) => !sent.get(key))
+		.map(([, protoName]) => protoName);
 }
 
 function matchesSentToken(listed: GatewayOAuthToken, sent: GatewayOAuthTokenRequest): boolean {
@@ -434,6 +443,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	async #sendOAuthUpdate(row: CredentialRow, credential: OAuthCredential, state: RowState) {
 		const token = oauthToGateway(credential);
+		const clearFields = clearedFields(token);
 		// Each pass either returns, throws, or adopts a commit and clears the outcomes, so it ends.
 		for (;;) {
 			try {
@@ -444,6 +454,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 						token,
 						expectedVersion: state.version,
 						agentAccountId: this.#agentAccountId,
+						clearFields,
 					} satisfies UpdateCredentialOAuthRequest,
 					updateCredentialOAuthResponseSchema,
 				);

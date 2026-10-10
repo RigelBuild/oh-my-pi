@@ -118,6 +118,11 @@ function startFakeServer(initialRows: FakeRow[]): FakeServer {
 				for (const [key, value] of Object.entries(tokenBody ?? {})) {
 					if (value !== "" && value !== undefined && value !== 0 && value !== "0") merged[key] = value;
 				}
+				// Named fields are cleared even though the token leaves them empty.
+				const camel = (name: string) => name.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase());
+				for (const name of Array.isArray(body.clearFields) ? body.clearFields : []) {
+					if (typeof name === "string") delete merged[camel(name)];
+				}
 				row.oauth = merged;
 				row.version = String(Number(row.version) + 1);
 				return Response.json({ version: row.version });
@@ -271,6 +276,25 @@ describe("CompassAuthCredentialStore", () => {
 			store.updateAuthCredential(row.id, { ...row.credential, access: "access-refreshed" });
 			await store.flush();
 			expect(server.rows.get("cred/oauth")?.oauth).toEqual({ ...oauthToken, access: "access-refreshed" });
+		} finally {
+			store.close();
+		}
+	});
+
+	test("clears org and region on the server when a refresh switches org", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const { orgId: _o, orgName: _n, region: _r, inferenceRegion: _i, ...rest } = row.credential;
+			store.updateAuthCredential(row.id, { ...rest, access: "access-new-org", activeOrganizationId: "org-other" });
+			await store.flush();
+			const stored = server.rows.get("cred/oauth")?.oauth;
+			expect(stored).toMatchObject({ access: "access-new-org", activeOrganizationId: "org-other" });
+			for (const field of ["orgId", "orgName", "region", "inferenceRegion"])
+				expect(stored).not.toHaveProperty(field);
+			await store.refreshSnapshot();
+			expect(oauthOf(store).credential.region).toBeUndefined();
 		} finally {
 			store.close();
 		}
