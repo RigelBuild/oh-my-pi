@@ -4,7 +4,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, withFileLock } from "@oh-my-pi/pi-utils";
 
 /** Read a token file; `null` when it is missing or blank. */
 export async function readTokenFile(file: string): Promise<string | null> {
@@ -30,28 +30,20 @@ export async function writeTokenFile(file: string, token: string): Promise<void>
 }
 
 /**
- * Read the token at `file`, or mint one. The token is written to a temp file
- * and hard-linked into place, so the publish is exclusive and never half-written:
- * concurrent first callers all return the winner's token.
+ * Read the token at `file`, or mint one. The check-and-write runs under a
+ * cross-process lock, so concurrent first callers all return the same token.
  */
 export async function ensureTokenFile(file: string): Promise<string> {
 	const existing = await readTokenFile(file);
 	if (existing) return existing;
-	const token = generateToken();
-	const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-	await writeTokenFile(temp, token);
-	try {
-		await fs.link(temp, file);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+	return withFileLock(file, async () => {
 		const winner = await readTokenFile(file);
-		// A blank file left by an older writer holds no token; replace it.
-		if (!winner) await fs.rename(temp, file);
-		return winner ?? token;
-	} finally {
-		await fs.rm(temp, { force: true });
-	}
-	return token;
+		if (winner) return winner;
+		const token = generateToken();
+		await writeTokenFile(file, token);
+		return token;
+	});
 }
 
 /** Generate a random URL-safe bearer token. */

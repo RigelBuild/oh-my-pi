@@ -16,25 +16,35 @@ async function tokenPath(): Promise<string> {
 	return path.join(dir, "nested", "metrics.token");
 }
 
-test("concurrent first mints in separate processes all return the persisted token", async () => {
-	const file = await tokenPath();
+async function mintInProcesses(file: string, count: number): Promise<string[]> {
 	const helper = path.join(import.meta.dir, "../../src/cli/token-file.ts");
 	// Each child imports the helper by path: a separate process is the race being tested.
 	const script = `const { ensureTokenFile } = await import(${JSON.stringify(helper)}); process.stdout.write(await ensureTokenFile(${JSON.stringify(file)}));`;
-	const procs = Array.from({ length: 8 }, () =>
+	const procs = Array.from({ length: count }, () =>
 		Bun.spawn(["bun", "-e", script], { stdout: "pipe", stderr: "pipe", env: { ...process.env } }),
 	);
-	const tokens = await Promise.all(
+	return Promise.all(
 		procs.map(async proc => {
 			const out = await new Response(proc.stdout).text();
 			expect(await proc.exited).toBe(0);
 			return out;
 		}),
 	);
+}
+
+test.each([
+	["no file", false],
+	["a blank file", true],
+])("concurrent first mints in separate processes from %s return the persisted token", async (_label, blank) => {
+	const file = await tokenPath();
+	if (blank) {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.writeFile(file, "\n");
+	}
+	const tokens = await mintInProcesses(file, 8);
 	const persisted = await Bun.file(file).text();
 	expect(persisted).toMatch(/^[A-Za-z0-9_-]{43}$/);
 	expect(new Set(tokens)).toEqual(new Set([persisted]));
-	expect((await fs.readdir(path.dirname(file))).filter(name => name.endsWith(".tmp"))).toEqual([]);
 });
 
 test("concurrent first mints in one process all return the persisted token", async () => {
