@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { startAuthGateway, type AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway, type AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
@@ -40,7 +40,7 @@ beforeEach(async () => {
 	};
 	gateway = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["gateway-token"],
+		authorize: bearerTokenAuthorizer(["gateway-token"]),
 		storage,
 		resolveModel: modelId => models[modelId],
 		version: "test",

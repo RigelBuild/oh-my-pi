@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
+import { createAuthGatewayRouter, SHARED_TOKEN_CALLER, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -38,7 +38,7 @@ describe("auth-gateway stdio transport", () => {
 				path: "/v1/chat/completions",
 				body: { model: "mock/stdio-model", messages: [{ role: "user", content: "hi" }] },
 			};
-			const output = await serve([JSON.stringify(request)], req => router.route(req, "test"));
+			const output = await serve([JSON.stringify(request)], req => router.route(req, "test", SHARED_TOKEN_CALLER));
 			expect(output[0]).toEqual({ ready: true, version: "test" });
 			expect(output[1]).toMatchObject({
 				id: "a",

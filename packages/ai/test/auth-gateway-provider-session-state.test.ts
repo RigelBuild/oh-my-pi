@@ -17,6 +17,7 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import {
 	AUTH_GATEWAY_MAX_SESSION_STATES,
 	AuthGatewaySessionStateStore,
+	bearerTokenAuthorizer,
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle, AuthGatewaySessionStateRequest } from "@oh-my-pi/pi-ai/auth-gateway";
@@ -153,7 +154,7 @@ async function startGateway(
 	}
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["test-token"],
+		authorize: bearerTokenAuthorizer(["test-token"]),
 		storage,
 		resolveModel: () => model,
 		version: "test",
@@ -177,8 +178,12 @@ async function startGateway(
 }
 
 /** One store request for a client-keyed session, as a gateway handler builds it. */
-function stateRequest(clientKey: string, account = "key:test-account"): AuthGatewaySessionStateRequest {
-	return { clientKey, model: ANTHROPIC_MODEL, context: CONTEXT, account };
+function stateRequest(
+	clientKey: string,
+	account = "key:test-account",
+	agentAccountId = "agent-a",
+): AuthGatewaySessionStateRequest {
+	return { clientKey, agentAccountId, model: ANTHROPIC_MODEL, context: CONTEXT, account };
 }
 
 /**
@@ -222,7 +227,7 @@ it.each(["/v1/pi/stream", "/v1/chat/completions"])(
 		await storage.credentials.set("factory-droid", credential);
 		const gateway = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => model,
 			fetch: captureFetch(captured, completionsChunks("ok", model.id)),
@@ -300,7 +305,7 @@ it.each(["/v1/pi/stream", "/v1/chat/completions"])(
 		});
 		const gateway = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => model,
 			fetch: captureFetch(captured, completionsChunks("ok", model.id)),
@@ -538,6 +543,18 @@ describe("auth-gateway provider session state", () => {
 			await gateway.cleanup();
 			clearCustomApis();
 		}
+	});
+
+	it("never shares an entry between two agents that send the same session key", () => {
+		const store = new AuthGatewaySessionStateStore();
+		const agentA = store.acquire(stateRequest("shared-key", "key:test-account", "agent-a"));
+		agentA.release();
+		const agentB = store.acquire(stateRequest("shared-key", "key:test-account", "agent-b"));
+		expect(agentB.states).not.toBe(agentA.states);
+		agentB.release();
+		const agentAAgain = store.acquire(stateRequest("shared-key", "key:test-account", "agent-a"));
+		expect(agentAAgain.states).toBe(agentA.states);
+		agentAAgain.release();
 	});
 
 	it("closes the provider state it evicts at the session ceiling", () => {

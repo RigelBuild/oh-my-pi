@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -13,7 +13,7 @@ test("model listing exposes one provider-qualified route per upstream model", as
 	const devin = createMockModel({ provider: "devin", id: "shared-model" });
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: [],
+		authorize: bearerTokenAuthorizer([]),
 		storage,
 		resolveModel: () => undefined,
 		listModels: () => [anthropic, anthropic, devin, devin],

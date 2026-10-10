@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -64,7 +64,7 @@ async function boot(): Promise<Harness> {
 	};
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["gw-token"],
+		authorize: bearerTokenAuthorizer(["gw-token"]),
 		storage,
 		resolveModel: id => {
 			if (id === model.id || id === `openrouter/${model.id}`) return model;

@@ -11,7 +11,7 @@
  * ends when stdin does.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
+import { createAuthGatewayRouter, SHARED_TOKEN_CALLER, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, normalizeModelPatternList, resolveCliModel } from "../config/model-resolver";
@@ -79,7 +79,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 					.json()
 					.catch(() => undefined)
 			: undefined;
-		if (!isRecord(body) || typeof body.model !== "string") return router.route(req, STDIO_PEER);
+		if (!isRecord(body) || typeof body.model !== "string") return router.route(req, STDIO_PEER, SHARED_TOKEN_CALLER);
 		const selector = body.model;
 		const candidates = selectorCandidates(selector, settings, registry);
 		let response = Response.json(
@@ -94,7 +94,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 				headers: req.headers,
 				body: JSON.stringify({ ...body, model: key }),
 			});
-			response = await router.route(attempt, STDIO_PEER);
+			response = await router.route(attempt, STDIO_PEER, SHARED_TOKEN_CALLER);
 			// 400 is the request's own fault and 499 its caller's: another model would fare no better.
 			if (response.status <= 400 || response.status === 499) return response;
 			logger.warn("auth-gateway stdio attempt failed", { selector, model: key, status: response.status });

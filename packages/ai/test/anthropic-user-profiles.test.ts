@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { AnthropicApiError } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import { AnthropicUserProfilesClient, type UserProfile } from "@oh-my-pi/pi-ai/providers/anthropic-user-profiles";
@@ -183,7 +183,7 @@ it("forwards inbound Anthropic user-profile attribution through the gateway to u
 	});
 	const gateway = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["test-token"],
+		authorize: bearerTokenAuthorizer(["test-token"]),
 		storage,
 		resolveModel: () => model,
 		version: "test",
