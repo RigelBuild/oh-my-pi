@@ -37,7 +37,45 @@ function usageReportScopeProjectId(report: UsageReport): string | undefined {
 	return undefined;
 }
 
+/**
+ * Whether the report's limits carry several distinct trimmed
+ * `scope.accountId` values. Mirrors the metrics renderer's `CONFLICTING_SCOPE`
+ * outcome: {@link usageReportScopeAccountId} collapses both "none" and
+ * "several" to `undefined`, so identity-less detection needs the conflict
+ * distinguished from a plain absence.
+ */
+function hasConflictingScopeAccountId(report: UsageReport): boolean {
+	const ids = new Set<string>();
+	for (const limit of report.limits) {
+		const accountId = limit.scope.accountId?.trim();
+		if (accountId) ids.add(accountId);
+	}
+	return ids.size > 1;
+}
+
+/**
+ * Match the renderer's account identity order. A conflicting set of scoped
+ * accounts is terminal even when email, org, or project metadata exists:
+ * the renderer needs a credential stamp to keep those reports distinct.
+ */
+export function usageReportHasNoIdentity(report: UsageReport): boolean {
+	if (usageReportMetadataValue(report, "accountId")) return false;
+	if (hasConflictingScopeAccountId(report)) return true;
+	if (usageReportMetadataValue(report, "email")) return false;
+	if (usageReportMetadataValue(report, "orgId")) return false;
+	if (usageReportMetadataValue(report, "projectId")) return false;
+	if (usageReportMetadataValue(report, "account")) return false;
+	if (usageReportMetadataValue(report, "user")) return false;
+	if (usageReportMetadataValue(report, "username")) return false;
+	if (usageReportScopeAccountId(report)) return false;
+	if (usageReportScopeProjectId(report)) return false;
+	return true;
+}
+
 function usageReportIdentifiers(report: UsageReport): string[] {
+	// Honor the stamp before email or org grouping, including org-scoped providers.
+	const credentialKey = usageReportMetadataValue(report, "credentialKey");
+	if (credentialKey) return [`${report.provider}:credential:${credentialKey.toLowerCase()}`];
 	const identifiers: string[] = [];
 	const email = usageReportMetadataValue(report, "email");
 	if (email) identifiers.push(`email:${email.toLowerCase()}`);
