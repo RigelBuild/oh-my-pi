@@ -357,10 +357,10 @@ describe("pickElectronTarget", () => {
 		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
 		await Bun.write(target, Bun.file(process.execPath));
 		await fs.chmod(target, 0o755);
-		// Mirrors /opt/google/chrome/google-chrome: fd-only execs precede the real one.
+		// google-chrome's fd-only execs, a `{var}` fd allocation, and a redirect ahead of the real target.
 		await Bun.write(
 			wrapper,
-			'#!/usr/bin/env bash\nHERE="$(dirname "$0")"\nexec < /dev/null\nexec > >(exec cat)\nexec 2> >(exec cat >&2)\nexec -a "$0" "$HERE/chrome" "$@"\n',
+			'#!/usr/bin/env bash\nHERE="$(dirname "$0")"\nexec < /dev/null\nexec > >(exec cat)\nexec 2> >(exec cat >&2)\nexec {log}>/dev/null\nexec 2>/dev/null -a "$0" "$HERE/chrome" "$@"\n',
 		);
 		await fs.chmod(wrapper, 0o755);
 		const child = Bun.spawn(
