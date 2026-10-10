@@ -50,7 +50,7 @@ import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
-import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
+import { ensureTokenFile, generateToken, writeTokenFile } from "./token-file";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -127,15 +127,6 @@ function getTokenFilePath(): string {
  */
 function getMetricsTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker-metrics.token");
-}
-
-/** Read-or-mint the token at `file`, persisting a freshly generated one. */
-async function ensureTokenFile(file: string): Promise<string> {
-	const existing = await readTokenFile(file);
-	if (existing) return existing;
-	const token = generateToken();
-	await writeTokenFile(file, token);
-	return token;
 }
 
 /** Env var honored by `serve` when `--subscriptions-config` is not passed (flag wins). */
