@@ -47,8 +47,8 @@ The broker is the only writer of OAuth refresh tokens. Clients (including the ga
 ### CLI
 
 ```
-omp auth-broker serve     [--bind=host:port]                    # boot the broker
-omp auth-broker token     [--regenerate] [--json]               # print or rotate the bearer token
+omp auth-broker serve [--bind=host:port] [--enable-metrics] [--no-enable-metrics] [--subscriptions-config=<file>]
+omp auth-broker token [--metrics] [--regenerate] [--json]
 omp auth-broker login     [<provider>] [--via=user@host] [--dry-run]
 omp auth-broker logout    [<provider>]
 omp auth-broker list      [--json]
@@ -57,8 +57,8 @@ omp auth-broker migrate   --from-local [--include-oauth] [--include-env] [--dry-
 omp auth-broker status    [--json]
 ```
 
-- `serve` opens the local SQLite store at `getAgentDbPath()` and binds an HTTP listener (default `127.0.0.1:8765`). On startup a token is ensured at `<config-dir>/auth-broker.token` (mode `0600`, newly created parent directory `0700`). The background refresher runs immediately and then every `refreshIntervalMs` (default 60 s), targeting OAuth credentials whose expiry is within `refreshSkewMs` (default 5 min).
-- `token` prints the stored bearer or generates a new one. `--regenerate` replaces the token file; restart a running broker to load the replacement into its in-memory allow-list.
+- `serve` opens the local SQLite store at `getAgentDbPath()` and binds an HTTP listener (default `127.0.0.1:8765`). On startup a token is ensured at `<config-dir>/auth-broker.token` (mode `0600`, newly created parent directory `0700`). The background refresher runs immediately and then every `refreshIntervalMs` (default 60 s), targeting OAuth credentials whose expiry is within `refreshSkewMs` (default 5 min). `--enable-metrics` exposes `GET /metrics`; enablement and scrape-token setup are described below.
+- `token` prints the stored bearer or generates a new one. `--regenerate` replaces the token file; restart a running broker to load the replacement into its in-memory allow-list. With `--metrics`, it reads or rotates the scrape-scoped token instead; externally provisioned tokens must be rotated at their source.
 - `login [<provider>]` runs the registered sign-in flow locally (OAuth or a provider's API-key login). With no provider it shows an interactive numbered picker. With `--via=user@host` it runs `ssh -L <callback-port>:127.0.0.1:<callback-port> -o ExitOnForwardFailure=yes user@host omp auth-broker login <provider>`; the credential is written on the remote host (`--via` requires `<provider>`, and `--dry-run` applies only to this remote path). Ports are derived from the auth registry: `anthropic:54545`, `openai-codex:1455`, `google-gemini-cli:8085`, `google-antigravity:51121`, `gitlab-duo:8080`, `devin:59653`, `openrouter:54549`, `stencil:54547`. `gitlab-duo-agent` and `zai-coding-plan` use non-loopback/manual callbacks rather than the old `8080`/`9999` listeners; run those flows on the host directly. Login is driven in-process through `AuthStorage.oauth.login()`.
 - `logout [<provider>]` disables the provider's active rows with cause `logged out by user`; disabled tombstones remain available through the broker API. With no argument it shows an interactive numbered picker of stored providers.
 - `list` enumerates the sign-in providers returned by `getOAuthProviders()` (visible built-ins plus `registerOAuthProvider` custom providers), not the stored accounts. `--json` emits an array of `{ id, name }`.
@@ -85,8 +85,19 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/usage/observed`         | bearer | Record usage observed by a broker client                           |
 | `GET`    | `/v1/usage/clients`          | bearer | Summarize client-observed usage since optional `sinceMs`           |
 | `POST`   | `/v1/usage/stale`            | bearer | Invalidate the broker's current usage cache                        |
+| `GET`    | `/metrics`                   | scrape token or bearer (opt-in) | Prometheus usage metrics                                      |
 
-Requests use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
+### Metrics
+
+The endpoint is off by default. `--enable-metrics` and `--no-enable-metrics` override `OMP_AUTH_BROKER_METRICS`. That variable enables metrics only for `1` or `true` (case-insensitive); any other set value disables metrics. When it is unset, `auth.broker.metrics` in the agent's config applies. The setting is read from the agent directory, not project config.
+
+The scrape token comes from `OMP_AUTH_BROKER_METRICS_TOKEN` (literal value) or `OMP_AUTH_BROKER_METRICS_TOKEN_FILE` (file path). Setting both, or an empty value, is an error. If neither is set, `serve` mints the token at `<config-dir>/auth-broker-metrics.token`. `omp auth-broker token --metrics` prints the active token or rotates omp's token file with `--regenerate`; externally provisioned tokens must be rotated at their source. A scrape token authorizes only `GET /metrics`; a master bearer also authorizes it. An empty token set is open only on loopback binds, but enabling metrics without a scrape or master bearer token is refused at startup. Startup also refuses a scrape token that overlaps a master bearer.
+
+The endpoint emits these Prometheus gauge families when they have samples: `llm_usage_limit_used_fraction`, `llm_usage_limit_used`, `llm_usage_limit_max`, `llm_usage_limit_remaining`, `llm_usage_limit_resets_at_seconds`, `llm_usage_limit_status`, `llm_usage_reset_credits_available`, `llm_usage_report_fetched_at_seconds`, `llm_subscription_info`, `llm_subscription_renews_at_seconds`, `llm_subscription_plan_capacity_weight`, and `llm_subscription_plan_price_usd`. A storage throw returns an empty `503`; null usage returns an empty `200` exposition.
+
+`--subscriptions-config=<file>` overrides `OMP_AUTH_BROKER_SUBSCRIPTIONS`. The JSON object may contain `accounts` and `plans`. `accounts` maps account labels to objects with required `provider` and optional `org`, `plan`, `renewsAt` (`YYYY-MM-DD`), `orgs` (org labels mapped to `plan`/`renewsAt`), or `providers` (provider IDs mapped to the same fields). `plans` maps `<provider>:<plan>` to numeric `capacityWeight` and `monthlyPriceUsd`. This file is read only when metrics are enabled; malformed JSON or fields prevent startup.
+
+Requests to `/v1` use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
 
 A snapshot contains `generation`, `generatedAt`, `serverNowMs`, `refresher`
 (`enabled`, `intervalMs`, `skewMs`, `nextSweepInMs`), and `credentials`.
@@ -280,6 +291,10 @@ Broker-backed credential storage is **off** unless `OMP_AUTH_BROKER_URL` (or `au
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `OMP_AUTH_BROKER_URL`               | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite is bypassed.                     | Any time the omp client should resolve credentials through a broker (and required by `omp auth-gateway serve`).           |
 | `OMP_AUTH_BROKER_TOKEN`             | Bearer token used for every broker endpoint except `/v1/healthz`.                                                                                                      | When `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
+| `OMP_AUTH_BROKER_METRICS`           | Enables the broker's opt-in `/metrics` endpoint when set to `1` or `true` (case-insensitive); a `serve` flag overrides it.                                               | Optional on the broker host.                                                                                              |
+| `OMP_AUTH_BROKER_METRICS_TOKEN`     | Literal scrape token for `/metrics`. Mutually exclusive with `OMP_AUTH_BROKER_METRICS_TOKEN_FILE`; an empty value is an error.                                           | Optional on the broker host; otherwise `serve` mints a token file.                                                        |
+| `OMP_AUTH_BROKER_METRICS_TOKEN_FILE` | Path to a file containing the `/metrics` scrape token. Mutually exclusive with `OMP_AUTH_BROKER_METRICS_TOKEN`; an empty value is an error.                            | Optional on the broker host; otherwise `serve` mints a token file.                                                        |
+| `OMP_AUTH_BROKER_SUBSCRIPTIONS`     | Path to the optional subscription JSON used to add plan and renewal metrics; `--subscriptions-config` takes precedence.                                                   | Optional when broker metrics are enabled.                                                                                 |
 | `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes.                                                 | Optional in broker mode.                                                                                                  |
 | `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent).                                       | Optional in broker mode.                                                                                                  |
 | `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | JSON file mapping provider IDs to OAuth `identityKey` values visible to this trusted client. Parsed once; invalid files abort initialization. API keys are unaffected. | Optional in broker mode.                                                                                                  |
@@ -298,6 +313,7 @@ The gateway uses the same broker URL/token resolution and account-pool environme
 | ------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `auth.broker.url`   | unset   | Same as `OMP_AUTH_BROKER_URL`; env wins. Hidden from the settings UI. Values are resolved as a literal, an environment variable name, or `!<shell command>` to use trimmed stdout. |
 | `auth.broker.token` | unset   | Same as `OMP_AUTH_BROKER_TOKEN`; env wins. Values are resolved the same way.                                                                                                       |
+| `auth.broker.metrics` | `false` | Enables broker `GET /metrics` when no CLI flag or `OMP_AUTH_BROKER_METRICS` value overrides it. Read from the agent config only. |
 | `auth.accountPolicies` | `[]` | Per-account OAuth routing rules: `provider`, identity selector `account` (`email`, `accountId`, `projectId`, optional `orgId`), optional `priority` and `reservePct` (0–100). |
 | `retry.usageReservePct` | `10` | Default protected remaining-quota percentage when an account has no `reservePct` override. |
 
@@ -320,6 +336,7 @@ That ranking picks the account for a **new** session. A running session remember
 | Path                              | Owner                                                | Mode                          |
 | --------------------------------- | ---------------------------------------------------- | ----------------------------- |
 | `<config-dir>/auth-broker.token`  | `omp auth-broker token` or `serve` | `0600`; new parent directory `0700` |
+| `<config-dir>/auth-broker-metrics.token` | `omp auth-broker token --metrics` or `serve --enable-metrics` | `0600` |
 | `<config-dir>/auth-gateway.token` | `omp auth-gateway token` or `serve` (serve skips it under `--no-auth`) | `0600`; new parent directory `0700` |
 
 `<config-dir>` is `getConfigRootDir()`: `~/.omp/` by default, respecting `PI_CONFIG_DIR` and the active profile (`~/.omp/profiles/<name>/` for the default profile layout). Creating a token does not tighten permissions on an already-existing parent directory.
