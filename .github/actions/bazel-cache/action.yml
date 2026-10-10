@@ -24,9 +24,10 @@ description: >
    entries untouched for 14 days are pruned before the build so
    ever-seeding archives don't grow without bound.
 
-   Only rigel-release saves. actions/cache entries are scoped to the ref that saved
-   them: a tag or branch run can read its base branch's archives, but whatever it saves
-   is readable only by that same ref, while still counting against the
+   Only rigel-release saves. actions/cache entries are scoped to the ref that
+   saved them: a run reads its own ref and the default branch, and a PR also
+   reads its base branch. A copy saved on any other ref is readable only by
+   that same ref, while still counting against the
    shared 10 GB repo quota. A tag-dispatched release saved a ~5 GB darwin
    archive under refs/tags/v18.2.10 and GitHub's LRU eviction then dropped
    the release branch's darwin archives, so the next release built cold.

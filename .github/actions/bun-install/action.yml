@@ -77,8 +77,8 @@ runs:
       # against the shared 10 GB repo quota — letting every PR branch save its
       # own copy of the ~500 MB store duplicated it 19x, evicting the far more
       # valuable bazel disk-cache archives (which is why release darwin builds
-      # kept going cold). Only rigel-release saves: a tag or branch copy is readable by
-      # that ref alone, so it wastes quota; every other ref restores rigel-release's.
+      # kept going cold). Only rigel-release saves: a copy on any other ref is
+      # readable by that ref alone and wastes quota; PRs into rigel-release restore it.
       - name: Restore bun store (GitHub cache)
         id: bun-cache
         if: steps.env.outputs.cache == 'gha'
