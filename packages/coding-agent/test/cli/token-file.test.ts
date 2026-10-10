@@ -77,14 +77,14 @@ test("rotation holds the lock and readers keep the old token until publication",
 		await gate;
 		await realWrite(target, data, options);
 	});
+	const rotation = writeTokenFile(file, "new-token");
 	try {
-		const rotation = writeTokenFile(file, "new-token");
 		await staged;
 		expect(await readTokenFile(file)).toBe("old-token");
 		expect(tryAcquireFileLock(file)).toBeNull();
-		openGate();
-		await rotation;
 	} finally {
+		openGate();
+		await rotation.catch(() => {});
 		write.mockRestore();
 	}
 	expect(await readTokenFile(file)).toBe("new-token");
