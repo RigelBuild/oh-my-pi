@@ -24,12 +24,12 @@ description: >
    entries untouched for 14 days are pruned before the build so
    ever-seeding archives don't grow without bound.
 
-   Only main saves. actions/cache entries are scoped to the ref that saved
-   them: a tag or branch run can read main's archives, but whatever it saves
+   Only rigel-release saves. actions/cache entries are scoped to the ref that saved
+   them: a tag or branch run can read its base branch's archives, but whatever it saves
    is readable only by that same ref, while still counting against the
    shared 10 GB repo quota. A tag-dispatched release saved a ~5 GB darwin
    archive under refs/tags/v18.2.10 and GitHub's LRU eviction then dropped
-   main's darwin archives, so the next release built cold.
+   the release branch's darwin archives, so the next release built cold.
 
 inputs:
    scope:
@@ -51,7 +51,7 @@ outputs:
       description: Exact GitHub cache key for a later explicit save
       value: ${{ steps.backend.outputs.cache-key }}
    save-needed:
-      description: Whether this run should save a new exact-key disk-cache archive (hosted, inexact restore, on main)
+      description: Whether this run should save a new exact-key disk-cache archive (hosted, inexact restore, on rigel-release)
       value: ${{ steps.compose.outputs.save-needed }}
    remote:
       description: Whether the shell probe selected the cluster remote cache
@@ -121,11 +121,11 @@ runs:
         env:
            REMOTE: ${{ steps.backend.outputs.remote }}
            RESTORE_HIT: ${{ steps.restore.outputs.cache-hit }}
-           ON_MAIN: ${{ github.ref == 'refs/heads/main' }}
+           ON_RELEASE: ${{ github.ref == 'refs/heads/rigel-release' }}
         run: |
            set -euo pipefail
            save_needed=false
-           if [ "$REMOTE" != "true" ] && [ "$RESTORE_HIT" != "true" ] && [ "$ON_MAIN" = "true" ]; then
+           if [ "$REMOTE" != "true" ] && [ "$RESTORE_HIT" != "true" ] && [ "$ON_RELEASE" = "true" ]; then
              save_needed=true
            fi
 

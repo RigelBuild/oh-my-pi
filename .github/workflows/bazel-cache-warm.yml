@@ -1,7 +1,7 @@
 name: Warm bazel disk cache
 
 # GitHub-hosted runners cannot use the cluster remote cache and only see
-# actions/cache entries created on the default branch, and bazel action keys
+# actions/cache entries created on rigel-release or the default branch, and bazel action keys
 # do not transfer across runner environments (a kata-produced disk cache
 # misses every action on a hosted image) — so seed each hosted consumer from
 # the same image it runs on:
@@ -21,7 +21,7 @@ name: Warm bazel disk cache
 #                             bazel archive).
 #
 # The v3 key embeds a crates/** source fingerprint, so a native change on
-# main means an exact miss: the build seeds from a previous generation via
+# rigel-release means an exact miss: the build seeds from a previous generation via
 # the prefix/bare restore keys and the refreshed archive is saved. An exact
 # hit makes every invocation a cache replay and saves nothing.
 #
@@ -30,7 +30,7 @@ name: Warm bazel disk cache
 
 on:
    push:
-      branches: [main]
+      branches: [rigel-release]
       paths:
          - "crates/**"
          - "bazel/**"
@@ -92,7 +92,7 @@ jobs:
               fallback-scope: ${{ matrix.fallback }}
 
    # Produces the shared bun store entry PR jobs restore. bun-install's save
-   # half only runs on non-PR events, and main CI jobs run on omp-kata (PVC
+   # half only runs on non-PR events, and rigel-release CI jobs run on omp-kata (PVC
    # store, no GitHub cache), so this is the sole hosted-runner producer.
    warm_bun:
       name: Seed bun store cache
