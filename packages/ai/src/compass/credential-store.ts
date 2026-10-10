@@ -5,6 +5,7 @@ import type { AuthCredentialStore } from "../auth/store";
 import type { AuthCredential, OAuthCredential, StoredAuthCredential } from "../auth/types";
 import { serializeCredential } from "../auth/sqlite-credential-store";
 import type { OAuthCredentials } from "../registry/oauth/types";
+import { isLoopbackHost } from "../utils/parse-bind";
 import type {
 	DisableCredentialRequest,
 	GatewayCredential,
@@ -52,6 +53,19 @@ const CONFLICT_CODES: ReadonlySet<string> = new Set(["aborted", "not_found"]);
 // The write may or may not have landed; resending the same CAS settles it either way.
 const TRANSIENT_CODES: ReadonlySet<string> = new Set(["unavailable", "deadline_exceeded", "unknown", "internal"]);
 
+/** The bearer and OAuth tokens ride every request, so plaintext is allowed only on loopback. */
+function assertSecureBaseUrl(baseUrl: string): void {
+	let url: URL;
+	try {
+		url = new URL(baseUrl);
+	} catch {
+		throw new Error("Compass baseUrl must be an absolute URL");
+	}
+	if (url.protocol === "https:") return;
+	if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return;
+	throw new Error("Compass baseUrl must use https unless it is a loopback address");
+}
+
 function int64String(value: GatewayInt64): string {
 	return typeof value === "string" ? value : String(value);
 }
@@ -93,9 +107,9 @@ function oauthToGateway(credential: OAuthCredential): GatewayOAuthTokenRequest {
 	const token: GatewayOAuthTokenRequest = {
 		access: credential.access,
 		refresh: credential.refresh,
-		expiresUnixMs: String(credential.expires),
+		expiresUnixMs: String(Math.trunc(credential.expires)),
 	};
-	const authorizedAtUnixMs = credential.authorizedAt ? String(credential.authorizedAt) : undefined;
+	const authorizedAtUnixMs = credential.authorizedAt ? String(Math.trunc(credential.authorizedAt)) : undefined;
 	return {
 		...token,
 		...(credential.enterpriseUrl ? { enterpriseUrl: credential.enterpriseUrl } : {}),
@@ -129,6 +143,8 @@ interface RowState {
 	pending: number;
 	/** A fire-and-forget write that failed transiently; resent before the next reload. */
 	unsynced?: Unsynced;
+	/** Access tokens of OAuth writes that failed transiently and may have committed anyway. */
+	unknownOutcomes?: Set<string>;
 }
 
 /**
@@ -161,6 +177,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	constructor(opts: CompassAuthCredentialStoreOptions) {
 		if (!opts.baseUrl.trim()) throw new Error("Compass baseUrl must not be empty");
+		assertSecureBaseUrl(opts.baseUrl);
 		if (!opts.token.trim()) throw new Error("Compass token must not be empty");
 		if (!opts.agentAccountId.trim()) throw new Error("Compass agentAccountId must not be empty");
 		this.#baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -224,6 +241,10 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
+	acknowledgeLocalChanges(): void {
+		this.#acknowledgedRevision = this.#revision;
+	}
+
 	listAuthCredentials(provider?: string): StoredAuthCredential[] {
 		const credentials: StoredAuthCredential[] = [];
 		for (const id of [...this.#rows.keys()].sort((a, b) => a - b)) {
@@ -267,7 +288,17 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			const row = this.#rows.get(id);
 			if (!row) return false;
 			const epoch = this.#accept(row.serverId);
-			if ((await this.#runWrite(row, epoch, undefined, () => this.#disable(row, cause))) === true) return true;
+			const unsynced: Unsynced = { kind: "disable", row, cause };
+			let disabled: boolean;
+			try {
+				disabled = await this.#runWrite(row, epoch, unsynced, () => this.#disable(row, cause));
+			} catch (error) {
+				// A transient failure keeps the disable queued for a resend, so the delete stands.
+				if (this.#stateFor(row.serverId).unsynced !== unsynced) throw error;
+				this.#removeLocalRow(id);
+				return true;
+			}
+			if (disabled === true) return true;
 			if (this.#disabled.has(row.serverId)) return false;
 		}
 		return false;
@@ -281,8 +312,9 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		return Promise.reject(new Error(EMPTY_CREDENTIALS_ERROR));
 	}
 
-	deleteAuthCredentials(_provider: string, _cause: string): Promise<void> {
-		return Promise.reject(new Error(EMPTY_CREDENTIALS_ERROR));
+	async deleteAuthCredentials(provider: string, cause: string): Promise<void> {
+		const ids = [...this.#rows.values()].filter(row => row.provider === provider).map(row => row.id);
+		await Promise.all(ids.map(id => this.deleteAuthCredential(id, cause)));
 	}
 
 	getCache(key: string, options: { includeExpired?: boolean } = {}): string | null {
@@ -360,17 +392,55 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		const epoch = this.#accept(row.serverId);
 		void this.#runWrite(row, epoch, { kind: "oauth" }, async () => {
 			const state = this.#stateFor(row.serverId);
-			const request: UpdateCredentialOAuthRequest = {
-				id: row.serverId,
-				token: oauthToGateway(credential),
-				expectedVersion: state.version,
-				agentAccountId: this.#agentAccountId,
-			};
-			const response = await this.#request("UpdateCredentialOAuth", request, updateCredentialOAuthResponseSchema);
+			const response = await this.#sendOAuthUpdate(row, credential, state);
 			state.version = int64String(response.version);
+			state.unknownOutcomes = undefined;
 			// The chain is FIFO, so this write supersedes any earlier failed one.
 			if (state.unsynced?.kind === "oauth") state.unsynced = undefined;
 		}).catch(error => this.#logWriteFailure("Compass OAuth update failed", row, this.#errorCode(error)));
+	}
+
+	async #sendOAuthUpdate(row: CredentialRow, credential: OAuthCredential, state: RowState) {
+		const send = () =>
+			this.#request(
+				"UpdateCredentialOAuth",
+				{
+					id: row.serverId,
+					token: oauthToGateway(credential),
+					expectedVersion: state.version,
+					agentAccountId: this.#agentAccountId,
+				} satisfies UpdateCredentialOAuthRequest,
+				updateCredentialOAuthResponseSchema,
+			);
+		try {
+			return await send();
+		} catch (error) {
+			const code = this.#errorCode(error);
+			if (TRANSIENT_CODES.has(code)) {
+				(state.unknownOutcomes ??= new Set()).add(credential.access);
+				throw error;
+			}
+			// A conflict with our own lost commit is not a peer write: adopt its version and resend.
+			if (code !== "aborted" || !state.unknownOutcomes || !(await this.#adoptOwnCommit(row, state))) throw error;
+			return await send();
+		}
+	}
+
+	async #adoptOwnCommit(row: CredentialRow, state: RowState): Promise<boolean> {
+		const pool = await this.#request(
+			"ListCredentialPool",
+			{ agentAccountId: this.#agentAccountId } satisfies ListCredentialPoolRequest,
+			listCredentialPoolResponseSchema,
+		);
+		const wire = pool.credentials?.find(candidate => candidate.id === row.serverId);
+		const access = wire?.oauth?.access;
+		if (!wire || access === undefined || !state.unknownOutcomes?.has(access)) {
+			state.unknownOutcomes = undefined;
+			return false;
+		}
+		state.version = int64String(wire.version);
+		state.unknownOutcomes = undefined;
+		return true;
 	}
 
 	#queueDisable(row: CredentialRow, cause: string): void {
@@ -439,7 +509,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			} catch (error) {
 				const code = this.#errorCode(error);
 				if (!CONFLICT_CODES.has(code)) {
-					// A definitive failure releases the row so the next list reconciles it from the server.
+					// A transient failure keeps the write for a resend; a definitive one releases the row to the next list.
 					if (unsynced && !this.#closed) state.unsynced = TRANSIENT_CODES.has(code) ? unsynced : undefined;
 					throw error;
 				}
@@ -527,6 +597,8 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 					Authorization: "Bearer " + this.#token,
 				},
 				body: JSON.stringify(body),
+				// A redirect would replay the bearer and OAuth tokens to another origin.
+				redirect: "error",
 				signal,
 			});
 			text = await response.text();

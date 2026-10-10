@@ -360,7 +360,6 @@ describe("CompassAuthCredentialStore", () => {
 				store.upsertAuthCredential("deepseek", { type: "api_key", key: "sk", source: "login" }),
 			).rejects.toThrow("enrolled through Compass");
 			await expect(store.replaceAuthCredentials("deepseek", [])).rejects.toThrow("enrolled through Compass");
-			await expect(store.deleteAuthCredentials("deepseek", "logout")).rejects.toThrow("enrolled through Compass");
 		} finally {
 			store.close();
 		}
@@ -487,15 +486,159 @@ describe("CompassAuthCredentialStore", () => {
 		}
 	});
 
-	test("maps a non-Connect 503 body to unavailable", async () => {
+	test("keeps a delete through a non-Connect 503 and resends the disable", async () => {
 		const server = startFakeServer([apiKeyRow()]);
-		const store = await storeFor(server.url);
+		const store = await storeFor(server.url, { refreshIntervalMs: 0 });
 		try {
 			server.failNext("DisableCredential", () => new Response("<html>bad gateway</html>", { status: 503 }));
-			await expect(store.deleteAuthCredential(1, "logout")).rejects.toMatchObject({ code: "unavailable" });
+			expect(await store.deleteAuthCredential(1, "logout")).toBe(true);
+			expect(store.listAuthCredentials()).toEqual([]);
+			store.pollExternalChanges();
+			await store.flush();
+			expect(server.rows.has("cred/key")).toBe(false);
+			expect(store.listAuthCredentials()).toEqual([]);
 		} finally {
 			store.close();
 		}
+	});
+
+	test("a definitive disable failure still rejects", async () => {
+		const server = startFakeServer([apiKeyRow()]);
+		const store = await storeFor(server.url);
+		try {
+			server.failNext("DisableCredential", () => Response.json({ code: "permission_denied" }, { status: 403 }));
+			await expect(store.deleteAuthCredential(1, "logout")).rejects.toMatchObject({ code: "permission_denied" });
+		} finally {
+			store.close();
+		}
+	});
+
+	test("lands a queued write after an earlier one committed but lost its response", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-a", refresh: "refresh-a" });
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-b", refresh: "refresh-b" });
+			// Commit A on the server, then lose its response.
+			server.rows.set("cred/oauth", {
+				...oauthRow(),
+				version: "2",
+				oauth: { ...oauthToken, access: "access-a", refresh: "refresh-a" },
+			});
+			server.failNext("UpdateCredentialOAuth", () => new Response("bad gateway", { status: 503 }));
+			held.release();
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-b");
+			expect(oauthOf(store).credential.refresh).toBe("refresh-b");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("a peer write after a lost response still wins", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-a" });
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-b" });
+			server.rows.set("cred/oauth", {
+				...oauthRow(),
+				version: "3",
+				oauth: { ...oauthToken, access: "access-peer" },
+			});
+			server.failNext("UpdateCredentialOAuth", () => new Response("bad gateway", { status: 503 }));
+			held.release();
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-peer");
+			expect(oauthOf(store).credential.access).toBe("access-peer");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("does not report its own adopted write as an external change", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		const auth = new AuthStorage(store);
+		try {
+			await auth.credentials.reload();
+			const row = oauthOf(store);
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-local" });
+			store.acknowledgeLocalChanges();
+			expect(store.pollExternalChanges()).toBe(false);
+		} finally {
+			auth.close();
+		}
+	});
+
+	test("logout disables every row of the provider", async () => {
+		const server = startFakeServer([apiKeyRow("cred/a", "sk-a"), apiKeyRow("cred/b", "sk-b"), oauthRow()]);
+		const store = await storeFor(server.url);
+		const auth = new AuthStorage(store);
+		try {
+			await auth.credentials.reload();
+			await auth.credentials.remove("deepseek");
+			expect([...server.rows.keys()]).toEqual(["cred/oauth"]);
+			expect(store.listAuthCredentials().map(row => row.provider)).toEqual(["anthropic"]);
+		} finally {
+			auth.close();
+		}
+	});
+
+	test("sends whole-millisecond int64 timestamps", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			store.updateAuthCredential(row.id, {
+				...row.credential,
+				access: "access-frac",
+				expires: 1750000000123.7,
+				authorizedAt: 1740000000456.2,
+			});
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth).toMatchObject({
+				access: "access-frac",
+				expiresUnixMs: "1750000000123",
+				authorizedAtUnixMs: "1740000000456",
+			});
+		} finally {
+			store.close();
+		}
+	});
+
+	test("refuses a plaintext base URL off loopback", () => {
+		const opts = { token: TOKEN, agentAccountId: ACCOUNT_ID };
+		expect(() => new CompassAuthCredentialStore({ ...opts, baseUrl: "http://compass.example:8443" })).toThrow(
+			"must use https",
+		);
+		expect(() => new CompassAuthCredentialStore({ ...opts, baseUrl: "compass:8443" })).toThrow();
+		expect(() => new CompassAuthCredentialStore({ ...opts, baseUrl: "https://compass.example" })).not.toThrow();
+		expect(() => new CompassAuthCredentialStore({ ...opts, baseUrl: "http://127.0.0.1:9000" })).not.toThrow();
+	});
+
+	test("does not follow a redirect with the credential body", async () => {
+		let landed = false;
+		const elsewhere = Bun.serve({
+			port: 0,
+			fetch: () => {
+				landed = true;
+				return Response.json({ credentials: [] });
+			},
+		});
+		const redirector = Bun.serve({
+			port: 0,
+			fetch: () => new Response(null, { status: 307, headers: { location: elsewhere.url.toString() } }),
+		});
+		servers.push(elsewhere, redirector);
+		await expect(storeFor(redirector.url.toString())).rejects.toBeDefined();
+		expect(landed).toBe(false);
 	});
 
 	test("sends nothing after close interrupts a write", async () => {
