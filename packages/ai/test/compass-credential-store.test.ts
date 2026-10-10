@@ -650,6 +650,62 @@ describe("CompassAuthCredentialStore", () => {
 		}
 	});
 
+	test("adopts its own lost write that carried a zero expiry", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-a", expires: 0 });
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-b", refresh: "refresh-b" });
+			// The server keeps the stored expiry for a zero field, then the response is lost.
+			server.failNext("UpdateCredentialOAuth", () => {
+				server.rows.set("cred/oauth", {
+					...oauthRow(),
+					version: "2",
+					oauth: { ...oauthToken, access: "access-a" },
+				});
+				return new Response("bad gateway", { status: 503 });
+			});
+			held.release();
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-b");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("keeps a parked delete when the reload after its conflict fails", async () => {
+		const server = startFakeServer([apiKeyRow()]);
+		const store = await storeFor(server.url, { refreshIntervalMs: 0 });
+		try {
+			server.failNext("DisableCredential", () => new Response("bad gateway", { status: 503 }));
+			expect(await store.deleteAuthCredential(1, "logout")).toBe(true);
+			server.rows.set("cred/key", { ...apiKeyRow(), version: "9" });
+			// The resend conflicts and the reload after it fails, so nothing confirms the row is gone.
+			const conflict = server.hold("DisableCredential");
+			store.pollExternalChanges();
+			await conflict.reached;
+			const down = () => new Response("bad gateway", { status: 503 });
+			const relist = server.hold("ListCredentialPool");
+			conflict.release();
+			await relist.reached;
+			server.failNext("ListCredentialPool", down);
+			relist.release();
+			await store.flush();
+			expect(store.listAuthCredentials()).toEqual([]);
+			store.pollExternalChanges();
+			await store.flush();
+			store.pollExternalChanges();
+			await store.flush();
+			expect(server.rows.has("cred/key")).toBe(false);
+			expect(store.listAuthCredentials()).toEqual([]);
+		} finally {
+			store.close();
+		}
+	});
+
 	test("a peer write after a lost response still wins", async () => {
 		const server = startFakeServer([oauthRow()]);
 		const store = await storeFor(server.url);

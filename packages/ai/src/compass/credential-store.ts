@@ -129,7 +129,8 @@ function oauthToGateway(credential: OAuthCredential): GatewayOAuthTokenRequest {
 function matchesSentToken(listed: GatewayOAuthToken, sent: GatewayOAuthTokenRequest): boolean {
 	const stored = new Map<string, unknown>(Object.entries(listed));
 	return Object.entries(sent).every(
-		([key, value]) => value === undefined || value === "" || String(stored.get(key)) === String(value),
+		([key, value]) =>
+			value === undefined || value === "" || String(value) === "0" || String(stored.get(key)) === String(value),
 	);
 }
 
@@ -139,8 +140,10 @@ function credentialFromGateway(row: GatewayCredential): AuthCredential | undefin
 	return undefined;
 }
 
-/** An OAuth resend always sends the row's current credential, never a stored copy. */
-/** `unconditional` marks a user delete, which outlasts a peer's version bump. */
+/**
+ * An OAuth resend always sends the row's current credential, never a stored copy.
+ * `unconditional` marks a user delete, which outlasts a peer's version bump.
+ */
 type Unsynced = { kind: "oauth" } | { kind: "disable"; row: CredentialRow; cause: string; unconditional: boolean };
 
 /** Writes are queued per row so each RPC carries the version of the state its caller checked. */
@@ -182,6 +185,8 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	#refreshStarted = 0;
 	#refreshApplied = 0;
 	#closed = false;
+	/** Server ids in the last applied list; undefined until one applies. */
+	#listedServerIds: ReadonlySet<string> | undefined;
 
 	constructor(opts: CompassAuthCredentialStoreOptions) {
 		if (!opts.baseUrl.trim()) throw new Error("Compass baseUrl must not be empty");
@@ -233,6 +238,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			else this.#state.set(wireRow.id, { version, epoch: 0, pending: 0 });
 			this.#rows.set(id, { id, serverId: wireRow.id, provider: wireRow.provider, credential });
 		}
+		this.#listedServerIds = new Set((response.credentials ?? []).map(wireRow => wireRow.id));
 		for (const [id, row] of this.#rows) {
 			const state = this.#state.get(row.serverId);
 			if (seen.has(row.serverId) || (state && this.#isHeld(state))) continue;
@@ -311,10 +317,15 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 				return true;
 			}
 			if (disabled === true) return true;
-			if (this.#disabled.has(row.serverId) || !this.#rows.has(row.id)) return false;
+			if (this.#disabled.has(row.serverId) || this.#goneFromServer(row.serverId)) return false;
 		}
 		this.#parkDelete(intent);
 		return true;
+	}
+
+	/** True only when the reload after a conflict applied and no longer listed the row. */
+	#goneFromServer(serverId: string): boolean {
+		return this.#listedServerIds !== undefined && !this.#listedServerIds.has(serverId);
 	}
 
 	/** Hides the row and keeps the delete for the next poll's resend. */
@@ -544,10 +555,11 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 				const keep = parked?.kind === "disable" && parked.unconditional && parked !== unsynced ? parked : undefined;
 				state.epoch += 1;
 				state.pending = 0;
-				state.unsynced = undefined;
+				state.unsynced = keep;
 				this.#logWriteFailure("Compass credential write conflicted; reloading pool", row, code);
+				this.#listedServerIds = undefined;
 				await this.#refreshQuietly();
-				if (keep && this.#rows.has(row.id)) this.#parkDelete(keep);
+				if (keep && this.#goneFromServer(row.serverId)) state.unsynced = undefined;
 				return false;
 			} finally {
 				if (state.epoch === epoch) state.pending = Math.max(0, state.pending - 1);
