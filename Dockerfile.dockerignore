@@ -82,3 +82,4 @@ pi-*.html
 # `.env` misses `python/robomp/.env`, which `COPY . /pi/` would bake in.
 **/.env
 **/gateway.token
+**/auth-gateway.token

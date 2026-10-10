@@ -81,3 +81,4 @@ pi-*.html
 # `.env` misses nested ones such as `python/robomp/.env`.
 **/.env
 **/gateway.token
+**/auth-gateway.token

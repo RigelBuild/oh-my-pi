@@ -375,7 +375,7 @@ export function registerGatewayShutdown(
 	return postmortem.register(
 		"auth-gateway",
 		async reason => {
-			process.stdout.write(`\nReceived ${reason}, shutting down...\n`);
+			process.stdout.write(`\nReceived ${reason.toUpperCase()}, shutting down...\n`);
 			try {
 				await handle.close(reason === postmortem.Reason.SIGTERM ? drainMs : undefined);
 			} finally {
