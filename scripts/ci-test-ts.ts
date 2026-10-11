@@ -3,6 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { splitIntoChunks } from "./ci-test-chunks";
 
 type Mode =
 	| "all"
@@ -215,21 +216,6 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 		command: ["bun", "test", ...extraArgs],
 		parallel,
 	};
-}
-
-/** Splits `files` into `count` contiguous groups whose sizes differ by at most one. */
-function splitIntoChunks<T>(files: T[], count: number): T[][] {
-	if (!Number.isInteger(count) || count < 1) {
-		throw new Error(`Invalid chunk count ${count}`);
-	}
-	const chunks: T[][] = [];
-	let start = 0;
-	for (let i = 0; i < count; i++) {
-		const end = start + Math.floor(files.length / count) + (i < files.length % count ? 1 : 0);
-		if (end > start) chunks.push(files.slice(start, end));
-		start = end;
-	}
-	return chunks;
 }
 
 async function workspaceTestCommands(

@@ -1337,6 +1337,11 @@ export async function createSessionManager(
 			const manager = await SessionManager.open(existing, parsed.sessionDir, undefined, {
 				suppressBreadcrumb: true,
 			});
+			// `--goal` seeds a fresh session only; an existing id with history is a resume.
+			if (parsed.goal !== undefined && manager.getEntries().length > 0) {
+				await manager.close();
+				throw new CliUsageError("--goal requires a fresh session; --session-id names an existing session.");
+			}
 			try {
 				manager.reserveExactId({ rememberBreadcrumb: true });
 			} catch (err) {

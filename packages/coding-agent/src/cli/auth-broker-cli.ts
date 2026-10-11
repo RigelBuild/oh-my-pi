@@ -173,19 +173,8 @@ async function resolveMetricsEnabled(enableMetrics: boolean | undefined): Promis
 	const env = process.env[METRICS_ENABLED_ENV];
 	if (env !== undefined) return parseMetricsEnv(env);
 	try {
-		// Pinned to the AGENT dir, never `process.cwd()`. Project settings merge
-		// over global, so reading the launch directory would let a checked-in
-		// `.omp/config.yml` expose a credential endpoint — and even override an
-		// explicit global `false`. The broker is a background daemon whose cwd is
-		// incidental, so its config must not depend on it (`gc-cli` pins the same
-		// way).
-		// `cwd` decides which PROJECT config gets merged, and it defaults to
-		// `getProjectDir()` (settings.ts:538) while `#loadReadOnly()` merges that
-		// project OVER the global file. Left unpinned, a checked-in
-		// `.omp/config.yml` could expose the endpoint and even override an
-		// explicit global `false`. Pointing it at the agent dir keeps the lookup
-		// inside omp's own directory, which carries no project config. `agentDir`
-		// needs no override: it already defaults to `getAgentDir()`.
+		// Pinned to the agent dir, never the launch cwd: a project `.omp/config.yml`
+		// merges over global and could expose this endpoint or override a global `false`.
 		const settings = await Settings.loadReadOnly({ cwd: getAgentDir() });
 		return cfgAuthBrokerMetrics.get(settings);
 	} catch {

@@ -102,6 +102,27 @@ describe("--session-id", () => {
 		expect(emptyArgs.continue).toBeUndefined();
 	});
 
+	it("rejects --goal when --session-id names a session with history, but seeds a new id", async () => {
+		const id = "seat-goal";
+		const source = SessionManager.create(cwd, sessionDir, undefined, { id });
+		managers.push(source);
+		source.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() });
+		await source.rewriteEntries();
+
+		await expect(
+			createSessionManager(args({ goal: "new objective", sessionId: id, sessionDir }), cwd, stubSettings),
+		).rejects.toThrow("--goal requires a fresh session");
+
+		const fresh = await createSessionManager(
+			args({ goal: "new objective", sessionId: "seat-goal-new", sessionDir }),
+			cwd,
+			stubSettings,
+		);
+		if (!fresh) throw new Error("Expected a new goal session");
+		managers.push(fresh);
+		expect(fresh.getSessionId()).toBe("seat-goal-new");
+	});
+
 	it("forks with the requested ID and rejects a fork ID collision", async () => {
 		const source = SessionManager.create(cwd, sessionDir);
 		managers.push(source);
