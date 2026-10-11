@@ -835,7 +835,7 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 	const sessionStates = new AuthGatewaySessionStateStore();
 	const route = async (req: Request, peer: string, caller: AgentCaller): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
-		try {
+		const body = async (): Promise<Response> => {
 			// The model catalog touches no credentials, so it skips the pool lookup.
 			if (req.method === "GET" && pathname === "/v1/models") {
 				return handleModelsList(opts);
@@ -932,6 +932,9 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 			// Route-table miss: no format module to defer to, so we emit a
 			// plain JSON 404 rather than guessing at a protocol-specific envelope.
 			return json(404, { error: `No route: ${req.method} ${pathname}` });
+		};
+		try {
+			return opts.routeScope ? await opts.routeScope(req, body) : await body();
 		} catch (error) {
 			logger.error("auth-gateway handler crashed", {
 				method: req.method,
