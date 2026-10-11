@@ -129,6 +129,28 @@ export function mintSessionId(): string {
 	return Bun.randomUUIDv7();
 }
 
+// Caller-chosen ids become part of the session file name.
+const SESSION_ID_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+// The atomic writer prefixes '.' and appends a Snowflake plus '.tmp' to the timestamped JSONL name.
+const MAX_SESSION_ID_LENGTH = 202;
+
+/** Throw unless `id` is safe to use as a caller-chosen session id. */
+export function assertValidSessionId(id: string): void {
+	if (id.length > MAX_SESSION_ID_LENGTH || !SESSION_ID_RE.test(id)) {
+		throw new Error(
+			`Invalid session id "${id}": use letters, digits, '.', '_' and '-', starting and ending with a letter or digit`,
+		);
+	}
+}
+
+/** Another live omp process already holds a caller-chosen session id. */
+export class SessionIdCollisionError extends Error {
+	constructor(readonly sessionId: string) {
+		super(`Session id "${sessionId}" is in use by another live omp process.`);
+		this.name = "SessionIdCollisionError";
+	}
+}
+
 /**
  * `moveTo` refused before anything moved: another live omp process writes the
  * session, or the session file at the destination.
@@ -1001,6 +1023,31 @@ export class SessionManager {
 	}
 
 	/**
+	 * Take this session's ownership lease now, failing closed, for a caller
+	 * that selected it by exact id. Throws {@link SessionIdCollisionError} when
+	 * another live process holds it or the lease cannot be probed.
+	 * `rememberBreadcrumb` records the terminal breadcrumb only after the lease
+	 * is held, for a reopen that suppressed it while loading.
+	 */
+	reserveExactId(options?: { rememberBreadcrumb?: boolean }): void {
+		const sessionId = this.#sessionId;
+		const sessionFile = this.#sessionFile;
+		if (this.#persist && sessionFile && this.#storage.claimSession) {
+			const current = this.#sessionClaim;
+			if (!(current?.sessionId === sessionId && current.release)) {
+				if (current && current.sessionId !== sessionId) current.release?.();
+				const release = this.#storage.claimSession(sessionId, sessionFile, { strict: true }) ?? undefined;
+				this.#sessionClaim = { sessionId, release };
+				if (!release) throw new SessionIdCollisionError(sessionId);
+			}
+		}
+		if (options?.rememberBreadcrumb && sessionFile) {
+			this.#suppressBreadcrumb = false;
+			this.#rememberBreadcrumb(this.#cwd, sessionFile);
+		}
+	}
+
+	/**
 	 * Whether another live omp process owns this session, claiming it first
 	 * when it is free. A non-owner never writes the session's file: its next
 	 * write moves this session to a sibling with a new id instead, so two
@@ -1832,7 +1879,7 @@ export class SessionManager {
 		}
 	}
 
-	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
+	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string, sessionId?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
@@ -1841,7 +1888,8 @@ export class SessionManager {
 			this.#sessionDir = path.resolve(options.sessionDir);
 			this.#storage.ensureDirSync(this.#sessionDir);
 		}
-		this.#sessionId = mintSessionId();
+		if (sessionId !== undefined) assertValidSessionId(sessionId);
+		this.#sessionId = sessionId ?? mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -1887,6 +1935,10 @@ export class SessionManager {
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+			// A caller-chosen id is reserved now, not at first write, so a
+			// competing launch fails instead of silently moving to a fresh id.
+			// Reserve first so a failed launch leaves the terminal breadcrumb alone.
+			if (sessionId !== undefined) this.reserveExactId();
 			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
 		} else {
 			this.#sessionFile = undefined;
@@ -3779,10 +3831,15 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = new FileSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: { id?: string },
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
-		manager.#resetToNewSession();
+		manager.#resetToNewSession(undefined, undefined, options?.id);
 		return manager;
 	}
 
@@ -3828,6 +3885,8 @@ export class SessionManager {
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
+			/** Exact id for the fork; defaults to a fresh id. */
+			id?: string;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
@@ -3856,29 +3915,47 @@ export class SessionManager {
 				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
 			},
 			options?.sessionFile,
+			options?.id,
 		);
-		manager.#header.title = sourceHeader?.title;
-		manager.#header.titleSource = sourceHeader?.titleSource;
-		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
-		manager.#header.additionalDirectories =
-			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
-		manager.#sessionName = manager.#header.title;
-		manager.#titleSource = manager.#header.titleSource;
-		manager.#titleUpdatedAt = nowIso();
-		manager.#hasTitleSlot = true;
-		manager.#entries = history;
-		manager.#index.rebuild(history);
-		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
-		if (options?.repairInterruptedTail) {
-			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
-			manager.#index.rebuild(history);
-		}
-		manager.#forceFileCreation = true;
-		await manager.#rewriteAtomically();
-		if (options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+		try {
+			await manager.#finishFork(sourcePath, cwd, sourceHeader, history, options);
+		} catch (err) {
+			// The caller never receives this manager, so drop any lease it reserved.
+			manager.#sessionClaim?.release?.();
+			manager.#sessionClaim = undefined;
+			throw err;
 		}
 		return manager;
+	}
+
+	async #finishFork(
+		sourcePath: string,
+		cwd: string,
+		sourceHeader: SessionHeader | undefined,
+		history: SessionEntry[],
+		options: { repairInterruptedTail?: boolean; copyArtifacts?: boolean } | undefined,
+	): Promise<void> {
+		this.#header.title = sourceHeader?.title;
+		this.#header.titleSource = sourceHeader?.titleSource;
+		this.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		this.#header.additionalDirectories =
+			this.#additionalDirectories.length > 0 ? this.#additionalDirectories : undefined;
+		this.#sessionName = this.#header.title;
+		this.#titleSource = this.#header.titleSource;
+		this.#titleUpdatedAt = nowIso();
+		this.#hasTitleSlot = true;
+		this.#entries = history;
+		this.#index.rebuild(history);
+		this.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		if (options?.repairInterruptedTail) {
+			SessionManager.#repairForkedInterruptedTail(history, this.#index.pathTo());
+			this.#index.rebuild(history);
+		}
+		this.#forceFileCreation = true;
+		await this.#rewriteAtomically();
+		if (options?.copyArtifacts !== false) {
+			await copySessionArtifacts(sourcePath, this.#sessionFile!);
+		}
 	}
 
 	/**

@@ -65,6 +65,8 @@ export interface Args {
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;
+	/** Exact session id: open it when it exists, else create a session with this id. */
+	sessionId?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
 	models?: string[];
@@ -280,6 +282,10 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 				// Like every string flag, a flag-looking token after `--goal` is its (rejected)
 				// value, never a flag of its own: `--goal --profile work` must not activate a profile.
 				if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) i++;
+				continue;
+			}
+			if (arg === "--session-id" && (i + 1 >= args.length || args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG)) {
+				result.invalidFlagValues.push("--session-id requires an id.");
 				continue;
 			}
 			if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) {

@@ -100,15 +100,16 @@ service-tier entry instead uses the configured tiers.
 | `--continue`, `-c` | Continue the previous session. |
 | `--resume [id]`, `-r`, `--session [id]` | Resume a session by ID prefix or path, or open the picker when no value is given. |
 | `--fork <session>` | Fork a saved session (by ID prefix or path) into a new session. See [session operations](./session-operations-export-share-fork-resume.md). |
+| `--session-id <id>` | Open a local session with this exact ID, or create one if it does not exist. With `--fork`, use it as the new session ID. Fails if another live omp process holds that ID. |
 | `--from-claude` | Import a Claude Code session into OMP. |
 | `--from-codex` | Import a Codex session into OMP. |
 | `--export <session>` | Export a session file to HTML and exit. |
 | `--no-title` | Disable title auto-generation (equivalent to the `PI_NO_TITLE` [environment variable](./environment-variables.md)). |
 
-`--continue`, `--resume`, `--fork`, and foreign-session imports require
+`--continue`, `--resume`, `--fork`, `--session-id`, and foreign-session imports require
 persistence and cannot use `--no-session`. `--from-claude` and `--from-codex`
 are mutually exclusive and cannot be combined with `--continue`, `--resume`,
-or `--fork`.
+`--fork`, or `--session-id`.
 
 #### Model selection
 
