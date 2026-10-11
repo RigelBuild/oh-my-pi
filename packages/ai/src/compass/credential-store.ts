@@ -137,6 +137,11 @@ function clearedFields(token: GatewayOAuthTokenRequest): string[] {
 
 function matchesSentToken(listed: GatewayOAuthToken, sent: GatewayOAuthTokenRequest): boolean {
 	const stored = new Map<string, unknown>(Object.entries(listed));
+	const sentFields = new Map<string, unknown>(Object.entries(sent));
+	// The write also cleared every optional field it left empty; a row still holding one is a peer's.
+	const filled = (value: unknown) => value !== undefined && value !== "" && String(value) !== "0";
+	if (Object.keys(CLEARABLE_OAUTH_FIELDS).some(key => !filled(sentFields.get(key)) && filled(stored.get(key))))
+		return false;
 	return Object.entries(sent).every(
 		([key, value]) =>
 			value === undefined ||

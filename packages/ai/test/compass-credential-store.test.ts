@@ -40,6 +40,21 @@ const oauthToken: GatewayOAuthToken = {
 	activeOrganizationId: "org-active",
 };
 
+/** The server's clear_fields allowlist: proto name to JSON field. */
+const SERVER_CLEARABLE = new Map([
+	["enterprise_url", "enterpriseUrl"],
+	["project_id", "projectId"],
+	["email", "email"],
+	["account_id", "accountId"],
+	["api_endpoint", "apiEndpoint"],
+	["org_id", "orgId"],
+	["org_name", "orgName"],
+	["authorized_at_unix_ms", "authorizedAtUnixMs"],
+	["region", "region"],
+	["inference_region", "inferenceRegion"],
+	["active_organization_id", "activeOrganizationId"],
+]);
+
 let servers: Bun.Server<undefined>[] = [];
 
 afterEach(() => {
@@ -119,9 +134,12 @@ function startFakeServer(initialRows: FakeRow[]): FakeServer {
 					if (value !== "" && value !== undefined && value !== 0 && value !== "0") merged[key] = value;
 				}
 				// Named fields are cleared even though the token leaves them empty.
-				const camel = (name: string) => name.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase());
-				for (const name of Array.isArray(body.clearFields) ? body.clearFields : []) {
-					if (typeof name === "string") delete merged[camel(name)];
+				const clearFields = Array.isArray(body.clearFields) ? body.clearFields : [];
+				for (const name of clearFields) {
+					const field = typeof name === "string" ? SERVER_CLEARABLE.get(name) : undefined;
+					if (!field)
+						return Response.json({ code: "invalid_argument", message: "bad clear field" }, { status: 400 });
+					delete merged[field];
 				}
 				row.oauth = merged;
 				row.version = String(Number(row.version) + 1);
@@ -725,6 +743,51 @@ describe("CompassAuthCredentialStore", () => {
 			await store.flush();
 			expect(server.rows.has("cred/key")).toBe(false);
 			expect(store.listAuthCredentials()).toEqual([]);
+		} finally {
+			store.close();
+		}
+	});
+
+	test("clears every optional field a write leaves empty", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const { access, refresh, expires } = row.credential;
+			store.updateAuthCredential(row.id, { type: "oauth", access, refresh, expires });
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth).toEqual({
+				access: oauthToken.access,
+				refresh: oauthToken.refresh,
+				expiresUnixMs: oauthToken.expiresUnixMs,
+			});
+		} finally {
+			store.close();
+		}
+	});
+
+	test("does not adopt a peer row that kept a field its lost write cleared", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const row = oauthOf(store);
+			const { region: _r, ...withoutRegion } = row.credential;
+			const held = server.hold("UpdateCredentialOAuth");
+			store.updateAuthCredential(row.id, { ...withoutRegion, access: "access-a" });
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...withoutRegion, access: "access-b" });
+			// A peer wrote the same access but kept the region this write cleared; the response is lost.
+			server.failNext("UpdateCredentialOAuth", () => {
+				server.rows.set("cred/oauth", {
+					...oauthRow(),
+					version: "3",
+					oauth: { ...oauthToken, access: "access-a" },
+				});
+				return new Response("bad gateway", { status: 503 });
+			});
+			held.release();
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth).toMatchObject({ access: "access-a", region: "eu" });
 		} finally {
 			store.close();
 		}
