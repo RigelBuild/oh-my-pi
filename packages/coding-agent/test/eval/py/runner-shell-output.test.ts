@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 
@@ -7,9 +9,10 @@ interface RunnerFrame {
 	id?: string;
 	data?: string;
 	status?: string;
+	evalue?: string;
 }
 
-const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
+const pythonPath = $which(Bun.env.PYTHON ?? "python3") ?? $which("python");
 const runnerPath = path.resolve(import.meta.dir, "../../../src/eval/py/runner.py");
 const repoRoot = path.resolve(import.meta.dir, "../../../../..");
 const encoder = new TextEncoder();
@@ -23,14 +26,15 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-async function runCell(code: string): Promise<RunnerFrame[]> {
+async function runCell(code: string, environment: NodeJS.ProcessEnv = process.env): Promise<RunnerFrame[]> {
+	if (!pythonPath) throw new Error("Python is required for runner shell tests");
 	const proc = Bun.spawn([pythonPath, "-u", runnerPath], {
 		cwd: repoRoot,
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "pipe",
 		env: {
-			...process.env,
+			...environment,
 			PYTHONUNBUFFERED: "1",
 			PYTHONIOENCODING: "utf-8",
 		},
@@ -89,6 +93,22 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 	}
 }
 
+const describeMissingBash = process.platform === "win32" ? describe.skip : describe;
+
+describeMissingBash("Python runner Bash lookup", () => {
+	it("reports a missing Bash executable without running another shell", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-absent-"));
+		try {
+			const frames = await runCell("%%bash\necho should-not-run", { ...process.env, PATH: dir });
+			expect(frames.find(frame => frame.type === "error")?.evalue).toBe("%%bash requires bash on PATH");
+			expect(frames.find(frame => frame.type === "done")?.status).toBe("error");
+			expect(frames.filter(frame => frame.type === "stdout")).toEqual([]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("Python runner shell output streaming", () => {
 	it("streams !cmd output chunks before the child process exits", async () => {
 		const child = [
@@ -101,7 +121,7 @@ describe("Python runner shell output streaming", () => {
 		].join(";");
 		const frames = await runCell(
 			[
-				`result = !${pythonPath} -c ${shellQuote(child)}`,
+				`result = !${shellQuote(pythonPath ?? "python3")} -c ${shellQuote(child)}`,
 				"print('return=' + str(result.returncode) + ' lines=' + repr(list(result)))",
 			].join("\n"),
 		);
@@ -116,7 +136,7 @@ describe("Python runner shell output streaming", () => {
 		const child = ["import sys", "sys.stdout.write(('x' + chr(10)) * 3100)", "sys.stdout.flush()"].join(";");
 		const frames = await runCell(
 			[
-				`result = !${pythonPath} -c ${shellQuote(child)}`,
+				`result = !${shellQuote(pythonPath ?? "python3")} -c ${shellQuote(child)}`,
 				"print('captured=' + str(len(result)) + ' return=' + str(result.returncode))",
 			].join("\n"),
 		);
@@ -134,7 +154,7 @@ describe("Python runner shell output streaming", () => {
 		const child = ["import sys", "sys.stdout.write('z' * (1024 * 1024 + 17))", "sys.stdout.flush()"].join(";");
 		const frames = await runCell(
 			[
-				`result = !${pythonPath} -c ${shellQuote(child)}`,
+				`result = !${shellQuote(pythonPath ?? "python3")} -c ${shellQuote(child)}`,
 				"print('capturedChars=' + str(len(result.n)) + ' return=' + str(result.returncode))",
 			].join("\n"),
 		);
@@ -155,7 +175,7 @@ describe("Python runner shell output streaming", () => {
 		const child = ["import sys", "data = sys.stdin.read()", "print('read=' + repr(data))"].join(";");
 		const frames = await runCell(
 			[
-				`result = !${pythonPath} -c ${shellQuote(child)}`,
+				`result = !${shellQuote(pythonPath ?? "python3")} -c ${shellQuote(child)}`,
 				"print('return=' + str(result.returncode) + ' lines=' + repr(list(result)))",
 			].join("\n"),
 		);
@@ -177,7 +197,7 @@ describe("Python runner shell output streaming", () => {
 			"sys.stdout.write('second')",
 			"sys.stdout.flush()",
 		].join(";");
-		const frames = await runCell(`%%bash\n${pythonPath} -c ${shellQuote(child)}`);
+		const frames = await runCell(`%%bash\n${shellQuote(pythonPath ?? "python3")} -c ${shellQuote(child)}`);
 		const stdout = frames.filter(frame => frame.type === "stdout").map(frame => frame.data);
 
 		expect(stdout[0]).toBe("first");

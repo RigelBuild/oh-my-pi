@@ -104,7 +104,7 @@ describe.skipIf(!hasZsh)("zsh action helper under _arguments' calling convention
 			fs.writeFileSync(
 				path.join(dir, "harness.zsh"),
 				// _describe only exists inside a completion context.
-				`_describe() { :; }\n${fn}\n_omp_call -n -J -default- sessions\n`,
+				`_describe() { :; }\npath=("${dir}" $path)\n${fn}\n_omp_call -n -J -default- sessions\n`,
 			);
 
 			const result = Bun.spawnSync(["zsh", "-f", path.join(dir, "harness.zsh")], {
