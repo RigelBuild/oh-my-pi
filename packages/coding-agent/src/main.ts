@@ -116,6 +116,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import {
 	assertValidSessionId,
 	ForkSourceNotFoundError,
+	hasConversationalHistory,
 	SessionIdCollisionError,
 	SessionManager,
 	SessionMoveRefusedError,
@@ -1337,8 +1338,8 @@ export async function createSessionManager(
 			const manager = await SessionManager.open(existing, parsed.sessionDir, undefined, {
 				suppressBreadcrumb: true,
 			});
-			// `--goal` seeds a fresh session only; an existing id with history is a resume.
-			if (parsed.goal !== undefined && manager.getEntries().length > 0) {
+			// `--goal` seeds a fresh session only; reopening one with messages is a resume.
+			if (parsed.goal !== undefined && hasConversationalHistory(manager.getEntries())) {
 				await manager.close();
 				throw new CliUsageError("--goal requires a fresh session; --session-id names an existing session.");
 			}
