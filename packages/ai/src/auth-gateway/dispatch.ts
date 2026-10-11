@@ -90,6 +90,11 @@ export function resolveGatewayAccount(
 	return `key:${Bun.hash(apiKey).toString(36)}`;
 }
 
+/** A credential setup failure, tagged so a caller can tell a missing credential from a broken store. */
+export interface GatewaySetupFailure extends GatewayErrorClassification {
+	readonly setupReason: "no_credential" | "store_error";
+}
+
 /**
  * Resolve the credential for one request from broker-backed storage.
  *
@@ -105,20 +110,21 @@ export async function resolveGatewayApiKey(
 	sessionId: string,
 	signal: AbortSignal,
 	peer: string,
-): Promise<ResolvedApiKey | GatewayErrorClassification> {
+): Promise<ResolvedApiKey | GatewaySetupFailure> {
 	let apiKey: ResolvedApiKey | undefined;
 	try {
 		apiKey = await storage.keys.getWithCredential(model.provider, sessionId, modelKeyOptions(model, signal));
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return classified;
+		return { ...classified, setupReason: "store_error" };
 	}
 	if (apiKey) return apiKey;
 	return {
 		status: 401,
 		type: "authentication_error",
 		message: `No credential available for provider ${model.provider}`,
+		setupReason: "no_credential",
 	};
 }
 
