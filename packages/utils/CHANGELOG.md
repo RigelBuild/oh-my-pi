@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `postmortem.setCleanupDeadline()` so a long-lived server can let a signal-driven cleanup step (such as an HTTP drain) run past the default 10 s deadline.
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

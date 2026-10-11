@@ -35,7 +35,7 @@ import {
 import { bearerTokenAuthorizer, DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders } from "../config/model-settings";
@@ -72,10 +72,18 @@ export interface AuthGatewayCommandArgs {
 		 * actually usable" signal. Slower and consumes a tiny amount of quota.
 		 */
 		strict?: boolean;
+		/** Internal serve-only bootstrap overrides; never surfaced as CLI flags. */
+		gatewayToken?: string;
+		drainMs?: number;
 	};
 }
 
 const ACTIONS: readonly AuthGatewayAction[] = ["serve", "stdio", "token", "status", "check"];
+
+/** Room after the drain for storage close before postmortem forces the exit. */
+const SHUTDOWN_MARGIN_MS = 2_000;
+/** Longest drain whose postmortem deadline still fits a timer. */
+export const MAX_GATEWAY_DRAIN_MS = 2_147_483_647 - SHUTDOWN_MARGIN_MS;
 
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
@@ -247,7 +255,8 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		);
 	}
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
-	const gatewayToken = flags.noAuth ? null : await ensureToken();
+	const gatewayToken = flags.noAuth ? null : (flags.gatewayToken ?? (await ensureToken()));
+	if (!flags.noAuth && !gatewayToken) throw new Error("auth-gateway bearer token must not be empty");
 
 	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 	// in sdk.ts. The gateway never touches local SQLite.
@@ -310,7 +319,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
-		process.stdout.write(`bearer token: ${getTokenFilePath()} (chmod 0600)\n`);
+		process.stdout.write(`bearer auth: enabled\n`);
 	} else {
 		process.stdout.write(`auth: disabled (--no-auth) — any client can call this gateway\n`);
 	}
@@ -349,43 +358,39 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	}, CREDENTIAL_SYNC_INTERVAL_MS);
 	credentialSync.unref();
 
-	const stopped = Promise.withResolvers<void>();
-	let shutdownStarted = false;
-	const stop = async (signal: NodeJS.Signals): Promise<void> => {
-		if (shutdownStarted) return;
-		shutdownStarted = true;
-		process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
+	registerGatewayShutdown(handle, flags.drainMs, () => {
 		clearInterval(catalogRefresh);
 		clearInterval(credentialSync);
-		let closeError: unknown;
-		try {
-			await handle.close();
-		} catch (error) {
-			closeError = error;
-		} finally {
-			storage.close();
-		}
-		if (closeError) {
-			stopped.reject(closeError);
-		} else {
-			stopped.resolve();
-		}
-	};
-	const onSigint = (): void => {
-		void stop("SIGINT");
-	};
-	const onSigterm = (): void => {
-		void stop("SIGTERM");
-	};
-	process.once("SIGINT", onSigint);
-	process.once("SIGTERM", onSigterm);
+		storage.close();
+	});
+	// postmortem exits the process once the shutdown cleanup finishes.
+	await new Promise<never>(() => {});
+}
 
-	try {
-		await stopped.promise;
-	} finally {
-		process.off("SIGINT", onSigint);
-		process.off("SIGTERM", onSigterm);
-	}
+/**
+ * Makes postmortem the only SIGTERM/SIGINT owner for a serving gateway: SIGTERM
+ * drains in-flight responses for `drainMs`, other exits stop at once, and
+ * postmortem then exits with its signal code (143 for SIGTERM). A drain raises the
+ * postmortem deadline to cover it plus {@link SHUTDOWN_MARGIN_MS} for `release`.
+ */
+export function registerGatewayShutdown(
+	handle: { close(drainMs?: number): Promise<void> },
+	drainMs: number | undefined,
+	release: () => void,
+): () => void {
+	if (drainMs !== undefined) postmortem.setCleanupDeadline(drainMs + SHUTDOWN_MARGIN_MS);
+	return postmortem.register(
+		"auth-gateway",
+		async reason => {
+			process.stdout.write(`\nReceived ${reason.toUpperCase()}, shutting down...\n`);
+			try {
+				await handle.close(reason === postmortem.Reason.SIGTERM ? drainMs : undefined);
+			} finally {
+				release();
+			}
+		},
+		{ exitOnly: true },
+	);
 }
 
 async function runToken(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {

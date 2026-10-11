@@ -42,7 +42,21 @@ let activeCleanupKeepAlive = false;
 // Promises of callbacks invoked late (registered while a pass runs), joined by
 // the active pass before it settles so `cleanup()`/signal exits await them.
 let activeLatePromises: Promise<void>[] | undefined;
-const CLEANUP_DEADLINE_MS = 10_000;
+const DEFAULT_CLEANUP_DEADLINE_MS = 10_000;
+const MAX_TIMER_MS = 2_147_483_647;
+let cleanupDeadlineMs = DEFAULT_CLEANUP_DEADLINE_MS;
+
+/**
+ * Sets how long signal and fatal cleanup passes may run before the process
+ * exits anyway. Process-wide; meant for long-lived servers whose cleanup step
+ * drains in-flight work for longer than the default 10 s.
+ */
+export function setCleanupDeadline(ms: number): void {
+	if (!Number.isSafeInteger(ms) || ms <= 0 || ms > MAX_TIMER_MS) {
+		throw new RangeError(`cleanup deadline must be a positive integer no greater than ${MAX_TIMER_MS} ms`);
+	}
+	cleanupDeadlineMs = ms;
+}
 /**
  * Symbol stamped by the extension-load guard onto the throwing replacement it
  * installs over `process.exit` / `process.reallyExit`, carrying the native
@@ -207,7 +221,7 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
 		settle();
 		deadline.resolve();
-	}, CLEANUP_DEADLINE_MS);
+	}, cleanupDeadlineMs);
 	const passPromise = Promise.race([cleanupSettled, deadline.promise]).finally(() => {
 		clearTimeout(deadlineTimer);
 		// A re-armed pass must drop only its own settled promise; an older
@@ -520,7 +534,7 @@ function formatFatalError(label: string, err: Error): string {
 }
 
 async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
-	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
+	const forcedExit = setTimeout(() => exitProcess(1), cleanupDeadlineMs);
 	try {
 		// Cleanup callbacks are invoked synchronously before runCleanup returns its
 		// completion promise. TUI owners therefore hand the cursor back before the

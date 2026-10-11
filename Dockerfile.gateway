@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.7-labs
+ARG PI_BASE=oh-my-pi/pi:dev
+FROM ${PI_BASE} AS gateway
+
+ENV HOME=/tmp \
+    COMPASS_GATEWAY_TOKEN_FILE=/run/compass/gateway.token \
+    COMPASS_GATEWAY_BIND=0.0.0.0:4000 \
+    COMPASS_GATEWAY_DRAIN_MS=20000
+
+WORKDIR /pi
+
+# Root inside rootless Podman maps to the invoking host user, so it can read a
+# host-user-owned 0600 bind-mounted token file without relaxing its mode.
+USER 0:0
+EXPOSE 4000
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bun", "packages/coding-agent/src/cli/gateway-boot.ts"]
