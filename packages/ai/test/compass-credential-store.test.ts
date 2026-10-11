@@ -1,6 +1,12 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test as bunTest } from "bun:test";
 import { AuthStorage, type OAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
-import { CompassAuthCredentialStore, type GatewayCredential, type GatewayOAuthToken } from "@oh-my-pi/pi-ai/compass";
+import {
+	CompassAuthCredentialStore,
+	currentAgentToken,
+	runWithAgentToken,
+	type GatewayCredential,
+	type GatewayOAuthToken,
+} from "@oh-my-pi/pi-ai/compass";
 
 interface FakeRow extends GatewayCredential {
 	version: string;
@@ -9,6 +15,7 @@ interface FakeRow extends GatewayCredential {
 interface RpcRequest {
 	method: string;
 	body: Record<string, unknown>;
+	agentToken: string | undefined;
 }
 
 interface FakeServer {
@@ -22,7 +29,8 @@ interface FakeServer {
 }
 
 const TOKEN = "compass-test-token";
-const ACCOUNT_ID = "agent-account-1";
+const AGENT_TOKEN = "agent-token-a";
+const OTHER_AGENT_TOKEN = "agent-token-b";
 const oauthToken: GatewayOAuthToken = {
 	access: "access-original",
 	refresh: "refresh-original",
@@ -57,6 +65,10 @@ const SERVER_CLEARABLE = new Map([
 
 let servers: Bun.Server<undefined>[] = [];
 
+function test(name: string, run: () => void | Promise<void>): void {
+	bunTest(name, () => runWithAgentToken(AGENT_TOKEN, run));
+}
+
 afterEach(() => {
 	for (const server of servers) server.stop(true);
 	servers = [];
@@ -79,7 +91,8 @@ function startFakeServer(initialRows: FakeRow[]): FakeServer {
 			const method = url.pathname.split("/").at(-1) ?? "";
 			const body = record(await request.json());
 			if (!body) return Response.json({ code: "invalid_argument", message: "invalid body" }, { status: 400 });
-			requests.push({ method, body });
+			const agentToken = typeof body.agentToken === "string" ? body.agentToken : undefined;
+			requests.push({ method, body, agentToken });
 			const hold = holds.get(method);
 			if (hold) {
 				holds.delete(method);
@@ -101,19 +114,13 @@ function startFakeServer(initialRows: FakeRow[]): FakeServer {
 			if (url.pathname !== `/compass.v1.GatewayCredentials/${method}`) {
 				return Response.json({ code: "not_found", message: "unknown method" }, { status: 404 });
 			}
-			if (method === "ListCredentialPool") {
-				if (body.agentAccountId !== ACCOUNT_ID) {
-					return Response.json({ code: "not_found", message: "unknown agent" }, { status: 404 });
-				}
-				return Response.json({ credentials: [...rows.values()] });
+			if (agentToken !== AGENT_TOKEN && agentToken !== OTHER_AGENT_TOKEN) {
+				return Response.json({ code: "unauthenticated", message: "missing agent token" }, { status: 401 });
 			}
+			if (method === "ListCredentialPool") return Response.json({ credentials: [...rows.values()] });
 			const id = typeof body.id === "string" ? body.id : "";
-			if (!body.agentAccountId) {
-				return Response.json({ code: "invalid_argument", message: "missing agent" }, { status: 400 });
-			}
 			const row = rows.get(id);
-			// An id outside the agent's pool looks missing, so ids cannot be probed.
-			if (!row || body.agentAccountId !== ACCOUNT_ID) {
+			if (!row) {
 				return Response.json({ code: "not_found", message: "missing credential" }, { status: 404 });
 			}
 			if (body.expectedVersion !== row.version) {
@@ -173,7 +180,6 @@ function storeFor(url: string, opts: { refreshIntervalMs?: number } = {}): Promi
 	return CompassAuthCredentialStore.open({
 		baseUrl: url,
 		token: TOKEN,
-		agentAccountId: ACCOUNT_ID,
 		refreshIntervalMs: opts.refreshIntervalMs ?? 60_000,
 	});
 }
@@ -214,6 +220,151 @@ function withoutType(credential: OAuthCredential): Omit<OAuthCredential, "type">
 }
 
 describe("CompassAuthCredentialStore", () => {
+	test("sends the scoped token on every door call without an account id", async () => {
+		const server = startFakeServer([oauthRow(), apiKeyRow()]);
+		const store = await storeFor(server.url);
+		try {
+			const oauth = oauthOf(store);
+			store.updateAuthCredential(oauth.id, { ...oauth.credential, access: "access-scoped" });
+			await store.flush();
+			await store.deleteAuthCredential(2, "logout");
+			expect(methods(server)).toEqual(["ListCredentialPool", "UpdateCredentialOAuth", "DisableCredential"]);
+			for (const request of server.requests) {
+				expect(request.agentToken).toBe(AGENT_TOKEN);
+				expect(request.body).not.toHaveProperty("agentAccountId");
+			}
+		} finally {
+			store.close();
+		}
+	});
+
+	bunTest("a queued write keeps its token after that scope ends", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url));
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			runWithAgentToken(AGENT_TOKEN, () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-a" }),
+			);
+			await held.reached;
+			// Queued under another agent, it must send that agent's token, not the one running when it starts.
+			runWithAgentToken(OTHER_AGENT_TOKEN, () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-b" }),
+			);
+			expect(store.hasPendingWrites()).toBe(true);
+			runWithAgentToken("agent-token-late", held.release);
+			await runWithAgentToken("agent-token-late", () => store.flush());
+			expect(
+				server.requests
+					.filter(request => request.method === "UpdateCredentialOAuth")
+					.map(request => request.agentToken),
+			).toEqual([AGENT_TOKEN, OTHER_AGENT_TOKEN]);
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-b");
+			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
+	bunTest("requires scope for reads and parks writes until a scoped poll", async () => {
+		const server = startFakeServer([oauthRow()]);
+		await expect(storeFor(server.url)).rejects.toThrow("agent token");
+		const store = new CompassAuthCredentialStore({ baseUrl: server.url, token: TOKEN, refreshIntervalMs: 60_000 });
+		try {
+			await expect(store.refreshSnapshot()).rejects.toThrow("agent token");
+			expect(store.pollExternalChanges()).toBe(false);
+			expect(server.requests).toHaveLength(0);
+			await runWithAgentToken(AGENT_TOKEN, () => store.refreshSnapshot());
+			const row = oauthOf(store);
+			runWithAgentToken("", () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-parked" }),
+			);
+			expect(runWithAgentToken("", currentAgentToken)).toBeUndefined();
+			expect(runWithAgentToken("", () => store.pollExternalChanges())).toBe(true);
+			await store.flush();
+			expect(methods(server)).toEqual(["ListCredentialPool"]);
+			expect(store.hasPendingWrites()).toBe(true);
+			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-parked");
+			expect(server.requests.filter(request => request.method === "UpdateCredentialOAuth")[0]?.agentToken).toBe(
+				OTHER_AGENT_TOKEN,
+			);
+			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
+	bunTest("treats an empty scoped token as no scope", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url));
+		try {
+			const row = oauthOf(store);
+			expect(runWithAgentToken("", currentAgentToken)).toBeUndefined();
+			await expect(runWithAgentToken("", () => store.refreshSnapshot())).rejects.toThrow("agent token");
+			expect(runWithAgentToken("", () => store.pollExternalChanges())).toBe(false);
+			runWithAgentToken("", () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-empty-scope" }),
+			);
+			await store.flush();
+			expect(methods(server)).toEqual(["ListCredentialPool"]);
+			expect(store.hasPendingWrites()).toBe(true);
+			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-empty-scope");
+			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
+	bunTest("parks unauthenticated OAuth writes and resends with the next poll token", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url, { refreshIntervalMs: 0 }));
+		try {
+			const row = oauthOf(store);
+			server.failNext("UpdateCredentialOAuth", () => Response.json({ code: "unauthenticated" }, { status: 401 }));
+			runWithAgentToken(AGENT_TOKEN, () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-retried" }),
+			);
+			await store.flush();
+			expect(store.hasPendingWrites()).toBe(true);
+			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-retried");
+			expect(
+				server.requests
+					.filter(request => request.method === "UpdateCredentialOAuth")
+					.map(request => request.agentToken),
+			).toEqual([AGENT_TOKEN, OTHER_AGENT_TOKEN]);
+			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
+	bunTest("parks an unconditional delete without scope and resends under the polling scope", async () => {
+		const server = startFakeServer([apiKeyRow()]);
+		const store = new CompassAuthCredentialStore({ baseUrl: server.url, token: TOKEN, refreshIntervalMs: 0 });
+		try {
+			await runWithAgentToken(AGENT_TOKEN, () => store.refreshSnapshot());
+			expect(await store.deleteAuthCredential(1, "logout")).toBe(true);
+			expect(methods(server)).toEqual(["ListCredentialPool"]);
+			expect(store.hasPendingWrites()).toBe(true);
+			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.rows.has("cred/key")).toBe(false);
+			expect(server.requests.filter(request => request.method === "DisableCredential")[0]?.agentToken).toBe(
+				OTHER_AGENT_TOKEN,
+			);
+			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
 	test("maps OAuth int64 strings and API keys while ignoring scope", async () => {
 		const server = startFakeServer([
 			oauthRow(),
@@ -251,15 +402,12 @@ describe("CompassAuthCredentialStore", () => {
 			expect(emptyOAuth.authorizedAt).toBeUndefined();
 			expect(rows[2]?.credential).toEqual({ type: "api_key", key: "sk-compass-key", source: "login" });
 			expect(rows.map(row => row.id)).toEqual([1, 2, 3]);
-			expect(server.requests[0]).toMatchObject({
-				method: "ListCredentialPool",
-				body: { agentAccountId: ACCOUNT_ID },
-			});
+			expect(server.requests[0]).toMatchObject({ method: "ListCredentialPool", body: { agentToken: AGENT_TOKEN } });
+			expect(server.requests[0]?.body).not.toHaveProperty("agentAccountId");
 		} finally {
 			store.close();
 		}
 	});
-
 	test("polls one time for a server-side credential change", async () => {
 		const server = startFakeServer([apiKeyRow()]);
 		const store = await storeFor(server.url);
@@ -869,7 +1017,7 @@ describe("CompassAuthCredentialStore", () => {
 	});
 
 	test("refuses a plaintext base URL off loopback", () => {
-		const opts = { token: TOKEN, agentAccountId: ACCOUNT_ID };
+		const opts = { token: TOKEN };
 		expect(() => new CompassAuthCredentialStore({ ...opts, baseUrl: "http://compass.example:8443" })).toThrow(
 			"must use https",
 		);

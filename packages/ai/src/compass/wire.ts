@@ -30,7 +30,7 @@ export interface GatewayCredential {
 }
 
 export interface ListCredentialPoolRequest {
-	agentAccountId: string;
+	agentToken: string;
 	provider?: string;
 }
 
@@ -74,7 +74,7 @@ export interface UpdateCredentialOAuthRequest {
 	id: string;
 	token: GatewayOAuthTokenRequest;
 	expectedVersion: GatewayInt64;
-	agentAccountId: string;
+	agentToken: string;
 	clearFields: string[];
 }
 
@@ -86,7 +86,7 @@ export interface DisableCredentialRequest {
 	id: string;
 	cause: string;
 	expectedVersion: GatewayInt64;
-	agentAccountId: string;
+	agentToken: string;
 }
 
 export type DisableCredentialResponse = Record<string, never>;
