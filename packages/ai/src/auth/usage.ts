@@ -43,6 +43,7 @@ import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
 	scopedUsageLimits,
+	usageReportHasNoIdentity,
 	usageReportMetadataValue,
 	usageReportScopeAccountId,
 } from "./usage-report";
@@ -613,7 +614,11 @@ export class UsageService implements UsageApi {
 				let hasUsableStoredOAuthCredential = false;
 				for (const entry of entries) {
 					if (entry.credential.type !== "oauth") continue;
-					const request = oauthUsageRequest(provider, entry.credential, baseUrl);
+					// Stamped here too: this branch has its own `continue`, so a pool
+					// of identity-less OAuth rows shared the `unidentified` account and
+					// xAI's fixed limit ids, and the renderer dropped every credential
+					// after the first as a duplicate series.
+					const request = { ...oauthUsageRequest(provider, entry.credential, baseUrl), credentialId: entry.id };
 					if (providerImpl.supports && !providerImpl.supports(request)) continue;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
@@ -656,6 +661,9 @@ export class UsageService implements UsageApi {
 				} else {
 					request = oauthUsageRequest(provider, credential, baseUrl);
 				}
+				// The stored row id, so an identity-less provider's several
+				// credentials stay distinguishable downstream.
+				request = { ...request, credentialId: entry.id };
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
 			}
@@ -832,7 +840,12 @@ export class UsageService implements UsageApi {
 			}
 
 			const results = await this.#fetchUsageRequests(requests, forcedRefresh.providers);
-			const reports = results.filter((report): report is UsageReport => report !== null);
+			const reports = results.flatMap((report, index) => {
+				if (!report) return [];
+				const credentialId = requests[index]?.credentialId;
+				if (credentialId === undefined || !usageReportHasNoIdentity(report)) return [report];
+				return [{ ...report, metadata: { ...report.metadata, credentialKey: String(credentialId) } }];
+			});
 			const deduped = dedupeUsageReports(reports, this.logger);
 			// no outer cache write — see comment above.
 			const resolved = deduped;
