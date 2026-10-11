@@ -1385,6 +1385,7 @@ export class SessionAdvisors {
 				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
 				const options = {
 					...streamOptions,
+					acceptEmptyResponse: true,
 					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(),
 				};
 				if (requestModel.api === "openai-codex-responses") {
@@ -1392,13 +1393,6 @@ export class SessionAdvisors {
 						...options,
 						codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS,
 					});
-				}
-				if (
-					requestModel.api === "google-generative-ai" ||
-					requestModel.api === "google-gemini-cli" ||
-					requestModel.api === "google-vertex"
-				) {
-					return baseAdvisorStreamFn(requestModel, context, { ...options, acceptEmptyResponse: true });
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);
 			};

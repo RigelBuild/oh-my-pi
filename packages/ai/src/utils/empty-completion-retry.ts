@@ -20,6 +20,8 @@ import { AssistantMessageEventStream } from "./event-stream";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
+/** Error text for a stop that stayed empty after every empty-completion retry. */
+export const EXHAUSTED_EMPTY_COMPLETION_MESSAGE = "Provider returned no visible output after empty-completion retries.";
 
 const NON_WHITESPACE_RE = /\S/;
 
@@ -102,7 +104,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 		let providerErrorRetries = 0;
 		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
-			let committed = options?.acceptEmptyResponse === true;
+			let committed = false;
 			let terminal: AssistantMessageEvent | undefined;
 			const flush = (): void => {
 				for (const event of buffered) outer.push(event);
@@ -135,7 +137,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			}
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
-			const retryEmpty =
+			const eligibleEmpty =
 				policy.retryEmptyCompletion === true &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
@@ -145,8 +147,8 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				completedMessage.stopDetails?.type !== "compaction" &&
 				!completedMessage.errorMessage &&
 				(completedMessage.usage?.output ?? 0) <= 1 &&
-				!hasVisibleAssistantContent(completedMessage) &&
-				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
+				!hasVisibleAssistantContent(completedMessage);
+			const retryEmpty = eligibleEmpty && emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
 			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
@@ -182,8 +184,17 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				}
 				continue;
 			}
-
 			flush();
+			// Exhausted empty retries must fail instead of delivering a benign stop.
+			if (eligibleEmpty && !signal?.aborted && completedMessage) {
+				const errored: AssistantMessage = {
+					...completedMessage,
+					stopReason: "error",
+					errorMessage: EXHAUSTED_EMPTY_COMPLETION_MESSAGE,
+				};
+				outer.push({ type: "error", reason: "error", error: errored });
+				return;
+			}
 			if (terminal) {
 				outer.push(terminal);
 			} else if (!outer.done) {

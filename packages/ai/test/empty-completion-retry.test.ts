@@ -4,6 +4,7 @@
  * so output is never duplicated.
  */
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "@oh-my-pi/pi-ai/types";
 import { MAX_EMPTY_COMPLETION_RETRIES, withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -127,7 +128,7 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
-	it("delivers the empty result after exhausting the retry cap", async () => {
+	it("surfaces an error after exhausting the retry cap", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
 		const stream = withReplaySafeStreamRetry(
@@ -147,8 +148,40 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(attempts).toBe(MAX_EMPTY_COMPLETION_RETRIES + 1);
 		expect(waits).toHaveLength(MAX_EMPTY_COMPLETION_RETRIES);
 		expect(events.filter(e => e.type === "start")).toHaveLength(1);
+		expect(events.at(-1)).toMatchObject({
+			type: "error",
+			reason: "error",
+			error: {
+				stopReason: "error",
+				errorMessage: "Provider returned no visible output after empty-completion retries.",
+			},
+		});
+		expect(result.stopReason).toBe("error");
+		const errorId = AIError.classify({ message: result.errorMessage });
+		expect(AIError.is(errorId, AIError.Flag.EmptyResponse)).toBe(true);
+		expect(AIError.retriable(errorId)).toBe(true);
+	});
+
+	it("preserves an aborted final empty attempt as a stop", async () => {
+		const controller = new AbortController();
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ signal: controller.signal, providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				if (attempts === MAX_EMPTY_COMPLETION_RETRIES + 1) controller.abort();
+				return emptyAttempt();
+			},
+			{ retryEmptyCompletion: true },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+		expect(attempts).toBe(MAX_EMPTY_COMPLETION_RETRIES + 1);
 		expect(events.at(-1)?.type).toBe("done");
-		expect(result.content).toEqual([]);
+		expect(result.stopReason).toBe("stop");
 	});
 
 	it("does not retry an empty pause_turn completion", async () => {
@@ -372,6 +405,38 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	it("accepts a silent stop while retrying a pre-output transient error", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ acceptEmptyResponse: true, providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				const message = assistant();
+				if (attempts === 1) {
+					message.stopReason = "error";
+					message.errorMessage = "The socket connection was closed unexpectedly";
+					return streamFromEvents([
+						{ type: "start", partial: message },
+						{ type: "error", reason: "error", error: message },
+					]);
+				}
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "done", reason: "stop", message },
+				]);
+			},
+			{ retryEmptyCompletion: true, retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+		expect(attempts).toBe(2);
+		expect(events.filter(event => event.type === "start")).toHaveLength(1);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([]);
+	});
 	it("does not retry a transient provider error after output commits", async () => {
 		let attempts = 0;
 		const message = assistant(["partial"]);
