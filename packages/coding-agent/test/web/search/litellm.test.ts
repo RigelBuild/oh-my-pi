@@ -70,6 +70,7 @@ describe("LiteLLM search", () => {
 		["http://localhost:4000/v1", "http://localhost:4000/v1/search/web-search"],
 		["http://localhost:4000/v1/", "http://localhost:4000/v1/search/web-search"],
 		["http://localhost:4000/", "http://localhost:4000/v1/search/web-search"],
+		["https://gw.example/tenant/proxy/v1", "https://gw.example/tenant/proxy/v1/search/web-search"],
 	])("normalizes the base URL %s and sends domain filters and a clamped count", async (baseUrl, expectedUrl) => {
 		process.env.LITELLM_API_KEY = "test-key";
 		process.env.LITELLM_SEARCH_TOOLS = " web-search ";
@@ -131,7 +132,10 @@ describe("LiteLLM search", () => {
 		expect(result.sources[1]).toMatchObject({ title: "http://example.net/", url: "http://example.net/" });
 	});
 
-	it("tries the next configured tool when a tool is missing", async () => {
+	it.each([
+		[500, "Search tool 'missing' not found in router.search_tools"],
+		[408, "request timeout"],
+	])("tries the next configured tool after a %d from the first", async (status, message) => {
 		process.env.LITELLM_API_KEY = "test-key";
 		process.env.LITELLM_SEARCH_TOOLS = "missing, available";
 		const calledUrls: string[] = [];
@@ -139,12 +143,7 @@ describe("LiteLLM search", () => {
 			const url = requestUrl(input);
 			calledUrls.push(url);
 			if (url.endsWith("/search/missing")) {
-				return new Response(
-					JSON.stringify({ error: { message: "Search tool 'missing' not found in router.search_tools" } }),
-					{
-						status: 500,
-					},
-				);
+				return new Response(JSON.stringify({ error: { message } }), { status });
 			}
 			return Response.json({ object: "search", results: [{ url: "https://example.com", title: "Found" }] });
 		};
@@ -171,6 +170,43 @@ describe("LiteLLM search", () => {
 
 		await expect(search).rejects.toMatchObject({ provider: "litellm", status: 401 });
 		await expect(search).rejects.toThrow("401 unauthorized");
+		expect(calledUrls).toEqual(["http://localhost:4000/v1/search/first"]);
+	});
+
+	it("keeps the API key out of an echoed upstream error", async () => {
+		process.env.LITELLM_API_KEY = "sk-secret-value";
+		process.env.LITELLM_SEARCH_TOOLS = "web-search";
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const auth = new Headers(init?.headers).get("authorization");
+			return new Response(JSON.stringify({ error: { message: `bad request, got header ${auth}` } }), {
+				status: 400,
+			});
+		};
+
+		const error = await searchLiteLLM(makeParams("cats", { fetch: fetchMock })).catch((err: unknown) => err);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("[REDACTED]");
+		expect((error as Error).message).not.toContain("sk-secret-value");
+	});
+
+	it("propagates caller cancellation without trying another tool", async () => {
+		process.env.LITELLM_API_KEY = "test-key";
+		process.env.LITELLM_SEARCH_TOOLS = "first, second";
+		const controller = new AbortController();
+		const calledUrls: string[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			calledUrls.push(requestUrl(input));
+			controller.abort();
+			init?.signal?.throwIfAborted();
+			return Response.json({ results: [] });
+		};
+
+		const error = await searchLiteLLM(makeParams("cats", { fetch: fetchMock, signal: controller.signal })).catch(
+			(err: unknown) => err,
+		);
+
+		expect((error as Error).name).toBe("AbortError");
 		expect(calledUrls).toEqual(["http://localhost:4000/v1/search/first"]);
 	});
 

@@ -70,8 +70,8 @@ function isRetryableToolFailure(error: unknown): boolean {
 	if (!(error instanceof SearchProviderError)) return false;
 	return (
 		error.status === 404 ||
+		error.status === 408 ||
 		error.status === 429 ||
-		error.status === 504 ||
 		(error.status !== undefined && error.status >= 500)
 	);
 }
@@ -115,7 +115,8 @@ async function callLiteLLMSearch(
 		} catch {
 			payload = undefined;
 		}
-		const message = errorMessage(payload) ?? (text.trim() || response.statusText);
+		// A proxy may echo the Authorization header back in its error body.
+		const message = (errorMessage(payload) ?? (text.trim() || response.statusText)).replaceAll(apiKey, "[REDACTED]");
 		const classified = classifyProviderHttpError("litellm", response.status, message);
 		if (classified) throw classified;
 		throw new SearchProviderError("litellm", `LiteLLM API error (${response.status}): ${message}`, response.status);
