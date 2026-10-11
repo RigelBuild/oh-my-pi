@@ -453,19 +453,21 @@ describe("browser tabs whose renderer crashed", () => {
 		getSessionFile: () => null,
 	} as unknown as ToolSession;
 
-	// Chromium reports a renderer crash only once its core is dumped, which on a host that keeps cores lands seconds
-	// late, past the runs' timeouts. The browsers launched here inherit this process's soft core limit.
+	// Chromium reports a renderer crash only after dumping its core, seconds late on hosts that keep cores. Launched
+	// browsers inherit this soft core limit; without a working prlimit the suite runs unchanged.
 	let coreLimit: string | undefined;
 	beforeAll(() => {
-		if (process.platform !== "linux") return;
+		const prlimit = process.platform === "linux" ? Bun.which("prlimit") : null;
+		if (!prlimit) return;
 		const pid = `--pid=${process.pid}`;
-		coreLimit = Bun.spawnSync(["prlimit", pid, "--core", "--raw", "--noheadings", "-o", "SOFT"])
-			.stdout.toString()
-			.trim();
-		Bun.spawnSync(["prlimit", pid, "--core=0:"]);
+		const read = Bun.spawnSync([prlimit, pid, "--core", "--raw", "--noheadings", "-o", "SOFT"]);
+		const soft = read.stdout.toString().trim();
+		if (read.exitCode !== 0 || !soft) return;
+		if (Bun.spawnSync([prlimit, pid, "--core=0:"]).exitCode === 0) coreLimit = soft;
 	});
 	afterAll(() => {
-		if (coreLimit) Bun.spawnSync(["prlimit", `--pid=${process.pid}`, `--core=${coreLimit}:`]);
+		const prlimit = coreLimit && Bun.which("prlimit");
+		if (prlimit) Bun.spawnSync([prlimit, `--pid=${process.pid}`, `--core=${coreLimit}:`]);
 	});
 
 	/** Watch the page at `url` over a CDP session of the test's own; `crashed` resolves once Chromium reports its renderer died. */
