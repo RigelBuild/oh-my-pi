@@ -381,19 +381,43 @@ describe("CompassAuthCredentialStore", () => {
 			const row = oauthOf(store);
 			server.failNext("UpdateCredentialOAuth", () => Response.json({ code: "unauthenticated" }, { status: 401 }));
 			runWithAgentToken(AGENT_TOKEN, () =>
-				store.updateAuthCredential(row.id, { ...row.credential, access: "access-retried" }),
+				store.updateAuthCredential(row.id, {
+					...row.credential,
+					access: "access-retried",
+					refresh: "refresh-rotated",
+				}),
 			);
 			await store.flush();
 			expect(store.hasPendingWrites()).toBe(true);
 			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
 			await store.flush();
 			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-retried");
+			expect(server.rows.get("cred/oauth")?.oauth?.refresh).toBe("refresh-rotated");
 			expect(
 				server.requests
 					.filter(request => request.method === "UpdateCredentialOAuth")
 					.map(request => request.agentToken),
 			).toEqual([AGENT_TOKEN, OTHER_AGENT_TOKEN]);
 			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
+	bunTest("waits one refresh interval before resending a failed write", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url, { refreshIntervalMs: 60_000 }));
+		try {
+			const row = oauthOf(store);
+			server.failNext("UpdateCredentialOAuth", () => Response.json({ code: "unauthenticated" }, { status: 401 }));
+			runWithAgentToken(AGENT_TOKEN, () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-retried" }),
+			);
+			await store.flush();
+			for (let i = 0; i < 3; i++) runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.requests.filter(request => request.method === "UpdateCredentialOAuth")).toHaveLength(1);
+			expect(store.hasPendingWrites()).toBe(true);
 		} finally {
 			store.close();
 		}

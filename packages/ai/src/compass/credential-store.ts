@@ -176,8 +176,10 @@ interface RowState {
 	/** Bumped on a conflict; jobs accepted under an older epoch drop instead of writing. */
 	epoch: number;
 	pending: number;
-	/** A fire-and-forget write that failed transiently; resent before the next reload. */
+	/** A fire-and-forget write parked without scope or after a transient or revoked-token failure. */
 	unsynced?: Unsynced;
+	/** A failed resend waits one refresh interval before the next try. */
+	resendAfterMs?: number;
 	/** OAuth writes that failed transiently and may have committed anyway. */
 	unknownOutcomes?: GatewayOAuthTokenRequest[];
 }
@@ -352,7 +354,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 					this.#disable(row, cause, agentToken),
 				);
 			} catch (error) {
-				// A transient failure keeps the disable queued for a resend, so the delete stands.
+				// A transient or revoked-token failure keeps the disable queued for a resend, so the delete stands.
 				if (this.#stateFor(row.serverId).unsynced !== intent) throw error;
 				this.#removeLocalRow(row.id);
 				return true;
@@ -472,6 +474,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		const intent: Unsynced = { kind: "oauth", seq: ++this.#oauthSeq };
 		if (!queuedToken) {
 			state.unsynced = intent;
+			state.resendAfterMs = undefined;
 			return;
 		}
 		const epoch = this.#accept(row.serverId);
@@ -527,6 +530,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		const unsynced = { kind: "disable", row, cause, unconditional: false } as const;
 		if (!queuedToken) {
 			state.unsynced = unsynced;
+			state.resendAfterMs = undefined;
 			return;
 		}
 		const epoch = this.#accept(row.serverId);
@@ -538,7 +542,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	#resendUnsynced(agentToken: string): void {
 		for (const [serverId, state] of this.#state) {
 			const unsynced = state.unsynced;
-			if (!unsynced || state.pending > 0) continue;
+			if (!unsynced || state.pending > 0 || (state.resendAfterMs ?? 0) > Date.now()) continue;
 			const id = this.#localIdByServerId.get(serverId);
 			if (id === undefined) continue;
 			if (unsynced.kind === "oauth") {
@@ -577,7 +581,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	/**
 	 * Runs one write on the row's chain. A conflict bumps the epoch so every job accepted
-	 * before it drops, then reloads the pool. A transient failure keeps `unsynced` for a resend.
+	 * before it drops, then reloads the pool. A transient or revoked-token failure keeps `unsynced` for a resend.
 	 */
 	#runWrite<T>(
 		row: CredentialRow,
@@ -600,8 +604,11 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 					// A newer OAuth intent parked while this one ran already carries the latest credential.
 					const newer =
 						unsynced?.kind === "oauth" && state.unsynced?.kind === "oauth" && state.unsynced.seq > unsynced.seq;
-					if (unsynced && !deleting && !newer && !this.#closed)
-						state.unsynced = TRANSIENT_CODES.has(code) || code === "unauthenticated" ? unsynced : undefined;
+					if (unsynced && !deleting && !newer && !this.#closed) {
+						const keep = TRANSIENT_CODES.has(code) || code === "unauthenticated";
+						state.unsynced = keep ? unsynced : undefined;
+						if (keep) state.resendAfterMs = Date.now() + this.#refreshIntervalMs;
+					}
 					throw error;
 				}
 				const parked = state.unsynced;
