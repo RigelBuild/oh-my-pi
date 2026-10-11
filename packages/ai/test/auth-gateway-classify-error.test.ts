@@ -226,19 +226,18 @@ describe("auth-gateway classifyUpstreamFailure", () => {
 
 	for (const testCase of cases) {
 		it(testCase.name, () => {
-			const result = classifyUpstreamFailure(
-				classifierModel,
-				testCase.error,
-				testCase.status,
-				testCase.message,
-			);
+			const result = classifyUpstreamFailure(classifierModel, testCase.error, testCase.status, testCase.message);
 			if (testCase.kind === undefined) {
 				expect(result).toBeUndefined();
 				return;
 			}
 			expect(result?.kind).toBe(testCase.kind);
 			expect(result?.status).toBe(testCase.expectedStatus ?? testCase.status);
-			expect(result?.message).toBe(testCase.expectedMessage ?? testCase.message ?? (testCase.error instanceof Error ? testCase.error.message : ""));
+			expect(result?.message).toBe(
+				testCase.expectedMessage ??
+					testCase.message ??
+					(testCase.error instanceof Error ? testCase.error.message : ""),
+			);
 		});
 	}
 
