@@ -38,9 +38,40 @@ export declare class DesktopSession {
    * behind it.
    */
   get capabilities(): DesktopCapabilities
+  /**
+   * Lock and display-sleep state read on the calling thread, never queued
+   * behind the worker, so it answers at once even while a request is stuck.
+   */
+  get screenState(): DesktopScreenState
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
+  listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
+  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<Application>
+  /**
+   * Capture and accessibility share one serialized request. Neither a failed
+   * snapshot nor an abandoned reply replaces the last delivered input frame.
+   */
+  observe(target: string, caps?: CaptureCaps | undefined | null, axOptions?: AxSnapshotOptions | undefined | null): Promise<DesktopObservation>
+  menuItems(target: string, path?: Array<string> | undefined | null): Promise<Array<DesktopMenuItem>>
+  menuSelect(target: string, path: Array<string>): Promise<undefined>
+  bringToCurrentSpace(windowId: string): Promise<undefined>
+  holdKeys(target: string, keys: Array<string>, options: HoldOptions): Promise<undefined>
+  holdMouse(target: string, x: number, y: number, options: HoldOptions): Promise<undefined>
+  /**
+   * Native ownership only. Human approval is required by the host before
+   * calling this method.
+   */
+  acquireControl(): Promise<DesktopControlState>
+  releaseControl(): void
+  controlState(): DesktopControlState
+  /** Retire queued work from a completed helper without revoking task control. */
+  retire(): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
+  /**
+   * Capture a fresh native-detail region without replacing the full input
+   * coordinate frame.
+   */
+  captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
   moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
   drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<undefined>
@@ -64,6 +95,11 @@ export declare class DesktopSession {
   axSetValue(reference: string, value: string): Promise<undefined>
   axFocus(reference: string): Promise<undefined>
   axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<undefined>
+  /**
+   * Immediately cancel operations submitted before this call. Later
+   * operations may proceed.
+   */
+  cancel(): void
   close(): Promise<undefined>
 }
 
@@ -700,6 +736,13 @@ export declare class VcsRepo {
 export declare function __ompInstallTokioRuntime(): void
 
 /**
+ * Points the addon at the directory holding downloaded wasm grammars
+ * (`<dir>/<file>`). The loader (`native/loader-state.js`) calls this once
+ * with `<natives dir>/grammars`; grammars then load lazily from it.
+ */
+export declare function __ompSetGrammarDir(dir: string): void
+
+/**
  * Release version stamped into this `.node` after linking.
  *
  * `None` for an unstamped build. The JS loader compares it against
@@ -727,6 +770,37 @@ export declare function appleFmCancel(handle: number): void
  * [`apple_fm_cancel`].
  */
 export declare function appleFmGenerate(request: string, onEvent: (err: null | Error, event: string) => void): number
+
+/**
+ * Installed application identity with currently observable process
+ * information.
+ */
+export interface Application {
+  id: string
+  name: string
+  path: string
+  running: boolean
+  pid?: number
+}
+
+/** Controls whether launching an application deliberately activates it. */
+export interface ApplicationOpenOptions {
+  activate?: boolean
+}
+
+/** Filters the native application inventory without requiring screen access. */
+export interface ApplicationQuery {
+  query?: string
+  runningOnly?: boolean
+}
+
+/**
+ * Applies an `HDiffPatch` single-stream patch (HDIFFSF20, zstd or
+ * uncompressed) to `oldPath`, writing the result to `outPath` (created or
+ * truncated). Resolves to the result's size in bytes. Rejects on I/O failure,
+ * a damaged or unsupported patch, or a patch made for other old data.
+ */
+export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -809,6 +883,11 @@ export interface AstFindResult {
   limitReached: boolean
   /** Non-fatal parse or pattern errors collected during the run. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 /**
@@ -981,6 +1060,11 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
+  /**
+   * Languages whose on-demand grammar is not installed; their files were
+   * skipped (see `wasmGrammarFor`).
+   */
+  missingGrammars?: Array<string>
 }
 
 export interface AxNode {
@@ -1058,6 +1142,14 @@ export interface BlockRangeOptions {
 export interface CaptureCaps {
   maxWidth?: number
   maxHeight?: number
+}
+
+/** Rectangle in pixels of the most recent full screenshot of the same target. */
+export interface CaptureRegion {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 /** Clipboard image payload encoded as PNG bytes. */
@@ -1142,10 +1234,29 @@ export interface DesktopCapabilities {
    * target and post real input).
    */
   takeover: boolean
+  applications: boolean
+  menus: boolean
+  heldInput: boolean
+  spaces: boolean
+  /**
+   * Native global Escape cancellation while input/control ownership is held.
+   * Wayland requires the host interrupt action instead.
+   */
+  globalEscape: boolean
   capturePermission: string
   inputPermission: string
   axPermission: string
   displayCount: number
+  /**
+   * The user session is locked (lock screen up). Only macOS detects this;
+   * other backends report `false`.
+   */
+  screenLocked: boolean
+  /**
+   * The display is asleep, so nothing can be captured until it wakes. Only
+   * macOS detects this; other backends report `false`.
+   */
+  displayAsleep: boolean
 }
 
 export interface DesktopCapture {
@@ -1159,10 +1270,28 @@ export interface DesktopCapture {
    * unscaled.
    */
   sourceHeight: number
+  /** Dimensions of the full screenshot coordinate frame used by pointer input. */
+  coordinateWidth: number
+  coordinateHeight: number
+  /**
+   * Region in the full screenshot's coordinates; zoom pixels are not input
+   * coordinates.
+   */
+  region?: CaptureRegion
   target: string
   displays: Array<DesktopDisplay>
   backend: string
   displayServer?: string
+  /**
+   * The user session was locked when this frame was taken: a display
+   * capture shows the lock screen, and a window capture shows the window's
+   * last frame behind it. Only macOS detects this; others report `false`.
+   */
+  screenLocked: boolean
+}
+
+export interface DesktopControlState {
+  active: boolean
 }
 
 /**
@@ -1184,9 +1313,36 @@ export interface DesktopDisplay {
   isPrimary: boolean
 }
 
+/**
+ * One immediate child of a native application menu. Paths contain the actual
+ * native labels, including ellipses; selection accepts normalized labels.
+ */
+export interface DesktopMenuItem {
+  title: string
+  path: Array<string>
+  enabled: boolean
+  checked: boolean
+  hasSubmenu: boolean
+  shortcut?: string
+}
+
+export interface DesktopObservation {
+  capture: DesktopCapture
+  accessibility: AxSnapshot
+}
+
 export interface DesktopPoint {
   x: number
   y: number
+}
+
+/**
+ * Lock and display-sleep state of the user session, read live per call.
+ * Only macOS detects either; other platforms report both as `false`.
+ */
+export interface DesktopScreenState {
+  screenLocked: boolean
+  displayAsleep: boolean
 }
 
 export interface DesktopSessionOptions {
@@ -1807,6 +1963,11 @@ export interface GrepMatch {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
   /** Per-file match count (count mode only). */
   matchCount?: number
 }
@@ -1989,6 +2150,14 @@ export interface HighlightColors {
   deleted?: string
 }
 
+export interface HoldOptions {
+  /** Duration in seconds, from zero through 100. */
+  duration: number
+  button?: string
+  keys?: Array<string>
+  takeover?: boolean
+}
+
 /**
  * Convert HTML source to Markdown with optional preprocessing.
  *
@@ -2098,9 +2267,11 @@ export interface IsoProbeResult {
 }
 
 /**
- * Pick the best backend available right now. `preferred` is treated as
- * a hint — see [`pi_iso::resolve`] for the exact priority rules. Backend
- * probes may spawn CLIs, so they run on the native blocking pool.
+ * Pick the best backend available right now.
+ *
+ * `preferred` is treated as a hint — see [`pi_iso::resolve`] for the exact
+ * priority rules. Backend probes may spawn CLIs, so they run on the native
+ * blocking pool.
  */
 export declare function isoResolve(preferred?: IsoBackendKind | undefined | null): Promise<IsoResolveResult>
 
@@ -2240,6 +2411,11 @@ export interface Match {
   contextAfter?: Array<ContextLine>
   /** Whether the line was truncated. */
   truncated?: boolean
+  /**
+   * 1-indexed character column where the first match on a truncated line
+   * starts; the truncated `line` shows a window around it.
+   */
+  column?: number
 }
 
 /**
@@ -2490,6 +2666,8 @@ export interface PointerOptions {
   button?: string
   count?: number
   modifiers?: Array<string>
+  /** Arbitrary keys held for the duration of a drag. */
+  keys?: Array<string>
   /**
    * Briefly activate the target window and post real input instead of the
    * default background delivery.
@@ -2616,14 +2794,23 @@ export interface PtyStartOptions {
 /**
  * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
  *
- * Conversion runs on the native blocking pool so parsing and rendering do not
- * stall the JavaScript event loop.
+ * The image is drawn at `scale` times the SVG's intrinsic size (default 1;
+ * above 1 renders vector content crisply at display resolution), then shrunk
+ * as needed to fit `max_width_px` x `max_height_px` with its aspect ratio
+ * kept. Conversion runs on the native blocking pool so parsing and rendering
+ * do not stall the JavaScript event loop.
+ *
+ * With `cell`, the limits round down to whole cells and the canvas pads with
+ * transparency, right and bottom, to whole cells: a terminal placing the PNG
+ * over `width / cell.width_px` columns and `height / cell.height_px` rows
+ * shows it 1:1 instead of resampling it.
  *
  * # Errors
- * Returns an error for invalid SVG data, zero/oversized limits, allocation
- * failure, or PNG encoding failure.
+ * Returns an error for invalid SVG data, zero/oversized limits, a zero cell
+ * size, a scale that is not finite and positive, allocation failure, or PNG
+ * encoding failure.
  */
-export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, scale?: number | undefined | null, cell?: SvgCell | undefined | null): Promise<Uint8Array>
 
 /**
  * Read an image from the system clipboard.
@@ -3277,6 +3464,15 @@ export interface SummarySegment {
  */
 export declare function supportsLanguage(lang: string): boolean
 
+/**
+ * Terminal cell size in device pixels, for [`rasterize_svg`] canvases a
+ * terminal shows over whole cells.
+ */
+export interface SvgCell {
+  widthPx: number
+  heightPx: number
+}
+
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {
   /** Engine: `ngram`, `smollm`, or `apple`. */
@@ -3547,6 +3743,39 @@ export declare function warmBlockParse(options: BlockParseOptions): Promise<unde
  * highlighted languages on the native worker pool.
  */
 export declare function warmHighlighter(): Promise<undefined>
+
+/**
+ * Wasm grammar backing `lang` (alias) or the language of `path`; `null` for
+ * built-in or unknown languages.
+ */
+export declare function wasmGrammarFor(query: WasmGrammarQuery): WasmGrammarInfo | null
+
+/** A grammar the host downloads on first use. */
+export interface WasmGrammarInfo {
+  /** Canonical language name, e.g. `verilog`, `csharp`. */
+  language: string
+  /** stencil-hq/wasm-grammars release tag hosting the grammar, e.g. `v1`. */
+  release: string
+  /**
+   * File name inside the grammar directory; the release asset is
+   * `<file>.zst`.
+   */
+  file: string
+  /** Lowercase hex SHA-256 of the decompressed `.wasm`. */
+  sha256: string
+  /** Byte size of the decompressed `.wasm`. */
+  size: number
+  /** Whether the grammar is downloaded (or already loaded). */
+  installed: boolean
+}
+
+/** Language to look up: an alias, or a path to infer it from. */
+export interface WasmGrammarQuery {
+  /** Language alias (e.g. `kotlin`, `sv`); wins over `path`. */
+  lang?: string
+  /** File whose extension selects the language. */
+  path?: string
+}
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

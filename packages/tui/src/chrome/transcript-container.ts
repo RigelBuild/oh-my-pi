@@ -57,6 +57,12 @@ export interface AppendOnlyTranscriptBlock {
 
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
+	/**
+	 * A finalized block whose rows still wait on async work (an SVG figure's
+	 * raster). Retirement holds until it lands: committed rows can never be
+	 * repainted, so retiring early would freeze a placeholder into scrollback.
+	 */
+	isTranscriptBlockPending?(): boolean;
 	/** Render the row that must remain represented under emergency viewport pressure. */
 	renderTranscriptBlockEmergencyRow?(width: number): string | undefined;
 }
@@ -121,7 +127,7 @@ const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
-	return block.isTranscriptBlockFinalized?.() ?? true;
+	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
 }
 
 function blockMode(component: Component): TranscriptBlockMode {
@@ -200,6 +206,7 @@ export class TranscriptContainer extends Container {
 	 */
 	#frameRows = new Map<TranscriptEntry, readonly string[]>();
 	#frameRowsWidth = 0;
+	#releaseFailures = new WeakSet<Component>();
 	/** The `children` array `#entries` last mirrored; see {@link #syncEntries}. */
 	#syncedChildren: Component[] | undefined;
 	/** Forces the next {@link #syncEntries} to compare every entry, not just the live tail. */
@@ -225,10 +232,15 @@ export class TranscriptContainer extends Container {
 		this.#entriesUnverified = true;
 	}
 
+	/** Removes `component` if {@link canRemoveBlock} allows it; otherwise does nothing. */
 	override removeChild(component: Component): void {
-		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
-		super.removeChild(component);
-		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
+		const index = this.#removableIndex(component);
+		if (index < 0) return;
+		// #removableIndex synced entries, which now mirror children index for
+		// index. This class renders through its own entries, never Container's
+		// memoized render, so splicing children directly is the whole removal.
+		this.children.splice(index, 1);
+		this.#entries.splice(index, 1);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
 	}
@@ -283,14 +295,24 @@ export class TranscriptContainer extends Container {
 
 	/** Whether a transient block may be discarded without leaving tape history. */
 	canRemoveBlock(component: Component): boolean {
+		return this.#removableIndex(component) >= 0;
+	}
+
+	/**
+	 * Syncs entries, then returns `component`'s index if it can be discarded
+	 * without leaving tape history (not committed, not emitted, not in an
+	 * offered batch), else -1.
+	 */
+	#removableIndex(component: Component): number {
 		this.#syncEntries();
-		const index = this.#entries.findIndex(entry => entry.component === component);
-		if (index < 0) return false;
+		// Removable blocks are transient ones near the live tail, so search from there.
+		const index = this.#entries.findLastIndex(entry => entry.component === component);
+		if (index < 0) return -1;
 		const entry = this.#entries[index]!;
-		if (entry.state === "committed" || entry.emitted > 0) return false;
-		if (this.#offered?.kind === "commit" && index < this.#offered.end) return false;
-		if (this.#offered?.kind === "append" && index === this.#offered.entry) return false;
-		return true;
+		if (entry.state === "committed" || entry.emitted > 0) return -1;
+		if (this.#offered?.kind === "commit" && index < this.#offered.end) return -1;
+		if (this.#offered?.kind === "append" && index === this.#offered.entry) return -1;
+		return index;
 	}
 
 	/**
@@ -577,7 +599,10 @@ export class TranscriptContainer extends Container {
 			popLoopPhase();
 		}
 		this.#replayPending = false;
-		if (rows.length === 0) return undefined;
+		if (rows.length === 0) {
+			this.#releaseCommittedRenderCaches();
+			return undefined;
+		}
 		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "replay" };
 		this.#offered = { batch, kind: "replay" };
 		return batch;
@@ -741,6 +766,8 @@ export class TranscriptContainer extends Container {
 				this.#retireEntry(this.#entries[index]!);
 			}
 			this.#frontier = offered.end;
+		} else {
+			this.#releaseCommittedRenderCaches();
 		}
 		this.#offered = undefined;
 		if (this.#replayRequested) this.#startReplay();
@@ -760,6 +787,7 @@ export class TranscriptContainer extends Container {
 			const entry = this.#entries[index]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = trimBlankEdges(entry.component.render(width));
+			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.unshift("");
 			rows.unshift(...block);
@@ -807,6 +835,7 @@ export class TranscriptContainer extends Container {
 		for (const entry of this.#entries) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = this.#renderEntry(entry, width);
+			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
 			this.#childStartRows.set(entry.component, rows.length);
@@ -1048,6 +1077,29 @@ export class TranscriptContainer extends Container {
 		entry.stableRows = EMPTY_STABLE_ROWS;
 		entry.renderedStableByWidth = new Map();
 		entry.stableRowCountByWidth = new Map();
+		this.#frameRows.delete(entry);
+		this.#releaseRenderCaches(entry);
+	}
+
+	#releaseCommittedRenderCaches(): void {
+		for (let index = 0; index < this.#frontier; index++) {
+			this.#releaseRenderCaches(this.#entries[index]!);
+		}
+	}
+
+	#releaseRenderCaches(entry: TranscriptEntry): void {
+		const release = entry.component.releaseRenderCaches;
+		if (release === undefined) return;
+		try {
+			release.call(entry.component);
+		} catch (err) {
+			if (this.#releaseFailures.has(entry.component)) return;
+			this.#releaseFailures.add(entry.component);
+			logger.warn("Transcript block failed to release render caches", {
+				component: entry.component.constructor.name,
+				error: String(err),
+			});
+		}
 	}
 
 	#startReplay(): void {
@@ -1149,6 +1201,14 @@ export class TranscriptContainer extends Container {
 				continue;
 			}
 			this.#setAllocation(candidate.entry.component, 1, frame);
+			const emergency = (
+				candidate.entry.component as Component & FinalizableBlock
+			).renderTranscriptBlockEmergencyRow?.(width);
+			if (emergency !== undefined) {
+				output.push(emergency);
+				owners.push(candidate.entry.component);
+				continue;
+			}
 			const rendered = this.#renderEntry(candidate.entry, width).slice(
 				this.#projectedEmittedRowCount(candidate.entry, candidate.index, width),
 			);

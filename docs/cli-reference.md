@@ -146,7 +146,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--prewalk-into <id-or-role>` | Arm prewalk with this target instead of the `smol` role. |
 | `--plan-yolo` | Start in read-only plan mode, auto-approve the model's plan proposal, then switch to the execution target to implement it. |
 | `--plan-yolo-into <id-or-role>` | Target model for plan-yolo execution (default the `smol` role); requires `--plan-yolo`. |
-| `--goal <objective>` | Start a fresh interactive session in goal mode and begin working on the objective, without typing `/goal`. Requires `goal.enabled`; interactive only. Bypasses `autoResume`, and is rejected with a positional prompt, `@file` or stdin input, `--resume`/`--continue`/`--fork`/imports, `--plan-yolo`, `--no-tools`, or startup plan mode (`plan.defaultOnStartup`). |
+| `--goal <objective>` | Start a fresh interactive session in goal mode and begin working on the objective, without typing `/goal`. Requires `goal.enabled`; interactive only. Bypasses `autoResume`, and is rejected with a positional prompt, `@file` or stdin input, `--resume`/`--continue`/`--fork`/imports, `--session-id` naming a session with messages, `--plan-yolo`, `--no-tools`, or startup plan mode (`plan.defaultOnStartup`). |
 
 #### Tools, approvals, and runtime
 
@@ -296,7 +296,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `stats` | View usage statistics. | |
 | `stream` | Broadcast local OMP session screens and chat to a public live channel. | |
 | `update` | Check for and install updates; `--canary`/`--stable` switch release channels. | |
-| `usage` | Show provider usage limits for every authenticated account; `usage clients` breaks token burn down per client (with `--days`), `usage invalidate` drops cached reports. | |
+| `usage` | Show provider usage limits for every authenticated account, flagging saved resets close to expiry; `usage clients` breaks token burn down per client (with `--days`), `usage invalidate` drops cached reports, `usage accounts` lists each OAuth account's provider and identity key (the key `task.agentAccountPools` and broker account pools take; no tokens, `--json` supported), and `usage reset` lists each Codex and Claude account's saved rate-limit resets by `<provider>/<credential id>` (`--json`, `--redact`) and `usage reset <provider>/<credential id>` spends one, also from an auth-broker client. | [Task agent discovery](./task-agent-discovery.md#model-and-structured-output-precedence), [saved resets](./settings.md#saved-reset-auto-consumption) |
 | `tiny-models` | Download tiny local models for session titles, memory, and word completion. | [local models](./local-models.md) |
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `toks` | Count file or text tokens with the embedded offline tokenizers. | |

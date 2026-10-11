@@ -351,6 +351,46 @@ release?.();`,
 			}
 		});
 	});
+
+	it("rejects --goal on a session with messages without touching the breadcrumb or keeping it open", async () => {
+		const id = `seat-goal-${process.pid}-${Date.now()}`;
+		await withPrivateCrumb(async (crumb, prior) => {
+			const saved = SessionManager.create(cwd, sessionDir, undefined, { id });
+			saved.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() });
+			await saved.rewriteEntries();
+			await saved.close();
+			fs.writeFileSync(crumb, prior);
+
+			await expect(
+				createSessionManager(args({ goal: "new objective", sessionId: id, sessionDir }), cwd, stubSettings),
+			).rejects.toThrow("--goal requires a fresh session");
+			expect(fs.readFileSync(crumb, "utf8")).toBe(prior);
+
+			// A closed manager released its lease, so the same id reopens without a collision.
+			const reopened = await createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings);
+			if (!reopened) throw new Error("Expected the session to reopen");
+			managers.push(reopened);
+		});
+	});
+
+	it("allows --goal on a new id and on a saved session with no messages", async () => {
+		const metaId = "seat-goal-meta";
+		const meta = SessionManager.create(cwd, sessionDir, undefined, { id: metaId });
+		meta.appendModelChange("test/model");
+		await meta.rewriteEntries();
+		await meta.close();
+
+		for (const id of [metaId, "seat-goal-new"]) {
+			const manager = await createSessionManager(
+				args({ goal: "new objective", sessionId: id, sessionDir }),
+				cwd,
+				stubSettings,
+			);
+			if (!manager) throw new Error(`Expected a goal session for ${id}`);
+			managers.push(manager);
+			expect(manager.getSessionId()).toBe(id);
+		}
+	});
 });
 
 describe("--session-id with a foreign session import", () => {
