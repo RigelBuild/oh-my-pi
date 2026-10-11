@@ -76,6 +76,7 @@
 		"deepinfra/black-forest-labs/FLUX-2-pro"
 	],
 	"web": [
+		"web/litellm",
 		"web/parallel",
 		"web/hosted",
 		"web/exa",
