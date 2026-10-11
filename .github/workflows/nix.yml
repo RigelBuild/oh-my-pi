@@ -2,7 +2,7 @@ name: OMP Nix
 
 on:
   push:
-    branches: [main]
+    branches: [rigel-release]
     paths:
       - ".github/workflows/nix.yml"
       - ".cargo/**"
@@ -20,7 +20,7 @@ on:
       - "scripts/**"
       - "docs/**"
   pull_request:
-    branches: [main]
+    branches: [rigel-release]
     paths:
       - ".github/workflows/nix.yml"
       - ".cargo/**"
