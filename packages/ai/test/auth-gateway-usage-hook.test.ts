@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -45,7 +45,7 @@ async function boot(onUsage?: (event: GatewayUsageEvent) => void | Promise<void>
 	const events: GatewayUsageEvent[] = [];
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
-		bearerTokens: ["test-token"],
+		authorize: bearerTokenAuthorizer(["test-token"]),
 		storage,
 		resolveModel: () => model,
 		version: "test",
@@ -140,7 +140,7 @@ describe("auth-gateway onUsage hook", () => {
 		const events: GatewayUsageEvent[] = [];
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
-			bearerTokens: ["test-token"],
+			authorize: bearerTokenAuthorizer(["test-token"]),
 			storage,
 			resolveModel: () => model,
 			version: "test",
