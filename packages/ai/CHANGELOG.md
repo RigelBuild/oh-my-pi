@@ -16,6 +16,7 @@
 - `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `CompassAuthCredentialStore` for versioned credential-pool reads and compare-and-swap updates through the Compass gateway. Writes name the serving agent, so the server can confine them to that agent's pool, and list the optional fields they clear.
 - Added `resolveStorage(caller)` to the auth-gateway options, which serves each admitted caller from its tenant's credential pool (keyed on the optional `CallerIdentity.ownerUserId`, else `agentAccountId`); a throw answers 503. Retained provider session state and the session id providers see are kept per caller.
+- Added optional `routeScope(req, run)` to keep an async request context active through auth-gateway storage resolution and streamed credential refresh.
 - Added the provider-enrollment routes `GET /internal/enroll/providers`, `POST /internal/enroll/authorize-url` and `POST /internal/enroll/exchange`. They build the authorize URL and exchange the code statelessly from the server's state and PKCE material. `withEnrollToken(token, authorize)` admits a server enroll token as the enroll caller, which reaches only these routes; agents get 401 there, and the enroll caller gets 401 on every other authenticated route. Enroll responses carry no CORS grant.
 
 ### Changed

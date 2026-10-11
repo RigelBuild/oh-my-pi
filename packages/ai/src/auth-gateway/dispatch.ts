@@ -32,6 +32,8 @@ export interface AuthGatewayRouteOptions {
 	 * live on it); the embedder owns and closes it. A throw answers 503.
 	 */
 	resolveStorage?: (caller: AgentCaller) => AuthStorage | Promise<AuthStorage>;
+	/** Wraps each routed request, including its `resolveStorage` call. */
+	routeScope?: <T>(req: Request, run: () => Promise<T>) => Promise<T>;
 	/**
 	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
 	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse
