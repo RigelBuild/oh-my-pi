@@ -459,7 +459,9 @@ describe("browser tabs whose renderer crashed", () => {
 	beforeAll(() => {
 		if (process.platform !== "linux") return;
 		const pid = `--pid=${process.pid}`;
-		coreLimit = Bun.spawnSync(["prlimit", pid, "--core", "--raw", "--noheadings", "-o", "SOFT"]).stdout.toString().trim();
+		coreLimit = Bun.spawnSync(["prlimit", pid, "--core", "--raw", "--noheadings", "-o", "SOFT"])
+			.stdout.toString()
+			.trim();
 		Bun.spawnSync(["prlimit", pid, "--core=0:"]);
 	});
 	afterAll(() => {
@@ -673,16 +675,20 @@ describe("browser tabs whose renderer crashed", () => {
 					globalThis.Worker = RealWorker;
 				}
 				expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+				// The run resumes only once its caller has been told, so crash-report latency cannot let it slip through.
+				const release = `__crashContinuationRelease${process.pid}`;
 				const run = runInTab(name, {
-					code: `await fetch("http://127.0.0.1:${server.port}/started"); await wait(2_000); await fetch("http://127.0.0.1:${server.port}/after-crash");`,
+					code: `await fetch("http://127.0.0.1:${server.port}/started"); await wait(() => globalThis.${release} === true, { timeout: 10_000, interval: 50 }); await fetch("http://127.0.0.1:${server.port}/after-crash");`,
 					timeoutMs: 10_000,
 					session,
 				}).catch((error: unknown) => error);
 				await started.promise;
 				await crashRenderer(browser, url);
 				expect(String(await run)).toContain("the tab could not be reattached and was closed");
-				// A run left going reaches the second fetch two seconds after it started; nothing marks that it did not.
-				await Bun.sleep(2_500);
+				(globalThis as Record<string, unknown>)[release] = true;
+				// A run left going sees the flag on its next 50 ms poll; nothing marks that it did not.
+				await Bun.sleep(500);
+				delete (globalThis as Record<string, unknown>)[release];
 				expect(requests).toBe(0);
 			} finally {
 				await releaseTab(name, { kill: true });
