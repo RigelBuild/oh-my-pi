@@ -356,6 +356,7 @@ release?.();`,
 		["messages", (m: SessionManager) => m.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() })],
 		["only a model change", (m: SessionManager) => m.appendModelChange("test/model")],
 		["only a saved goal mode", (m: SessionManager) => m.appendModeChange("goal", { objective: "old objective" })],
+		["only its header", (_m: SessionManager) => {}],
 	] as const)("rejects --goal on a saved session with %s and leaves the breadcrumb alone", async (_label, seed) => {
 		const id = `seat-goal-${process.pid}-${Date.now()}`;
 		await withPrivateCrumb(async (crumb, prior) => {
