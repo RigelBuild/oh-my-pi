@@ -453,6 +453,19 @@ describe("browser tabs whose renderer crashed", () => {
 		getSessionFile: () => null,
 	} as unknown as ToolSession;
 
+	// Chromium reports a renderer crash only once its core is dumped, which on a host that keeps cores lands seconds
+	// late, past the runs' timeouts. The browsers launched here inherit this process's soft core limit.
+	let coreLimit: string | undefined;
+	beforeAll(() => {
+		if (process.platform !== "linux") return;
+		const pid = `--pid=${process.pid}`;
+		coreLimit = Bun.spawnSync(["prlimit", pid, "--core", "--raw", "--noheadings", "-o", "SOFT"]).stdout.toString().trim();
+		Bun.spawnSync(["prlimit", pid, "--core=0:"]);
+	});
+	afterAll(() => {
+		if (coreLimit) Bun.spawnSync(["prlimit", `--pid=${process.pid}`, `--core=${coreLimit}:`]);
+	});
+
 	/** Watch the page at `url` over a CDP session of the test's own; `crashed` resolves once Chromium reports its renderer died. */
 	async function watchRenderer(
 		browser: BrowserHandle,
