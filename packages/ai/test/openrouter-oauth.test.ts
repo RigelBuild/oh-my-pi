@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "bun:test";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 
 const KEY_EXCHANGE_URL = "https://openrouter.ai/api/v1/auth/keys";
-const REDIRECT_URI = "http://localhost:54549/callback";
 
 interface RecordedRequest {
 	url: string;
@@ -19,6 +19,12 @@ function login(callbacks: OAuthController) {
 }
 
 describe("OpenRouter OAuth flow", () => {
+	it("prefers loopback port 54549 for its callback", () => {
+		const login = authPolicyFor("openrouter")?.login;
+		if (login?.kind !== "oauth-code") throw new Error("missing OAuth policy for openrouter");
+		expect(login.callback).toMatchObject({ port: 54549, path: "/callback" });
+	});
+
 	it("builds a stateless authorize URL whose challenge binds the exchanged verifier", async () => {
 		let authUrl = "";
 		const requests: RecordedRequest[] = [];
@@ -44,7 +50,8 @@ describe("OpenRouter OAuth flow", () => {
 
 		const parsed = new URL(authUrl);
 		expect(parsed.origin + parsed.pathname).toBe("https://openrouter.ai/auth");
-		expect(parsed.searchParams.get("callback_url")).toBe(REDIRECT_URI);
+		// The flow falls back to a random port when 54549 is taken, so only the loopback shape is fixed.
+		expect(parsed.searchParams.get("callback_url")).toMatch(/^http:\/\/localhost:\d+\/callback$/);
 		expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
 		expect(parsed.searchParams.has("state")).toBe(false);
 		expect(credentials).toBe("sk-or-v1-minted");
