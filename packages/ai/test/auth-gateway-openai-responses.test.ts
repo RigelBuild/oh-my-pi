@@ -460,6 +460,39 @@ describe("openai-responses parseRequest", () => {
 		expect(replay.some(item => item.type === "function_call_output")).toBe(false);
 	});
 
+	it("accepts nullable Responses function tool fields and coalesces them", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.6-luna",
+			input: "hi",
+			tools: [
+				{
+					type: "function",
+					name: "read",
+					description: null,
+					parameters: null,
+					strict: null,
+				},
+			],
+		});
+		const tool = parsed.context.tools?.[0];
+		expect(tool).toMatchObject({ name: "read", description: "", parameters: {} });
+		expect(tool?.strict).toBeUndefined();
+	});
+
+	it("still requires the Responses function tool type and name", () => {
+		for (const tool of [{ type: "function" }, { name: "read" }, { type: "function", name: "" }]) {
+			expect(() => parseRequest({ model: "gpt-5.6-luna", input: "hi", tools: [tool] })).toThrow();
+		}
+	});
+
+	it("rejects malformed non-null Responses function tool fields", () => {
+		for (const field of [{ description: 3 }, { parameters: "invalid" }, { strict: "true" }]) {
+			expect(() =>
+				parseRequest({ model: "gpt-5.6-luna", input: "hi", tools: [{ type: "function", name: "read", ...field }] }),
+			).toThrow();
+		}
+	});
+
 	it("rejects raw explicit prompt-cache controls instead of silently dropping them", () => {
 		expect(() =>
 			parseRequest({
