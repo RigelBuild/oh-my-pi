@@ -605,6 +605,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 					throw error;
 				}
 				const parked = state.unsynced;
+				// A parked OAuth write was made against the same stale version, so the peer wins it too.
 				const keep = parked?.kind === "disable" && parked.unconditional && parked !== unsynced ? parked : undefined;
 				state.epoch += 1;
 				state.pending = 0;

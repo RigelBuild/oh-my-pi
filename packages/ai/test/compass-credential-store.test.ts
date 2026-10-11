@@ -321,6 +321,36 @@ describe("CompassAuthCredentialStore", () => {
 		}
 	});
 
+	bunTest("a peer write wins over a write parked without scope when an earlier write conflicts", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url, { refreshIntervalMs: 0 }));
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			runWithAgentToken(AGENT_TOKEN, () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-scoped" }),
+			);
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-unscoped" });
+			// A peer bumps the row, so the held write conflicts.
+			server.rows.set("cred/oauth", {
+				...oauthRow(),
+				version: "7",
+				oauth: { ...oauthToken, access: "access-peer" },
+			});
+			held.release();
+			await runWithAgentToken(AGENT_TOKEN, () => store.flush());
+			// The parked write was based on the version the peer replaced, so compare-and-swap drops it.
+			expect(store.hasPendingWrites()).toBe(false);
+			expect(oauthOf(store).credential.access).toBe("access-peer");
+			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-peer");
+		} finally {
+			store.close();
+		}
+	});
+
 	bunTest("treats an empty scoped token as no scope", async () => {
 		const server = startFakeServer([oauthRow()]);
 		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url));
