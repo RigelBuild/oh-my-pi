@@ -93,6 +93,7 @@ import {
 	type ScreenshotChangeResult,
 	type ScreenshotHistory,
 	type ScreenshotOptions,
+	screenshotArea,
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
@@ -154,7 +155,7 @@ import {
 	type TernTargetAction,
 } from "./page-kit";
 import { parseTernSelector, type TernSelector } from "./selectors";
-import { TernBrowserError, type TernSocketClient } from "./wire";
+import { TernError, type TernSocketClient } from "./wire";
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 type DragTarget = string | { readonly x: number; readonly y: number };
@@ -245,7 +246,7 @@ function unsupported(name: string, reason: string): ToolError {
 }
 
 /** The message of a page-side exception answered by Tern (`js` errors), without Tern's prefix. */
-function pageErrorText(error: TernBrowserError): string {
+function pageErrorText(error: TernError): string {
 	return error.message.replace(/^Tern browser \w+ failed \(js\): /, "");
 }
 
@@ -271,7 +272,7 @@ export function userSourceFunction(source: string): string {
 }
 
 /** The first line of a page-side exception, without the `Error: ` prefix: agent-readable kit failures. */
-function kitErrorText(error: TernBrowserError): string {
+function kitErrorText(error: TernError): string {
 	return (pageErrorText(error).split("\n", 1)[0] ?? "").replace(/^Error: /, "");
 }
 
@@ -388,13 +389,15 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/**
-	 * Open a PiP over pane `opts.pane` at `about:blank`, configure it (dialog
-	 * policy, allowlist, agent, TLS, downloads, scripts) and only then make the
-	 * first real navigation. The PiP closes again when configuration fails,
-	 * and when the open was abandoned (timeout/abort) but Tern answered late.
+	 * Open a PiP over pane `opts.pane` at `about:blank`, wait for that load to
+	 * report, configure the PiP (dialog policy, allowlist, agent, TLS, downloads,
+	 * scripts) and only then make the first real navigation. The PiP closes
+	 * again when configuration fails, and when the open was abandoned
+	 * (timeout/abort) but Tern answered late.
 	 */
 	static async open(client: TernSocketClient, opts: TernOpenOptions): Promise<TernTab> {
 		const startedAt = Date.now();
+		const remainingMs = (): number => Math.max(1, opts.timeoutMs - (Date.now() - startedAt));
 		const opened = await client.request(
 			{
 				op: "open",
@@ -417,10 +420,9 @@ export class TernTab implements InProcessRunTab {
 		}
 		const tab = new TernTab({ client, block: opened.block, name: opts.name, viewport: opts.viewport });
 		try {
-			await tab.#configure(opts);
+			await tab.#configure(opts, remainingMs());
 			if (opts.url) {
-				const remainingMs = Math.max(1, opts.timeoutMs - (Date.now() - startedAt));
-				await tab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: remainingMs });
+				await tab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: remainingMs() });
 			}
 		} catch (error) {
 			await tab.close({ timeoutMs: 5_000 }).catch(() => undefined);
@@ -478,7 +480,7 @@ export class TernTab implements InProcessRunTab {
 		try {
 			await this.#client.request({ op: "close", block: this.block }, { timeoutMs: opts.timeoutMs });
 		} catch (error) {
-			if (error instanceof TernBrowserError && (error.kind === "not_found" || error.kind === "closed")) return;
+			if (error instanceof TernError && (error.kind === "not_found" || error.kind === "closed")) return;
 			throw error;
 		}
 	}
@@ -520,7 +522,7 @@ export class TernTab implements InProcessRunTab {
 			try {
 				result = await this.#eval(KIT_CALL, [method, args], "isolated", frame);
 			} catch (error) {
-				if (error instanceof TernBrowserError && error.kind === "js") throw new ToolError(kitErrorText(error));
+				if (error instanceof TernError && error.kind === "js") throw new ToolError(kitErrorText(error));
 				throw error;
 			}
 			if (isRecord(result) && result.missing === true) {
@@ -539,7 +541,7 @@ export class TernTab implements InProcessRunTab {
 			if (typeof fn !== "string") throw new ToolError(`${label} expects a function or a source string`);
 			return await this.#eval(userSourceFunction(fn), [], "page", frame);
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`${label} threw a JavaScript exception:\n${pageErrorText(error)}`);
 			}
 			throw error;
@@ -756,8 +758,15 @@ export class TernTab implements InProcessRunTab {
 
 	// ─── Configuration and scripts ────────────────────────────────────────
 
-	async #configure(opts: TernOpenOptions): Promise<void> {
-		await this.#pull();
+	async #configure(opts: TernOpenOptions, timeoutMs: number): Promise<void> {
+		// Tern answers `open` once the page takes calls, before its about:blank load reports. That load's
+		// late `committed`/`loaded` events would otherwise settle the first navigation before it loads.
+		await this.#poll(
+			"The Tern page's initial about:blank load",
+			timeoutMs,
+			() => (this.#events.some(event => event.type === "loaded" || event.type === "failed") ? true : undefined),
+			{ pull: true },
+		);
 		await this.#op("dialogs", { policy: opts.dialogs ?? "default" });
 		if (opts.allowedDomains?.length) {
 			this.#allowedDomains = normalizeAllowedDomains(opts.allowedDomains);
@@ -1653,7 +1662,7 @@ export class TernTab implements InProcessRunTab {
 		try {
 			return await this.#eval(wrapper, [token, args], "page", frame);
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`elementHandle.evaluate() threw a JavaScript exception:\n${pageErrorText(error)}`);
 			}
 			throw error;
@@ -1717,7 +1726,7 @@ export class TernTab implements InProcessRunTab {
 			null,
 			context.timeoutMs,
 		).catch(error => {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`tab.a11y() failed: ${kitErrorText(error)}`);
 			}
 			throw error;
@@ -1750,12 +1759,18 @@ export class TernTab implements InProcessRunTab {
 
 	// ─── Screenshots, PDF ─────────────────────────────────────────────────
 
-	/** Capture raw image bytes: viewport, full page, or an element (optionally in a frame). */
+	/** Capture raw image bytes: viewport, full page, or an element (optionally in a frame), at `scale` image pixels per CSS pixel (default: the viewport's). */
 	async captureBytes(
-		opts: { selector?: string | TernSelector; fullPage?: boolean; format: "png" | "jpeg"; quality?: number },
+		opts: {
+			selector?: string | TernSelector;
+			fullPage?: boolean;
+			format: "png" | "jpeg";
+			quality?: number;
+			scale?: number;
+		},
 		frame: FramePath = null,
 	): Promise<Buffer> {
-		const scale = this.#viewport.deviceScaleFactor ?? 1;
+		const scale = opts.scale ?? this.#viewport.deviceScaleFactor ?? 1;
 		const fields: Record<string, unknown> = { scale, format: opts.format };
 		if (opts.format === "jpeg") fields.quality = opts.quality ?? 80;
 		if (opts.selector !== undefined) {
@@ -1805,8 +1820,9 @@ export class TernTab implements InProcessRunTab {
 		}
 		let comparison: Buffer;
 		let buffer: Buffer;
+		const scale = this.#viewport.deviceScaleFactor ?? 1;
 		try {
-			const capture = { selector: opts.selector, fullPage: opts.fullPage };
+			const capture = { selector: opts.selector, fullPage: opts.fullPage, scale };
 			comparison = await this.captureBytes({ ...capture, format: "png" }, frame);
 			buffer =
 				format === "png"
@@ -1861,6 +1877,7 @@ export class TernTab implements InProcessRunTab {
 				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
+				capture: { area: screenshotArea(opts), scale },
 			});
 			if (opts.annotate) lines.push(formatScreenshotLegend(legend));
 			context.output.push({ type: "text", text: lines.join("\n") });
@@ -1994,7 +2011,7 @@ export class TernTab implements InProcessRunTab {
 				...(opts.text !== undefined ? { text: opts.text } : {}),
 			});
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "failed") {
+			if (error instanceof TernError && error.kind === "failed") {
 				throw new ToolError("tab.handleDialog() found no pending confirm or prompt");
 			}
 			throw error;
@@ -2660,8 +2677,7 @@ export class TernTab implements InProcessRunTab {
 							logger.debug("Tern recording frame capture failed", {
 								error: error instanceof Error ? error.message : String(error),
 							});
-							if (error instanceof TernBrowserError && (error.kind === "closed" || error.kind === "not_found"))
-								return;
+							if (error instanceof TernError && (error.kind === "closed" || error.kind === "not_found")) return;
 						}
 						await Bun.sleep(Math.max(0, intervalMs - (Date.now() - startedAt)));
 					}
