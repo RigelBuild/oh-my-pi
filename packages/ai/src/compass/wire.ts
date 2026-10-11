@@ -55,11 +55,27 @@ export interface GatewayOAuthTokenRequest {
 	activeOrganizationId?: string;
 }
 
+/** Optional token fields, by proto name, that a write can clear; an empty field otherwise keeps its stored value. */
+export const CLEARABLE_OAUTH_FIELDS = {
+	enterpriseUrl: "enterprise_url",
+	projectId: "project_id",
+	email: "email",
+	accountId: "account_id",
+	apiEndpoint: "api_endpoint",
+	orgId: "org_id",
+	orgName: "org_name",
+	authorizedAtUnixMs: "authorized_at_unix_ms",
+	region: "region",
+	inferenceRegion: "inference_region",
+	activeOrganizationId: "active_organization_id",
+} as const satisfies Partial<Record<keyof GatewayOAuthTokenRequest, string>>;
+
 export interface UpdateCredentialOAuthRequest {
 	id: string;
 	token: GatewayOAuthTokenRequest;
 	expectedVersion: GatewayInt64;
 	agentAccountId: string;
+	clearFields: string[];
 }
 
 export interface UpdateCredentialOAuthResponse {

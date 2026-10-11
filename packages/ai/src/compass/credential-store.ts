@@ -22,6 +22,7 @@ import {
 	disableCredentialResponseSchema,
 	listCredentialPoolResponseSchema,
 	updateCredentialOAuthResponseSchema,
+	CLEARABLE_OAUTH_FIELDS,
 } from "./wire";
 
 export interface CompassAuthCredentialStoreOptions {
@@ -126,8 +127,21 @@ function oauthToGateway(credential: OAuthCredential): GatewayOAuthTokenRequest {
 	};
 }
 
+/** Every optional field the token leaves empty; the write makes the stored row match it exactly. */
+function clearedFields(token: GatewayOAuthTokenRequest): string[] {
+	const sent = new Map<string, unknown>(Object.entries(token));
+	return Object.entries(CLEARABLE_OAUTH_FIELDS)
+		.filter(([key]) => !sent.get(key))
+		.map(([, protoName]) => protoName);
+}
+
 function matchesSentToken(listed: GatewayOAuthToken, sent: GatewayOAuthTokenRequest): boolean {
 	const stored = new Map<string, unknown>(Object.entries(listed));
+	const sentFields = new Map<string, unknown>(Object.entries(sent));
+	// The write also cleared every optional field it left empty; a row still holding one is a peer's.
+	const filled = (value: unknown) => value !== undefined && value !== "" && String(value) !== "0";
+	if (Object.keys(CLEARABLE_OAUTH_FIELDS).some(key => !filled(sentFields.get(key)) && filled(stored.get(key))))
+		return false;
 	return Object.entries(sent).every(
 		([key, value]) =>
 			value === undefined ||
@@ -434,6 +448,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	async #sendOAuthUpdate(row: CredentialRow, credential: OAuthCredential, state: RowState) {
 		const token = oauthToGateway(credential);
+		const clearFields = clearedFields(token);
 		// Each pass either returns, throws, or adopts a commit and clears the outcomes, so it ends.
 		for (;;) {
 			try {
@@ -444,6 +459,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 						token,
 						expectedVersion: state.version,
 						agentAccountId: this.#agentAccountId,
+						clearFields,
 					} satisfies UpdateCredentialOAuthRequest,
 					updateCredentialOAuthResponseSchema,
 				);
