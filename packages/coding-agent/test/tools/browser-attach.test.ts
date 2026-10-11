@@ -357,13 +357,17 @@ describe("pickElectronTarget", () => {
 		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
 		await Bun.write(target, Bun.file(process.execPath));
 		await fs.chmod(target, 0o755);
-		await Bun.write(wrapper, '#!/usr/bin/env bash\nHERE="$(dirname "$0")"\nexec -a "$0" "$HERE/chrome" "$@"\n');
+		// google-chrome's fd-only execs, a `{var}` fd allocation, and a redirect ahead of the real target.
+		await Bun.write(
+			wrapper,
+			'#!/usr/bin/env bash\nHERE="$(dirname "$0")"\nexec < /dev/null\nexec > >(exec cat)\nexec 2> >(exec cat >&2)\nexec {log}>/dev/null\nexec 2>/dev/null -a "$0" "$HERE/chrome" "$@"\n',
+		);
 		await fs.chmod(wrapper, 0o755);
 		const child = Bun.spawn(
 			[
 				wrapper,
 				"--eval",
-				'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+				'process.stdout.write("ready\\n"); setInterval(() => {}, 1 << 30)',
 				`--user-data-dir=${profile}`,
 				`--remote-debugging-port=${cdp.port}`,
 			],
@@ -384,6 +388,221 @@ describe("pickElectronTarget", () => {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
+
+	test.skipIf(process.platform !== "linux")("does not reuse a concatenated relative wrapper target", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-relative-concat-"));
+		const wrapper = path.join(root, "chromium");
+		const target = path.join(root, "chrome");
+		const profile = path.join(root, "profile");
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		try {
+			await Bun.write(target, Bun.file(process.execPath));
+			await fs.chmod(target, 0o755);
+			await Bun.write(wrapper, `#!/usr/bin/env bash\nHERE="${root}"\nexec "$HERE/chrome"suffix "$@"\n`);
+			await fs.chmod(wrapper, 0o755);
+			const child = Bun.spawn(
+				[
+					target,
+					"--eval",
+					'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+					`--user-data-dir=${profile}`,
+					`--remote-debugging-port=${cdp.port}`,
+				],
+				{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+			);
+			try {
+				const readiness = child.stdout.getReader();
+				await readiness.read();
+				readiness.releaseLock();
+				expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		} finally {
+			cdp.stop(true);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test.skipIf(process.platform !== "linux")(
+		"reuses Chromium launched through quoted and unquoted absolute-target wrappers",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-absolute-wrapper-"));
+			const wrapper = path.join(root, "chromium");
+			const target = path.join(root, "chrome");
+			const profile = path.join(root, "profile");
+			await Bun.write(target, Bun.file(process.execPath));
+			await fs.chmod(target, 0o755);
+			try {
+				for (const quoted of [true, false]) {
+					const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+					try {
+						await Bun.write(wrapper, `#!/usr/bin/env bash\nexec ${quoted ? `"${target}"` : target} "$@"\n`);
+						await fs.chmod(wrapper, 0o755);
+						const child = Bun.spawn(
+							[
+								wrapper,
+								"--eval",
+								'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+								`--user-data-dir=${profile}`,
+								`--remote-debugging-port=${cdp.port}`,
+							],
+							{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+						);
+						try {
+							const readiness = child.stdout.getReader();
+							await readiness.read();
+							readiness.releaseLock();
+							expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
+								cdpUrl: `http://127.0.0.1:${cdp.port}`,
+								pid: child.pid,
+							});
+							expect(
+								await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}-other`] }),
+							).toBeNull();
+						} finally {
+							child.kill();
+							await child.exited;
+						}
+					} finally {
+						cdp.stop(true);
+					}
+				}
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	test.skipIf(process.platform !== "linux")("reuses Chromium through two literal wrapper execs", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-nested-wrapper-"));
+		const wrapper = path.join(root, "chromium");
+		const intermediate = path.join(root, "intermediate");
+		const target = path.join(root, "chrome");
+		const profile = path.join(root, "profile");
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		try {
+			await Bun.write(target, Bun.file(process.execPath));
+			await fs.chmod(target, 0o755);
+			await Bun.write(intermediate, `#!/usr/bin/env bash\nexec "${target}" "$@"\n`);
+			await fs.chmod(intermediate, 0o755);
+			await Bun.write(wrapper, `#!/usr/bin/env bash\nexec "${intermediate}" "$@"\n`);
+			await fs.chmod(wrapper, 0o755);
+			const child = Bun.spawn(
+				[
+					wrapper,
+					"--eval",
+					'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+					`--user-data-dir=${profile}`,
+					`--remote-debugging-port=${cdp.port}`,
+				],
+				{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+			);
+			try {
+				const readiness = child.stdout.getReader();
+				await readiness.read();
+				readiness.releaseLock();
+				expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
+					cdpUrl: `http://127.0.0.1:${cdp.port}`,
+					pid: child.pid,
+				});
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		} finally {
+			cdp.stop(true);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test.skipIf(process.platform !== "linux")("ignores a generic dispatcher reached through a wrapper", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-dispatcher-wrapper-"));
+		const wrapper = path.join(root, "chromium");
+		const dispatcher = path.join(root, "dispatcher");
+		const profile = path.join(root, "profile");
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		try {
+			await Bun.write(dispatcher, Bun.file(process.execPath));
+			await fs.chmod(dispatcher, 0o755);
+			await Bun.write(wrapper, `#!/usr/bin/env bash\nexec "${dispatcher}" "$@"\n`);
+			await fs.chmod(wrapper, 0o755);
+			const child = Bun.spawn(
+				[
+					dispatcher,
+					"--eval",
+					'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+					`--user-data-dir=${profile}`,
+					`--remote-debugging-port=${cdp.port}`,
+				],
+				{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+			);
+			try {
+				const readiness = child.stdout.getReader();
+				await readiness.read();
+				readiness.releaseLock();
+				expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
+				expect(await findReusableCdp(wrapper)).toBeNull();
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		} finally {
+			cdp.stop(true);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test.skipIf(process.platform !== "linux")(
+		"does not attach through a dynamic or concatenated exec target",
+		async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-dynamic-wrapper-"));
+			const wrapper = path.join(root, "chromium");
+			const target = path.join(root, "chrome");
+			const profile = path.join(root, "profile");
+			const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+			try {
+				await Bun.write(target, Bun.file(process.execPath));
+				await fs.chmod(target, 0o755);
+				const child = Bun.spawn(
+					[
+						target,
+						"--eval",
+						'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+						`--user-data-dir=${profile}`,
+						`--remote-debugging-port=${cdp.port}`,
+					],
+					{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+				);
+				try {
+					const readiness = child.stdout.getReader();
+					await readiness.read();
+					readiness.releaseLock();
+					for (const execTarget of [`"${target}"suffix`, `"${target}${"$"}{SUFFIX}"`]) {
+						await Bun.write(wrapper, `#!/usr/bin/env bash\nexec ${execTarget} "$@"\n`);
+						await fs.chmod(wrapper, 0o755);
+						expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
+					}
+					for (const script of [
+						`#!/usr/bin/env bash\nexec "${target}" "$@"\nexec "$BROWSER" "$@"\n`,
+						`#!/usr/bin/env bash\nexec '$HERE/chrome' "$@"\n`,
+						`#!/usr/bin/env bash\nif [ "${"$"}{USE_ALT:-0}" = 1 ]; then exec "$BROWSER" "$@"; fi\nexec "${target}" "$@"\n`,
+						`#!/usr/bin/env bash\ncat <<'DOC'\nexec "${target}" "$@"\nDOC\nexec "$BROWSER" "$@"\n`,
+					]) {
+						await Bun.write(wrapper, script);
+						expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toBeNull();
+					}
+				} finally {
+					child.kill();
+					await child.exited;
+				}
+			} finally {
+				cdp.stop(true);
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps profile tabs isolated and never kills a borrowed Chrome on close",
