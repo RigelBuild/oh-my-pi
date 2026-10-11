@@ -380,10 +380,12 @@ therefore completes through the paste-code path.
 | `OLLAMA_CLOUD_API_KEY`                              | Ollama web search provider                                                |
 | `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token; fallbacks for `searxng.endpoint` / `searxng.token`, used when the setting is unset, `null`, or blank |
 | `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials; fallbacks used only when the matching `searxng.basic*` setting is unset or `null` (an empty string is a valid credential) |
+| `LITELLM_SEARCH_TOOLS`                             | Comma-separated LiteLLM search tool names tried in order; fallback for `litellm.searchTools` when unset, null, or blank |
 
 DuckDuckGo search is keyless — it queries the no-JS HTML frontend (`html.duckduckgo.com`) and needs no credentials; it also feeds the credential-free `public` aggregate (alongside startpage, google, ecosia, and mojeek).
 
 SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.omp/agent/config.yml`; environment variables are fallbacks.
+LiteLLM search uses `LITELLM_API_KEY` from the provider credential table and `LITELLM_BASE_URL` for its API endpoint (default `http://localhost:4000/v1`). Configure `LITELLM_SEARCH_TOOLS` with the LiteLLM `search_tools` names to enable search.
 
 ### Anthropic web search authentication
 

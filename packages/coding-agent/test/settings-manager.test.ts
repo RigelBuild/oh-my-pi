@@ -1903,6 +1903,7 @@ describe("Settings", () => {
 			"xai/grok-4.5",
 			"web/exa",
 			"web/tavily",
+			"web/litellm",
 		];
 		const webOrderedCandidates = [
 			...webOrderedHead,

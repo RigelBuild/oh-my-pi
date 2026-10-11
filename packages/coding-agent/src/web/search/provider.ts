@@ -35,6 +35,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	ecosia: () => import("./providers/ecosia").then(m => new m.EcosiaProvider()),
 	startpage: () => import("./providers/startpage").then(m => new m.StartpageProvider()),
 	mojeek: () => import("./providers/mojeek").then(m => new m.MojeekProvider()),
+	litellm: () => import("./providers/litellm").then(m => new m.LiteLLMProvider()),
 	public: () => import("./providers/public").then(m => new m.PublicWebProvider()),
 };
 

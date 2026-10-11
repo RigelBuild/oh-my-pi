@@ -38,6 +38,7 @@
   - `packages/coding-agent/src/web/search/providers/ollama.ts` — Ollama web search adapter.
   - `packages/coding-agent/src/web/search/providers/tavily.ts` — Tavily search adapter.
   - `packages/coding-agent/src/web/search/providers/tinyfish.ts` — TinyFish search adapter.
+  - `packages/coding-agent/src/web/search/providers/litellm.ts` — LiteLLM router search adapter.
   - `packages/coding-agent/src/web/search/providers/xai.ts` — xAI Responses web-search adapter.
   - `packages/coding-agent/src/web/search/providers/zai.ts` — Z.AI remote MCP adapter.
   - `packages/coding-agent/src/web/parallel.ts` — Parallel search/extract HTTP client.
@@ -114,7 +115,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - **Fallbacks**: `retry.fallbackChains.web`. If it is set (even as an empty list), exactly those selectors follow the primary and are explicit. If it is unset, every entry of the built-in `web` priority list that matches an available model follows as a non-explicit candidate. Duplicate models are dropped, and a model listed by any explicit selector stays explicit.
   - **Explicit vs automatic**: explicit candidates use `isExplicitlyAvailable()`, so Perplexity and Public Web can run their unauthenticated paths when you select them. Parallel, Exa, and Firecrawl run their keyless paths in either mode. Automatic candidates use `isAvailable()` and are skipped when their credentials are missing.
   - **Per-request selector**: `SearchQueryParams.model` (`omp q --model web/duckduckgo "…"`) replaces the whole chain with that single explicit candidate.
-  - **Default chain** (`packages/coding-agent/src/priority.json`): `web/parallel`, `web/hosted`, `web/exa`, `web/firecrawl`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. Parallel/Exa/Firecrawl offer keyless paths but use configured credentials when available; hosted search uses the session provider's credential. The chain is not a guarantee of zero billing. Other paid engines/chat providers require explicit role/fallback configuration. Public Web is explicit-only and never runs automatically.
+- **Default chain** (`packages/coding-agent/src/priority.json`): `web/litellm`, `web/parallel`, `web/hosted`, `web/exa`, `web/firecrawl`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. LiteLLM is skipped unless both credentials and `litellm.searchTools` are configured. Parallel/Exa/Firecrawl offer keyless paths but use configured credentials when available; hosted search uses the session provider's credential. The chain is not a guarantee of zero billing. Other paid engines/chat providers require explicit role/fallback configuration. Public Web is explicit-only and never runs automatically.
   - **Legacy settings**: on load, `packages/coding-agent/src/config/settings.ts` migrates `providers.webSearch`, `providers.webSearchOrder`, `providers.webSearchExclude`, and `providers.webSearchGeminiModel` into `modelRoles.web` plus `retry.fallbackChains.web`, then deletes the old keys. The migration never overwrites a role or chain that is already set. The migrated chain is the listed providers followed by the default chain, with excluded providers removed; `providers.webSearchGeminiModel` only shapes a listed `gemini` entry.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
@@ -272,7 +273,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - Many provider adapters accept `AbortSignal`; `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it as `params.signal` to providers and rethrows cancellation during fallback.
 
 ## Limits & Caps
-- Default chain length: 11 selectors (the `web` list in `packages/coding-agent/src/priority.json`).
+- Default chain length: 12 selectors (the `web` list in `packages/coding-agent/src/priority.json`).
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
@@ -287,6 +288,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
 - Kagi result count: default `10`, max `40` (`packages/coding-agent/src/web/search/providers/kagi.ts`).
 - SearXNG result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/searxng.ts`).
+- LiteLLM result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/litellm.ts`).
 - OpenAI API local sources/citations cap: `num_search_results` before `limit`, default `10`, max `100`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/openai.ts`).
 - xAI local sources/citations cap: `num_search_results` before `limit`, omitted/invalid/zero => default `10`, max `30`; the count is not sent upstream (`packages/coding-agent/src/web/search/providers/xai.ts`).
 - Perplexity API-key mode defaults: `max_tokens = 8192`, `temperature = 0.2`, `num_search_results = 20` (`packages/coding-agent/src/web/search/providers/perplexity.ts`).
