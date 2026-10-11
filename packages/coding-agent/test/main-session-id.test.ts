@@ -352,11 +352,15 @@ release?.();`,
 		});
 	});
 
-	it("rejects --goal on a session with messages without touching the breadcrumb or keeping it open", async () => {
+	it.each([
+		["messages", (m: SessionManager) => m.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() })],
+		["only a model change", (m: SessionManager) => m.appendModelChange("test/model")],
+		["only a saved goal mode", (m: SessionManager) => m.appendModeChange("goal", { objective: "old objective" })],
+	] as const)("rejects --goal on a saved session with %s and leaves the breadcrumb alone", async (_label, seed) => {
 		const id = `seat-goal-${process.pid}-${Date.now()}`;
 		await withPrivateCrumb(async (crumb, prior) => {
 			const saved = SessionManager.create(cwd, sessionDir, undefined, { id });
-			saved.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() });
+			seed(saved);
 			await saved.rewriteEntries();
 			await saved.close();
 			fs.writeFileSync(crumb, prior);
@@ -366,30 +370,22 @@ release?.();`,
 			).rejects.toThrow("--goal requires a fresh session");
 			expect(fs.readFileSync(crumb, "utf8")).toBe(prior);
 
-			// A closed manager released its lease, so the same id reopens without a collision.
+			// The rejected launch took no lease, so the same id still reopens.
 			const reopened = await createSessionManager(args({ sessionId: id, sessionDir }), cwd, stubSettings);
 			if (!reopened) throw new Error("Expected the session to reopen");
 			managers.push(reopened);
 		});
 	});
 
-	it("allows --goal on a new id and on a saved session with no messages", async () => {
-		const metaId = "seat-goal-meta";
-		const meta = SessionManager.create(cwd, sessionDir, undefined, { id: metaId });
-		meta.appendModelChange("test/model");
-		await meta.rewriteEntries();
-		await meta.close();
-
-		for (const id of [metaId, "seat-goal-new"]) {
-			const manager = await createSessionManager(
-				args({ goal: "new objective", sessionId: id, sessionDir }),
-				cwd,
-				stubSettings,
-			);
-			if (!manager) throw new Error(`Expected a goal session for ${id}`);
-			managers.push(manager);
-			expect(manager.getSessionId()).toBe(id);
-		}
+	it("allows --goal on a new id", async () => {
+		const manager = await createSessionManager(
+			args({ goal: "new objective", sessionId: "seat-goal-new", sessionDir }),
+			cwd,
+			stubSettings,
+		);
+		if (!manager) throw new Error("Expected a goal session");
+		managers.push(manager);
+		expect(manager.getSessionId()).toBe("seat-goal-new");
 	});
 });
 

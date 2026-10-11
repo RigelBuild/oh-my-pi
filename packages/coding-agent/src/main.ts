@@ -116,7 +116,6 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import {
 	assertValidSessionId,
 	ForkSourceNotFoundError,
-	hasConversationalHistory,
 	SessionIdCollisionError,
 	SessionManager,
 	SessionMoveRefusedError,
@@ -1334,15 +1333,14 @@ export async function createSessionManager(
 	if (sessionId !== undefined) {
 		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
 		if (existing) {
+			// `--goal` seeds a fresh session only; reopening any saved session is a resume.
+			if (parsed.goal !== undefined) {
+				throw new CliUsageError("--goal requires a fresh session; --session-id names an existing session.");
+			}
 			// No breadcrumb until the lease is held, so a failed launch leaves it alone.
 			const manager = await SessionManager.open(existing, parsed.sessionDir, undefined, {
 				suppressBreadcrumb: true,
 			});
-			// `--goal` seeds a fresh session only; reopening one with messages is a resume.
-			if (parsed.goal !== undefined && hasConversationalHistory(manager.getEntries())) {
-				await manager.close();
-				throw new CliUsageError("--goal requires a fresh session; --session-id names an existing session.");
-			}
 			try {
 				manager.reserveExactId({ rememberBreadcrumb: true });
 			} catch (err) {
