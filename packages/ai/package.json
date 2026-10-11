@@ -78,6 +78,11 @@
 			"types": "./src/auth-broker/index.ts",
 			"import": "./src/auth-broker/index.ts"
 		},
+		"./compass": {
+			"types": "./src/compass/index.ts",
+			"import": "./src/compass/index.ts"
+		},
+
 		"./auth-broker/*": {
 			"types": "./src/auth-broker/*.ts",
 			"import": "./src/auth-broker/*.ts"
