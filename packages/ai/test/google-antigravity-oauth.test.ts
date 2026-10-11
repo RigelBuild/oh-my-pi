@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { AuthStorage, type AuthStorageOptions, SqliteAuthCredentialStore } from "../src/auth-storage";
 import {
 	ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
 	googleAntigravityProjectHook,
 } from "../src/registry/oauth/google-antigravity";
+import { refreshOAuthToken } from "../src/registry/oauth";
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const LOAD_CODE_ASSIST_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist`;
 const ONBOARD_USER_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal:onboardUser`;
 const OPERATION_URL = `${CLOUD_CODE_ASSIST_ENDPOINT}/v1internal/operations/onboard-123`;
+const USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
@@ -218,5 +221,402 @@ describe("Antigravity OAuth project discovery", () => {
 
 		await expect(discoverAntigravityProject()).rejects.toThrow("loadCodeAssist failed: 201 Created: created");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves stored identity when refresh userinfo is unavailable", async () => {
+		const result = await googleAntigravityProjectHook(
+			{ access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 60_000 },
+			{
+				provider: "google-antigravity",
+				phase: "refresh",
+				raw: {},
+				fetch,
+				stored: {
+					access: "old-access",
+					refresh: "old-refresh",
+					expires: 0,
+					accountId: "account-123",
+					email: "user@example.test",
+					projectId: "project-123",
+				},
+			},
+		);
+
+		expect(result).toMatchObject({ accountId: "account-123", email: "user@example.test", projectId: "project-123" });
+		expect(result.access).toBe("fresh-access");
+	});
+
+	it("rejects a refreshed credential whose account identity conflicts", async () => {
+		await expect(
+			googleAntigravityProjectHook(
+				{
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 60_000,
+					accountId: "account-new",
+				},
+				{
+					provider: "google-antigravity",
+					phase: "refresh",
+					raw: {},
+					fetch,
+					stored: {
+						access: "old-access",
+						refresh: "old-refresh",
+						expires: 0,
+						accountId: "account-old",
+						projectId: "project-123",
+					},
+				},
+			),
+		).rejects.toThrow("account identity conflicts");
+	});
+});
+
+describe("Antigravity compiled OAuth refresh rule", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function mockRefresh(userinfoResponse: Response) {
+		const requests: string[] = [];
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | URL | Request) => {
+					const url = String(input);
+					requests.push(url);
+					if (url === "https://oauth2.googleapis.com/token") {
+						return jsonResponse({
+							access_token: "fresh-access",
+							refresh_token: "fresh-refresh",
+							expires_in: 3600,
+						});
+					}
+					if (url === USERINFO_URL) return userinfoResponse;
+					throw new Error(`Unexpected Antigravity OAuth request: ${url}`);
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		);
+		return { fetchSpy, requests };
+	}
+
+	it("preserves stored identity when refresh userinfo is unavailable", async () => {
+		const { requests } = mockRefresh(jsonResponse({ error: "temporarily unavailable" }, 503));
+		const refreshed = await refreshOAuthToken("google-antigravity", {
+			access: "old-access",
+			refresh: "old-refresh",
+			expires: 0,
+			accountId: "account-123",
+			email: "user@example.test",
+			projectId: "project-123",
+		});
+
+		expect(refreshed).toMatchObject({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			accountId: "account-123",
+			email: "user@example.test",
+			projectId: "project-123",
+		});
+		expect(requests).toEqual(["https://oauth2.googleapis.com/token", USERINFO_URL]);
+	});
+
+	it("rejects a refreshed userinfo identity that differs from the stored account", async () => {
+		mockRefresh(jsonResponse({ id: "account-other", email: "other@example.test" }));
+		await expect(
+			refreshOAuthToken("google-antigravity", {
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: 0,
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			}),
+		).rejects.toThrow("account identity conflicts");
+	});
+
+	it("requires a stored projectId before refreshing", async () => {
+		const { fetchSpy, requests } = mockRefresh(jsonResponse({ id: "account-123" }));
+		await expect(
+			refreshOAuthToken("google-antigravity", {
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: 0,
+				accountId: "account-123",
+			}),
+		).rejects.toThrow("missing projectId");
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(requests).toEqual([]);
+	});
+});
+
+describe("Antigravity AuthStorage refresh persistence", () => {
+	async function makeStorage(
+		refreshOAuthCredential: NonNullable<AuthStorageOptions["refreshOAuthCredential"]>,
+	): Promise<AuthStorage> {
+		return AuthStorage.create(":memory:", { refreshOAuthCredential });
+	}
+
+	async function makeLeaseFreeStorage(
+		refreshOAuthCredential: NonNullable<AuthStorageOptions["refreshOAuthCredential"]>,
+	): Promise<AuthStorage> {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const leaseMethods: Record<string, true> = {
+			tryAcquireCredentialRefreshLease: true,
+			getCredentialRefreshLeaseExpiresAt: true,
+			releaseCredentialRefreshLease: true,
+			renewCredentialRefreshLease: true,
+		};
+		const storeWithoutLeases = new Proxy(store, {
+			get(target, property) {
+				if (typeof property === "string" && leaseMethods[property] === true) return undefined;
+				const value = Reflect.get(target, property, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		return new AuthStorage(storeWithoutLeases, { refreshOAuthCredential });
+	}
+
+	it("persists merged identity through normal refresh", async () => {
+		const storage = await makeStorage(async () => ({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 60_000,
+		}));
+		try {
+			await storage.credentials.set("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: 0,
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			});
+			const apiKey = await storage.keys.get("google-antigravity");
+			expect(apiKey).toContain("fresh-access");
+			expect(storage.credentials.get("google-antigravity")).toMatchObject({
+				access: "fresh-access",
+				refresh: "fresh-refresh",
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("persists merged identity through forced refresh", async () => {
+		const storage = await makeStorage(async () => ({
+			access: "forced-access",
+			refresh: "forced-refresh",
+			expires: Date.now() + 60_000,
+		}));
+		try {
+			await storage.credentials.set("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: Date.now() + 60_000,
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			});
+			const id = storage.credentials.list("google-antigravity")[0]?.id;
+			if (id === undefined) throw new Error("missing credential id");
+			expect((await storage.oauth.refresh(id)).credential).toMatchObject({
+				access: "forced-access",
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("blocks normal refresh conflicts without changing stored state", async () => {
+		const storage = await makeLeaseFreeStorage(async () => ({
+			access: "conflicting-access",
+			refresh: "conflicting-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-other",
+		}));
+		try {
+			await storage.credentials.set("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: 0,
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			});
+			expect(await storage.keys.get("google-antigravity")).toBeUndefined();
+			expect(storage.credentials.get("google-antigravity")).toMatchObject({
+				access: "old-access",
+				accountId: "account-123",
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("rejects forced refresh conflicts without changing stored state", async () => {
+		const storage = await makeLeaseFreeStorage(async () => ({
+			access: "conflicting-access",
+			refresh: "conflicting-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-other",
+		}));
+		try {
+			await storage.credentials.set("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: Date.now() + 60_000,
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			});
+			const id = storage.credentials.list("google-antigravity")[0]?.id;
+			if (id === undefined) throw new Error("missing credential id");
+			await expect(storage.oauth.refresh(id)).rejects.toThrow("account identity conflicts");
+			expect(storage.credentials.get("google-antigravity")).toMatchObject({
+				access: "old-access",
+				accountId: "account-123",
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("rejects conflicting lease-backed delegate refresh before persistence", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store, {
+			refreshOAuthCredential: async () => ({
+				access: "conflicting-access",
+				refresh: "conflicting-refresh",
+				expires: Date.now() + 60_000,
+				accountId: "account-other",
+			}),
+		});
+		const original = {
+			type: "oauth" as const,
+			access: "old-access",
+			refresh: "old-refresh",
+			expires: Date.now() - 60_000,
+			accountId: "account-123",
+			email: "user@example.test",
+			projectId: "project-123",
+		};
+		try {
+			await storage.credentials.set("google-antigravity", original);
+
+			const [result] = await storage.health.check();
+			const persisted = store.listAuthCredentials("google-antigravity")[0]?.credential;
+
+			expect(result.ok).toBe(false);
+			expect(result.reason).toContain("account identity conflicts");
+			if (persisted?.type !== "oauth") throw new Error("expected persisted OAuth credential");
+			expect({
+				access: persisted.access,
+				refresh: persisted.refresh,
+				expires: persisted.expires,
+				accountId: persisted.accountId,
+				email: persisted.email,
+				projectId: persisted.projectId,
+			}).toEqual({
+				access: original.access,
+				refresh: original.refresh,
+				expires: original.expires,
+				accountId: original.accountId,
+				email: original.email,
+				projectId: original.projectId,
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("rejects peer-adopted Antigravity credentials with conflicting identity", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store, {
+			refreshOAuthCredential: async () => {
+				throw new Error("unexpected refresh");
+			},
+		});
+		try {
+			await storage.credentials.set("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: Date.now() - 60_000,
+				accountId: "account-123",
+				projectId: "project-123",
+			});
+			const listAuthCredentials = store.listAuthCredentials.bind(store);
+			let peerRotated = false;
+			vi.spyOn(store, "listAuthCredentials").mockImplementation(provider => {
+				if (provider === "google-antigravity" && !peerRotated) {
+					peerRotated = true;
+					const row = listAuthCredentials(provider)[0];
+					if (!row) throw new Error("missing Antigravity credential");
+					store.updateAuthCredential(row.id, {
+						type: "oauth",
+						access: "peer-access",
+						refresh: "peer-refresh",
+						expires: Date.now() + 120_000,
+						accountId: "account-other",
+						projectId: "project-123",
+					});
+				}
+				return listAuthCredentials(provider);
+			});
+
+			const [result] = await storage.health.check();
+			expect(result.ok).toBe(false);
+			expect(result.reason).toContain("account identity conflicts");
+			expect(store.listAuthCredentials("google-antigravity")[0]?.credential).toMatchObject({
+				type: "oauth",
+				access: "peer-access",
+				accountId: "account-other",
+			});
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("rejects conflicting delegate refreshes during credential health checks", async () => {
+		const storage = await makeLeaseFreeStorage(async () => ({
+			access: "conflicting-access",
+			refresh: "conflicting-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-other",
+		}));
+		try {
+			await storage.credentials.set("google-antigravity", {
+				type: "oauth",
+				access: "old-access",
+				refresh: "old-refresh",
+				expires: Date.now() - 60_000,
+				accountId: "account-123",
+				email: "user@example.test",
+				projectId: "project-123",
+			});
+
+			const [result] = await storage.health.check();
+
+			expect(result.ok).toBe(false);
+			expect(result.reason).toContain("account identity conflicts");
+			expect(storage.credentials.get("google-antigravity")).toMatchObject({
+				access: "old-access",
+				accountId: "account-123",
+			});
+		} finally {
+			storage.close();
+		}
 	});
 });

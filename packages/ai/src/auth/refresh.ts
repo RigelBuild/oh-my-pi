@@ -2,6 +2,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
+import { hasOAuthAccountIdentityConflict } from "../registry/oauth/google-antigravity";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
@@ -322,6 +323,12 @@ export class OAuthRefresher {
 			}
 			if (leaseRenewalError) throw leaseRenewalError;
 
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(current, refreshed)) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
+			}
 			const merged: T = options.mergeRefreshedCredential
 				? options.mergeRefreshedCredential(current, refreshed)
 				: mergeRefreshedCredential(current, refreshed);
@@ -434,11 +441,20 @@ export class OAuthRefresher {
 		reason?: OAuthRefreshReason,
 	): Promise<OAuthCredentials> {
 		const authRecovery = reason === "auth-recovery";
-		if (authRecovery && credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)) {
-			const recent = this.#recentMint(credentialId);
-			if (recent) return recent.credential;
+		const recent =
+			authRecovery && credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)
+				? this.#recentMint(credentialId)
+				: undefined;
+		const refreshed = recent
+			? recent.credential
+			: await this.#refreshSingleFlight(provider, credential, credentialId, signal, reason);
+		if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(credential, refreshed)) {
+			throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+				kind: "validation",
+				provider,
+			});
 		}
-		return this.#refreshSingleFlight(provider, credential, credentialId, signal, reason);
+		return refreshed;
 	}
 
 	/** Refresh without recent-mint reuse; still shares the per-credential in-flight request. */
@@ -661,6 +677,12 @@ export class OAuthRefresher {
 					}
 				}
 				throw error;
+			}
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(attempted, refreshed)) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
 			}
 			// Preserve credential-subtype metadata, such as MCP token endpoints,
 			// that the provider's bare OAuth response cannot reproduce.

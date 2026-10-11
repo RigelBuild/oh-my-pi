@@ -155,6 +155,16 @@ Capability-dependent responses include `Vary: OMP-Auth-Broker-Capabilities` so i
 
 The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using their stored MCP token endpoint/client metadata; it does not need to load the MCP manager.
 
+### Antigravity OAuth identity and refresh
+
+Antigravity credentials use the Google OAuth userinfo `id` as their stable
+`accountId` (the email address is display metadata only). The broker preserves
+the stored account ID, project ID, and email when a refresh succeeds but the
+userinfo request is temporarily unavailable. A refreshed non-empty account ID
+that differs from the stored non-empty ID is rejected as a credential
+validation failure; no part of that refreshed token state is persisted. This
+prevents a transient identity mix-up from re-keying a subscription account.
+
 ## auth-gateway
 
 ### Container boot
@@ -176,7 +186,7 @@ The entrypoint reads one non-empty bearer token from `COMPASS_GATEWAY_TOKEN_FILE
 
 ### CLI
 
-```
+```text
 omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers]
 omp auth-gateway stdio
 omp auth-gateway token   [--regenerate] [--json]
