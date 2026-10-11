@@ -166,7 +166,9 @@ function credentialFromGateway(row: GatewayCredential): AuthCredential | undefin
  * An OAuth resend always sends the row's current credential, never a stored copy.
  * `unconditional` marks a user delete, which outlasts a peer's version bump.
  */
-type Unsynced = { kind: "oauth" } | { kind: "disable"; row: CredentialRow; cause: string; unconditional: boolean };
+type Unsynced =
+	| { kind: "oauth"; seq: number }
+	| { kind: "disable"; row: CredentialRow; cause: string; unconditional: boolean };
 
 /** Writes are queued per row so each RPC carries the version of the state its caller checked. */
 interface RowState {
@@ -190,6 +192,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	readonly #fetch: typeof fetch;
 	readonly #timeoutMs: number;
 	readonly #refreshIntervalMs: number;
+	#oauthSeq = 0;
 	readonly #closeController = new AbortController();
 	readonly #localIdByServerId = new Map<string, number>();
 	readonly #state = new Map<string, RowState>();
@@ -466,16 +469,17 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	#queueOAuthUpdate(row: CredentialRow, credential: OAuthCredential, queuedToken = currentAgentToken()): void {
 		const state = this.#stateFor(row.serverId);
+		const intent: Unsynced = { kind: "oauth", seq: ++this.#oauthSeq };
 		if (!queuedToken) {
-			state.unsynced = { kind: "oauth" };
+			state.unsynced = intent;
 			return;
 		}
 		const epoch = this.#accept(row.serverId);
-		void this.#runWrite(row, epoch, { kind: "oauth" }, queuedToken, async () => {
+		void this.#runWrite(row, epoch, intent, queuedToken, async () => {
 			const response = await this.#sendOAuthUpdate(row, credential, state, queuedToken);
 			state.version = int64String(response.version);
-			// The chain is FIFO, so this write supersedes any earlier failed one.
-			if (state.unsynced?.kind === "oauth") state.unsynced = undefined;
+			// An OAuth intent parked after this write was queued holds a newer credential.
+			if (state.unsynced?.kind === "oauth" && state.unsynced.seq <= intent.seq) state.unsynced = undefined;
 		}).catch(error => this.#logWriteFailure("Compass OAuth update failed", row, this.#errorCode(error)));
 	}
 
@@ -593,7 +597,10 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 					// A transient or revoked-token failure keeps the write for a resend; a definitive one releases it.
 					// A pending delete outranks a later OAuth write to the same row.
 					const deleting = unsynced?.kind === "oauth" && state.unsynced?.kind === "disable";
-					if (unsynced && !deleting && !this.#closed)
+					// A newer OAuth intent parked while this one ran already carries the latest credential.
+					const newer =
+						unsynced?.kind === "oauth" && state.unsynced?.kind === "oauth" && state.unsynced.seq > unsynced.seq;
+					if (unsynced && !deleting && !newer && !this.#closed)
 						state.unsynced = TRANSIENT_CODES.has(code) || code === "unauthenticated" ? unsynced : undefined;
 					throw error;
 				}

@@ -297,6 +297,30 @@ describe("CompassAuthCredentialStore", () => {
 		}
 	});
 
+	bunTest("keeps a write parked without scope while an earlier write lands", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url, { refreshIntervalMs: 0 }));
+		try {
+			const row = oauthOf(store);
+			const held = server.hold("UpdateCredentialOAuth");
+			runWithAgentToken(AGENT_TOKEN, () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-scoped" }),
+			);
+			await held.reached;
+			store.updateAuthCredential(row.id, { ...row.credential, access: "access-unscoped" });
+			held.release();
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-scoped");
+			expect(store.hasPendingWrites()).toBe(true);
+			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.rows.get("cred/oauth")?.oauth?.access).toBe("access-unscoped");
+			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
 	bunTest("treats an empty scoped token as no scope", async () => {
 		const server = startFakeServer([oauthRow()]);
 		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url));
