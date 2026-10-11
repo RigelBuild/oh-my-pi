@@ -1,4 +1,8 @@
-import { isUsageLimit } from "./flags";
+import { isUsageLimit, status as getErrorStatus } from "./flags";
+import { isConcurrencyCapExclusion, isUsageLimitOutcome, parseRateLimitReason } from "./rate-limit";
+import { isProviderRetryableError } from "./retryable";
+import type { Api, Model } from "../types";
+import { extractProviderRetryHint, getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 
 /** A gateway-facing classification of an arbitrary upstream/internal error. */
 export interface GatewayErrorClassification {
@@ -93,4 +97,62 @@ function extractEmbeddedStatus(message: string): number | undefined {
 	if (!raw) return undefined;
 	const code = Number.parseInt(raw, 10);
 	return Number.isFinite(code) && code >= 100 && code < 600 ? code : undefined;
+}
+
+export type UpstreamFailureKind =
+	| "transport"
+	| "server_error"
+	| "rate_limited"
+	| "credential_exhausted"
+	| "not_served"
+	| "setup_error";
+
+export interface UpstreamFailure {
+	readonly kind: UpstreamFailureKind;
+	readonly status?: number;
+	readonly retryAfterMs?: number;
+	readonly message: string;
+}
+
+/** Non-abort failures only. `undefined` means stop. `message` is `errorClassificationMessage ?? errorMessage`. */
+export function classifyUpstreamFailure(
+	model: Model<Api>,
+	error: unknown,
+	status: number | undefined,
+	message: string | undefined,
+): UpstreamFailure | undefined {
+	const errorMessage = error instanceof Error ? error.message : error === undefined ? undefined : String(error);
+	const text = message ?? errorMessage ?? "";
+	const errorStatus = status ?? getErrorStatus(error);
+	const classificationError = error instanceof Error ? new Error(text, { cause: error }) : new Error(text);
+	if (errorStatus !== undefined) Object.assign(classificationError, { status: errorStatus });
+	let kind: UpstreamFailureKind;
+	if (isUsageLimit(classificationError) || isUsageLimitOutcome(errorStatus, text)) {
+		kind = "credential_exhausted";
+	} else if (errorStatus === 401 || (errorStatus === 403 && !isConcurrencyCapExclusion(errorStatus, text))) {
+		kind = "credential_exhausted";
+	} else if ((errorStatus === 403 && isConcurrencyCapExclusion(errorStatus, text)) || errorStatus === 429) {
+		kind = "rate_limited";
+	} else if (errorStatus === 404) kind = "not_served";
+	else if (errorStatus !== undefined) {
+		if (errorStatus === 408 || errorStatus >= 500) kind = "server_error";
+		else return undefined;
+	} else {
+		if (!isProviderRetryableError(classificationError)) return undefined;
+		const reason = parseRateLimitReason(text);
+		if (reason === "RATE_LIMIT_EXCEEDED" || reason === "CONCURRENT_LIMIT") kind = "rate_limited";
+		else if (reason === "MODEL_CAPACITY_EXHAUSTED" || reason === "SERVER_ERROR") kind = "server_error";
+		else kind = "transport";
+	}
+
+	const retryAfterMs =
+		error instanceof Error
+			? getRetryAfterMsFromHeaders(getHeadersFromError(error))
+			: extractProviderRetryHint(model.provider, text);
+	return {
+		kind,
+		...(errorStatus !== undefined && { status: errorStatus }),
+		...(retryAfterMs !== undefined && { retryAfterMs }),
+		message: text,
+	};
 }
