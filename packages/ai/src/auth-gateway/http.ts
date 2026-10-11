@@ -10,7 +10,7 @@ import { getInstallId } from "@oh-my-pi/pi-utils";
 import type { Api, Model } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import type { ClientUsageIdentity } from "../usage";
-import type { AuthGatewayAuthorizer, CallerIdentity } from "./types";
+import type { AgentCaller, AuthGatewayAuthorizer, CallerIdentity, EnrollCaller } from "./types";
 
 const JSON_HEADERS = {
 	"Content-Type": "application/json",
@@ -131,13 +131,16 @@ export function presentedBearer(req: Request): string | undefined {
  * The one caller every request is admitted as under shared bearer tokens. The
  * NUL in its id keeps any real account from colliding with it.
  */
-export const SHARED_TOKEN_CALLER: CallerIdentity = Object.freeze({ agentAccountId: "\u0000shared" });
+export const SHARED_TOKEN_CALLER: AgentCaller = Object.freeze({ kind: "agent", agentAccountId: "\u0000shared" });
 
 /**
  * The caller an empty token set admits. The server matches it by reference: its
  * bearer, if any, was never checked, so there is no credential to keep out of the URL.
  */
-export const UNAUTHENTICATED_CALLER: CallerIdentity = Object.freeze({ agentAccountId: "\u0000shared" });
+export const UNAUTHENTICATED_CALLER: AgentCaller = Object.freeze({ kind: "agent", agentAccountId: "\u0000shared" });
+
+/** The one enrollment caller; {@link withEnrollToken} admits the server's enroll token as it. */
+export const ENROLL_CALLER: EnrollCaller = Object.freeze({ kind: "enroll" });
 
 /** A non-empty id with no NUL: the reserved shared id carries one, so no real id can collide with it. */
 function isAccountId(value: unknown): value is string {
@@ -145,13 +148,13 @@ function isAccountId(value: unknown): value is string {
 }
 
 /**
- * Whether an authorizer result names a caller. Anything else (`undefined`, `{}`,
- * an empty or NUL-bearing id or owner) is answered 401, never mapped to a default caller.
+ * Whether an authorizer result names a caller. Anything else (`undefined`, `{}`, an
+ * unknown kind, an empty or NUL-bearing id or owner) is answered 401, never mapped to a default caller.
  */
 export function isCallerIdentity(value: unknown): value is CallerIdentity {
-	if (value === SHARED_TOKEN_CALLER || value === UNAUTHENTICATED_CALLER) return true;
-	if (typeof value !== "object" || value === null || !("agentAccountId" in value)) return false;
-	if (!isAccountId(value.agentAccountId)) return false;
+	if (value === SHARED_TOKEN_CALLER || value === UNAUTHENTICATED_CALLER || value === ENROLL_CALLER) return true;
+	if (typeof value !== "object" || value === null || !("kind" in value) || value.kind !== "agent") return false;
+	if (!("agentAccountId" in value) || !isAccountId(value.agentAccountId)) return false;
 	return !("ownerUserId" in value) || value.ownerUserId === undefined || isAccountId(value.ownerUserId);
 }
 
@@ -160,9 +163,26 @@ export function isCallerIdentity(value: unknown): value is CallerIdentity {
  * get their own namespace, so two agents sending the same key never share one;
  * the shared caller keeps the key verbatim so existing caches stay warm.
  */
-export function callerSessionId(caller: CallerIdentity, sessionId: string): string {
+export function callerSessionId(caller: AgentCaller, sessionId: string): string {
 	if (caller.agentAccountId === SHARED_TOKEN_CALLER.agentAccountId) return sessionId;
 	return deterministicUuid(`${caller.agentAccountId}\u0000${sessionId}`);
+}
+
+/**
+ * Admits the server's enroll token as {@link ENROLL_CALLER} and hands every other
+ * request to `authorize`. The compare is timing-safe, including across lengths.
+ */
+export function withEnrollToken(enrollToken: string, authorize: AuthGatewayAuthorizer): AuthGatewayAuthorizer {
+	// A presented bearer is trimmed, so a padded token could never match: refuse it here, not as a silent 401.
+	if (!enrollToken || enrollToken.trim() !== enrollToken) {
+		throw new Error("enroll token must be non-empty with no surrounding whitespace");
+	}
+	const expected = TOKEN_ENCODER.encode(enrollToken);
+	return req => {
+		const bearer = presentedBearer(req);
+		if (bearer !== undefined && timingSafeEqual(TOKEN_ENCODER.encode(bearer), expected)) return ENROLL_CALLER;
+		return authorize(req);
+	};
 }
 
 /**

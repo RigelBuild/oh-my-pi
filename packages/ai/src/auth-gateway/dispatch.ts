@@ -16,7 +16,7 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { extractProviderRetryHint } from "../utils/retry-after";
-import type { AuthGatewayServerOptions, CallerIdentity } from "./types";
+import type { AgentCaller, AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
 
@@ -31,7 +31,7 @@ export interface AuthGatewayRouteOptions {
 	 * instance for that key on every call (stickiness, backoff and the usage cache
 	 * live on it); the embedder owns and closes it. A throw answers 503.
 	 */
-	resolveStorage?: (caller: CallerIdentity) => AuthStorage | Promise<AuthStorage>;
+	resolveStorage?: (caller: AgentCaller) => AuthStorage | Promise<AuthStorage>;
 	/**
 	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
 	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse

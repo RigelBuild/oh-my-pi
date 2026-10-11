@@ -145,8 +145,9 @@ export interface AuthGatewayFormatModule {
 	formatError(status: number, type: string, message: string): Response;
 }
 
-/** The caller a request was admitted as. */
-export interface CallerIdentity {
+/** An agent admitted on its own bearer. */
+export interface AgentCaller {
+	kind: "agent";
 	/** The agent the request belongs to; retained provider sessions are kept per agent. */
 	agentAccountId: string;
 	/**
@@ -155,6 +156,14 @@ export interface CallerIdentity {
 	 */
 	ownerUserId?: string;
 }
+
+/** The server's enrollment caller: admitted on `/internal/enroll/*` only, and refused everywhere else. */
+export interface EnrollCaller {
+	kind: "enroll";
+}
+
+/** The caller a request was admitted as. */
+export type CallerIdentity = AgentCaller | EnrollCaller;
 
 /**
  * Admits a request: the caller it belongs to, or `null` to answer 401. A throw
