@@ -178,7 +178,7 @@ interface RowState {
 	pending: number;
 	/** A fire-and-forget write parked without scope or after a transient or revoked-token failure. */
 	unsynced?: Unsynced;
-	/** A failed resend waits one refresh interval before the next try. */
+	/** After a kept failure, the next resend waits one refresh interval; a new park clears it. */
 	resendAfterMs?: number;
 	/** OAuth writes that failed transiently and may have committed anyway. */
 	unknownOutcomes?: GatewayOAuthTokenRequest[];
@@ -374,7 +374,9 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	/** Hides the row and keeps the delete for the next poll's resend. */
 	#parkDelete(intent: Extract<Unsynced, { kind: "disable" }>): void {
 		this.#removeLocalRow(intent.row.id);
-		this.#stateFor(intent.row.serverId).unsynced = intent;
+		const state = this.#stateFor(intent.row.serverId);
+		state.unsynced = intent;
+		state.resendAfterMs = undefined;
 	}
 
 	upsertAuthCredential(_provider: string, _credential: AuthCredential): Promise<StoredAuthCredential[]> {
@@ -640,7 +642,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#maybeBackgroundRefresh(): void {
-		// No request behind the poll means no door call; a parked write resends on every scoped poll.
+		// No request behind the poll means no door call; a parked write resends on the next scoped poll past its backoff.
 		const agentToken = currentAgentToken();
 		if (this.#closed || !agentToken) return;
 		this.#resendUnsynced(agentToken);

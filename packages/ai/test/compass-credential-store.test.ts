@@ -443,6 +443,26 @@ describe("CompassAuthCredentialStore", () => {
 		}
 	});
 
+	bunTest("resends a delete parked without scope despite an earlier write's backoff", async () => {
+		const server = startFakeServer([oauthRow()]);
+		const store = await runWithAgentToken(AGENT_TOKEN, () => storeFor(server.url, { refreshIntervalMs: 60_000 }));
+		try {
+			const row = oauthOf(store);
+			server.failNext("UpdateCredentialOAuth", () => Response.json({ code: "unauthenticated" }, { status: 401 }));
+			runWithAgentToken(AGENT_TOKEN, () =>
+				store.updateAuthCredential(row.id, { ...row.credential, access: "access-retried" }),
+			);
+			await store.flush();
+			expect(await store.deleteAuthCredential(row.id, "logout")).toBe(true);
+			runWithAgentToken(OTHER_AGENT_TOKEN, () => store.pollExternalChanges());
+			await store.flush();
+			expect(server.rows.has("cred/oauth")).toBe(false);
+			expect(store.hasPendingWrites()).toBe(false);
+		} finally {
+			store.close();
+		}
+	});
+
 	test("maps OAuth int64 strings and API keys while ignoring scope", async () => {
 		const server = startFakeServer([
 			oauthRow(),
