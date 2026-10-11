@@ -73,4 +73,18 @@ export const cfgSearxngEngines = register({ id: "searxng.engines", type: "string
 
 export const cfgSearxngLanguage = register({ id: "searxng.language", type: "string", default: undefined });
 
+// LiteLLM
+export const cfgLitellmSearchTools = register({
+	id: "litellm.searchTools",
+	type: "string",
+	default: undefined,
+	env: { name: "LITELLM_SEARCH_TOOLS", fallback: "blank" },
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "LiteLLM Search Tools",
+		description: "Comma-separated LiteLLM search_tools names to try in order",
+	},
+});
+
 export const cfgSearxngSafesearch = register({ id: "searxng.safesearch", type: "number", default: undefined });
