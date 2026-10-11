@@ -260,7 +260,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
 	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic"]),
 	"supports-between-tools-thinking": wire("supportsBetweenToolsThinking", ["anthropic"]),
-	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
+	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic", "bedrock"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
 
 	// ── wire: bedrock-converse-stream ──
@@ -406,6 +406,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
+	/**
+	 * Most questions one System One judgment request may carry; the judge
+	 * splits larger requests. Unassigned: the endpoint takes any batch size.
+	 */
+	"judgment-questions-max": { key: "judgmentQuestionsMax", set: "catalog", shape: "scalar" },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },

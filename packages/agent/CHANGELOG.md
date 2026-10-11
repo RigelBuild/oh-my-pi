@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved append-only context caching so a turn with an unchanged system prompt skips rejoining the prompt and renders per-tool cache keys once per build, making repeat turns faster ([#15218](https://github.com/can1357/oh-my-pi/pull/15218) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.9.0] - 2026-10-11
+
 ### Fixed
 
-- Fixed `queue_update` events going stale while a queued steer was adopted into the running turn as live steering, withdrawn by the interrupt path, or landed in the transcript; those transitions now notify queue listeners like every other queue mutator ([#14821](https://github.com/can1357/oh-my-pi/pull/14821) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed stale queue updates when queued steering is adopted, withdrawn, or added to the transcript, ensuring queue listeners consistently receive the latest state.
 
 ## [18.8.8] - 2026-10-10
 

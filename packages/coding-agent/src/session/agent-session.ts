@@ -930,6 +930,7 @@ export class AgentSession implements SettingsScope {
 	// Retry state
 	readonly #recovery: TurnRecovery;
 	#textOutputCommitted = true;
+	#stopTimeTodoRemindersEnabled = true;
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
@@ -2521,11 +2522,14 @@ export class AgentSession implements SettingsScope {
 		// the CLI path), so discovery-backed providers (e.g. GitHub Copilot, or a
 		// models.yml LiteLLM provider with a cold cache) may not be populated yet.
 		// Reactivate a `no_model` advisor (#9010), retract stale
-		// retry.fallbackChains warnings (#10048), and rebind the active model to
-		// its refreshed same-selector entry (#10488) once discovery settles.
+		// retry.fallbackChains warnings (#10048), rebind the active model to
+		// its refreshed same-selector entry (#10488), and surface registry
+		// warnings discovery produced (e.g. an unreachable OLLAMA_BASE_URL)
+		// once discovery settles.
 		void this.#retryInactiveAdvisorAfterModelDiscovery();
 		void this.#revalidateFallbackChainsAfterModelDiscovery();
 		if (config.rebindModelAfterDiscovery) void this.#rebindActiveModelAfterModelDiscovery();
+		void this.#surfaceModelRegistryWarningsAfterDiscovery();
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
@@ -4557,7 +4561,8 @@ export class AgentSession implements SettingsScope {
 					await emitAgentEndNotification({ willContinue: true });
 					return;
 				}
-				const todoContinuationScheduled = await this.#todo.checkCompletion(msg);
+				const todoContinuationScheduled =
+					this.#stopTimeTodoRemindersEnabled && (await this.#todo.checkCompletion(msg));
 				if (todoContinuationScheduled) {
 					await emitAgentEndNotification({ willContinue: true });
 					return;
@@ -6180,6 +6185,11 @@ export class AgentSession implements SettingsScope {
 			if (!this.agent.state.isStreaming && this.#inFlightEventHandlers.size === 0) return;
 		}
 	}
+	/** Stop todo reminders from starting extra turns in a single-shot print run. */
+	disableStopTimeTodoReminders(): void {
+		this.#stopTimeTodoRemindersEnabled = false;
+	}
+
 	/**
 	 * Prevent advisor notes from starting hidden primary turns while a headless
 	 * caller prints and drains the final primary response.
@@ -13497,6 +13507,22 @@ export class AgentSession implements SettingsScope {
 		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
 			this.#emit({ type: "config_warnings_changed" });
 		}
+	}
+
+	/**
+	 * Move registry warnings produced by the initial background discovery into
+	 * {@link configWarnings} so the interactive header shows them. Startup drains
+	 * the registry before discovery runs, so a discovery-time warning (an
+	 * env-redirected built-in provider failing) would otherwise only be logged.
+	 */
+	async #surfaceModelRegistryWarningsAfterDiscovery(): Promise<void> {
+		if (this.#isDisposed || typeof this.#modelRegistry.awaitInitialBackgroundRefresh !== "function") return;
+		await this.#modelRegistry.awaitInitialBackgroundRefresh(this.#modelDiscoveryAbortController.signal);
+		if (this.#isDisposed) return;
+		const warnings = this.#modelRegistry.drainConfigWarnings();
+		if (warnings.length === 0) return;
+		this.configWarnings.push(...warnings);
+		this.#emit({ type: "config_warnings_changed" });
 	}
 
 	/**

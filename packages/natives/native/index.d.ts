@@ -795,10 +795,11 @@ export interface ApplicationQuery {
 }
 
 /**
- * Applies an `HDiffPatch` single-stream patch (HDIFFSF20, zstd or
- * uncompressed) to `oldPath`, writing the result to `outPath` (created or
- * truncated). Resolves to the result's size in bytes. Rejects on I/O failure,
- * a damaged or unsupported patch, or a patch made for other old data.
+ * Applies an `HDiffPatch` single-stream patch to `oldPath`, writing `outPath`.
+ *
+ * Accepts HDIFFSF20 patches, zstd-compressed or uncompressed; `outPath` is
+ * created or truncated. Resolves to the result's size in bytes. Rejects on I/O
+ * failure, a damaged or unsupported patch, or a patch made for other old data.
  */
 export declare function applyBinaryPatch(oldPath: string, patchPath: string, outPath: string): Promise<number>
 
@@ -3458,9 +3459,8 @@ export interface SummarySegment {
 }
 
 /**
- * Check if a language is supported for highlighting.
- * Returns true if the language has either direct support or a fallback
- * mapping.
+ * Check if a language resolves to a grammar (by name, extension or alias),
+ * i.e. whether `highlightCode` colors it rather than echoing it.
  */
 export declare function supportsLanguage(lang: string): boolean
 

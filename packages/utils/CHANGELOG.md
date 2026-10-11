@@ -2,22 +2,35 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- Renamed `takeRecentLoopPhase()` to `takeLoopPhaseAttribution()`, which returns `LoopPhaseAttribution` (`{ label, ms }`) instead of a string, returns `undefined` unless a window was armed with `resetLoopPhaseWindow()`, and names a label only when it outweighs unlabeled time ([#15019](https://github.com/can1357/oh-my-pi/pull/15019) by [@jaredlyon](https://github.com/jaredlyon)).
-
-### Added
-
-- Added `withLoopPhase(label, fn)`, which runs `fn` under a loop phase and pops it in `finally`; for an async `fn` only its synchronous prefix is labeled ([#15001](https://github.com/can1357/oh-my-pi/pull/15001) by [@jaredlyon](https://github.com/jaredlyon)).
-- Added `postmortem.setCleanupDeadline()` so a long-lived server can let a signal-driven cleanup step (such as an HTTP drain) run past the default 10 s deadline.
-
 ### Changed
 
-- Sped up streaming JSON string scanning for long tool-argument payloads by bulk-skipping ordinary characters ([#14297](https://github.com/can1357/oh-my-pi/pull/14297) by [@abilliontokens](https://github.com/abilliontokens)).
+- Sped up streaming JSON parsing of tool arguments with many string values: the scan no longer re-searches the rest of the payload for a backslash once per string (about 2.2x faster on a 24 KB object of 300 short-string entries) ([#15273](https://github.com/can1357/oh-my-pi/pull/15273) by [@iliaal](https://github.com/iliaal)).
 
 ### Fixed
 
-- Fixed archive extraction failing on Windows without the symlink privilege: symlink entries now degrade to a directory junction or an in-archive file copy instead of failing the whole archive with `EPERM`, dangling links that cannot be copied are skipped instead of aborting, and directory symlink entries are extracted instead of being skipped ([#14820](https://github.com/can1357/oh-my-pi/pull/14820) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed `JsonLexer.string()` running past a closing delimiter other than `"` or `'` (such as a backtick) in strings longer than 32 characters ([#15273](https://github.com/can1357/oh-my-pi/pull/15273) by [@iliaal](https://github.com/iliaal)).
+
+### Added
+
+- Added `postmortem.setCleanupDeadline()` so a long-lived server can let a signal-driven cleanup step (such as an HTTP drain) run past the default 10 s deadline.
+
+## [18.9.0] - 2026-10-11
+
+### Breaking Changes
+
+- Renamed `takeRecentLoopPhase()` to `takeLoopPhaseAttribution()`. The new API returns a `LoopPhaseAttribution` object (`{ label, ms }`) and reports a label only when it accounts for more time than unlabeled work within an armed measurement window.
+
+### Added
+
+- Added `withLoopPhase(label, fn)` for attributing synchronous work to a named loop phase, with automatic cleanup even when the callback throws.
+
+### Changed
+
+- Improved streaming JSON parsing performance for long tool-argument payloads.
+
+### Fixed
+
+- Fixed archive extraction on Windows systems without symlink privileges by allowing symlink entries to be extracted using supported fallbacks, while skipping unresolvable dangling links instead of failing the entire archive.
 
 ## [18.8.9] - 2026-10-10
 

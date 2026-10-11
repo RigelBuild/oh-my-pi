@@ -51,6 +51,8 @@ export const RUNNER_APIS = [
 	"web-search",
 	"typesafe",
 	"openrouter-decisions",
+	"openai-decisions",
+	"workers-ai-systemone",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
@@ -65,6 +67,8 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	"web-search": "search",
 	typesafe: "judge",
 	"openrouter-decisions": "judge",
+	"openai-decisions": "judge",
+	"workers-ai-systemone": "judge",
 	"openai-images": "image",
 	"openrouter-images": "image",
 	"xai-tts": "tts",
@@ -829,6 +833,14 @@ export interface BedrockCompat {
 	 * choices to `auto` when this is false. Default: true.
 	 */
 	supportsForcedToolChoice?: boolean;
+	/**
+	 * Whether the endpoint accepts thinking-binding controls (`thinking.block_binding`,
+	 * the `thinking-binding-controls-2026-08-01` beta and the `/input_transformations`
+	 * response path) on prefix-bound models. Only consulted when
+	 * `thinking.prefixBinding` is set; `false` omits the controls while keeping the
+	 * local prefix-binding safeguards. Default: true.
+	 */
+	supportsThinkingBindingControls?: boolean;
 }
 
 /** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
@@ -844,6 +856,8 @@ export interface ResolvedBedrockCompat {
 	/** See {@link BedrockCompat.supportsSamplingParams}. */
 	supportsSamplingParams?: boolean;
 	supportsForcedToolChoice: boolean;
+	/** See {@link BedrockCompat.supportsThinkingBindingControls}. */
+	supportsThinkingBindingControls: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to
