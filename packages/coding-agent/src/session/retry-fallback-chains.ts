@@ -101,7 +101,14 @@ export function parseRetryFallbackSelector(
 	const parsed = parseModelString(trimmed, {
 		allowMaxSuffix: true,
 		allowAutoAlias: true,
-		isLiteralModelId: (provider, id) => modelLookup?.find(provider, id) !== undefined,
+		// Literal only when `find` resolves to that exact id, not an alias or routed wire id.
+		isLiteralModelId: (provider, id) => {
+			const model = modelLookup?.find(provider, id);
+			return (
+				model !== undefined &&
+				`${model.provider}/${model.id}`.toLowerCase() === `${provider.trim()}/${id.trim()}`.toLowerCase()
+			);
+		},
 	});
 	if (!parsed) return undefined;
 	return {

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -697,7 +698,24 @@ function buildGitLabJsonHeaders(apiKey: string): Headers {
 }
 
 async function discoverGitLabRemoteProjectPath(cwd: string | undefined, baseUrl: string): Promise<string | null> {
-	const gitConfigText = await readGitConfigText(cwd ?? process.cwd());
+	const lookup = gitConfigTextLookup(cwd ?? process.cwd());
+	let step = lookup.next();
+	while (!step.done) step = lookup.next(await readTextFile(step.value));
+	return remoteProjectPathFromGitConfig(step.value, baseUrl);
+}
+
+/** Synchronous twin of the workspace-remote lookup discovery runs, for cache identity. */
+export function readGitLabDuoWorkflowRemoteProjectPathSync(
+	cwd: string | undefined,
+	baseUrl: string | undefined,
+): string | null {
+	const lookup = gitConfigTextLookup(cwd ?? process.cwd());
+	let step = lookup.next();
+	while (!step.done) step = lookup.next(readTextFileSync(step.value));
+	return remoteProjectPathFromGitConfig(step.value, normalizeGitLabBaseUrl(baseUrl));
+}
+
+function remoteProjectPathFromGitConfig(gitConfigText: string | null, baseUrl: string): string | null {
 	if (!gitConfigText) {
 		return null;
 	}
@@ -713,11 +731,13 @@ async function discoverGitLabRemoteProjectPath(cwd: string | undefined, baseUrl:
 	return null;
 }
 
-async function readGitConfigText(startCwd: string): Promise<string | null> {
+// Yields each file path the lookup must read and receives its text (null when
+// unreadable), so the async and sync readers walk exactly the same files.
+function* gitConfigTextLookup(startCwd: string): Generator<string, string | null, string | null> {
 	let current = path.resolve(startCwd);
 	while (true) {
 		const gitPath = path.join(current, ".git");
-		const configText = await readGitConfigFromDotGit(gitPath);
+		const configText = yield* gitConfigFromDotGit(gitPath);
 		if (configText) {
 			return configText;
 		}
@@ -729,12 +749,12 @@ async function readGitConfigText(startCwd: string): Promise<string | null> {
 	}
 }
 
-async function readGitConfigFromDotGit(gitPath: string): Promise<string | null> {
-	const directConfig = await readTextFile(path.join(gitPath, "config"));
+function* gitConfigFromDotGit(gitPath: string): Generator<string, string | null, string | null> {
+	const directConfig = yield path.join(gitPath, "config");
 	if (directConfig !== null) {
 		return directConfig;
 	}
-	const dotGitFile = await readTextFile(gitPath);
+	const dotGitFile = yield gitPath;
 	if (dotGitFile === null) {
 		return null;
 	}
@@ -745,21 +765,29 @@ async function readGitConfigFromDotGit(gitPath: string): Promise<string | null> 
 	const gitDirPath = path.isAbsolute(gitDir) ? gitDir : path.resolve(path.dirname(gitPath), gitDir);
 	// In a linked worktree, `.git` points at `.git/worktrees/<name>` whose `config`
 	// holds no remotes — those live in the common dir named by the `commondir` file.
-	const commonDir = await readTextFile(path.join(gitDirPath, "commondir"));
+	const commonDir = yield path.join(gitDirPath, "commondir");
 	if (commonDir) {
 		const trimmed = commonDir.trim();
 		const commonDirPath = path.isAbsolute(trimmed) ? trimmed : path.resolve(gitDirPath, trimmed);
-		const commonConfig = await readTextFile(path.join(commonDirPath, "config"));
+		const commonConfig = yield path.join(commonDirPath, "config");
 		if (commonConfig !== null) {
 			return commonConfig;
 		}
 	}
-	return readTextFile(path.join(gitDirPath, "config"));
+	return yield path.join(gitDirPath, "config");
 }
 
 async function readTextFile(filePath: string): Promise<string | null> {
 	try {
 		return await fs.readFile(filePath, "utf8");
+	} catch {
+		return null;
+	}
+}
+
+function readTextFileSync(filePath: string): string | null {
+	try {
+		return readFileSync(filePath, "utf8");
 	} catch {
 		return null;
 	}

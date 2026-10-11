@@ -13,8 +13,21 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import {
+	factoryDroidModelManagerOptions,
+	gitLabDuoWorkflowModelManagerOptions,
+	MODELS_DEV_CATALOG_PROVIDER_IDS,
+	PROVIDER_DESCRIPTORS,
+	resolveModelCacheProviderId,
+} from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { formatRoleModelValue } from "@oh-my-pi/pi-coding-agent/session/role-models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry runtime provider registration", () => {
@@ -25,6 +38,16 @@ describe("ModelRegistry runtime provider registration", () => {
 	let fetchRequests: string[];
 
 	const sourceIds = ["ext://atomic", "ext://runtime", "ext://oauth"];
+	/** Every config-declared discovery provider id, for the disable list. */
+	const scoped0Providers = (): string[] => registry.getDiscoverableProviders();
+	/** Every provider a built-in model manager can discover, for the disable list. */
+	const builtInProviderIds = (): string[] => [
+		...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
+		...MODELS_DEV_CATALOG_PROVIDER_IDS,
+		"google-antigravity",
+		"google-gemini-cli",
+		"openai-codex",
+	];
 
 	// Stub transport: reject every request so refresh("online") drives the full
 	// online discovery path with deterministic, instant failures instead of real
@@ -1498,5 +1521,326 @@ describe("ModelRegistry runtime provider registration", () => {
 		// conflict rather than a vacuous assertion.
 		expect(configured.find(providerName, "glm-5.3")?.baseUrl).toBe("https://model-level.example/v1");
 		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
+	});
+
+	// The cold-cache discovery guard asks this predicate. `getDiscoverableProviders()`
+	// covers only config-declared providers, so a runtime `fetchDynamicModels`
+	// provider left the guard blind and resume fell back to the baked model.
+	test("hasRefreshableProviders counts a runtime provider when every other provider is disabled", async () => {
+		const providerName = "dynamic-refreshable-provider";
+		// Disable every config and built-in provider so only the runtime manager
+		// can make the registry refreshable; an ambient built-in credential would
+		// otherwise open the gate and prove nothing.
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [...scoped0Providers(), ...builtInProviderIds()],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+
+		scoped.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-responses",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "dynamic-refreshable-model" }],
+			},
+			"ext://runtime",
+		);
+
+		expect(scoped.hasRefreshableProviders()).toBe(true);
+	});
+
+	// `refresh()` also discovers descriptor-backed built-in providers, which neither
+	// list reports. A default only in a cold built-in catalog (new Codex/Copilot
+	// model) looked unrefreshable, so resume kept its baked model.
+	test("hasRefreshableProviders counts a credentialed built-in provider", async () => {
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [...scoped0Providers(), ...builtInProviderIds()],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+
+		// Re-enable one descriptor-backed provider and give it a credential, so a
+		// built-in manager is the ONLY thing a refresh could discover through.
+		const enabled = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== "openai-codex"),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(enabled.hasRefreshableProviders()).toBe(false);
+
+		authStorage.keys.setRuntime("openai-codex", "codex-test-token");
+		try {
+			expect(enabled.hasRefreshableProviders()).toBe(true);
+		} finally {
+			authStorage.keys.removeRuntime("openai-codex");
+		}
+	});
+
+	// An uncredentialed built-in provider must NOT open the gate: `getAvailable()`
+	// drops every model whose provider has no credential, so such a provider can
+	// never contribute a selectable candidate however much it discovers — and a
+	// cold-start session would pay a pointless synchronous online pass.
+	test("hasRefreshableProviders ignores a built-in provider with no credential", async () => {
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== "openai-codex"),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+		expect(authStorage.credentials.has("openai-codex")).toBe(false);
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+	});
+
+	// A credentialed seed-only built-in (`local`) has no fetcher, so it must not
+	// make a typo/wildcard default pay a blocking full-registry refresh.
+	test("hasRefreshableProviders ignores a credentialed fetcherless built-in", async () => {
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== "local"),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+		authStorage.keys.setRuntime("local", "local-test-key");
+		try {
+			expect(scoped.hasRefreshableProviders()).toBe(false);
+			expect(scoped.canRefreshProvider("local")).toBe(false);
+		} finally {
+			authStorage.keys.removeRuntime("local");
+		}
+	});
+
+	// A runtime provider whose catalog is already fresh adds nothing to a retry;
+	// only a cold one (no cache row yet) is worth the blocking pass.
+	test("a runtime provider stops counting once its catalog is hydrated fresh", async () => {
+		const providerName = "dynamic-warm-provider";
+		const scoped = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [...scoped0Providers(), ...builtInProviderIds()],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+		scoped.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-responses",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "dynamic-warm-model" }],
+			},
+			"ext://runtime",
+		);
+		expect(scoped.canRefreshProvider(providerName)).toBe(true);
+
+		await scoped.refreshRuntimeProviders("online");
+		expect(scoped.find(providerName, "dynamic-warm-model")).toBeDefined();
+		await scoped.refreshRuntimeProviders("offline");
+
+		expect(scoped.canRefreshProvider(providerName)).toBe(false);
+		expect(scoped.hasRefreshableProviders()).toBe(false);
+	});
+
+	const builtInOnly = async (providerId: string): Promise<ModelRegistry> =>
+		new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: offlineFetch,
+			settings: await Settings.loadIsolated({
+				cwd: tempDir,
+				agentDir: tempDir,
+				overrides: {
+					disabledProviders: [
+						...scoped0Providers(),
+						...builtInProviderIds().filter(provider => provider !== providerId),
+					],
+					"compaction.enabled": false,
+				},
+			}),
+		});
+
+	// A fresh authoritative row written before the migration policy existed
+	// still holds the migrated ids, so the manager refetches it.
+	test("a built-in cache awaiting a migration-policy refetch still counts as due", async () => {
+		const bundled = getBundledModels("google");
+		const catalogFingerprint = fingerprintStaticModels(bundled);
+		const dbPath = path.join(tempDir, "models.db");
+		authStorage.keys.setRuntime("google", "google-test-key");
+		try {
+			writeModelCache("google", Date.now(), bundled, true, catalogFingerprint, dbPath);
+			expect((await builtInOnly("google")).canRefreshProvider("google")).toBe(true);
+
+			const migrationIds = ["gemini-3.7-flash", "gemini-3.8-flash"].join("\0");
+			const migratedFingerprint = `${catalogFingerprint}:drop:${Bun.hash(migrationIds).toString(36)}`;
+			writeModelCache("google", Date.now(), bundled, true, migratedFingerprint, dbPath);
+			expect((await builtInOnly("google")).canRefreshProvider("google")).toBe(false);
+		} finally {
+			authStorage.keys.removeRuntime("google");
+		}
+	});
+
+	// An always-refetch manager goes online on every refresh, so a warm cache
+	// row is not a reason to skip it.
+	test("an always-refetch built-in counts as due despite a fresh cache", async () => {
+		const token = "droid-test-token";
+		const options = factoryDroidModelManagerOptions({ apiKey: token });
+		const seed = (options.staticModels ?? []).map(spec => buildModel(spec));
+		writeModelCache(
+			resolveModelCacheProviderId("factory-droid", { apiKey: token }),
+			Date.now(),
+			seed,
+			true,
+			fingerprintStaticModels(seed, true),
+			path.join(tempDir, "models.db"),
+		);
+		authStorage.keys.setRuntime("factory-droid", token);
+		try {
+			const scoped = await builtInOnly("factory-droid");
+			await scoped.hydrateCredentialScopedModelCaches();
+			const state = scoped.getProviderDiscoveryState("factory-droid");
+			expect(state?.source).toBe("cache");
+			expect(state?.stale).toBe(false);
+			expect(scoped.canRefreshProvider("factory-droid")).toBe(true);
+		} finally {
+			authStorage.keys.removeRuntime("factory-droid");
+		}
+	});
+
+	// The manager scopes its cache by credential and workspace, so only scoped hydration can see it warm.
+	test("a GitLab Duo agent is due until its scoped cache is hydrated warm", async () => {
+		const token = "glpat-duo-test-token";
+		authStorage.keys.setRuntime("gitlab-duo-agent", token);
+		try {
+			const cold = await builtInOnly("gitlab-duo-agent");
+			await cold.hydrateCredentialScopedModelCaches();
+			expect(cold.canRefreshProvider("gitlab-duo-agent")).toBe(true);
+			expect(cold.hasRefreshableProviders()).toBe(true);
+
+			const options = gitLabDuoWorkflowModelManagerOptions({ apiKey: token });
+			expect(options.cacheProviderId).not.toBe("gitlab-duo-agent");
+			const seed = (options.staticModels ?? []).map(spec => buildModel(spec));
+			writeModelCache(
+				options.cacheProviderId!,
+				Date.now(),
+				seed,
+				true,
+				fingerprintStaticModels(seed, true),
+				path.join(tempDir, "models.db"),
+			);
+			const warm = await builtInOnly("gitlab-duo-agent");
+			await warm.hydrateCredentialScopedModelCaches();
+			expect(warm.getProviderDiscoveryState("gitlab-duo-agent")?.stale).toBe(false);
+			expect(warm.canRefreshProvider("gitlab-duo-agent")).toBe(false);
+			expect(warm.hasRefreshableProviders()).toBe(false);
+		} finally {
+			authStorage.keys.removeRuntime("gitlab-duo-agent");
+		}
+	});
+
+	// `find` routes a dotted revision spelling onto the dashed id; whole-id
+	// literal checks need exact membership or `x-5.1:high`-style keys mis-split.
+	test("hasModelId is exact membership while find routes spelling aliases", () => {
+		const providerName = "exact-membership-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://exact.example.com/v1",
+				apiKey: "EXACT_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "router-5-1" }],
+			},
+			"ext://exact",
+		);
+
+		expect(registry.find(providerName, "router-5.1")?.id).toBe("router-5-1");
+		expect(registry.hasModelId(providerName, "router-5.1")).toBe(false);
+		expect(registry.hasModelId(providerName, "ROUTER-5-1")).toBe(true);
+	});
+
+	// Exact membership keeps a real suffix-shaped id literal; a routed wire id still parses as a suffix.
+	test("selector suppression and role saves split routed suffixes but keep literal ids", () => {
+		const providerName = "routed-suppression-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://routed.example.com/v1",
+				apiKey: "ROUTED_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						...baseModel,
+						id: "router",
+						reasoning: true,
+						thinking: {
+							mode: "effort",
+							efforts: [Effort.Low, Effort.High],
+							effortRouting: { [Effort.Low]: "router:low" },
+						},
+					},
+					{ ...baseModel, id: "literal:low" },
+				],
+			},
+			"ext://routed",
+		);
+		const router = registry.find(providerName, "router:low");
+		expect(router?.id).toBe("router");
+
+		registry.suppressSelector(`${providerName}/router:low`, Date.now() + 60_000);
+		expect(registry.isSelectorSuppressed(`${providerName}/router:high`)).toBe(true);
+		registry.suppressSelector(`${providerName}/literal:low`, Date.now() + 60_000);
+		expect(registry.isSelectorSuppressed(`${providerName}/literal:low`)).toBe(true);
+		expect(registry.isSelectorSuppressed(`${providerName}/literal`)).toBe(false);
+
+		const settings = Settings.isolated({ modelRoles: { smol: `${providerName}/router:low` } });
+		expect(formatRoleModelValue(settings, registry, "smol", router!)).toBe(`${providerName}/router:low`);
+		const literal = registry.find(providerName, "literal:low")!;
+		settings.setModelRole("smol", `${providerName}/literal:low`);
+		expect(formatRoleModelValue(settings, registry, "smol", literal)).toBe(`${providerName}/literal:low`);
 	});
 });

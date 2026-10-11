@@ -55,6 +55,9 @@ export const launchHelp = {
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",
 			multiple: true,
 		}),
+		"reapply-config": Flags.boolean({
+			description: "On startup resume or fork, apply configured model, thinking, and service tiers (default off)",
+		}),
 		"add-dir": Flags.string({
 			description: "Add a workspace directory beyond the working directory (repeatable)",
 			multiple: true,
@@ -62,6 +65,7 @@ export const launchHelp = {
 		print: Flags.boolean({ char: "p", description: "Non-interactive mode: process prompt and exit" }),
 		continue: Flags.boolean({ char: "c", description: "Continue previous session" }),
 		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, path, or picker if omitted)" }),
+		fork: Flags.string({ description: "Fork a saved session (by ID prefix or path) into a new session" }),
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),

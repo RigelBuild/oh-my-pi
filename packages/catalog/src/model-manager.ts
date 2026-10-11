@@ -2,7 +2,7 @@ import { VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
-import { readModelCache, writeModelCache } from "./model-cache";
+import { type CacheEntry, readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import { isTimeBasedCost } from "./pricing";
 import {
@@ -154,66 +154,216 @@ function materializeStaticModels<TApi extends Api>(value: readonly (ModelSpec<TA
 	}
 	return out;
 }
-interface CachedHeaderRestoreResult<TApi extends Api> {
+/** Cached rows after header restoration plus ids that still lack a trusted header source. */
+export interface CachedHeaderRestoreResult<TApi extends Api> {
 	models: Model<TApi>[];
 	unresolvedModelIds: ReadonlySet<string>;
 }
 
+type CachedHeaderPatch = Pick<Model, "headers" | "resolveHeaders">;
+
+interface CachedHeaderRestorePolicy<TApi extends Api> {
+	omittedIds: ReadonlySet<string>;
+	unrestorableIds: ReadonlySet<string>;
+	staticById: ReadonlyMap<string, Model<TApi>>;
+	legacyHeaderRestoreMarkers: boolean;
+	restorableHeaderFallback: Record<string, string> | undefined;
+	restoreCachedHeaders: ModelManagerOptions<TApi>["restoreCachedHeaders"];
+}
+
+function cachedHeaderRestorePolicy<TApi extends Api, TModelsDevPayload>(
+	cache: CacheEntry<TApi> | null,
+	staticModels: readonly Model<TApi>[],
+	options: ModelManagerOptions<TApi, TModelsDevPayload>,
+): CachedHeaderRestorePolicy<TApi> | undefined {
+	const headerOmittedModelIds = cache?.headerOmittedModelIds ?? [];
+	if (headerOmittedModelIds.length === 0) return undefined;
+	return {
+		omittedIds: new Set(headerOmittedModelIds),
+		unrestorableIds: new Set(cache?.unrestorableHeaderModelIds ?? []),
+		staticById: new Map(staticModels.map(model => [model.id, model])),
+		legacyHeaderRestoreMarkers: cache?.legacyHeaderRestoreMarkers ?? false,
+		restorableHeaderFallback: options.restorableHeaderFallback,
+		restoreCachedHeaders: options.restoreCachedHeaders,
+	};
+}
+
 /**
- * Restore cache-omitted headers from the current static source.
- *
- * A same-id static match is trusted only when the row did not flag the model
- * unrestorable (its live headers matched static when cached). Request-model
- * fallback also honors that marker for current rows. Only legacy rows written
- * before request-model header matching may bypass it: their id-only writer
- * necessarily marked every synthesized variant unrestorable (#6037, #6284).
- * Header-bearing models without a trusted source cannot be reconstructed
- * safely without persisting arbitrary credential values; callers must refetch
- * them online or omit them rather than return a broken model.
+ * Current unrestorable markers forbid static header recovery; legacy markers
+ * may recover by requestModelId. Without a trusted source, omit the model
+ * rather than return it without the headers required for authorization.
  */
+function cachedHeaderSource<TApi extends Api>(
+	model: Model<TApi>,
+	policy: CachedHeaderRestorePolicy<TApi>,
+): CachedHeaderPatch | "fallback" | undefined {
+	const unrestorable = policy.unrestorableIds.has(model.id);
+	// Current unrestorable markers prove that neither same-id nor request-model
+	// static headers matched the live model. Only the old id-only writer's
+	// markers may recover a synthesized variant through `requestModelId`.
+	const staticModel = unrestorable
+		? policy.legacyHeaderRestoreMarkers && model.requestModelId
+			? policy.staticById.get(model.requestModelId)
+			: undefined
+		: (policy.staticById.get(model.id) ??
+			(model.requestModelId ? policy.staticById.get(model.requestModelId) : undefined));
+	if (staticModel?.headers || staticModel?.resolveHeaders) {
+		return { headers: staticModel.headers, resolveHeaders: staticModel.resolveHeaders };
+	}
+	// A non-unrestorable row whose static source is gone was cached with
+	// headers matching the provider's trusted constant (e.g. a Copilot
+	// model with no bundled entry). Reattach the constant by value instead
+	// of dropping the model on this offline read.
+	if (!unrestorable && policy.restorableHeaderFallback) return "fallback";
+	const configured = policy.restoreCachedHeaders?.(model);
+	return configured?.headers || configured?.resolveHeaders ? configured : undefined;
+}
+
+/** Restore cache-omitted headers from the current static source (see `cachedHeaderSource`). */
 function restoreCachedModelHeaders<TApi extends Api>(
 	cachedModels: readonly Model<TApi>[],
-	staticModels: readonly Model<TApi>[],
-	headerOmittedModelIds: readonly string[],
-	unrestorableHeaderModelIds: readonly string[],
-	legacyHeaderRestoreMarkers: boolean,
-	restorableHeaderFallback: Record<string, string> | undefined,
-	restoreCachedHeaders: ModelManagerOptions<TApi>["restoreCachedHeaders"],
+	policy: CachedHeaderRestorePolicy<TApi> | undefined,
 ): CachedHeaderRestoreResult<TApi> {
-	if (headerOmittedModelIds.length === 0) {
+	if (!policy) {
 		return { models: [...cachedModels], unresolvedModelIds: new Set() };
 	}
-	const omittedIds = new Set(headerOmittedModelIds);
-	const unrestorableIds = new Set(unrestorableHeaderModelIds);
-	const staticById = new Map(staticModels.map(model => [model.id, model]));
 	const unresolvedModelIds = new Set<string>();
 	const restored = cachedModels.map(model => {
-		if (!omittedIds.has(model.id)) return model;
-		const unrestorable = unrestorableIds.has(model.id);
-		// Current unrestorable markers prove that neither same-id nor request-model
-		// static headers matched the live model. Only the old id-only writer's
-		// markers may recover a synthesized variant through `requestModelId`.
-		const staticModel = unrestorable
-			? legacyHeaderRestoreMarkers && model.requestModelId
-				? staticById.get(model.requestModelId)
-				: undefined
-			: (staticById.get(model.id) ?? (model.requestModelId ? staticById.get(model.requestModelId) : undefined));
-		if (!staticModel?.headers && !staticModel?.resolveHeaders) {
-			// A non-unrestorable row whose static source is gone was cached with
-			// headers matching the provider's trusted constant (e.g. a Copilot
-			// model with no bundled entry). Reattach the constant by value instead
-			// of dropping the model on this offline read.
-			if (!unrestorable && restorableHeaderFallback) {
-				return { ...model, headers: { ...restorableHeaderFallback } };
-			}
-			const configured = restoreCachedHeaders?.(model);
-			if (configured?.headers || configured?.resolveHeaders) return { ...model, ...configured };
+		if (!policy.omittedIds.has(model.id)) return model;
+		const source = cachedHeaderSource(model, policy);
+		if (source === undefined) {
 			unresolvedModelIds.add(model.id);
 			return model;
 		}
-		return { ...model, headers: staticModel.headers, resolveHeaders: staticModel.resolveHeaders };
+		if (source === "fallback") return { ...model, headers: { ...policy.restorableHeaderFallback } };
+		return { ...model, ...source };
 	});
 	return { models: restored, unresolvedModelIds };
+}
+
+/** Static slice and cache identity that cached rows are compared against. */
+export interface ModelManagerStaticCatalog<TApi extends Api = Api> {
+	models: Model<TApi>[];
+	fingerprint: string;
+}
+
+/** Materialize the static slice and its cache fingerprint exactly as `resolveProviderModels` does. */
+export function resolveModelManagerStaticCatalog<TApi extends Api, TModelsDevPayload>(
+	options: ModelManagerOptions<TApi, TModelsDevPayload>,
+): ModelManagerStaticCatalog<TApi> {
+	const models = options.staticModels
+		? materializeStaticModels<TApi>(options.staticModels)
+		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
+	const catalogFingerprint = fingerprintStaticModels(models, options.dynamicModelsAuthoritative ?? false);
+	// Endpoint-migration policy is cache identity: adding an id must invalidate
+	// matching-static-catalog caches written by the prior resolver.
+	const dropIds = options.dropCachedModelIdsOnStaticMismatch;
+	const fingerprint =
+		dropIds && dropIds.length > 0
+			? `${catalogFingerprint}:drop:${Bun.hash(dropIds.join("\0")).toString(36)}`
+			: catalogFingerprint;
+	return { models, fingerprint };
+}
+
+/** Fetch-relevant cache verdict; `assessModelCache` extends it with restored rows. */
+export interface ModelCacheVerdict {
+	hasUnresolvedHeaders: boolean;
+	fingerprintMatches: boolean;
+	hasUsableFreshCache: boolean;
+	hasAuthoritativeCache: boolean;
+	hasRemoteFetcher: boolean;
+	cacheAgeMs: number;
+}
+
+/** Pure usability verdict for one cache row; never fetches or writes. */
+export interface ModelCacheAssessment<TApi extends Api = Api> extends ModelCacheVerdict {
+	restoredCache: CachedHeaderRestoreResult<TApi>;
+	usableCachedModels: Model<TApi>[];
+}
+
+/** Fingerprint, migration, and freshness policy shared by both assessment paths. */
+function cacheVerdict<TApi extends Api, TModelsDevPayload>(
+	options: ModelManagerOptions<TApi, TModelsDevPayload>,
+	staticCatalog: ModelManagerStaticCatalog<TApi>,
+	cache: CacheEntry<TApi> | null,
+	nowMs: number,
+	hasUnresolvedHeaders: boolean,
+	usableCachedModels: readonly Model<TApi>[],
+): ModelCacheVerdict {
+	const staticFingerprint = staticCatalog.fingerprint;
+	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
+	const fingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
+	const needsModelMigration =
+		!fingerprintMatches &&
+		cacheDropIds !== undefined &&
+		usableCachedModels.some(model => cacheDropIds.includes(model.id));
+	const hasUsableFreshCache =
+		(cache?.fresh ?? false) &&
+		!hasUnresolvedHeaders &&
+		!needsModelMigration &&
+		(!(options.dynamicModelsAuthoritative ?? false) || fingerprintMatches);
+	const hasRemoteFetcher = typeof options.fetchDynamicModels === "function" || options.modelsDev !== undefined;
+	return {
+		hasUnresolvedHeaders,
+		fingerprintMatches,
+		hasUsableFreshCache,
+		hasAuthoritativeCache: ((cache?.authoritative ?? false) && hasUsableFreshCache) || !hasRemoteFetcher,
+		hasRemoteFetcher,
+		cacheAgeMs: cache ? nowMs - cache.updatedAt : Number.POSITIVE_INFINITY,
+	};
+}
+
+/** Header restoration, fingerprint, migration, and freshness policy for a cache row. */
+export function assessModelCache<TApi extends Api, TModelsDevPayload>(
+	options: ModelManagerOptions<TApi, TModelsDevPayload>,
+	staticCatalog: ModelManagerStaticCatalog<TApi>,
+	cache: CacheEntry<TApi> | null,
+	nowMs: number,
+): ModelCacheAssessment<TApi> {
+	const restoredCache = restoreCachedModelHeaders(
+		cache?.models ?? [],
+		cachedHeaderRestorePolicy(cache, staticCatalog.models, options),
+	);
+	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
+	const hasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
+	return {
+		...cacheVerdict(options, staticCatalog, cache, nowMs, hasUnresolvedHeaders, usableCachedModels),
+		restoredCache,
+		usableCachedModels,
+	};
+}
+
+/**
+ * `assessModelCache` verdict without restored rows: same header-source policy,
+ * but no model copies. Stops at the first unresolved row; any unresolved row
+ * already rules out a usable fresh cache, so migration needs no usable filter.
+ */
+export function assessModelCacheVerdict<TApi extends Api, TModelsDevPayload>(
+	options: ModelManagerOptions<TApi, TModelsDevPayload>,
+	staticCatalog: ModelManagerStaticCatalog<TApi>,
+	cache: CacheEntry<TApi> | null,
+	nowMs: number,
+): ModelCacheVerdict {
+	const cachedModels = cache?.models ?? [];
+	const policy = cachedHeaderRestorePolicy(cache, staticCatalog.models, options);
+	let hasUnresolvedHeaders = false;
+	if (policy) {
+		for (const model of cachedModels) {
+			if (policy.omittedIds.has(model.id) && cachedHeaderSource(model, policy) === undefined) {
+				hasUnresolvedHeaders = true;
+				break;
+			}
+		}
+	}
+	return cacheVerdict(options, staticCatalog, cache, nowMs, hasUnresolvedHeaders, cachedModels);
+}
+
+/** Whether `strategy` fetches remote sources given an assessed cache row. */
+export function modelCacheNeedsFetch(verdict: ModelCacheVerdict, strategy: ModelRefreshStrategy): boolean {
+	return (
+		verdict.hasRemoteFetcher &&
+		shouldFetchRemoteSources(strategy, verdict.hasUsableFreshCache, verdict.hasAuthoritativeCache, verdict.cacheAgeMs)
+	);
 }
 
 /**
@@ -235,52 +385,27 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const ttlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 	const dbPath = options.cacheDbPath;
 	const restorableHeaderFallback = options.restorableHeaderFallback;
-	const staticModels = options.staticModels
-		? materializeStaticModels<TApi>(options.staticModels)
-		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
+	const staticCatalog = resolveModelManagerStaticCatalog(options);
+	const staticModels = staticCatalog.models;
+	const staticFingerprint = staticCatalog.fingerprint;
 	const additiveStaticModelIds =
 		options.modelsDev?.additiveOnly && staticModels.length > 0
 			? new Set(staticModels.map(model => model.id))
 			: undefined;
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
-	const restoredCache = restoreCachedModelHeaders(
-		cache?.models ?? [],
-		staticModels,
-		cache?.headerOmittedModelIds ?? [],
-		cache?.unrestorableHeaderModelIds ?? [],
-		cache?.legacyHeaderRestoreMarkers ?? false,
-		restorableHeaderFallback,
-		options.restoreCachedHeaders,
-	);
-	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
-	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
+	const assessment = assessModelCache(options, staticCatalog, cache, now());
+	const restoredCache = assessment.restoredCache;
+	const usableCachedModels = assessment.usableCachedModels;
+	const cacheHasUnresolvedHeaders = assessment.hasUnresolvedHeaders;
+	const cacheFingerprintMatches = assessment.fingerprintMatches;
+	const hasUsableFreshCache = assessment.hasUsableFreshCache;
+	const hasAuthoritativeCache = assessment.hasAuthoritativeCache;
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
-	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
-	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, dynamicModelsAuthoritative);
-	// Endpoint-migration policy is cache identity: adding an id must invalidate
-	// matching-static-catalog caches written by the prior resolver.
-	const staticFingerprint =
-		cacheDropIds && cacheDropIds.length > 0
-			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
-			: staticCatalogFingerprint;
-	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
-	const cacheNeedsModelMigration =
-		!cacheFingerprintMatches &&
-		cacheDropIds !== undefined &&
-		usableCachedModels.some(model => cacheDropIds.includes(model.id));
-	const hasUsableFreshCache =
-		(cache?.fresh ?? false) &&
-		!cacheHasUnresolvedHeaders &&
-		!cacheNeedsModelMigration &&
-		(!dynamicModelsAuthoritative || cacheFingerprintMatches);
 	const dynamicFetcher = options.fetchDynamicModels;
 	const hasDynamicFetcher = typeof dynamicFetcher === "function";
 	const hasModelsDevFetcher = options.modelsDev !== undefined;
-	const hasRemoteFetcher = hasDynamicFetcher || hasModelsDevFetcher;
-	const hasAuthoritativeCache = ((cache?.authoritative ?? false) && hasUsableFreshCache) || !hasRemoteFetcher;
-	const cacheAgeMs = cache ? now() - cache.updatedAt : Number.POSITIVE_INFINITY;
-	const shouldFetchFromNetwork =
-		hasRemoteFetcher && shouldFetchRemoteSources(strategy, hasUsableFreshCache, hasAuthoritativeCache, cacheAgeMs);
+	const hasRemoteFetcher = assessment.hasRemoteFetcher;
+	const shouldFetchFromNetwork = modelCacheNeedsFetch(assessment, strategy);
 
 	// Cold-start fast path: when a fresh, authoritative cache exists, the network
 	// fetch is skipped, AND the static catalog slice is byte-identical to what
@@ -393,15 +518,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// refetch for NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only
 			// model until it ages out. Writing nothing lets the next launch retry
 			// immediately (#10964).
-			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath) ?? cache;
 			const latestRestoredCache = restoreCachedModelHeaders(
-				latestCache?.models ?? cache?.models ?? [],
-				staticModels,
-				latestCache?.headerOmittedModelIds ?? cache?.headerOmittedModelIds ?? [],
-				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
-				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
-				restorableHeaderFallback,
-				options.restoreCachedHeaders,
+				latestCache?.models ?? [],
+				cachedHeaderRestorePolicy(latestCache, staticModels, options),
 			);
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
 				model => !latestRestoredCache.unresolvedModelIds.has(model.id),

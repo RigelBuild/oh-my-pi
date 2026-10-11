@@ -397,7 +397,12 @@ import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import {
+	type BranchSummaryEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type NewSessionOptions,
+	type SessionEntry,
+} from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -656,6 +661,25 @@ type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
+/** A reapplied startup's session file, adopted model, and last knob entry ids. */
+interface ReappliedConfigBaseline {
+	sessionFile: string;
+	/** `provider/id` the startup adopted; reload restores it over a later ephemeral fallback. */
+	modelSelector: string | undefined;
+	model: string | undefined;
+	thinking: string | undefined;
+	tier: string | undefined;
+}
+
+function lastEntryId(branch: readonly SessionEntry[], type: SessionEntry["type"]): string | undefined {
+	return branch.findLast(entry => entry.type === type)?.id;
+}
+
+/** Last model selection that a reload restores; retry and promotion fallbacks are skipped. */
+function lastSelectedModelEntryId(branch: readonly SessionEntry[]): string | undefined {
+	return branch.findLast(entry => entry.type === "model_change" && entry.role !== EPHEMERAL_MODEL_CHANGE_ROLE)?.id;
+}
+
 /**
  * Translate a `power.sleepPrevention` mode into `PowerAssertion.start` options,
  * or `undefined` when the mode asks for no assertion at all.
@@ -869,6 +893,8 @@ export class AgentSession implements SettingsScope {
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
+	/** Last model/thinking/tier entry ids after a reapplied startup; a same-session reload keeps unchanged knobs live. */
+	#reappliedConfigBaseline: ReappliedConfigBaseline | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
@@ -1604,6 +1630,18 @@ export class AgentSession implements SettingsScope {
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
+		const startupSessionFile = this.sessionManager.getSessionFile();
+		if (config.reappliedConfig && startupSessionFile) {
+			const branch = this.sessionManager.getBranch();
+			const startupModel = this.model;
+			this.#reappliedConfigBaseline = {
+				sessionFile: path.resolve(startupSessionFile),
+				modelSelector: startupModel ? `${startupModel.provider}/${startupModel.id}` : undefined,
+				model: lastSelectedModelEntryId(branch),
+				thinking: lastEntryId(branch, "thinking_level_change"),
+				tier: lastEntryId(branch, "service_tier_change"),
+			};
+		}
 
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
@@ -10884,6 +10922,7 @@ export class AgentSession implements SettingsScope {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const previousReappliedConfigBaseline = this.#reappliedConfigBaseline;
 
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
@@ -10952,12 +10991,28 @@ export class AgentSession implements SettingsScope {
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
+			// A reload of the reapplied startup session keeps each knob no new entry has changed since.
+			const reapplied =
+				!switchingToDifferentSession && this.#reappliedConfigBaseline?.sessionFile === path.resolve(sessionPath)
+					? this.#reappliedConfigBaseline
+					: undefined;
+			const reloadBranch = this.sessionManager.getBranch();
+			const keepReappliedModel =
+				reapplied !== undefined && lastSelectedModelEntryId(reloadBranch) === reapplied.model;
+			const keepLiveThinking =
+				reapplied !== undefined && lastEntryId(reloadBranch, "thinking_level_change") === reapplied.thinking;
+			const keepLiveTier =
+				reapplied !== undefined && lastEntryId(reloadBranch, "service_tier_change") === reapplied.tier;
+
 			// Resolve the target's model before announcing the switch, so an
 			// unrestorable one rolls back before any hook sees the target session.
-			const targetModelStrings = getRestorableSessionModels(
-				sessionContext.models,
-				this.sessionManager.getLastModelChangeRole(),
-			);
+			// An ephemeral fallback since a reapplied startup returns to the adopted
+			// model, as a plain session's fallback returns to its default.
+			const targetModelStrings = keepReappliedModel
+				? reapplied.modelSelector
+					? [reapplied.modelSelector]
+					: []
+				: getRestorableSessionModels(sessionContext.models, this.sessionManager.getLastModelChangeRole());
 			let targetModel = explicitModel;
 			let modelFallbackWarning: string | undefined;
 			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
@@ -11036,10 +11091,9 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 
-			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
-			const hasServiceTierEntry = this.sessionManager
-				.getBranch()
-				.some(entry => entry.type === "service_tier_change");
+			const restoreBranch = this.sessionManager.getBranch();
+			const hasThinkingEntry = restoreBranch.some(entry => entry.type === "thinking_level_change");
+			const hasServiceTierEntry = restoreBranch.some(entry => entry.type === "service_tier_change");
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
 			const configuredServiceTierByFamily = buildServiceTierByFamily(
 				cfgTierOpenai.get(this.settings),
@@ -11060,12 +11114,16 @@ export class AgentSession implements SettingsScope {
 						? AUTO_THINKING
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
-			this.#models.restoreThinkingLevel(restoredThinkingLevel);
-			this.#models.restoreServiceTiers(
-				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
-			);
-
+			if (!keepLiveThinking) this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			// Legacy sessions predate tier entries and keep configured tiers, as on startup.
+			// Once an entry exists, its value (including null) is authoritative.
+			if (!keepLiveTier) {
+				this.#models.restoreServiceTiers(
+					hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				);
+			}
 			if (switchingToDifferentSession) {
+				this.#reappliedConfigBaseline = undefined;
 				await this.#memory.resetContextForNewTranscript();
 			}
 			if (switchingToDifferentSession || didReloadConversationChange) {
@@ -11137,6 +11195,7 @@ export class AgentSession implements SettingsScope {
 			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
 			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
 			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
+			this.#reappliedConfigBaseline = previousReappliedConfigBaseline;
 			this.#checkpointState = previousCheckpointState;
 			this.#pendingRewindReport = previousPendingRewindReport;
 			this.#lastCompletedRewind = previousLastCompletedRewind;

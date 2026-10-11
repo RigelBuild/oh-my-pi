@@ -203,6 +203,8 @@ export interface AgentSessionConfig {
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
 	serviceTierByFamily?: ServiceTierByFamily;
+	/** Startup reapplied config over the branch's model, thinking, or tier; a same-session reload keeps those live values. */
+	reappliedConfig?: boolean;
 	/** Prompt templates for expansion. */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion. */

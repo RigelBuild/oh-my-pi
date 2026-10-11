@@ -10,7 +10,7 @@ import {
 	filterProviderReplayMessages,
 	resolveTelemetry,
 	type StreamFn,
-	type ThinkingLevel,
+	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
@@ -31,12 +31,14 @@ import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-co
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { isCredentialScopedModelCacheProvider } from "@oh-my-pi/pi-catalog/provider-models";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
@@ -63,11 +65,15 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
+	DEFAULT_MODEL_ROLE,
 	disabledProviderIds,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	isDefaultModelRoleSelfAlias,
 	type ModelMatchPreferences,
+	normalizeModelPatternList,
+	parseDefaultModelRoleSelfAlias,
 	parseModelPattern,
 	pickDefaultAvailableModel,
 	resolveAllowedModels,
@@ -75,12 +81,18 @@ import {
 	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	type ResolvedModelRoleValue,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import {
+	formatModelSelectorValue,
+	MAX_THINKING_SUFFIX_OPTIONS,
+	parseModelString,
+	splitThinkingSuffix,
+} from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
-import { buildServiceTierByFamily } from "./config/service-tier";
+import { buildServiceTierByFamily, SERVICE_TIER_FAMILIES } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
@@ -588,6 +600,8 @@ export interface CreateAgentSessionOptions {
 	 * of re-deriving tiers from settings.
 	 */
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
+	/** Reapply config-selected model, thinking, and tiers on CLI startup resume or fork; not in-session `/resume`. */
+	reapplyConfig?: boolean;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
@@ -1829,6 +1843,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
 		options.thinkingLevel !== undefined ||
+		options.reapplyConfig === true ||
 		options.systemPrompt !== undefined ||
 		options.systemPromptTemplate !== undefined ||
 		options.customSystemPrompt !== undefined ||
@@ -1880,6 +1895,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasExistingSession = existingBranch.length > 0;
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
+	// Reapply overrides saved knobs, so a fresh session keeps fresh precedence.
+	const reapplyConfig = options.reapplyConfig === true && hasExistingSession;
 
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
@@ -1921,21 +1938,119 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			matchPreferences: modelMatchPreferences,
 		}),
 	);
+	// `reapplyConfig` adopts config per knob. A default made only of self aliases
+	// (`default`, `*`, `@default`, `pi/default`) names no model; classify per
+	// pattern, since the role getter flattens lists into `"*,@default"`.
+	const normalizedDefaultRole = defaultRoleValue?.trim();
+	const defaultRolePatterns = normalizeModelPatternList(normalizedDefaultRole);
+	// A bare `default` is a self alias only as the whole value. Inside a list it
+	// is a concrete selector (`cursor/default`) like any other candidate.
+	const isListItemConcreteDefault = (pattern: string): boolean =>
+		pattern === DEFAULT_MODEL_ROLE && defaultRolePatterns.length > 1;
+	// The first self alias reached before the matched entry, by RAW position
+	// (alias expansion shifts expanded indexes). It means "keep the session
+	// model", optionally at its suffix level. The winner's own entry counts only
+	// when its expansion matched (`default` can directly match `cursor/default`).
+	const reachedSelfAlias = (spec: ResolvedModelRoleValue): { level?: ConfiguredThinkingLevel } | undefined => {
+		const matchedIndex = spec.model
+			? (spec.matchedRawPatternIndex ?? spec.matchedPatternIndex ?? 0)
+			: defaultRolePatterns.length;
+		for (const [index, pattern] of defaultRolePatterns.entries()) {
+			if (index > matchedIndex) break;
+			if (index === matchedIndex && spec.matchedPattern === pattern) break;
+			if (isListItemConcreteDefault(pattern)) continue;
+			const alias = parseDefaultModelRoleSelfAlias(pattern);
+			if (alias) return alias;
+		}
+		return undefined;
+	};
+	const selfAliasThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined =>
+		reachedSelfAlias(spec)?.level;
+	// Read live, never captured: `defaultRoleSpec` is re-resolved once
+	// late-registering providers appear, which can change the answer.
+	const hasConfigDefaultRole = (): boolean => {
+		if (reachedSelfAlias(defaultRoleSpec)) return false;
+		return (
+			defaultRolePatterns.some(pattern => !isDefaultModelRoleSelfAlias(pattern)) ||
+			defaultRoleSpec.model !== undefined
+		);
+	};
+	const adoptConfigModel = (): boolean => reapplyConfig && !hasExplicitModel && hasConfigDefaultRole();
+	// Under reapply, an unresolved role still names its thinking knob by suffix:
+	// the first suffixed candidate ahead of any self alias.
+	const unresolvedRoleThinkingLevel = (): ConfiguredThinkingLevel | undefined => {
+		for (const rawPattern of defaultRolePatterns) {
+			if (!isListItemConcreteDefault(rawPattern) && parseDefaultModelRoleSelfAlias(rawPattern)) return undefined;
+			for (const pattern of resolveConfiguredModelPatterns([rawPattern], settings)) {
+				const { level } = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
+				if (level !== undefined && level !== ThinkingLevel.Inherit) return level;
+			}
+		}
+		return undefined;
+	};
+	/** The thinking level the default role names for `spec`. */
+	const configRoleThinkingLevelFor = (spec: ResolvedModelRoleValue): ConfiguredThinkingLevel | undefined => {
+		if (spec.explicitThinkingLevel) return spec.thinkingLevel;
+		return reapplyConfig && !spec.model ? unresolvedRoleThinkingLevel() : undefined;
+	};
+	/** Whether config, with `spec` as the default role, names the thinking knob; `inherit` names none. */
+	const adoptsConfigThinking = (spec: ResolvedModelRoleValue): boolean => {
+		if (!reapplyConfig || hasExplicitModel) return false;
+		const roleLevel = configRoleThinkingLevelFor(spec);
+		return (
+			(roleLevel !== undefined && roleLevel !== ThinkingLevel.Inherit) ||
+			selfAliasThinkingLevelFor(spec) !== undefined ||
+			cfgDefaultThinkingLevel.isConfigured(settings)
+		);
+	};
+	/** Whether `pickInitialThinkingLevel` can still read the saved selector suffix for `spec`. */
+	const savedSuffixIsReadableFor = (spec: ResolvedModelRoleValue): boolean =>
+		options.thinkingLevel === undefined && !hasThinkingEntry && !adoptsConfigThinking(spec);
+	// Exact-lookup registry APIs need the registered provider spelling.
+	const registeredProviderKey = (provider: string): string => modelRegistry.resolveProviderKey(provider);
+	// Stale rows already settle a literal suffix; only a catalog without ids is cold.
+	// Hydration marks a cacheless credential-scoped built-in `bundled`.
+	const hasColdCatalog = (provider: string): boolean => {
+		const state = modelRegistry.getProviderDiscoveryState(provider);
+		const discoveryManager = modelRegistry.getDiscoveryProviderId(provider) !== undefined;
+		if (state === undefined) return discoveryManager;
+		if (state.status === "idle") return state.models.length === 0;
+		if (discoveryManager) return state.models.length === 0;
+		return isCredentialScopedModelCacheProvider(provider) && state.source === "bundled";
+	};
+	const canRefreshForSavedSuffix = (provider: string): boolean =>
+		modelRegistry.canRefreshProvider(provider) && hasColdCatalog(provider);
+	// Notices interpolate config and session selectors; keep each on one line.
+	const singleLine = (value: string): string => value.replace(/[\t\n\r]/g, " ");
+	const sameModelReference = (left: string | undefined, right: string | undefined): boolean =>
+		left !== undefined && right !== undefined && left.trim().toLowerCase() === right.trim().toLowerCase();
+	let savedSuffixIsReadable = true;
+	/** Deferred saved-suffix discovery reparse, armed only when the first pass skipped it as unreadable. */
+	let retrySavedSuffixParse: (() => Promise<void>) | undefined;
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
-	// Identify session model strings to restore in fallback order. We do an
-	// initial pass here so model-dependent setup (thinking-level resolution,
-	// host preconnect) can use the restored model; extension-registered
-	// providers aren't visible yet, so we retry the preferred candidates once
-	// extensions register below.
+	// Session model strings in fallback order. The early pass feeds model-dependent
+	// setup; extension providers register later, so candidates are retried below.
+	// Under `reapplyConfig` they back an unresolved config default. A flag-off
+	// `--model` pins identity and thinking, so it reads no saved selector.
 	const sessionModelStrings =
-		!hasExplicitModel && hasExistingSession
+		hasExistingSession && (!hasExplicitModel || reapplyConfig)
 			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
-	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
+	// A saved selector carries identity AND a thinking suffix. When config or
+	// `--model` supplies the identity, the restore walk is skipped, so parse the
+	// suffix of the last-active selector here or that knob is lost.
+	if ((adoptConfigModel() || hasExplicitModel) && sessionModelStrings.length > 0) {
+		restoredSessionThinkingLevel = parseModelString(sessionModelStrings[0], {
+			allowMaxSuffix: true,
+			allowAutoAlias: true,
+			isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
+		})?.thinkingLevel;
+	}
+	if (!hasExplicitModel && !adoptConfigModel() && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
@@ -1965,27 +2080,56 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			model = settingsDefaultModel;
 		});
 	}
+	// The early role resolution ran before extension providers registered. Under
+	// `reapplyConfig`, keep the post-registration retry live when the early match
+	// was a lower-priority candidate, or when config names a default that has not
+	// been adopted yet (an all-self-alias list can gain a model later).
+	const reResolveConfigDefault = (): boolean => {
+		if (hasExplicitModel || !reapplyConfig) return false;
+		if (!settings.getModelRole("default")) return false;
+		if (!adoptConfigModel()) return true;
+		return model !== undefined && (defaultRoleSpec.matchedPatternIndex ?? 0) > 0;
+	};
 
 	const taskDepth = options.taskDepth ?? 0;
 
-	// Resolves the session/agent thinking level using the same precedence we
-	// apply at startup: explicit option → persisted session entry → restored
-	// model selector suffix → default role's explicit selector → selected
-	// model's defaultLevel → global settings default. Run again after extension
-	// role reclaim so the final model's own defaults aren't masked by an earlier
-	// fallback model's.
+	// Startup thinking precedence: explicit option → persisted session entry →
+	// restored selector suffix → default role selector → model defaultLevel →
+	// global default. Under reapply, a config-named knob outranks the session's
+	// entry and suffix. Rerun after reclaim so a fallback's defaults don't stick.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
+		// Under reapply, a thinking knob config names (role selector, suffixed self
+		// alias, or `defaultThinkingLevel`) outranks the session's; `inherit` names none.
+		const roleLevel = configRoleThinkingLevelFor(defaultRoleSpec);
+		const adoptConfigThinking = adoptsConfigThinking(defaultRoleSpec);
+		const configRoleThinkingLevel =
+			adoptConfigThinking && roleLevel === ThinkingLevel.Inherit ? undefined : roleLevel;
+		const selfAliasThinkingLevel = selfAliasThinkingLevelFor(defaultRoleSpec);
+		// Recorded so the saved-suffix discovery reparse asks the same question.
+		savedSuffixIsReadable = options.thinkingLevel === undefined && !hasThinkingEntry && !adoptConfigThinking;
 		let level = options.thinkingLevel;
-		if (level === undefined && hasExistingSession && hasThinkingEntry) {
+		if (level === undefined && hasExistingSession && hasThinkingEntry && !adoptConfigThinking) {
 			level =
 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
 				parseThinkingLevel(existingSession.thinkingLevel);
 		}
-		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
+		if (
+			level === undefined &&
+			!hasThinkingEntry &&
+			!adoptConfigThinking &&
+			restoredSessionThinkingLevel !== undefined
+		) {
 			level = restoredSessionThinkingLevel;
 		}
-		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
-			level = defaultRoleSpec.thinkingLevel;
+		if (level === undefined && !hasExplicitModel && (!hasThinkingEntry || adoptConfigThinking)) {
+			if (configRoleThinkingLevel !== undefined) {
+				level = configRoleThinkingLevel;
+			} else if (selfAliasThinkingLevel !== undefined) {
+				level = selfAliasThinkingLevel;
+			}
+		}
+		if (level === undefined && adoptConfigThinking && cfgDefaultThinkingLevel.isConfigured(settings)) {
+			level = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings));
 		}
 		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
 			level = selectedModel.thinking.defaultLevel;
@@ -2710,7 +2854,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// downstream fallback filling `model`). Reclaim it here so resume
 		// honors the last active role in either case.
 		const sessionRetryLimit = restoredSessionModelIndex >= 0 ? restoredSessionModelIndex : sessionModelStrings.length;
-		if (!hasExplicitModel && sessionRetryLimit > 0) {
+		if (!hasExplicitModel && !adoptConfigModel() && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
 					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
@@ -2756,12 +2900,75 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		// Exhaust persisted candidates (including configured and extension discovery)
 		// before permitting a settings-default or first-available substitution.
+		// Under reapply, `--model` or an adopted config default owns identity and the
+		// saved selectors only back it, so a missing session model is not a restore failure.
 		if (
+			!hasExplicitModel &&
+			!adoptConfigModel() &&
 			sessionModelStrings.length > 0 &&
 			restoredSessionModelIndex < 0 &&
 			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
 		) {
 			throw new Error(`Could not restore model ${sessionModelStrings[0]}`);
+		}
+		// The early saved-suffix parse ran before extension providers registered,
+		// so a literal id ending in an effort name (`custom/router:low`) may have
+		// been misread as thinking. Re-parse now.
+		if ((adoptConfigModel() || hasExplicitModel || reResolveConfigDefault()) && sessionModelStrings.length > 0) {
+			const savedSessionModelString = sessionModelStrings[0];
+			const reparseSavedSuffix = () =>
+				parseModelString(savedSessionModelString, {
+					allowMaxSuffix: true,
+					allowAutoAlias: true,
+					// The caller's own pinned model counts as literal, compared
+					// case-insensitively like other model references.
+					isLiteralModelId: (provider, id) =>
+						modelRegistry.hasModelId(provider, id) ||
+						(sameModelReference(options.model?.provider, provider) && sameModelReference(options.model?.id, id)),
+				});
+			let savedParse = reparseSavedSuffix();
+			// A cold dynamic catalog can hide a literal suffix. Refresh only when the suffix is readable,
+			// joining an in-flight pass before retrying.
+			if (
+				savedSuffixIsReadable &&
+				savedParse?.thinkingLevel !== undefined &&
+				canRefreshForSavedSuffix(registeredProviderKey(savedParse.provider))
+			) {
+				const savedProvider = registeredProviderKey(savedParse.provider);
+				await runtimeDiscoveryPromise;
+				await modelRegistry.awaitBackgroundRefresh();
+				await logger.time("restoreSessionSuffixDiscoveryFallback", () =>
+					modelRegistry.refreshDiscoverableProviders([savedProvider], "online-if-uncached"),
+				);
+				savedParse = reparseSavedSuffix();
+			}
+			// Skipped only as unreadable: provisional, since the discovery retry can
+			// pick a new default that makes the suffix readable again.
+			if (
+				!savedSuffixIsReadable &&
+				savedParse?.thinkingLevel !== undefined &&
+				canRefreshForSavedSuffix(registeredProviderKey(savedParse.provider))
+			) {
+				const savedProvider = registeredProviderKey(savedParse.provider);
+				retrySavedSuffixParse = async (): Promise<void> => {
+					retrySavedSuffixParse = undefined;
+					await runtimeDiscoveryPromise;
+					await modelRegistry.awaitBackgroundRefresh();
+					await logger.time("restoreSessionSuffixDiscoveryRetry", () =>
+						modelRegistry.refreshDiscoverableProviders([savedProvider], "online-if-uncached"),
+					);
+					restoredSessionThinkingLevel = reparseSavedSuffix()?.thinkingLevel;
+				};
+			}
+			restoredSessionThinkingLevel = savedParse?.thinkingLevel;
+			// The early parse already fed `thinkingLevel`; re-pick from the corrected value.
+			if (model) {
+				adoptThinkingForModel(model);
+			} else {
+				thinkingLevel = pickInitialThinkingLevel(undefined);
+				autoThinking = thinkingLevel === AUTO_THINKING;
+				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+			}
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role
@@ -2862,7 +3069,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const parsedOriginal = parseModelString(originalSelector, {
 							allowMaxSuffix: true,
 							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+							isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
 						});
 						const retryFallback: InitialRetryFallbackState = {
 							role: chainKey,
@@ -3073,7 +3280,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Fall back to first available model with a valid API key, honoring the
 		// path-scoped `enabledModels` allow-list when configured. Skip when the
 		// user explicitly requested a model via --model that wasn't found.
-		if (!model && deferredModelPatterns.length === 0) {
+		if ((!model || reResolveConfigDefault()) && deferredModelPatterns.length === 0) {
 			// Retry the configured default role against the current catalog,
 			// setting `model` (+ thinking level) when it resolves. Extension
 			// factories register providers AFTER the early `defaultRoleSpec`
@@ -3085,6 +3292,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// user's configured default with a bundled provider's default whenever
 			// a stray `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issues #3569, #6162)
+
+			// Whether `model` holds a value THIS resolver adopted, and so may be
+			// withdrawn when discovery refreshes the catalog behind it.
+			let adoptedDefaultRoleModel = false;
 			const tryResolveDefaultRole = async (): Promise<boolean> => {
 				if (hasExplicitModel) return false;
 				// Re-resolve the allowed set: extension factories and discovery
@@ -3094,10 +3305,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings,
 					matchPreferences: modelMatchPreferences,
 				});
-				if (!reResolvedRoleSpec.model) return false;
+				if (!reResolvedRoleSpec.model) {
+					// A model this resolver adopted earlier is provisional: discovery
+					// may have withdrawn it. Every later fallback is gated on `!model`,
+					// so drop it and let them run.
+					if (model && adoptedDefaultRoleModel) {
+						model = undefined;
+						adoptedDefaultRoleModel = false;
+						modelFallbackMessage = `Model role "default" (${singleLine(settings.getModelRole("default") ?? "")}) is no longer available`;
+					}
+					defaultRoleSpec = reResolvedRoleSpec;
+					return false;
+				}
+				// Under `reapplyConfig`, a self alias reached first means "keep the
+				// session model": adopt nothing. With no saved model there is none to keep.
+				if (reapplyConfig && sessionModelStrings.length > 0 && reachedSelfAlias(reResolvedRoleSpec)) {
+					defaultRoleSpec = reResolvedRoleSpec;
+					return false;
+				}
 				defaultRoleSpec = reResolvedRoleSpec;
 				const resolvedDefaultModel = reResolvedRoleSpec.model;
 				model = resolvedDefaultModel;
+				adoptedDefaultRoleModel = true;
+				// The config default overruled any early restore, so the notice below
+				// must not report the session model as kept.
+				restoredSessionModelIndex = -1;
 				modelFallbackMessage = undefined;
 				// Recompute the thinking level against the now-real model.
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
@@ -3107,7 +3339,140 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return true;
 			};
 
+			// Cold-cache discovery race: a discovery provider ships no
+			// static models, so take at most one cache-aware pass per session creation.
+			// `hasRefreshableProviders()` also covers extension runtime providers,
+			// which `getDiscoverableProviders()` omits.
+			let discoveryRefreshed = false;
+			// Whether discovery could still make a candidate AHEAD of the current
+			// match selectable. Avoids a full discovery timeout on behalf of a
+			// candidate that only lacks credentials.
+			const unresolvedCandidateCanDiscover = (): boolean => {
+				const matchedRawIndex = defaultRoleSpec.model
+					? (defaultRoleSpec.matchedRawPatternIndex ?? defaultRoleSpec.matchedPatternIndex ?? 0)
+					: defaultRolePatterns.length;
+				const matchedExpandedIndex = defaultRoleSpec.model
+					? (defaultRoleSpec.matchedPatternIndex ?? 0)
+					: Number.POSITIVE_INFINITY;
+				let expandedIndex = 0;
+				for (const [index, pattern] of defaultRolePatterns.entries()) {
+					if (index > matchedRawIndex) break;
+					if (isDefaultModelRoleSelfAlias(pattern)) {
+						if (index >= matchedRawIndex) break;
+						return true;
+					}
+					for (const candidate of resolveConfiguredModelPatterns([pattern], settings)) {
+						if (expandedIndex >= matchedExpandedIndex) return false;
+						const provider = candidate.split("/")[0];
+						if (!provider || provider === candidate || provider.includes("*")) return true;
+						if (modelRegistry.canRefreshProvider(registeredProviderKey(provider))) return true;
+						expandedIndex++;
+					}
+				}
+				return false;
+			};
+			// The arbitrary-model fallback has no candidate list but still needs cold discovery.
+			const refreshDiscoveryOnce = async (filterCandidates: boolean): Promise<boolean> => {
+				if (discoveryRefreshed || !modelRegistry.hasRefreshableProviders()) return false;
+				if (filterCandidates && !unresolvedCandidateCanDiscover()) return false;
+				discoveryRefreshed = true;
+				await runtimeDiscoveryPromise;
+				await modelRegistry.awaitBackgroundRefresh();
+				await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
+				return true;
+			};
+
 			await tryResolveDefaultRole();
+
+			// The configured default outranks the baked model and the arbitrary pick
+			// below, and both run only while `model` is unset, so take the discovery
+			// pass first. It is also the only retry for an ordered list whose FIRST
+			// candidate needs discovery.
+			if (
+				!hasExplicitModel &&
+				Boolean(settings.getModelRole("default")) &&
+				(!model || (defaultRoleSpec.matchedPatternIndex ?? 0) > 0 || reResolveConfigDefault()) &&
+				(await refreshDiscoveryOnce(true))
+			) {
+				await tryResolveDefaultRole();
+				// A new winner can make the saved suffix readable again; redo the
+				// deferred reparse before it is read.
+				if (retrySavedSuffixParse && savedSuffixIsReadableFor(defaultRoleSpec)) {
+					await retrySavedSuffixParse();
+					if (model) {
+						adoptThinkingForModel(model);
+					} else {
+						thinkingLevel = pickInitialThinkingLevel(undefined);
+						autoThinking = thinkingLevel === AUTO_THINKING;
+						effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+					}
+				}
+			}
+
+			// Under `reapplyConfig`, an unresolved config default or a reached self
+			// alias keeps the session's own model over an arbitrary pick, fetching a
+			// cold discovery-backed provider once if needed.
+			const keepsSessionModel =
+				adoptConfigModel() ||
+				(reapplyConfig && !hasExplicitModel && reachedSelfAlias(defaultRoleSpec) !== undefined);
+			if (!model && keepsSessionModel && sessionModelStrings.length > 0) {
+				const restoreSavedSessionModel = async (): Promise<boolean> => {
+					const enabledModelPatterns = cfgEnabledModels.get(settings);
+					const allowedModels =
+						enabledModelPatterns.length > 0
+							? await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences)
+							: undefined;
+					for (let i = 0; i < sessionModelStrings.length; i++) {
+						const parsedModel = parseModelString(sessionModelStrings[i], {
+							allowMaxSuffix: true,
+							allowAutoAlias: true,
+							isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
+						});
+						if (!parsedModel) continue;
+						const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
+						if (
+							restoredModel &&
+							(!allowedModels ||
+								allowedModels.some(
+									allowed => allowed.provider === restoredModel.provider && allowed.id === restoredModel.id,
+								)) &&
+							hasModelAuth(restoredModel)
+						) {
+							model = restoredModel;
+							modelFallbackMessage = undefined;
+							restoredSessionModelIndex = i;
+							restoredSessionThinkingLevel = parsedModel.thinkingLevel;
+							adoptThinkingForModel(restoredModel);
+							preconnectModelHost(restoredModel.baseUrl);
+							return true;
+						}
+					}
+					return false;
+				};
+				if (!(await logger.time("restoreSessionModelReapplyFallback", restoreSavedSessionModel))) {
+					const candidateProviders = new Set<string>();
+					for (const sessionModelStr of sessionModelStrings) {
+						const parsedModel = parseModelString(sessionModelStr, {
+							allowMaxSuffix: true,
+							allowAutoAlias: true,
+							isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
+						});
+						if (!parsedModel) continue;
+						// Already in the catalog: discovery cannot make an excluded model eligible.
+						if (modelRegistry.find(parsedModel.provider, parsedModel.id)) continue;
+						const providerKey = registeredProviderKey(parsedModel.provider);
+						if (modelRegistry.canRefreshProvider(providerKey)) candidateProviders.add(providerKey);
+					}
+					if (candidateProviders.size > 0) {
+						await runtimeDiscoveryPromise;
+						await modelRegistry.awaitBackgroundRefresh();
+						await logger.time("restoreSessionModelReapplyDiscoveryFallback", () =>
+							modelRegistry.refreshDiscoverableProviders(candidateProviders, "online-if-uncached"),
+						);
+						await restoreSavedSessionModel();
+					}
+				}
+			}
 
 			if (!model) {
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
@@ -3115,36 +3480,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.hasConcreteAuth(provider),
 				);
 
-				// Cold-cache discovery race (issues #6114, #6162): a discovery
-				// provider (models.yml `openai-models-list`, LM Studio/Ollama/
-				// llama.cpp, or an openai-compat proxy) ships no static models, so
-				// the static+cached catalog resolved nothing above. Background
-				// discovery in main.ts fires only AFTER createAgentSession returns,
-				// so on a cache-cold boot the configured default stays unresolved
-				// and `pick` silently degrades to an unrelated authed provider's
-				// default (#6162) or "No models available" (#6114) — even though
-				// `omp models` (which awaits discovery) lists the model. Await one
-				// cache-aware discovery pass and retry when a default role is
-				// configured (must win over `pick`) or nothing resolved at all.
-				// The common path — role already resolved, or a `pick` with no
-				// configured default — never pays for it.
-				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
-				if (
-					!hasExplicitModel &&
-					(defaultRoleConfigured || !pick) &&
-					modelRegistry.getDiscoverableProviders().length > 0
-				) {
-					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
-					if (!(await tryResolveDefaultRole()) && !model) {
-						const refreshedCandidates = await resolveAllowedModels(
-							modelRegistry,
-							settings,
-							modelMatchPreferences,
-						);
-						pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth), provider =>
-							modelRegistry.hasConcreteAuth(provider),
-						);
-					}
+				// Nothing resolved and only a discovery provider's catalog could
+				// carry a model. A no-op when the configured-default pass already ran.
+				if (!pick && !hasExplicitModel && (await refreshDiscoveryOnce(false))) {
+					const refreshedCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+					pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth), provider =>
+						modelRegistry.hasConcreteAuth(provider),
+					);
 				}
 
 				if (!model && pick) {
@@ -3162,6 +3504,57 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+			}
+		}
+
+		if (
+			reapplyConfig &&
+			!hasExplicitModel &&
+			sessionModelStrings.length > 0 &&
+			restoredSessionModelIndex < 0 &&
+			(!defaultRoleSpec.model ||
+				!model ||
+				defaultRoleSpec.model.provider !== model.provider ||
+				defaultRoleSpec.model.id !== model.id) &&
+			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
+		) {
+			throw new Error(`Could not restore model ${sessionModelStrings[0]}`);
+		}
+
+		// `reapplyConfig` notice: the resolution above is silent, so report whether
+		// the config default was adopted or fell back. Only an adoption starts with
+		// `--reapply-config: resumed on ` (see `buildModelFallbackNotification`).
+		const bakedSessionModel = sessionModelStrings[0] === undefined ? undefined : singleLine(sessionModelStrings[0]);
+		if (adoptConfigModel() && model && bakedSessionModel) {
+			const configDefaultResolved =
+				defaultRoleSpec.model !== undefined &&
+				defaultRoleSpec.model.provider === model.provider &&
+				defaultRoleSpec.model.id === model.id;
+			const unresolvedDefault = `--reapply-config: config default "${singleLine(defaultRoleValue ?? "")}" did not resolve${
+				defaultRoleSpec.warning ? ` (${singleLine(defaultRoleSpec.warning)})` : ""
+			}`;
+			if (restoredSessionModelIndex >= 0) {
+				// Index 0 is the session's active model; a later index means that one
+				// failed too and the resume did change models.
+				modelFallbackMessage = `${unresolvedDefault}${
+					restoredSessionModelIndex === 0
+						? `; kept the session's ${formatModelString(model)}`
+						: ` and the session's ${bakedSessionModel} could not be restored; using its saved fallback ${formatModelString(model)}`
+				}`;
+			} else if (configDefaultResolved) {
+				const bakedParsed = parseModelString(bakedSessionModel, {
+					allowMaxSuffix: true,
+					allowAutoAlias: true,
+					isLiteralModelId: (provider, id) => modelRegistry.hasModelId(provider, id),
+				});
+				if (
+					!sameModelReference(bakedParsed?.provider, model.provider) ||
+					!sameModelReference(bakedParsed?.id, model.id)
+				) {
+					modelFallbackMessage = `--reapply-config: resumed on ${formatModelString(model)} from config instead of the session's ${bakedSessionModel}`;
+				}
+			} else {
+				modelFallbackMessage = `${unresolvedDefault} and the session's ${bakedSessionModel} could not be restored; using ${formatModelString(model)}`;
 			}
 		}
 
@@ -4168,15 +4561,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `model` is final here: deferred patterns, auth fallback, and extension
 		// role reclaim have all run, so a resolver can scope tiers to its family.
 		const resolvedServiceTierByFamily = options.resolveServiceTierByFamily?.(model);
+		const configServiceTierByFamily = buildServiceTierByFamily(
+			cfgTierOpenai.get(settings),
+			cfgTierAnthropic.get(settings),
+			cfgTierGoogle.get(settings),
+		);
+		// Under `reapplyConfig`, adopt the config tier PER FAMILY; a family config
+		// does not name keeps the session's. A configured `none` is omitted from the
+		// built map but still clears the session's tier. Independent of `--model`;
+		// `openAIServiceTier` below still wins.
+		const mergeConfigServiceTier = (): ServiceTierByFamily => {
+			const tierSettingByFamily = {
+				openai: cfgTierOpenai,
+				anthropic: cfgTierAnthropic,
+				google: cfgTierGoogle,
+			} satisfies Record<(typeof SERVICE_TIER_FAMILIES)[number], unknown>;
+			const merged: ServiceTierByFamily = { ...existingSession.serviceTier, ...configServiceTierByFamily };
+			for (const family of SERVICE_TIER_FAMILIES) {
+				if (configServiceTierByFamily[family] === undefined && tierSettingByFamily[family].isConfigured(settings)) {
+					delete merged[family];
+				}
+			}
+			return merged;
+		};
+		// On a resume without `reapplyConfig`, a recorded tier entry (even `null`)
+		// is authoritative; a session predating tier entries keeps config as before.
 		const configuredServiceTierByFamily =
 			resolvedServiceTierByFamily ??
-			(hasServiceTierEntry
-				? (existingSession.serviceTier ?? {})
-				: buildServiceTierByFamily(
-						cfgTierOpenai.get(settings),
-						cfgTierAnthropic.get(settings),
-						cfgTierGoogle.get(settings),
-					));
+			(reapplyConfig
+				? mergeConfigServiceTier()
+				: hasServiceTierEntry
+					? (existingSession.serviceTier ?? {})
+					: configServiceTierByFamily);
 		const persistInitialServiceTier =
 			options.openAIServiceTier !== undefined || resolvedServiceTierByFamily !== undefined;
 		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
@@ -4488,6 +4904,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
+			reappliedConfig: reapplyConfig,
 			sessionManager,
 			settings,
 			additionalExtensionPaths: options.additionalExtensionPaths,
@@ -5271,7 +5688,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionsResult,
 			setToolUIContext,
 			mcpManager,
-			modelFallbackMessage,
+			// Interpolates config and session selectors; strip terminal controls.
+			modelFallbackMessage: modelFallbackMessage === undefined ? undefined : sanitizeText(modelFallbackMessage),
 			lspServers,
 			startBackgroundModelDiscovery: startRuntimeDiscovery,
 			eventBus,
