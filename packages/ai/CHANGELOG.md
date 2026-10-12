@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `CompassOwnerPool` with single-flight per-owner storage, request-stream leases, and idle eviction pinned by pending credential writes.
 - Added `AuthStorage.keys.hasUsable(provider, { modelId })`, a side-effect-free dry run of `getApiKey`. It is true when an eligible credential is not under a recorded block for that model; it reads existing block marks and does not probe usage or resolve key references. It never advances round-robin, records stickiness, refreshes OAuth, writes or prunes the store, or returns key material.
 
 ## [18.9.2-rigel.1] - 2026-10-15
