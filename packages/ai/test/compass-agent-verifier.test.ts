@@ -171,6 +171,45 @@ describe("Compass agent verifier", () => {
 		await expect(authorize(req)).rejects.toThrow();
 		expect(calls).toHaveLength(1);
 	});
+	test("classifies request abort as canceled", async () => {
+		const calls: RpcCall[] = [];
+		const fetcher = makeFetch(call => {
+			const signal = call.init?.signal;
+			if (!signal) throw new Error("missing request signal");
+			return new Promise<Response>((_resolve, reject) => {
+				signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+			});
+		}, calls);
+		const controller = new AbortController();
+		const authorize = verifier(fetcher);
+		const pending = authorize(
+			new Request("https://gateway.example/v1/models", {
+				headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
+				signal: controller.signal,
+			}),
+		);
+		await Promise.resolve();
+		controller.abort(new DOMException("request canceled", "AbortError"));
+
+		const error = await Promise.resolve(pending).then(
+			() => null,
+			value => value,
+		);
+		expect(error).toMatchObject({ code: "canceled" });
+		expect(calls).toHaveLength(1);
+	});
+
+	test("rejects an explicit timeout that is not finite and positive", () => {
+		for (const timeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+			expect(() =>
+				createCompassAgentVerifier({
+					baseUrl: "https://compass.example",
+					token: SERVICE_TOKEN,
+					timeoutMs,
+				}),
+			).toThrow("timeoutMs");
+		}
+	});
 
 	test("cancels the remote call when the incoming request aborts", async () => {
 		const calls: RpcCall[] = [];
