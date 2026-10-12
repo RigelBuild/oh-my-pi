@@ -13,8 +13,10 @@ import {
 	hasGatewayUsage,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
+	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import type { CallerIdentity } from "../types";
 
 interface ResolvedVideoRequest {
 	model: Model<Api>;
@@ -33,6 +35,7 @@ async function resolveVideoJob(
 	req: Request,
 	peer: string,
 	gatewayId: string,
+	caller: CallerIdentity,
 ): Promise<ResolvedVideoRequest | Response> {
 	const controller = mirrorRequestAbort(req);
 	if (controller.signal.aborted) return aborted();
@@ -43,7 +46,7 @@ async function resolveVideoJob(
 		const message = error instanceof Error ? error.message : String(error);
 		return videoServer.formatError(400, "invalid_request_error", message);
 	}
-	const model = bootOpts.resolveModel(`${identity.provider}/${identity.modelId}`);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, `${identity.provider}/${identity.modelId}`, caller);
 	if (!model) {
 		return videoServer.formatError(
 			404,
@@ -133,6 +136,7 @@ export async function handleVideoSubmit(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -146,7 +150,7 @@ export async function handleVideoSubmit(
 		const message = error instanceof Error ? error.message : String(error);
 		return videoServer.formatError(400, "invalid_request_error", message);
 	}
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
 	if (!model) return videoServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (model.api !== "openrouter-video") {
 		return videoServer.formatError(
@@ -206,10 +210,11 @@ export async function handleVideoPoll(
 	req: Request,
 	peer: string,
 	gatewayId: string,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
-	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId);
+	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId, caller);
 	if (resolved instanceof Response) return resolved;
 	logVideoRequest(requestId, "poll", resolved.model, peer);
 	try {
@@ -238,10 +243,11 @@ export async function handleVideoContent(
 	req: Request,
 	peer: string,
 	gatewayId: string,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
-	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId);
+	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId, caller);
 	if (resolved instanceof Response) return resolved;
 	logVideoRequest(requestId, "content", resolved.model, peer);
 	try {

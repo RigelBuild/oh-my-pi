@@ -16,9 +16,31 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { extractProviderRetryHint } from "../utils/retry-after";
-import type { AgentCaller, AuthGatewayServerOptions } from "./types";
+import type { AgentCaller, AuthGatewayServerOptions, CallerIdentity } from "./types";
 
-export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+export type ModelResolver = (
+	modelId: string,
+	caller: CallerIdentity,
+) => Model<Api> | undefined | Promise<Model<Api> | undefined>;
+
+export class ModelResolverUnavailableError extends Error {
+	constructor() {
+		super("model resolver unavailable");
+		this.name = "ModelResolverUnavailableError";
+	}
+}
+
+export async function resolveGatewayModel(
+	resolver: ModelResolver,
+	modelId: string,
+	caller: CallerIdentity,
+): Promise<Model<Api> | undefined> {
+	try {
+		return await resolver(modelId, caller);
+	} catch {
+		throw new ModelResolverUnavailableError();
+	}
+}
 
 export interface FailoverContext {
 	/** The inbound request, as an opaque token; the fork reads no identity from it. */
@@ -95,6 +117,8 @@ export interface AuthGatewayRouteOptions {
 	listModels?: () => Iterable<Model<Api>>;
 	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
 	excludeProviders?: ReadonlySet<string>;
+	/** Optional stable-name rows, projected independently from provider-qualified model rows. */
+	listAliases?: () => Iterable<{ id: string; model: Model<Api> }>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 	/** Chat routes retry an eligible pre-output failure on the next candidate, if any; unset keeps one attempt. */

@@ -17,10 +17,16 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 
+interface ResolverCall {
+	modelId: string;
+	caller: CallerIdentity;
+}
+
 interface Harness {
 	handle: AuthGatewayServerHandle;
 	mock: MockModel;
 	resolved: string[];
+	resolverCalls: ResolverCall[];
 	/** `Authorization` of every upstream call that went through the `fetch` seam. */
 	upstreamKeys: (string | null)[];
 	close(): Promise<void>;
@@ -40,7 +46,7 @@ function rawAuthorizer(result: unknown): AuthGatewayAuthorizer {
 	return () => result as CallerIdentity | null;
 }
 
-async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Promise<Harness> {
+async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true, resolverFailure = false): Promise<Harness> {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-authorize-"));
 	const shared = await AuthStorage.create(path.join(dir, "shared.db"));
@@ -69,6 +75,7 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 		kind: "embedding",
 		supportsTools: false,
 	} satisfies ModelSpec<Api>);
+	const resolverCalls: ResolverCall[] = [];
 	const upstreamKeys: (string | null)[] = [];
 	const fetchImpl: FetchImpl = async (_input, init) => {
 		upstreamKeys.push(new Headers(init?.headers).get("authorization"));
@@ -92,13 +99,18 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 					return pool;
 				}
 			: undefined,
-		resolveModel: id => (id === embedding.id ? embedding : mock.model),
+		resolveModel: async (id, caller) => {
+			resolverCalls.push({ modelId: id, caller });
+			if (resolverFailure) throw new Error("resolver backend unavailable");
+			return id === embedding.id ? embedding : mock.model;
+		},
 		version: "test",
 		fetch: fetchImpl,
 	});
 	return {
 		handle,
 		mock,
+		resolverCalls,
 		resolved,
 		upstreamKeys,
 		close: async () => {
@@ -354,5 +366,37 @@ describe("auth-gateway authorize seam", () => {
 		harness.mock.push({ content: ["ok"] });
 		const response = await chat(harness, {}, {}, "/v1/chat/completions?k=anything");
 		expect(response.status).toBe(200);
+	});
+
+	it("passes the admitted caller to chat and embedding model resolution", async () => {
+		harness = await boot(agentAuthorizer);
+		harness.mock.push({ content: ["chat"] });
+		const chatResponse = await chat(harness, { Authorization: "Bearer token-a" });
+		expect(chatResponse.status).toBe(200);
+		const embeddingResponse = await fetch(`${harness.handle.url}/v1/embeddings`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: "Bearer token-b" },
+			body: JSON.stringify({ model: "text-embedding-3-small", input: "hi" }),
+		});
+		expect(embeddingResponse.status).toBe(200);
+		expect(harness.resolverCalls).toEqual([
+			{ modelId: "mock/authorize", caller: { kind: "agent", agentAccountId: "agent-a" } },
+			{ modelId: "text-embedding-3-small", caller: { kind: "agent", agentAccountId: "agent-b" } },
+		]);
+	});
+
+	it("awaits an asynchronous model resolver", async () => {
+		harness = await boot(agentAuthorizer);
+		harness.mock.push({ content: ["async resolver"] });
+		const response = await chat(harness, { Authorization: "Bearer token-a" });
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ choices: [{ message: { content: "async resolver" } }] });
+	});
+
+	it("answers 503 when model resolution fails", async () => {
+		harness = await boot(agentAuthorizer, true, true);
+		const response = await chat(harness, { Authorization: "Bearer token-a" });
+		expect(response.status).toBe(503);
+		expect(await response.json()).toEqual({ error: "credential pool unavailable" });
 	});
 });

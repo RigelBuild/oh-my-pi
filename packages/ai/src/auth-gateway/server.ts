@@ -51,10 +51,12 @@ import { resolvePeer } from "../utils/resolve-peer";
 import {
 	type AuthGatewayBootOptions,
 	type AuthGatewayRouteOptions,
+	ModelResolverUnavailableError,
 	buildGatewayApiKeyResolver,
 	type CandidateFailoverOptions,
 	type FailoverContext,
 	gatewayUsageOutcome,
+	resolveGatewayModel,
 	mirrorRequestAbort,
 	normalizeClientSessionKey,
 	recordGatewayUsage,
@@ -974,7 +976,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
 
-	const model = bootOpts.resolveModel(modelId);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, modelId, caller);
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
@@ -1235,7 +1237,7 @@ async function handlePiNative(
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
 
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
@@ -1476,9 +1478,8 @@ interface ModelListRow {
 function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 	const seen = new Set<string>();
 	const data: ModelListRow[] = [];
-	for (const model of opts.listModels?.() ?? []) {
-		const id = `${model.provider}/${model.id}`;
-		if (seen.has(id)) continue;
+	const append = (id: string, model: Model<Api>) => {
+		if (seen.has(id)) return;
 		seen.add(id);
 		const row: ModelListRow = {
 			id,
@@ -1493,7 +1494,14 @@ function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;
 		if (model.supportsTools === false) row.supports_tools = false;
 		data.push(row);
+	};
+	for (const model of opts.listModels?.() ?? []) {
+		append(`${model.provider}/${model.id}`, model);
 	}
+	for (const alias of opts.listAliases?.() ?? []) {
+		append(alias.id, alias.model);
+	}
+
 	return json(200, { object: "list", data });
 }
 
@@ -1603,49 +1611,49 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 			// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
 			// reach the same handler through their Decisions path.
 			if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
-				return await handleSystemOne(scoped, req, peer);
+				return await handleSystemOne(scoped, req, peer, caller);
 			}
 
 			// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
 			// (JSON), and OpenAI multipart / OpenRouter JSON edits.
 			if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
-				return await handleImageGenerations(scoped, req, peer);
+				return await handleImageGenerations(scoped, req, peer, caller);
 			}
 			if (req.method === "POST" && pathname === "/v1/images/edits") {
-				return await handleImageEdits(scoped, req, peer);
+				return await handleImageEdits(scoped, req, peer, caller);
 			}
 
 			// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
 			if (req.method === "POST" && pathname === "/v1/audio/speech") {
-				return await handleSpeech(scoped, req, peer);
+				return await handleSpeech(scoped, req, peer, caller);
 			}
 
 			// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
 			if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
-				return await handleTranscriptions(scoped, req, peer);
+				return await handleTranscriptions(scoped, req, peer, caller);
 			}
 
 			// Embeddings, OpenAI wire (OpenRouter is compatible).
 			if (req.method === "POST" && pathname === "/v1/embeddings") {
-				return await handleEmbeddings(scoped, req, peer);
+				return await handleEmbeddings(scoped, req, peer, caller);
 			}
 
 			// Rerank, OpenRouter wire.
 			if (req.method === "POST" && pathname === "/v1/rerank") {
-				return await handleRerank(scoped, req, peer);
+				return await handleRerank(scoped, req, peer, caller);
 			}
 
 			// Video generation, OpenRouter's asynchronous wire: submit, then poll
 			// and download by the gateway-issued job id (stateless — the id
 			// encodes provider, model, and upstream job).
 			if (req.method === "POST" && pathname === "/v1/videos") {
-				return await handleVideoSubmit(scoped, req, peer);
+				return await handleVideoSubmit(scoped, req, peer, caller);
 			}
 			const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
 			if (videoJob) {
 				const gatewayId = decodeURIComponent(videoJob[1]);
 				const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
-				return await handler(scoped, req, peer, gatewayId);
+				return await handler(scoped, req, peer, gatewayId, caller);
 			}
 
 			// Route-table miss: no format module to defer to, so we emit a
@@ -1655,6 +1663,14 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 		try {
 			return opts.routeScope ? await opts.routeScope(req, body) : await body();
 		} catch (error) {
+			if (error instanceof ModelResolverUnavailableError) {
+				logger.warn("auth-gateway credential pool unavailable", {
+					path: loggablePath(pathname),
+					peer,
+					error: errorName(error),
+				});
+				return json(503, { error: "credential pool unavailable" });
+			}
 			logger.error("auth-gateway handler crashed", {
 				method: req.method,
 				path: loggablePath(pathname),
