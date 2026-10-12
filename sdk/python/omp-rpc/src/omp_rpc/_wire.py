@@ -574,6 +574,8 @@ class QueuedMessagesState:
     """Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`."""
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    live_steered: int = 0
+    """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -663,7 +665,7 @@ class SessionState:
     """Background jobs or deliveries can still inject a follow-up and wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
-    queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": []}, "queuedMessages"))
+    queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))
     todo_phases: tuple[TodoPhase, ...] = ()
     system_prompt: tuple[str, ...] = ()
     """System prompt sections, for session dumps."""
@@ -916,6 +918,17 @@ class LoginProvider:
     name: str
     available: bool
     authenticated: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LogoutAccount:
+    """A stored credential `logout` can remove; `active` marks credentials the session may be using."""
+    credential_id: int
+    provider: str
+    label: str
+    detail: str
+    type: Literal["api_key", "oauth"]
+    active: bool
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1179,6 +1192,8 @@ class QueueUpdateEvent:
     type: Literal["queue_update"] = "queue_update"
     steering: tuple[str, ...]
     follow_up: tuple[str, ...]
+    live_steered: int = 0
+    """Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1562,6 +1577,11 @@ class NegotiateProtocolResult:
     protocol_version: int
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LogoutResult:
+    remaining_source: str | None = None
+
+
 UserContent: TypeAlias = TextContent | ImageContent
 
 
@@ -1830,6 +1850,7 @@ def parse_queued_messages_state(value: object, path: str = "QueuedMessagesState"
     return QueuedMessagesState(
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
+        live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
     )
 
 
@@ -1918,7 +1939,7 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         queued_message_count=defaulted(payload, "queuedMessageCount", decode_int, path, 0),
         has_pending_async_work=defaulted(payload, "hasPendingAsyncWork", decode_bool, path, False),
         is_settled=defaulted(payload, "isSettled", decode_bool, path, False),
-        queued_messages=defaulted(payload, "queuedMessages", parse_queued_messages_state, path, parse_queued_messages_state({"steering": [], "followUp": []}, path)),
+        queued_messages=defaulted(payload, "queuedMessages", parse_queued_messages_state, path, parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, path)),
         todo_phases=defaulted(payload, "todoPhases", array(parse_todo_phase), path, ()),
         system_prompt=defaulted(payload, "systemPrompt", scalar_or_array(decode_str), path, ()),
         dump_tools=defaulted(payload, "dumpTools", array(parse_tool_descriptor), path, ()),
@@ -2207,6 +2228,18 @@ def parse_login_provider(value: object, path: str = "LoginProvider") -> LoginPro
         name=required(payload, "name", decode_str, path),
         available=required(payload, "available", decode_bool, path),
         authenticated=required(payload, "authenticated", decode_bool, path),
+    )
+
+
+def parse_logout_account(value: object, path: str = "LogoutAccount") -> LogoutAccount:
+    payload = expect_object(value, path)
+    return LogoutAccount(
+        credential_id=required(payload, "credentialId", decode_int, path),
+        provider=required(payload, "provider", decode_str, path),
+        label=required(payload, "label", decode_str, path),
+        detail=required(payload, "detail", decode_str, path),
+        type=required(payload, "type", cast('Decoder[Literal["api_key", "oauth"]]', literal(frozenset({"api_key", "oauth"}))), path),
+        active=required(payload, "active", decode_bool, path),
     )
 
 
@@ -2516,6 +2549,7 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
     return QueueUpdateEvent(
         steering=required(payload, "steering", array(decode_str), path),
         follow_up=required(payload, "followUp", array(decode_str), path),
+        live_steered=defaulted(payload, "liveSteered", decode_int, path, 0),
     )
 
 
@@ -2950,6 +2984,13 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     payload = expect_object(value, path)
     return NegotiateProtocolResult(
         protocol_version=required(payload, "protocolVersion", decode_int, path),
+    )
+
+
+def parse_logout_result(value: object, path: str = "LogoutResult") -> LogoutResult:
+    payload = expect_object(value, path)
+    return LogoutResult(
+        remaining_source=optional(payload, "remainingSource", decode_str, path),
     )
 
 
@@ -3417,6 +3458,19 @@ class WireClient:
         params["providerId"] = provider_id
         return required(expect_object(self._command("login", params, timeout=600), "login"), "providerId", decode_str, "login")
 
+    def get_logout_accounts(self, provider_id: str) -> tuple[LogoutAccount, ...]:
+        """List the stored credentials `logout` can remove for a provider, active first."""
+        params: dict[str, object] = {}
+        params["providerId"] = provider_id
+        return required(expect_object(self._command("get_logout_accounts", params), "get_logout_accounts"), "accounts", array(parse_logout_account), "get_logout_accounts")
+
+    def logout(self, provider_id: str, credential_id: int) -> LogoutResult:
+        """Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies."""
+        params: dict[str, object] = {}
+        params["providerId"] = provider_id
+        params["credentialId"] = credential_id
+        return parse_logout_result(self._command("logout", params), "logout")
+
     def predict_word(self, text: str, cursor: int) -> str | None:
         """Ghost-text suffix for the prose word ending at `cursor` (a UTF-16 offset); null when none applies."""
         params: dict[str, object] = {}
@@ -3749,6 +3803,8 @@ __all__ = [
     "LiveRole",
     "LiveTranscriptEvent",
     "LoginProvider",
+    "LogoutAccount",
+    "LogoutResult",
     "MessageContent",
     "MessageEndEvent",
     "MessageStartEvent",
@@ -3923,6 +3979,8 @@ __all__ = [
     "parse_live_phase_event",
     "parse_live_transcript_event",
     "parse_login_provider",
+    "parse_logout_account",
+    "parse_logout_result",
     "parse_message_end_event",
     "parse_message_start_event",
     "parse_message_update_event",

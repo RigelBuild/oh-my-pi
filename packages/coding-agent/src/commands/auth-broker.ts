@@ -63,11 +63,15 @@ export default class AuthBroker extends Command {
 			description:
 				"Path to the JSON subscription-config file for `serve`; env OMP_AUTH_BROKER_SUBSCRIPTIONS, flag wins",
 		}),
+		"trust-proxy-headers": Flags.boolean({
+			description: "Trust forwarded peer IP headers from a reverse proxy (serve); off by default.",
+		}),
 	};
 
 	static examples = [
 		"# Boot the broker against the local SQLite store\n  omp auth-broker serve",
 		"# Boot on a non-default port\n  omp auth-broker serve --bind=127.0.0.1:9000",
+		"# Trust client IP headers from a trusted reverse proxy\n  omp auth-broker serve --trust-proxy-headers",
 		"# Print the bearer token\n  omp auth-broker token",
 		"# Rotate the bearer token\n  omp auth-broker token --regenerate",
 		"# Print the scrape-scoped /metrics token\n  omp auth-broker token --metrics",
@@ -112,6 +116,7 @@ export default class AuthBroker extends Command {
 				subscriptionsConfig: flags["subscriptions-config"],
 				enableMetrics: flags["enable-metrics"],
 				noEnableMetrics: flags["no-enable-metrics"],
+				trustProxyHeaders: flags["trust-proxy-headers"],
 			},
 		};
 		await initTheme();

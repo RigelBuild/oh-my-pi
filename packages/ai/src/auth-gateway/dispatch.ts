@@ -42,6 +42,8 @@ export interface AuthGatewayRouteOptions {
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
+	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
+	excludeProviders?: ReadonlySet<string>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 }
@@ -203,9 +205,11 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  *   to a sibling (usage-limit block vs credential invalidation by error class).
  *
  * `lastKey` tracks the most recent bearer so the switch step invalidates the
- * credential that actually failed. `onResolvedKey` observes every rotation;
- * routes that retain provider session state use it to re-key the account
- * lease, one-shot routes pass `undefined`.
+ * credential that actually failed; a retry context's `previousKey` wins, since
+ * concurrent operations sharing one resolver (split judgment chunks) each know
+ * the bearer they sent. `onResolvedKey` observes every rotation; routes that
+ * retain provider session state use it to re-key the account lease, one-shot
+ * routes pass `undefined`.
  */
 export function buildGatewayApiKeyResolver(
 	storage: AuthStorage,
@@ -218,7 +222,7 @@ export function buildGatewayApiKeyResolver(
 	onResolvedKey?: (apiKey: string) => void,
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
-	return async ({ lastChance, error, signal }) => {
+	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
@@ -239,7 +243,7 @@ export function buildGatewayApiKeyResolver(
 			model,
 			sessionId,
 			model.provider,
-			lastKey,
+			previousKey ?? lastKey,
 			error,
 			sig,
 			format,

@@ -373,28 +373,34 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
 }
 
 /**
- * Session-source launch flags dropped when relaunching into an existing
- * session. A pinned `--session-id` is restored only while it remains active;
- * after an in-session switch, restart resumes the session that is now active.
+ * One-shot launch selectors dropped when relaunching into an existing
+ * session: the relaunch supplies its own session source, and replaying a
+ * stale continue/fork/import selector would re-run its one-shot session
+ * choice. `--goal` belongs here too: it seeds a fresh session only, and
+ * `validateGoalLaunch` rejects it beside any resume/fork selector. A pinned
+ * `--session-id` is restored only while it remains the active session.
  */
-const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
-	"--resume",
-	"-r",
-	"--session",
-	"--continue",
-	"-c",
-	"--session-id",
-	"--fork",
-	"--from-claude",
-	"--from-codex",
-]);
+const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
+	"--resume": true,
+	"-r": true,
+	"--session": true,
+	"--continue": true,
+	"-c": true,
+	"--session-id": true,
+	"--fork": true,
+	"--from-claude": true,
+	"--from-codex": true,
+	"--goal": true,
+};
 
 /**
- * Rewrite the launch argv for an in-place self-restart (`/restart`).
+ * Rewrite the launch argv for a relaunch of this session (`/restart`, and
+ * `/fork pane|window` with `resumeSessionId` undefined).
  *
  * Keeps every configuration flag as launched, but drops:
- * - session-source flags ({@link SESSION_SOURCE_FLAGS}, including inline
+ * - one-shot selectors ({@link ONE_SHOT_LAUNCH_FLAGS}, including inline
  *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ * - flags in `drop`, which the caller re-supplies with current values;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
  *   duplicate the initial prompt.
@@ -406,7 +412,11 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  * with `--session-id` re-pins that id while it is still the active session
  * (even before the first write), where `--resume` would prefix-match.
  */
-export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
+export function restartArgv(
+	argv: string[],
+	resumeSessionId: string | undefined,
+	drop?: Readonly<Record<string, true>>,
+): string[] {
 	let pinnedSessionId: string | undefined;
 	const kept: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
@@ -415,10 +425,11 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
 		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
 		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
-		if (flag === "--session-id") {
+		// A caller dropping `--session-id` (terminal fork) must not inherit the pin.
+		if (flag === "--session-id" && !(drop !== undefined && Object.hasOwn(drop, flag))) {
 			pinnedSessionId = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : argv[i + 1];
 		}
-		if (SESSION_SOURCE_FLAGS.has(flag)) {
+		if (Object.hasOwn(ONE_SHOT_LAUNCH_FLAGS, flag) || (drop !== undefined && Object.hasOwn(drop, flag))) {
 			if (consumesNext) i++;
 			continue;
 		}

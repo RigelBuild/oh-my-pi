@@ -169,6 +169,14 @@ export function resolveUsedFraction(limit: UsageLimit): number | undefined {
 	return undefined;
 }
 
+/** Float slack so a remaining fraction derived as `1 - used` still matches a reserve it sits exactly on. */
+const RESERVE_BOUNDARY_EPSILON = 1e-9;
+
+/** Whether remaining quota is at or below the reserve (both 0..1 fractions). */
+export function isWithinUsageReserve(remainingFraction: number, reserveFraction: number): boolean {
+	return remainingFraction <= reserveFraction + RESERVE_BOUNDARY_EPSILON;
+}
+
 /**
  * Canonicalize a provider plan identifier: trim, lowercase, fold whitespace and
  * hyphen runs to `_`, and strip a leading `chatgpt_`.
