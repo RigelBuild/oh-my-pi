@@ -199,7 +199,7 @@ describe("Compass agent verifier", () => {
 		expect(calls).toHaveLength(1);
 	});
 
-	test("rejects an explicit timeout that is not finite and positive", () => {
+	test("accepts only integer timeouts from 1 ms to the timer maximum", () => {
 		for (const timeoutMs of [0, -1, 1.5, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY]) {
 			expect(() =>
 				createCompassAgentVerifier({
@@ -208,6 +208,11 @@ describe("Compass agent verifier", () => {
 					timeoutMs,
 				}),
 			).toThrow("timeoutMs");
+		}
+		for (const timeoutMs of [1, 2_147_483_647]) {
+			expect(() =>
+				createCompassAgentVerifier({ baseUrl: "https://compass.example", token: SERVICE_TOKEN, timeoutMs }),
+			).not.toThrow();
 		}
 	});
 
