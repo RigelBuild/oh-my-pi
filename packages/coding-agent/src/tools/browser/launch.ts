@@ -481,6 +481,12 @@ export interface LaunchHeadlessOptions extends HeadlessLaunchFeatures {
 	args?: readonly string[];
 	/** Additional exact Puppeteer default arguments to suppress. */
 	ignoreDefaultArgs?: readonly string[];
+	/** Aborts the launch and kills the spawned browser. */
+	signal?: AbortSignal;
+	/** Remaining caller budget; bounds puppeteer's wait for the DevTools endpoint. */
+	timeoutMs?: number;
+	/** Per-CDP-command timeout; defaults to {@link BROWSER_PROTOCOL_TIMEOUT_MS}. */
+	protocolTimeoutMs?: number;
 }
 
 /** Result of a headless Chromium launch. */
@@ -534,13 +540,13 @@ export function buildHeadlessLaunchArgs(
 }
 
 export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promise<LaunchHeadlessResult> {
+	const startedAt = performance.now();
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	const initialViewport = {
 		width: vp.width,
 		height: vp.height,
 		deviceScaleFactor: vp.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	};
-	const puppeteer = await loadPuppeteer();
 	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		allowFileAccess: opts.allowFileAccess,
@@ -549,33 +555,45 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);
 	}
 	// Own the Chromium profile directory instead of letting puppeteer-core create
-	// (and delete) a temporary one. Passing `--user-data-dir` makes puppeteer
-	// treat the profile as non-temporary, so `ChromeLauncher.cleanUserDataDir`
-	// becomes a no-op and can no longer reject its eager process-exit hook with an
-	// unhandled EBUSY when Chromium still holds the profile lock on Windows
-	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
+	// (and delete) a temporary one: its eager exit-hook cleanup rejects with an
+	// unhandled EBUSY on Windows while Chromium holds the lock (issue #7058).
 	let userDataDir: string | undefined;
-	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
-		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
-		launchArgs.push(`--user-data-dir=${userDataDir}`);
-	}
+	let phase: "executable resolve" | "ws endpoint" | "cdp handshake" | "page target" = "executable resolve";
 	try {
-		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
+		opts.signal?.throwIfAborted();
+		const puppeteer = await loadPuppeteer();
 		const executablePath = await ensureChromiumExecutable();
-		const browser = await puppeteer.launch({
-			headless: opts.headless,
-			defaultViewport: opts.headless ? initialViewport : null,
-			executablePath,
-			args: launchArgs,
-			ignoreDefaultArgs: [
-				...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
-			],
-			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
-		});
+		if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
+			userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
+			launchArgs.push(`--user-data-dir=${userDataDir}`);
+			await seedOwnedProfilePreferences(userDataDir);
+		}
+		const timeout = Math.max(1, (opts.timeoutMs ?? 30_000) - (performance.now() - startedAt));
+		phase = "cdp handshake";
+		const browser = await untilAborted(opts.signal, () =>
+			puppeteer.launch({
+				headless: opts.headless,
+				defaultViewport: opts.headless ? initialViewport : null,
+				executablePath,
+				args: launchArgs,
+				ignoreDefaultArgs: [
+					...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
+				],
+				protocolTimeout: opts.protocolTimeoutMs ?? BROWSER_PROTOCOL_TIMEOUT_MS,
+				signal: opts.signal,
+				timeout,
+			}),
+		);
+
 		return { browser, userDataDir };
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
-		throw error;
+		// Caller cancellation keeps its AbortError identity; only timeouts get a phase label.
+		if (opts.signal?.aborted) throw error;
+		const message = error instanceof Error ? error.message : String(error);
+		if (/page target/i.test(message)) phase = "page target";
+		else if (/WS endpoint URL/i.test(message)) phase = "ws endpoint";
+		throw new Error(`Headless browser ${phase} failed: ${message}`, { cause: error });
 	}
 }
 

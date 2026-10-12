@@ -117,6 +117,7 @@ export interface AcquireBrowserOptions {
 	cwd: string;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	signal?: AbortSignal;
+	timeoutMs?: number;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
@@ -233,7 +234,10 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			viewport: opts.viewport,
 			ignoreHttpsErrors: kind.ignoreHttpsErrors,
 			allowFileAccess: kind.allowFileAccess,
+			signal: opts.signal,
+			timeoutMs: opts.timeoutMs,
 		});
+
 		return {
 			key: browserKey(kind),
 			kind,

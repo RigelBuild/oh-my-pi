@@ -746,11 +746,35 @@ index fb7fe66ecb99fd207b99c1e9a9ae00769f0b9a20..af5284b9ee8226e78fa0243ec2f83a63
              ...userDisabledFeatures,
          ]
              .filter(feature => {
+diff --git a/lib/puppeteer/node/BrowserLauncher.js b/lib/puppeteer/node/BrowserLauncher.js
+index 26c975127830c860fd153cd4237a236c666f67f4..2f66a70672c9659103ceae02d03f9cca84dbc639 100644
+--- a/lib/puppeteer/node/BrowserLauncher.js
++++ b/lib/puppeteer/node/BrowserLauncher.js
+@@ -186,7 +186,9 @@ export class BrowserLauncher {
+             // Attempt to close the browser gracefully
+             try {
+                 await cdpConnection.closeBrowser();
+-                await browserProcess.hasClosed();
++                // Bound the wait like the no-connection branch: a wedged browser must not hang close.
++                await firstValueFrom(race(from(browserProcess.hasClosed()), timer(5000)));
++                await browserProcess.close();
+             }
+             catch (error) {
+                 debugError?.(error);
 diff --git a/lib/puppeteer/node/NodeWebSocketTransport.js b/lib/puppeteer/node/NodeWebSocketTransport.js
-index a1af6472f4fb346978e3bd073ddb34963b129da2..951b5968947edaf24775716ccbab31d3fe98fabe 100644
+index a1af6472f4fb346978e3bd073ddb34963b129da2..a262a2617d1eed8b02785a7acdc22078dab3f662 100644
 --- a/lib/puppeteer/node/NodeWebSocketTransport.js
 +++ b/lib/puppeteer/node/NodeWebSocketTransport.js
-@@ -25,7 +25,11 @@ export class NodeWebSocketTransport {
+@@ -14,6 +14,8 @@ export class NodeWebSocketTransport {
+         return new Promise((resolve, reject) => {
+             const ws = new NodeWebSocket(url, [], {
+                 followRedirects: true,
++                // A peer that accepts TCP but never upgrades must not stall the launch.
++                handshakeTimeout: 30_000,
+                 perMessageDeflate: false,
+                 allowSynchronousEvents: false,
+                 maxPayload: 256 * 1024 * 1024, // 256Mb
+@@ -25,7 +27,11 @@ export class NodeWebSocketTransport {
              ws.addEventListener('open', () => {
                  return resolve(new NodeWebSocketTransport(ws));
              });
