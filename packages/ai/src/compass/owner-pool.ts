@@ -9,11 +9,17 @@ export interface CompassOwnerEntry {
 }
 
 export interface CompassOwnerPoolOptions {
+	/** Opens an owner's Compass-backed credential store and storage. */
 	open: (ownerUserId: string) => Promise<CompassOwnerEntry>;
+	/** Soft owner-count cap; entries that fail idle checks may keep it exceeded. Default 256. */
 	maxOwners?: number;
+	/** Regular idle eviction threshold. Default 900_000 ms. */
 	idleMs?: number;
+	/** Minimum idle age for LRU cap eviction. Default 60_000 ms. */
 	minIdleMs?: number;
+	/** Sweep timer interval. Default 60_000 ms; 0 disables the timer. */
 	sweepIntervalMs?: number;
+	/** Clock used to stamp owner use. Default Date.now. */
 	now?: () => number;
 }
 
@@ -85,24 +91,22 @@ export class CompassOwnerPool {
 		return owner.storage;
 	}
 
-	/** Runs one routed request. Leases end with the response body or when the run stops. */
-	async withRequestLease<T>(run: () => Promise<T>): Promise<T> {
+	/** Runs one routed request. Leases end with its response body or when the run stops. */
+	async withRequestLease(run: () => Promise<Response>): Promise<Response> {
 		const lease: RequestLease = { entries: new Set(), released: false };
-		let result: T;
+		let response: Response;
 		try {
-			result = await this.#requestLease.run(lease, run);
+			response = await this.#requestLease.run(lease, run);
 		} catch (error) {
 			this.#release(lease);
 			throw error;
 		}
-		if (!(result instanceof Response) || result.body === null || lease.entries.size === 0) {
+		if (response.body === null || lease.entries.size === 0) {
 			this.#release(lease);
-			return result;
+			return response;
 		}
 		try {
-			const response = this.#wrapResponse(result, () => this.#release(lease));
-			// SAFETY: A runtime check established that the generic result is a Response.
-			return response as unknown as T;
+			return this.#wrapResponse(response, () => this.#release(lease));
 		} catch (error) {
 			this.#release(lease);
 			throw error;
@@ -157,7 +161,11 @@ export class CompassOwnerPool {
 	#release(lease: RequestLease): void {
 		if (lease.released) return;
 		lease.released = true;
-		for (const owner of lease.entries) owner.leases = Math.max(0, owner.leases - 1);
+		const releasedAt = this.#now();
+		for (const owner of lease.entries) {
+			owner.leases = Math.max(0, owner.leases - 1);
+			owner.lastUsedMs = releasedAt;
+		}
 		lease.entries.clear();
 	}
 
