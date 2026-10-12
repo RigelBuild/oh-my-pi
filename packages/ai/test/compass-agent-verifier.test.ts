@@ -200,7 +200,7 @@ describe("Compass agent verifier", () => {
 	});
 
 	test("rejects an explicit timeout that is not finite and positive", () => {
-		for (const timeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+		for (const timeoutMs of [0, -1, 1.5, 2_147_483_648, Number.NaN, Number.POSITIVE_INFINITY]) {
 			expect(() =>
 				createCompassAgentVerifier({
 					baseUrl: "https://compass.example",

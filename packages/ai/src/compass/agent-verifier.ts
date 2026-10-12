@@ -19,6 +19,8 @@ export interface CompassAgentVerifierOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+/** Largest delay a timer accepts. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 const VERIFY_SERVICE = "GatewayAuth";
 const VERIFY_METHOD = "VerifyAgentToken";
 const INVALID_AGENT_TOKEN = "invalid agent token";
@@ -27,8 +29,8 @@ function createVerifier(opts: CompassAgentVerifierOptions) {
 	const baseUrl = normalizeCompassBaseUrl(opts.baseUrl);
 	if (!opts.token.trim()) throw new Error("Compass token must not be empty");
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-		throw new Error("Compass timeoutMs must be finite and greater than zero");
+	if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS)
+		throw new Error(`Compass timeoutMs must be an integer from 1 to ${MAX_TIMEOUT_MS}`);
 	const fetcher = opts.fetch ?? fetch;
 
 	return async (
@@ -78,6 +80,7 @@ export function createCompassAgentVerifier(opts: CompassAgentVerifierOptions): A
 	};
 }
 
+/** Resolves only when the door answers `invalid agent token` to an empty token: reach, TLS and service bearer all work. */
 export async function probeCompassDoor(opts: CompassAgentVerifierOptions): Promise<void> {
 	const verify = createVerifier(opts);
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
