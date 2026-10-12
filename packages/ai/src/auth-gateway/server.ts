@@ -1249,12 +1249,6 @@ async function handlePiNative(
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	for (const message of parsed.context.messages) {
-		if (message.role === "assistant" && message.model === parsed.modelId) {
-			message.model = model.id;
-			message.provider = model.provider;
-		}
-	}
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines

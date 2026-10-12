@@ -464,7 +464,7 @@ describe("auth-gateway authorize seam", () => {
 		expect(assistant).toMatchObject({ model: "real-y", provider: "openrouter" });
 	});
 
-	it("stamps replayed pi-native assistant turns with the resolved model", async () => {
+	it("keeps pi-native replayed assistant provenance unchanged", async () => {
 		harness = await boot(agentAuthorizer, true, false, "real-y");
 		harness.mock.push({ content: ["ok"] });
 		const response = await fetch(`${harness.handle.url}/v1/pi/stream`, {
@@ -500,7 +500,7 @@ describe("auth-gateway authorize seam", () => {
 		});
 		expect(response.status).toBe(200);
 		const assistant = harness.mock.calls[0]?.context.messages.find(message => message.role === "assistant");
-		expect(assistant).toMatchObject({ model: "real-y", provider: "openrouter" });
+		expect(assistant).toMatchObject({ model: "stable-x", provider: "anthropic", api: "anthropic-messages" });
 	});
 
 	it("returns 499 when the format or pi-native resolver completes after cancellation", async () => {
