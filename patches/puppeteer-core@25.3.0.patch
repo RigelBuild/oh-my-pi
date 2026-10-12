@@ -747,16 +747,23 @@ index fb7fe66ecb99fd207b99c1e9a9ae00769f0b9a20..af5284b9ee8226e78fa0243ec2f83a63
          ]
              .filter(feature => {
 diff --git a/lib/puppeteer/node/BrowserLauncher.js b/lib/puppeteer/node/BrowserLauncher.js
-index 26c975127830c860fd153cd4237a236c666f67f4..2f66a70672c9659103ceae02d03f9cca84dbc639 100644
+index 26c975127830c860fd153cd4237a236c666f67f4..dc17c73973ff4e4287ad19e877ba462799c37cb1 100644
 --- a/lib/puppeteer/node/BrowserLauncher.js
 +++ b/lib/puppeteer/node/BrowserLauncher.js
-@@ -186,7 +186,9 @@ export class BrowserLauncher {
+@@ -185,8 +185,15 @@ export class BrowserLauncher {
+         if (cdpConnection) {
              // Attempt to close the browser gracefully
              try {
-                 await cdpConnection.closeBrowser();
+-                await cdpConnection.closeBrowser();
 -                await browserProcess.hasClosed();
-+                // Bound the wait like the no-connection branch: a wedged browser must not hang close.
-+                await firstValueFrom(race(from(browserProcess.hasClosed()), timer(5000)));
++                // Bound Browser.close and the exit wait together: a wedged browser must not hang close.
++                const graceful = (async () => {
++                    await cdpConnection.closeBrowser();
++                    await browserProcess.hasClosed();
++                })();
++                // The timer may win; keep the abandoned close from surfacing as an unhandled rejection.
++                graceful.catch(error => debugError?.(error));
++                await firstValueFrom(race(from(graceful), timer(5000)));
 +                await browserProcess.close();
              }
              catch (error) {

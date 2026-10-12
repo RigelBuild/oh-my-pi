@@ -160,4 +160,23 @@ describe("headless browser launch deadline", () => {
 		},
 		30_000,
 	);
+
+	it.skipIf(process.platform !== "linux")(
+		"force-closes a browser that never answers Browser.close",
+		async () => {
+			await withFakeBrowser(async pidFile => {
+				const withinMs = 1_000 + 5_000 + MAX_LAUNCH_MS;
+				const launch = launchHeadlessBrowser({ headless: true, timeoutMs: 1_000 });
+				void launch.catch(() => undefined);
+				await waitForPidOrLaunch(pidFile, launch);
+				await expectFastRejection(
+					launch,
+					error => expect(error.message.toLowerCase()).toContain("page target"),
+					withinMs,
+				);
+				await expectFixtureExited(pidFile);
+			}, "ack-no-close");
+		},
+		30_000,
+	);
 });
