@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Compass-backed gateway boot that validates mounted tokens, verifies agents, and loads credentials per owner.
+
 ## [18.9.2-rigel.2] - 2026-10-18
 
 ### Changed
