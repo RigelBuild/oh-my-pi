@@ -977,6 +977,7 @@ async function handleFormatEndpoint(
 	}
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, modelId, caller);
+	if (controller.signal.aborted) return clientClosedResponse(route);
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
@@ -999,6 +1000,12 @@ async function handleFormatEndpoint(
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
+	}
+	for (const message of parsed.context.messages) {
+		if (message.role === "assistant" && message.model === modelId) {
+			message.model = model.id;
+			message.provider = model.provider;
+		}
 	}
 	// Merge gateway-captured passthrough headers under the parser's own
 	// captures. Parsers that set `options.headers` themselves win (they may
@@ -1238,8 +1245,15 @@ async function handlePiNative(
 	}
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+	}
+	for (const message of parsed.context.messages) {
+		if (message.role === "assistant" && message.model === parsed.modelId) {
+			message.model = model.id;
+			message.provider = model.provider;
+		}
 	}
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
@@ -1664,12 +1678,12 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 			return opts.routeScope ? await opts.routeScope(req, body) : await body();
 		} catch (error) {
 			if (error instanceof ModelResolverUnavailableError) {
-				logger.warn("auth-gateway credential pool unavailable", {
+				logger.warn("auth-gateway model resolver unavailable", {
 					path: loggablePath(pathname),
 					peer,
-					error: errorName(error),
+					cause: errorName(error.cause),
 				});
-				return json(503, { error: "credential pool unavailable" });
+				return json(503, { error: "model resolver unavailable" });
 			}
 			logger.error("auth-gateway handler crashed", {
 				method: req.method,

@@ -47,6 +47,7 @@ async function resolveVideoJob(
 		return videoServer.formatError(400, "invalid_request_error", message);
 	}
 	const model = await resolveGatewayModel(bootOpts.resolveModel, `${identity.provider}/${identity.modelId}`, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) {
 		return videoServer.formatError(
 			404,
@@ -151,6 +152,7 @@ export async function handleVideoSubmit(
 		return videoServer.formatError(400, "invalid_request_error", message);
 	}
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) return videoServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (model.api !== "openrouter-video") {
 		return videoServer.formatError(

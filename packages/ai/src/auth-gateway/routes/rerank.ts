@@ -40,6 +40,7 @@ export async function handleRerank(
 	if (controller.signal.aborted) return aborted();
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) return rerankWire.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (model.api !== "openrouter-rerank") {
 		return rerankWire.formatError(400, "invalid_request_error", `Model ${parsed.modelId} does not support reranking`);

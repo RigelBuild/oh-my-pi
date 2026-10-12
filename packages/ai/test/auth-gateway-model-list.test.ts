@@ -13,13 +13,18 @@ test("model listing exposes provider-qualified models and bare stable-name alias
 	const anthropic = createMockModel({ provider: "anthropic", id: "shared-model" });
 	const devin = createMockModel({ provider: "devin", id: "shared-model" });
 	const stableName = createMockModel({ provider: "anthropic", id: "claude-opus-4-8" });
+	const collidingAlias = createMockModel({ provider: "devin", id: "ignored-alias-model" });
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		authorize: bearerTokenAuthorizer([]),
 		storage,
 		resolveModel: () => undefined,
 		listModels: () => [anthropic, anthropic, devin, devin],
-		listAliases: () => [{ id: "claude-opus-4-8", model: stableName }],
+		listAliases: () => [
+			{ id: "anthropic/shared-model", model: collidingAlias },
+			{ id: "claude-opus-4-8", model: stableName },
+			{ id: "claude-opus-4-8", model: devin },
+		],
 		version: "test",
 	});
 

@@ -40,6 +40,7 @@ export async function handleEmbeddings(
 	if (controller.signal.aborted) return aborted();
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) {
 		return embeddings.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}

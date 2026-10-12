@@ -45,6 +45,7 @@ export async function handleSpeech(
 	}
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) return speechWire.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (!isSpeechApi(model.api)) {
 		const route =

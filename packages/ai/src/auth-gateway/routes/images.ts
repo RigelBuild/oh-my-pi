@@ -59,6 +59,7 @@ async function handleImages(
 	}
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) {
 		return imagesServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
