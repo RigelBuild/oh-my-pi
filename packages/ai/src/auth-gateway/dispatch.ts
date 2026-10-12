@@ -107,7 +107,7 @@ export interface AuthGatewayRouteOptions {
 	 */
 	resolveStorage?: (caller: AgentCaller) => AuthStorage | Promise<AuthStorage>;
 	/** Wraps each routed request, including its `resolveStorage` call. */
-	routeScope?: <T>(req: Request, run: () => Promise<T>) => Promise<T>;
+	routeScope?: (req: Request, run: () => Promise<Response>) => Promise<Response>;
 	/**
 	 * Resolve the requested model id with the admitted caller to a pi-ai Model.
 	 * May return synchronously or asynchronously; the gateway awaits either form.
