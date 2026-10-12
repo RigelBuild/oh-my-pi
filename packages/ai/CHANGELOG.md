@@ -4,31 +4,43 @@
 
 ### Breaking Changes
 
-- Renamed `TypeSafeJudge` to `NativeJudge` (`TypeSafeJudgeOptions` → `NativeJudgeOptions`, `TypeSafeJudgeCallOptions` → `NativeJudgeCallOptions`) and `TypeSafeApiError` to `JudgmentApiError`, since the client now speaks every native judgment API; `JUDGMENT_ROUTES` is removed, so use `isJudgmentApi` or build a judge for a catalog model with `createNativeJudge(model, { apiKey })`
 - `startAuthGateway` takes an `authorize(req)` function in place of `bearerTokens`. It returns the caller's identity (`{ kind: "agent", agentAccountId }` or the enroll caller) or `null` to answer 401; a throw answers 503. Any result that is not an identity with a non-empty id, or an admission with no `Authorization: Bearer` token, also answers 401. Use `bearerTokenAuthorizer(tokens)` to keep the shared-token behavior.
 - `createAuthGatewayRouter(...).route` takes the admitted agent caller as a required third argument. Pass `SHARED_TOKEN_CALLER` for a single-tenant transport.
 - `CallerIdentity` is a union of `AgentCaller` (`kind: "agent"`) and `EnrollCaller` (`kind: "enroll"`). An agent result without `kind: "agent"` answers 401.
 
-### Changed
-
-- Improved Anthropic prompt-cache breakpoint selection in long conversations to pick cache anchors in a single backward walk, removing the per-request index arrays that grew with conversation length ([#15219](https://github.com/can1357/oh-my-pi/pull/15219) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ### Fixed
 
-- Fixed Devin-routed OpenAI models rejecting every turn with `invalid_argument` after switching an existing session from `openai-codex` ([#15234](https://github.com/can1357/oh-my-pi/issues/15234))
 - Responses function tools now accept null optional fields from compatible gateways ([RIG-4236](https://linear.app/rigelbuild/issue/RIG-4236)).
 - Exhausted replay-safe empty completions now return an error instead of a successful empty stop ([RIG-4236](https://linear.app/rigelbuild/issue/RIG-4236)).
 - An auth broker started with no bearer tokens now serves credential routes only on a loopback bind (`127.0.0.0/8`, `::1`, `localhost`); on any other bind every route except `/v1/healthz` returns 401.
 
 ### Added
 
-- Added native judges for OpenAI's Decisions API (`openai-decisions`: System One questions and answers translated to and from `POST /v1/decisions`) and Cloudflare Workers AI decision models such as Clef (`workers-ai-systemone`: `POST /client/v4/accounts/{account}/ai/run/{model}`, with the account id from the login credential or `CLOUDFLARE_ACCOUNT_ID`); the auth-gateway System One route serves both
-- Added `createNativeJudge(model, { apiKey, headers, fetch })`, which builds the judge for a catalog judge model with its wire id (`requestModelId`) and catalog question cap
-- Added the `cloudflare-workers-ai` login (`loginCloudflareWorkersAi`), which stores a Cloudflare API token with its account ID; logging in again with the same token replaces the stored credential
-- Added `maxQuestions` to `NativeJudge`: requests with more questions are split into chunks, at most 4 in flight at once, and their answers and usage merged, for System One endpoints that cap the `questions` map; when a split fails, the usage already billed for its successful chunks still reaches `onPartialUsage`, the session ledger and the auth-gateway usage ledger. The auth-gateway System One route applies the catalog's cap too ([#15368](https://github.com/can1357/oh-my-pi/pull/15368), [#15373](https://github.com/can1357/oh-my-pi/pull/15373) by [@H4vC](https://github.com/H4vC))
 - Added opt-in auth-broker Prometheus usage and subscription metrics with scrape-scoped tokens.
 - Added `CompassAuthCredentialStore` for versioned credential-pool reads and compare-and-swap updates through the Compass gateway. Writes name the serving agent, so the server can confine them to that agent's pool, and list the optional fields they clear.
 - Added `resolveStorage(caller)` to the auth-gateway options, which serves each admitted caller from its tenant's credential pool (keyed on the optional `CallerIdentity.ownerUserId`, else `agentAccountId`); a throw answers 503. Retained provider session state and the session id providers see are kept per caller.
 - Added the provider-enrollment routes `GET /internal/enroll/providers`, `POST /internal/enroll/authorize-url` and `POST /internal/enroll/exchange`. They build the authorize URL and exchange the code statelessly from the server's state and PKCE material. `withEnrollToken(token, authorize)` admits a server enroll token as the enroll caller, which reaches only these routes; agents get 401 there, and the enroll caller gets 401 on every other authenticated route. Enroll responses carry no CORS grant.
+
+## [18.9.2] - 2026-10-11
+
+### Breaking Changes
+
+- Renamed `TypeSafeJudge` to `NativeJudge` and `TypeSafeApiError` to `JudgmentApiError`, including their associated option types. `JUDGMENT_ROUTES` has been removed; use `isJudgmentApi` or create a judge for catalog models with `createNativeJudge(model, { apiKey })`.
+
+### Added
+
+- Added native judge support for OpenAI’s Decisions API and Cloudflare Workers AI decision models, including the `openai-decisions` and `workers-ai-systemone` APIs. The auth gateway’s System One route supports both providers.
+- Added `createNativeJudge(model, { apiKey, headers, fetch })` for creating judges from catalog models with their configured request model IDs and question limits.
+- Added Cloudflare Workers AI authentication with `loginCloudflareWorkersAi`, storing the API token and account ID; logging in again with the same token replaces the existing credential.
+- Added automatic question batching to `NativeJudge` for endpoints with question limits, with up to four concurrent batches and merged answers and usage reporting. Usage from successful batches is reported through partial-usage callbacks and both session and auth-gateway usage ledgers, even if another batch fails.
+
+### Changed
+
+- Improved Anthropic prompt caching for long conversations, reducing memory usage while selecting cache breakpoints.
+
+### Fixed
+
+- Fixed Devin-routed OpenAI models returning `invalid_argument` on every turn after an existing session was switched from `openai-codex`.
 
 ## [18.9.1] - 2026-10-11
 
