@@ -5,7 +5,6 @@ import type { AuthCredentialStore } from "../auth/store";
 import type { AuthCredential, OAuthCredential, StoredAuthCredential } from "../auth/types";
 import { serializeCredential } from "../auth/sqlite-credential-store";
 import type { OAuthCredentials } from "../registry/oauth/types";
-import { isLoopbackHost } from "../utils/parse-bind";
 import type {
 	DisableCredentialRequest,
 	GatewayCredential,
@@ -21,7 +20,9 @@ import {
 	compassRpcErrorFromResponse,
 	decodeCompassJson,
 	disableCredentialResponseSchema,
+	fetchCompassRpcResponse,
 	listCredentialPoolResponseSchema,
+	normalizeCompassBaseUrl,
 	updateCredentialOAuthResponseSchema,
 	CLEARABLE_OAUTH_FIELDS,
 } from "./wire";
@@ -58,19 +59,6 @@ const EMPTY_CREDENTIALS_ERROR = "Credentials are enrolled through Compass";
 const CONFLICT_CODES: ReadonlySet<string> = new Set(["aborted", "not_found"]);
 // The write may or may not have landed; resending the same CAS settles it either way.
 const TRANSIENT_CODES: ReadonlySet<string> = new Set(["unavailable", "deadline_exceeded", "unknown", "internal"]);
-
-/** The bearer and OAuth tokens ride every request, so plaintext is allowed only on loopback. */
-function assertSecureBaseUrl(baseUrl: string): void {
-	let url: URL;
-	try {
-		url = new URL(baseUrl);
-	} catch {
-		throw new Error("Compass baseUrl must be an absolute URL");
-	}
-	if (url.protocol === "https:") return;
-	if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return;
-	throw new Error("Compass baseUrl must use https unless it is a loopback address");
-}
 
 function int64String(value: GatewayInt64): string {
 	return typeof value === "string" ? value : String(value);
@@ -215,10 +203,8 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	#listedServerIds: ReadonlySet<string> | undefined;
 
 	constructor(opts: CompassAuthCredentialStoreOptions) {
-		if (!opts.baseUrl.trim()) throw new Error("Compass baseUrl must not be empty");
-		assertSecureBaseUrl(opts.baseUrl);
+		this.#baseUrl = normalizeCompassBaseUrl(opts.baseUrl);
 		if (!opts.token.trim()) throw new Error("Compass token must not be empty");
-		this.#baseUrl = opts.baseUrl.replace(/\/+$/, "");
 		this.#token = opts.token;
 		this.#fetch = opts.fetch ?? fetch;
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -694,27 +680,22 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	): Promise<T> {
 		if (this.#closed) throw new CompassRpcError("closed", "Compass credential store is closed");
 		const signal = AbortSignal.any([this.#closeController.signal, AbortSignal.timeout(this.#timeoutMs)]);
-		let response: Response;
-		let text: string;
+		let result: { response: Response; text: string };
 		try {
-			response = await this.#fetch(this.#baseUrl + "/compass.v1.GatewayCredentials/" + method, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"Connect-Protocol-Version": "1",
-					Authorization: "Bearer " + this.#token,
-				},
-				body: JSON.stringify({ ...body, agentToken }),
-				// A redirect would replay the bearer and OAuth tokens to another origin.
-				redirect: "error",
+			result = await fetchCompassRpcResponse({
+				baseUrl: this.#baseUrl,
+				service: "GatewayCredentials",
+				method,
+				token: this.#token,
+				fetch: this.#fetch,
+				body: { ...body, agentToken },
 				signal,
 			});
-			text = await response.text();
 		} catch (cause) {
 			throw this.#transportError(cause);
 		}
-		if (!response.ok) throw compassRpcErrorFromResponse(response.status, text);
-		return decodeCompassJson(text, schema);
+		if (!result.response.ok) throw compassRpcErrorFromResponse(result.response.status, result.text);
+		return decodeCompassJson(result.text, schema);
 	}
 
 	#transportError(cause: unknown): CompassRpcError {
