@@ -570,22 +570,39 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		}
 		const remaining = () => Math.max(1, (opts.timeoutMs ?? 30_000) - (performance.now() - startedAt));
 		phase = "cdp handshake";
-		const browser = await untilAborted(opts.signal, () =>
-			puppeteer.launch({
-				headless: opts.headless,
-				defaultViewport: opts.headless ? initialViewport : null,
-				executablePath,
-				args: launchArgs,
-				ignoreDefaultArgs: [
-					...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
-				],
-				protocolTimeout: opts.protocolTimeoutMs ?? BROWSER_PROTOCOL_TIMEOUT_MS,
-				signal: opts.signal,
-				timeout: remaining(),
-				// Waited below so a timeout there is reported as the page-target phase.
-				waitForInitialPage: false,
-			}),
+		// Puppeteer's timeout stops at the DevTools URL; the WebSocket upgrade after it
+		// has only a fixed bound. This deadline aborts the launch (killing Chromium) at
+		// the caller's budget and is disarmed once the launch resolves.
+		const deadline = new AbortController();
+		const deadlineTimer = setTimeout(
+			() => deadline.abort(new Error(`timed out after ${opts.timeoutMs ?? 30_000} ms`)),
+			remaining(),
 		);
+		const launchSignal = opts.signal ? AbortSignal.any([opts.signal, deadline.signal]) : deadline.signal;
+		let browser: Browser;
+		try {
+			browser = await untilAborted(launchSignal, () =>
+				puppeteer.launch({
+					headless: opts.headless,
+					defaultViewport: opts.headless ? initialViewport : null,
+					executablePath,
+					args: launchArgs,
+					ignoreDefaultArgs: [
+						...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
+					],
+					protocolTimeout: opts.protocolTimeoutMs ?? BROWSER_PROTOCOL_TIMEOUT_MS,
+					signal: launchSignal,
+					timeout: remaining(),
+					// Waited below so a timeout there is reported as the page-target phase.
+					waitForInitialPage: false,
+				}),
+			);
+		} catch (error) {
+			if (deadline.signal.aborted && !opts.signal?.aborted) throw deadline.signal.reason;
+			throw error;
+		} finally {
+			clearTimeout(deadlineTimer);
+		}
 		phase = "page target";
 		try {
 			await browser.waitForTarget(target => target.type() === "page", {

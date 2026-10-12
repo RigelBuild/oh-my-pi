@@ -183,4 +183,20 @@ describe("headless browser launch deadline", () => {
 		},
 		30_000,
 	);
+
+	it.skipIf(process.platform !== "linux")(
+		"bounds a stalled WebSocket upgrade by timeoutMs without a caller signal",
+		async () => {
+			await withFakeBrowser(async pidFile => {
+				const launch = launchHeadlessBrowser({ headless: true, timeoutMs: 1_500 });
+				void launch.catch(() => undefined);
+				await waitForPidOrLaunch(pidFile, launch);
+				await expectFastRejection(launch, error => {
+					expect(error.message.toLowerCase()).toContain("cdp handshake");
+				});
+				await expectFixtureExited(pidFile);
+			}, "no-upgrade");
+		},
+		45_000,
+	);
 });

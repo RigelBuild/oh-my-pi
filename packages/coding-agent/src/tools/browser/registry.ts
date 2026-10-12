@@ -170,9 +170,9 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 			clearEntry();
 			throw error;
 		}
-		// The launch may resolve AFTER the caller has already aborted (the outer
+		// The launch may resolve AFTER the caller has already aborted: the outer
 		// `untilAborted` rejects immediately on abort but does not cancel the
-		// inner promise, and `launchHeadlessBrowser` does not accept a signal).
+		// inner promise, which can settle in the same tick the signal fires.
 		// Without this branch the completed handle sits in `browsers` at
 		// refCount:0 forever — no tab ever takes a hold, `releaseBrowser` never
 		// fires, and `releaseAllTabs` walks `tabs`, not `browsers`, so the
