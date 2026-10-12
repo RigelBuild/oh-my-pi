@@ -51,6 +51,15 @@ async function expectFixtureExited(pidFile: string, withinMs = MAX_LAUNCH_MS): P
 	throw new Error(`Fixture process ${pid} did not exit`);
 }
 
+// A failed exit assertion must not leak the fixture past the test.
+async function killFixture(pidFile: string): Promise<void> {
+	if (!fs.existsSync(pidFile)) return;
+	const pid = Number(await fs.promises.readFile(pidFile, "utf8"));
+	if (!Number.isInteger(pid) || pid <= 0 || !fs.existsSync(`/proc/${pid}`)) return;
+	process.kill(pid, "SIGKILL");
+	await expectFixtureExited(pidFile);
+}
+
 async function withFakeBrowser(run: (pidFile: string) => Promise<void>, mode = "silent"): Promise<void> {
 	const tempDir = TempDir.createSync("@browser-launch-deadline-");
 	const executable = path.join(tempDir.path(), "fake-chromium");
@@ -72,6 +81,7 @@ async function withFakeBrowser(run: (pidFile: string) => Promise<void>, mode = "
 		else process.env.OMP_BROWSER_STALLED_PID_FILE = previousPidFile;
 		if (previousMode === undefined) delete process.env.OMP_BROWSER_STALLED_MODE;
 		else process.env.OMP_BROWSER_STALLED_MODE = previousMode;
+		await killFixture(pidFile);
 		await tempDir.remove();
 	}
 }
