@@ -942,6 +942,13 @@ export interface KeysApi {
 	 * routing metadata so discovery can hit the correct host.
 	 */
 	peek(provider: string): Promise<string | undefined>;
+	/**
+	 * Dry run of {@link KeysApi.get}: true when an eligible credential exists that is not under a
+	 * recorded block for `modelId`'s scopes (a sole stored API key always counts, as `get` uses it).
+	 * Assumes key references resolve, so true does not guarantee `get` returns a key. Never advances
+	 * round-robin, records stickiness, refreshes, probes usage, prunes blocks, or returns key material.
+	 */
+	hasUsable(provider: string, options?: { modelId?: string }): boolean;
 	/** Resolve the first active auth source by precedence without refreshing credentials. */
 	source(provider: string, options?: AuthSourceOptions): AuthSource | undefined;
 	/**

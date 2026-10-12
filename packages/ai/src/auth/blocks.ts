@@ -133,6 +133,13 @@ export class CredentialBlocks implements BlocksApi {
 
 	constructor(deps: CredentialBlocksDeps) {
 		this.#deps = deps;
+		// Dry runs read through peek, so every store that serves block reads must also offer it.
+		const readsBlocks =
+			typeof deps.store.getCredentialBlock === "function" ||
+			typeof deps.store.getCredentialBlockScopes === "function";
+		if (readsBlocks !== (typeof deps.store.peekCredentialBlock === "function")) {
+			throw new TypeError("credential store must implement peekCredentialBlock exactly when it serves block reads");
+		}
 		try {
 			this.#deps.store.cleanExpiredCredentialBlocks?.(Date.now());
 		} catch (err) {
@@ -350,6 +357,41 @@ export class CredentialBlocks implements BlocksApi {
 		blockScope: string | readonly string[] | undefined = undefined,
 	): boolean {
 		return this.blockedUntil(provider, providerKey, credentialIndex, blockScope) !== undefined;
+	}
+
+	/**
+	 * {@link isBlocked} for dry runs: no expiry pruning, store cleanup, activity tracking or health
+	 * latching. A failed store read leaves the in-memory block deciding, as in {@link blockedUntil}.
+	 * If a bulk scope read fails while point reads still work, selection sees no persisted rows and this does.
+	 */
+	isBlockedPeek(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		blockScopeOrScopes: string | readonly string[] | undefined = undefined,
+	): boolean {
+		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
+		if (credentialId === undefined) return false;
+		const nowMs = Date.now();
+		const scopes = [
+			"",
+			...PROTECTED_BLOCK_SCOPES,
+			...(typeof blockScopeOrScopes === "string" ? [blockScopeOrScopes] : (blockScopeOrScopes ?? [])),
+		].filter((scope, index) => index === 0 || scope.length > 0);
+		const peek = this.#deps.health.damaged ? undefined : this.#deps.store.peekCredentialBlock?.bind(this.#deps.store);
+		for (const scope of scopes) {
+			let persisted: number | undefined;
+			let readOk = false;
+			try {
+				persisted = peek?.(credentialId, providerKey, scope);
+				readOk = peek !== undefined;
+			} catch {}
+			if (persisted !== undefined) return true;
+			const memory = this.#credentialBackoff.get(scopedBackoffKey(providerKey, scope))?.get(credentialId);
+			// A mirrored block the store no longer holds was reset by a sibling process.
+			if (memory && memory.until > nowMs && !(memory.persisted && readOk)) return true;
+		}
+		return false;
 	}
 
 	/**

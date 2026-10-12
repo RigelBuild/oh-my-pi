@@ -29,6 +29,9 @@ function makeStore(rows: StoredAuthCredential[], blocked = new Map<number, numbe
 		upsertAuthCredential: async () => rows,
 		async deleteAuthCredentials() {},
 		getCredentialBlock: credentialId => blocked.get(credentialId),
+		peekCredentialBlock(credentialId, providerKey, blockScope) {
+			return this.getCredentialBlock?.(credentialId, providerKey, blockScope);
+		},
 		getCache(key) {
 			const entry = cache.get(key);
 			return entry && entry.expiresAtSec * 1000 > Date.now() ? entry.value : null;

@@ -7,7 +7,7 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import { AUTHENTICATED_SENTINEL } from "../registry/types";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialPool } from "./pool";
-import type { CredentialSelector, OAuthResolutionResult } from "./select";
+import { type CredentialSelector, type OAuthResolutionResult, oauthCanRefreshOrUse } from "./select";
 import type {
 	AuthApiKeyOptions,
 	AuthCredential,
@@ -306,6 +306,45 @@ export class KeyCascade implements KeysApi {
 			return this.#deps.overrides.resolve(apiKeySelection.credential.key);
 		}
 		return undefined;
+	}
+
+	/**
+	 * Dry run of {@link KeyCascade.get}: whether it would hand out an unblocked credential now.
+	 * Follows `get`'s tier order; the first tier holding candidates decides, as in `get`.
+	 */
+	hasUsable(provider: string, options?: { modelId?: string }): boolean {
+		if (this.#deps.overrides.runtimeKey(provider)) return true;
+		if (this.#deps.overrides.configKey(provider) !== undefined) return true;
+		const { selector } = this.#deps;
+		const modelId = options?.modelId;
+		const nowMs = Date.now();
+		// An expired token with a refresh grant counts: `get` refreshes it, which a dry run cannot rehearse.
+		const oauth = selector.availability(
+			provider,
+			"oauth",
+			modelId,
+			credential => credential.type === "oauth" && oauthCanRefreshOrUse(credential, nowMs),
+		);
+		if (oauth !== "absent") return oauth === "usable";
+		const loginApiKey = selector.availability(
+			provider,
+			"api_key",
+			modelId,
+			credential =>
+				credential.type === "api_key" &&
+				credential.source === "login" &&
+				!this.isKeylessFallback(provider, credential),
+		);
+		if (loginApiKey !== "absent") return loginApiKey === "usable";
+		if (this.#deps.overrides.fallbackKey(provider) !== undefined || getEnvApiKey(provider)) return true;
+		return (
+			selector.availability(
+				provider,
+				"api_key",
+				modelId,
+				credential => credential.type === "api_key" && credential.source !== "login",
+			) === "usable"
+		);
 	}
 
 	/**
