@@ -1,15 +1,23 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { GATEWAY_MODEL_KINDS } from "../../src/cli/auth-gateway-cli";
-import { buildGatewayCatalog, getGatewayBootConfig, readTokenFile, runGatewayBoot } from "../../src/cli/gateway-boot";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
+import { GATEWAY_MODEL_KINDS } from "../../src/cli/auth-gateway-cli";
+import { CLAUDE_TRACE_DEBUG_CERT } from "../../src/cli/claude-trace-cli";
+import { buildGatewayCatalog, getGatewayBootConfig, readTokenFile, runGatewayBoot } from "../../src/cli/gateway-boot";
+
+type GatewayReady = { kind: "read"; value: Uint8Array | undefined; done: boolean } | { kind: "exit"; code: number };
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "gateway-boot-child.ts");
 const SERVICE_TOKEN = "service-test-token";
 const GOOD_AGENT_TOKEN = "agent-test-token";
 const INTERNAL_AGENT_TOKEN = "internal-test-token";
 const BAD_AGENT_TOKEN = "bad-agent-token";
+const TEST_CERT_FIXTURE = path.join(import.meta.dir, "fixtures", "compass-ca.crt");
+const TEST_KEY_FIXTURE = path.join(import.meta.dir, "fixtures", "compass-ca.key");
+const WRONG_CA_FIXTURE = path.join(import.meta.dir, "fixtures", "wrong-ca.crt");
+const TEST_CERT = await Bun.file(TEST_CERT_FIXTURE).text();
+const TEST_KEY = await Bun.file(TEST_KEY_FIXTURE).text();
 
 let servers: Bun.Server<undefined>[] = [];
 
@@ -17,7 +25,6 @@ afterEach(() => {
 	for (const server of servers) server.stop(true);
 	servers = [];
 });
-
 function reserveBind(): { bind: string; url: string } {
 	const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
 	const bind = `127.0.0.1:${server.port}`;
@@ -56,8 +63,8 @@ async function startGateway(
 	const decoder = new TextDecoder();
 	let text = "";
 	while (!text.includes("READY\n")) {
-		const next = reader.read().then(({ value, done }) => ({ kind: "read" as const, value, done }));
-		const exit = child.exited.then(code => ({ kind: "exit" as const, code }));
+		const next = reader.read().then(({ value, done }): GatewayReady => ({ kind: "read", value, done }));
+		const exit = child.exited.then((code): GatewayReady => ({ kind: "exit", code }));
 		const result = await Promise.race([next, exit]);
 		if (result.kind === "exit") throw new Error(`gateway process exited with code ${result.code}`);
 		if (result.done) throw new Error("gateway process closed stdout before readiness");
@@ -69,10 +76,11 @@ async function startGateway(
 	return child;
 }
 
-function startFakeCompass(): Bun.Server<undefined> {
+function startFakeCompass(tls?: { cert: string; key: string }): Bun.Server<undefined> {
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
+		...(tls === undefined ? {} : { tls }),
 		async fetch(request) {
 			const url = new URL(request.url);
 			const body: unknown = await request.json();
@@ -265,6 +273,71 @@ describe("Compass gateway boot", () => {
 			expect(catalog.resolveModel(`${model.provider}/${model.id}`)).toBe(model);
 		}
 		expect(catalog.resolveModel("abliterated-model")).toBeUndefined();
+	});
+	test("uses COMPASS_SERVER_CA_FILE for HTTPS verification and owner RPCs", async () => {
+		using dir = TempDir.createSync("@omp-gateway-boot-");
+		const serviceFile = dir.join("service-token");
+		await Bun.write(serviceFile, SERVICE_TOKEN);
+		const compass = startFakeCompass({ cert: TEST_CERT, key: TEST_KEY });
+		const gatewayBind = reserveBind();
+		const env = {
+			COMPASS_SERVER_URL: `https://127.0.0.1:${compass.port}`,
+			COMPASS_SERVICE_TOKEN_FILE: serviceFile,
+			COMPASS_SERVER_CA_FILE: TEST_CERT_FIXTURE,
+			COMPASS_GATEWAY_BIND: gatewayBind.bind,
+		};
+		const child = await startGateway(env, gatewayBind.url);
+		try {
+			const listing = await fetch(`${gatewayBind.url}/v1/models`, {
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}` },
+			});
+			expect(listing.status).toBe(200);
+			const model = Array.from(buildGatewayCatalog().listModels()).find(
+				candidate => modelKind(candidate) === "chat",
+			);
+			if (!model) throw new Error("expected a bundled chat model");
+			const noCredential = await fetch(`${gatewayBind.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}`, "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: `${model.provider}/${model.id}`,
+					messages: [{ role: "user", content: "hi" }],
+				}),
+			});
+			expect(noCredential.status).toBe(401);
+		} finally {
+			child.kill("SIGTERM");
+			await child.exited;
+		}
+
+		const { bind } = reserveBind();
+		await expect(
+			runGatewayBoot({ ...env, COMPASS_SERVER_CA_FILE: WRONG_CA_FIXTURE, COMPASS_GATEWAY_BIND: bind }),
+		).rejects.toThrow("Compass agent verification failed");
+		expectBindAvailable(bind);
+	});
+	test("keeps Compass HTTP traffic off the provider proxy", async () => {
+		using dir = TempDir.createSync("@omp-gateway-boot-");
+		const serviceFile = dir.join("service-token");
+		await Bun.write(serviceFile, SERVICE_TOKEN);
+		const compass = startFakeCompass();
+		const gatewayBind = reserveBind();
+		const env = {
+			COMPASS_SERVER_URL: `http://[::ffff:127.0.0.1]:${compass.port}`,
+			COMPASS_SERVICE_TOKEN_FILE: serviceFile,
+			COMPASS_GATEWAY_BIND: gatewayBind.bind,
+			PI_PROXY: "http://127.0.0.1:1",
+		};
+		const child = await startGateway(env, gatewayBind.url);
+		try {
+			const listing = await fetch(`${gatewayBind.url}/v1/models`, {
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}` },
+			});
+			expect(listing.status).toBe(200);
+		} finally {
+			child.kill("SIGTERM");
+			await child.exited;
+		}
 	});
 
 	test("serves Compass-backed authorization, model listing, and owner credential lookup", async () => {
