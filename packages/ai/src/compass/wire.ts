@@ -136,6 +136,37 @@ export interface DisableCredentialRequest {
 
 export type DisableCredentialResponse = Record<string, never>;
 
+export interface GatewayModelCandidate {
+	provider: string;
+	modelId: string;
+}
+
+export interface GatewayModelMetadata {
+	contextWindow?: GatewayInt64;
+	inputCostMicroUsd?: GatewayInt64;
+	outputCostMicroUsd?: GatewayInt64;
+	api?: string;
+}
+
+export interface GatewayModelRegistryEntry {
+	displayName?: string;
+	candidates?: GatewayModelCandidate[];
+	metadata?: GatewayModelMetadata;
+}
+
+export interface GatewayModelRegistry {
+	entries?: Record<string, GatewayModelRegistryEntry>;
+}
+
+export interface GetGatewayModelRegistryResponse {
+	version?: GatewayInt64;
+	registry?: GatewayModelRegistry;
+}
+
+export interface GetGatewayModelRegistryVersionResponse {
+	version?: GatewayInt64;
+}
+
 interface CompassRpcErrorResponse {
 	code: string;
 	message?: string;
@@ -155,6 +186,47 @@ const int64Schema = type("number | string").narrow((value, ctx) => {
 const versionSchema = int64Schema.narrow(
 	(value, ctx) => (typeof value === "string" ? BigInt(value) > 0n : value >= 1) || ctx.mustBe("at least 1"),
 );
+// A JSON number past 2^53 has already lost precision, so it could alias two registry versions.
+const nonNegativeInt64Schema = int64Schema.narrow(
+	(value, ctx) =>
+		(typeof value === "string" ? BigInt(value) >= 0n : Number.isSafeInteger(value) && value >= 0) ||
+		ctx.mustBe("a non-negative int64 (as a string past 2^53)"),
+);
+
+const gatewayModelCandidateSchema = type({
+	"+": "delete",
+	provider: "string",
+	modelId: "string",
+});
+
+const gatewayModelMetadataSchema = type({
+	"+": "delete",
+	"contextWindow?": nonNegativeInt64Schema,
+	"inputCostMicroUsd?": nonNegativeInt64Schema,
+	"outputCostMicroUsd?": nonNegativeInt64Schema,
+	"api?": "string",
+});
+
+const gatewayModelRegistryEntrySchema = type({
+	"+": "delete",
+	"displayName?": "string",
+	"candidates?": gatewayModelCandidateSchema.array(),
+	"metadata?": gatewayModelMetadataSchema,
+});
+
+export const getGatewayModelRegistryResponseSchema: FluentType<GetGatewayModelRegistryResponse> = type({
+	"+": "delete",
+	"version?": nonNegativeInt64Schema,
+	"registry?": type({
+		"+": "delete",
+		"entries?": type.record(type("string"), gatewayModelRegistryEntrySchema),
+	}),
+});
+
+export const getGatewayModelRegistryVersionResponseSchema: FluentType<GetGatewayModelRegistryVersionResponse> = type({
+	"+": "delete",
+	"version?": nonNegativeInt64Schema,
+});
 
 export const gatewayOAuthTokenSchema: FluentType<GatewayOAuthToken> = type({
 	"+": "delete",
