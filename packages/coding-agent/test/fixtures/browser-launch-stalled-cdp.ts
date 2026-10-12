@@ -27,5 +27,7 @@ const server = Bun.serve({
 	},
 });
 
-await fs.writeFile(pidFile, String(process.pid));
+// Rename so a watcher never observes the PID file before its content lands.
+await fs.writeFile(`${pidFile}.tmp`, String(process.pid));
+await fs.rename(`${pidFile}.tmp`, pidFile);
 process.stderr.write(`\nDevTools listening on ws://127.0.0.1:${server.port}/devtools/browser/fake\n`);
