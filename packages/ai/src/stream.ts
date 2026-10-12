@@ -1086,7 +1086,7 @@ function isRetryableThinkingLoop(message: AssistantMessage): boolean {
  * caller abort during backoff propagates so cancellation surfaces as an abort,
  * never a stale stall result.
  */
-async function resolveWithThinkingLoopRetries(
+export async function resolveWithThinkingLoopRetries(
 	signal: AbortSignal | undefined,
 	dispatch: () => AssistantMessageEventStream,
 	onAttempt?: (message: AssistantMessage) => void,
