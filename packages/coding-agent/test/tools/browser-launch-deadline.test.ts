@@ -41,9 +41,13 @@ async function expectFixtureExited(pidFile: string, withinMs = MAX_LAUNCH_MS): P
 	const pid = Number(await fs.promises.readFile(pidFile, "utf8"));
 	const deadline = performance.now() + withinMs;
 	while (performance.now() < deadline) {
-		const statPath = `/proc/${pid}/stat`;
-		if (!fs.existsSync(statPath)) return;
-		const stat = await fs.promises.readFile(statPath, "utf8");
+		let stat: string;
+		try {
+			stat = await fs.promises.readFile(`/proc/${pid}/stat`, "utf8");
+		} catch (error) {
+			if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+			throw error;
+		}
 		const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
 		if (state === "Z" || state === "X") return;
 		await new Promise(resolve => setTimeout(resolve, 10));
