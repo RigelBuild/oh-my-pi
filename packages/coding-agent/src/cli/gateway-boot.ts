@@ -36,7 +36,13 @@ export function getGatewayBootConfig(env: Readonly<Record<string, string | undef
 	if (!serviceTokenFile) throw new Error("COMPASS_SERVICE_TOKEN_FILE must not be empty");
 	const serverUrlValue = env.COMPASS_SERVER_URL;
 	if (!serverUrlValue) throw new Error("COMPASS_SERVER_URL is required");
-	const serverUrl = normalizeCompassBaseUrl(serverUrlValue);
+	let serverUrl: string;
+	try {
+		serverUrl = normalizeCompassBaseUrl(serverUrlValue);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : "invalid URL";
+		throw new Error(`COMPASS_SERVER_URL is invalid: ${reason}`, { cause: error });
+	}
 	const caFile = env.COMPASS_SERVER_CA_FILE;
 	if (new URL(serverUrl).protocol === "https:" && !caFile) {
 		throw new Error("COMPASS_SERVER_CA_FILE is required when COMPASS_SERVER_URL uses https");
@@ -125,11 +131,12 @@ export async function runGatewayBoot(env: Readonly<Record<string, string | undef
 			? undefined
 			: await readTokenFile(config.enrollTokenFile, "COMPASS_GATEWAY_ENROLL_TOKEN_FILE");
 
+	const compassBaseFetch = globalThis.fetch;
 	installGlobalProxyFetch();
 	const compassFetch = Object.assign(
 		(input: string | URL | Request, init?: RequestInit) =>
-			fetch(input, ca === undefined ? init : ({ ...init, tls: { ca } } satisfies BunFetchRequestInit)),
-		{ preconnect: fetch.preconnect },
+			compassBaseFetch(input, ca === undefined ? init : ({ ...init, tls: { ca } } satisfies BunFetchRequestInit)),
+		{ preconnect: compassBaseFetch.preconnect },
 	);
 	const verifierOptions = { baseUrl: config.serverUrl, token: serviceToken, fetch: compassFetch };
 	await probeCompassDoor(verifierOptions);
