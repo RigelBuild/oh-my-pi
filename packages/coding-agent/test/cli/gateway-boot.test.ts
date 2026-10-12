@@ -127,7 +127,8 @@ function startFakeCompass(tls?: { cert: string; key: string }): Bun.Server<undef
 describe("Compass gateway boot", () => {
 	test("requires a valid Compass server URL before binding", async () => {
 		await expectRejectedBeforeBind({}, "COMPASS_SERVER_URL is required");
-		await expectRejectedBeforeBind({ COMPASS_SERVER_URL: "http://compass.example" }, "loopback");
+		await expectRejectedBeforeBind({ COMPASS_SERVER_URL: "http://compass.example" }, "COMPASS_SERVER_URL is invalid");
+		await expectRejectedBeforeBind({ COMPASS_SERVER_URL: "not a url" }, "COMPASS_SERVER_URL is invalid");
 	});
 
 	test("requires readable CA material for HTTPS before binding", async () => {
