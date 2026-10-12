@@ -568,7 +568,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			launchArgs.push(`--user-data-dir=${userDataDir}`);
 			await seedOwnedProfilePreferences(userDataDir);
 		}
-		const timeout = Math.max(1, (opts.timeoutMs ?? 30_000) - (performance.now() - startedAt));
+		const remaining = () => Math.max(1, (opts.timeoutMs ?? 30_000) - (performance.now() - startedAt));
 		phase = "cdp handshake";
 		const browser = await untilAborted(opts.signal, () =>
 			puppeteer.launch({
@@ -581,18 +581,28 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 				],
 				protocolTimeout: opts.protocolTimeoutMs ?? BROWSER_PROTOCOL_TIMEOUT_MS,
 				signal: opts.signal,
-				timeout,
+				timeout: remaining(),
+				// Waited below so a timeout there is reported as the page-target phase.
+				waitForInitialPage: false,
 			}),
 		);
-
+		phase = "page target";
+		try {
+			await browser.waitForTarget(target => target.type() === "page", {
+				timeout: remaining(),
+				signal: opts.signal,
+			});
+		} catch (error) {
+			await browser.close().catch(() => undefined);
+			throw error;
+		}
 		return { browser, userDataDir };
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
 		// Caller cancellation keeps its AbortError identity; only timeouts get a phase label.
 		if (opts.signal?.aborted) throw error;
 		const message = error instanceof Error ? error.message : String(error);
-		if (/page target/i.test(message)) phase = "page target";
-		else if (/WS endpoint URL/i.test(message)) phase = "ws endpoint";
+		if (phase === "cdp handshake" && /WS endpoint URL/i.test(message)) phase = "ws endpoint";
 		throw new Error(`Headless browser ${phase} failed: ${message}`, { cause: error });
 	}
 }

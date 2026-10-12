@@ -37,9 +37,9 @@ async function waitForPidOrLaunch(pidFile: string, launch: Promise<unknown>): Pr
 	}
 }
 
-async function expectFixtureExited(pidFile: string): Promise<void> {
+async function expectFixtureExited(pidFile: string, withinMs = MAX_LAUNCH_MS): Promise<void> {
 	const pid = Number(await fs.promises.readFile(pidFile, "utf8"));
-	const deadline = performance.now() + MAX_LAUNCH_MS;
+	const deadline = performance.now() + withinMs;
 	while (performance.now() < deadline) {
 		const statPath = `/proc/${pid}/stat`;
 		if (!fs.existsSync(statPath)) return;
@@ -51,16 +51,18 @@ async function expectFixtureExited(pidFile: string): Promise<void> {
 	throw new Error(`Fixture process ${pid} did not exit`);
 }
 
-async function withFakeBrowser(run: (pidFile: string) => Promise<void>): Promise<void> {
+async function withFakeBrowser(run: (pidFile: string) => Promise<void>, mode = "silent"): Promise<void> {
 	const tempDir = TempDir.createSync("@browser-launch-deadline-");
 	const executable = path.join(tempDir.path(), "fake-chromium");
 	const pidFile = path.join(tempDir.path(), "fixture.pid");
 	const previousExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
 	const previousPidFile = process.env.OMP_BROWSER_STALLED_PID_FILE;
+	const previousMode = process.env.OMP_BROWSER_STALLED_MODE;
 	await Bun.write(executable, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}\n`);
 	fs.chmodSync(executable, 0o755);
 	process.env.PUPPETEER_EXECUTABLE_PATH = executable;
 	process.env.OMP_BROWSER_STALLED_PID_FILE = pidFile;
+	process.env.OMP_BROWSER_STALLED_MODE = mode;
 	try {
 		await run(pidFile);
 	} finally {
@@ -68,18 +70,24 @@ async function withFakeBrowser(run: (pidFile: string) => Promise<void>): Promise
 		else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
 		if (previousPidFile === undefined) delete process.env.OMP_BROWSER_STALLED_PID_FILE;
 		else process.env.OMP_BROWSER_STALLED_PID_FILE = previousPidFile;
+		if (previousMode === undefined) delete process.env.OMP_BROWSER_STALLED_MODE;
+		else process.env.OMP_BROWSER_STALLED_MODE = previousMode;
 		await tempDir.remove();
 	}
 }
 
-async function expectFastRejection(launch: Promise<unknown>, check: (error: Error) => void): Promise<void> {
+async function expectFastRejection(
+	launch: Promise<unknown>,
+	check: (error: Error) => void,
+	withinMs = MAX_LAUNCH_MS,
+): Promise<void> {
 	const startedAt = performance.now();
 	const result = await Promise.race([
 		launch.then(
 			() => ({ kind: "resolved" as const }),
 			error => ({ kind: "rejected" as const, error }),
 		),
-		new Promise<{ kind: "slow" }>(resolve => setTimeout(() => resolve({ kind: "slow" }), MAX_LAUNCH_MS)),
+		new Promise<{ kind: "slow" }>(resolve => setTimeout(() => resolve({ kind: "slow" }), withinMs)),
 	]);
 	expect(result.kind).toBe("rejected");
 	if (result.kind === "rejected") {
@@ -88,7 +96,7 @@ async function expectFastRejection(launch: Promise<unknown>, check: (error: Erro
 			check(result.error);
 		}
 	}
-	expect(performance.now() - startedAt).toBeLessThan(MAX_LAUNCH_MS);
+	expect(performance.now() - startedAt).toBeLessThan(withinMs);
 }
 
 describe("headless browser launch deadline", () => {
@@ -117,8 +125,29 @@ describe("headless browser launch deadline", () => {
 					expect(error.message.toLowerCase()).toContain("cdp handshake");
 					expect(error.cause).toBeDefined();
 				});
+				await expectFixtureExited(pidFile);
 			});
 		},
 		20_000,
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"force-closes a browser that acknowledges Browser.close but never exits",
+		async () => {
+			await withFakeBrowser(async pidFile => {
+				// Page-target budget plus the 5 s graceful-close bound.
+				const withinMs = 1_000 + 5_000 + MAX_LAUNCH_MS;
+				const launch = launchHeadlessBrowser({ headless: true, timeoutMs: 1_000 });
+				void launch.catch(() => undefined);
+				await waitForPidOrLaunch(pidFile, launch);
+				await expectFastRejection(
+					launch,
+					error => expect(error.message.toLowerCase()).toContain("page target"),
+					withinMs,
+				);
+				await expectFixtureExited(pidFile);
+			}, "ack");
+		},
+		30_000,
 	);
 });
