@@ -164,6 +164,58 @@ describe("CompassOwnerPool", () => {
 		expect(await ownerPool.get("a")).toBe(storage);
 		expect(await ownerPool.get("b")).toBe(second.entry.storage);
 	});
+	bunTest("loads only each owner's credentials through openCompassOwner", async () => {
+		const credentialsByToken: Record<string, GatewayCredential> = {
+			[OWNER_TOKEN]: {
+				id: "credential/owner-a",
+				provider: "anthropic",
+				version: "1",
+				apiKey: "owner-a-key",
+			},
+			[LIVE_TOKEN]: {
+				id: "credential/owner-b",
+				provider: "openai",
+				version: "1",
+				apiKey: "owner-b-key",
+			},
+		};
+		const server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				const body = record(await request.json());
+				const agentToken = body?.agentToken;
+				if (
+					request.headers.get("authorization") !== `Bearer ${SERVICE_TOKEN}` ||
+					request.headers.get("connect-protocol-version") !== "1" ||
+					request.headers.get("content-type") !== "application/json"
+				) {
+					return Response.json({ code: "unauthenticated", message: "bad request" }, { status: 401 });
+				}
+				if (typeof agentToken !== "string" || !Object.hasOwn(credentialsByToken, agentToken)) {
+					return Response.json({ code: "unauthenticated", message: "unknown agent" }, { status: 401 });
+				}
+				if (new URL(request.url).pathname !== "/compass.v1.GatewayCredentials/ListCredentialPool") {
+					return Response.json({ code: "unimplemented", message: "unknown method" }, { status: 404 });
+				}
+				return Response.json({ credentials: [credentialsByToken[agentToken]] });
+			},
+		});
+		servers.push(server);
+		const ownerPool = pool({
+			open: ownerUserId =>
+				runWithAgentToken(ownerUserId === "owner-a" ? OWNER_TOKEN : LIVE_TOKEN, () =>
+					openCompassOwner({ baseUrl: server.url.toString(), token: SERVICE_TOKEN }),
+				),
+		});
+
+		const ownerA = await ownerPool.get("owner-a");
+		const ownerAAgain = await ownerPool.get("owner-a");
+		const ownerB = await ownerPool.get("owner-b");
+		expect(ownerAAgain).toBe(ownerA);
+		expect(ownerB).not.toBe(ownerA);
+		expect(ownerA.credentials.list().map(row => row.provider)).toEqual(["anthropic"]);
+		expect(ownerB.credentials.list().map(row => row.provider)).toEqual(["openai"]);
+	});
 
 	bunTest("shares concurrent first opens for one owner", async () => {
 		const owner = fakeOwner();
@@ -244,8 +296,47 @@ describe("CompassOwnerPool", () => {
 		expect(second.closed()).toBe(1);
 
 		await response.body?.cancel();
+		now = 28;
 		ownerPool.sweep();
 		expect(first.closed()).toBe(1);
+	});
+	bunTest("refreshes every leased owner idle time when a response lease ends", async () => {
+		let now = 0;
+		const first = fakeOwner();
+		const second = fakeOwner();
+		const ownerPool = pool({
+			open: async owner => (owner === "a" ? first.entry : second.entry),
+			idleMs: 10,
+			now: () => now,
+		});
+		await ownerPool.get("a");
+		now = 1;
+		let finishStream: (() => void) | undefined;
+		const response = await ownerPool.withRequestLease(async () => {
+			await ownerPool.get("a");
+			await ownerPool.get("b");
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode("complete"));
+						finishStream = () => controller.close();
+					},
+				}),
+			);
+		});
+		now = 20;
+		const finish = finishStream;
+		if (!finish) throw new Error("response stream did not start");
+		finish();
+		await response.text();
+		now = 25;
+		ownerPool.sweep();
+		expect(first.closed()).toBe(0);
+		expect(second.closed()).toBe(0);
+		now = 41;
+		ownerPool.sweep();
+		expect(first.closed()).toBe(1);
+		expect(second.closed()).toBe(1);
 	});
 
 	bunTest("releases a response lease when its body ends or errors", async () => {
@@ -306,7 +397,6 @@ describe("CompassOwnerPool", () => {
 		expect(bodyless.closed()).toBe(1);
 		expect(thrown.closed()).toBe(1);
 	});
-
 	bunTest("evicts least-recently-used idle entries only when unleased and unpinned", async () => {
 		let now = 0;
 		const a = fakeOwner();
@@ -375,6 +465,7 @@ describe("CompassOwnerPool", () => {
 		await runWithAgentToken(OWNER_TOKEN, () =>
 			ownerPool.withRequestLease(async () => {
 				storage = await ownerPool.get("owner-a");
+				return new Response(null);
 			}),
 		);
 		const openedStore = store;
@@ -404,6 +495,7 @@ describe("CompassOwnerPool", () => {
 			ownerPool.withRequestLease(async () => {
 				const current = await ownerPool.get("owner-a");
 				await current.credentials.poll();
+				return new Response(null);
 			}),
 		);
 		await openedStore.flush();
