@@ -1145,7 +1145,8 @@ jobs:
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
          (needs.release_build.result == 'success' ||
-          (github.repository != 'can1357/oh-my-pi' && needs.release_build.result == 'skipped')) &&
+          (github.repository != 'can1357/oh-my-pi' && needs.release_build.result == 'skipped' &&
+           needs.release_gate.result == 'success' && needs.release_github.result == 'success')) &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}
       # release_native_leaves must finish first: the core package lists the
@@ -1153,7 +1154,8 @@ jobs:
       # resolve them the moment the core version is live. release_build too:
       # binary updates install what build.stencil.so published (update-cli.ts),
       # so the build service must lead npm.
-      needs: [release_metadata, release_binary, release_smoke, release_build, release_native_leaves]
+      # The fork skips release_build, so it gates on release_gate/release_github directly.
+      needs: [release_metadata, release_gate, release_binary, release_smoke, release_github, release_build, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
       # short-lived publish token (trusted publishing + provenance). When a
