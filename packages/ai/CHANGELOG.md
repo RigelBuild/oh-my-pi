@@ -17,7 +17,11 @@
 ### Added
 
 - Added opt-in auth-broker Prometheus usage and subscription metrics with scrape-scoped tokens.
-- Added `CompassAuthCredentialStore` for versioned credential-pool reads and compare-and-swap updates through the Compass gateway. Writes name the serving agent, so the server can confine them to that agent's pool, and list the optional fields they clear.
+
+
+- Compass credential-pool requests now carry the triggering agent token in an async scope. Writes without a token wait for a scoped poll; revoked-token writes park for a later poll and expose `hasPendingWrites()`.
+
+- Added `CompassAuthCredentialStore` for versioned credential-pool reads and compare-and-swap updates through the Compass gateway. Requests carry the triggering agent's token so the gateway can confine operations to that agent's pool, and list the optional fields they clear.
 - Added `resolveStorage(caller)` to the auth-gateway options, which serves each admitted caller from its tenant's credential pool (keyed on the optional `CallerIdentity.ownerUserId`, else `agentAccountId`); a throw answers 503. Retained provider session state and the session id providers see are kept per caller.
 - Added optional `routeScope(req, run)` to keep an async request context active through auth-gateway storage resolution and streamed credential refresh.
 - Added the provider-enrollment routes `GET /internal/enroll/providers`, `POST /internal/enroll/authorize-url` and `POST /internal/enroll/exchange`. They build the authorize URL and exchange the code statelessly from the server's state and PKCE material. `withEnrollToken(token, authorize)` admits a server enroll token as the enroll caller, which reaches only these routes; agents get 401 there, and the enroll caller gets 401 on every other authenticated route. Enroll responses carry no CORS grant.
