@@ -60,11 +60,7 @@ env:
    # so a filegroup addition cannot silently skip both.
    NATIVES_X64_TARGETS: natives-linux-x64-baseline natives-linux-x64-modern
    NATIVES_CROSS_TARGETS: natives-darwin-arm64 natives-darwin-x64-baseline natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-arm64 natives-win32-x64-baseline
-   # Per-test wall-clock ceiling (seconds) for scripts/ci-test-ts.ts. omp-kata
-   # runners with reclaim_guest_freed_memory (infra/tune-kata-runtime.sh) run
-   # the SQLite/subprocess-heavy coding-agent suites 1.5-2x slower, which put
-   # several cases (model-registry refresh, session fork, credential bridge)
-   # over the 30 s default; 120 s still catches a real hang.
+   # Keeps a 120 s ceiling for scripts/ci-test-ts.ts that still catches a real hang.
    OMP_TEST_TIMEOUT: "120"
 
 permissions:
@@ -194,8 +190,11 @@ jobs:
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
-         - id: cache
+         - name: Restore Rust Bazel cache
+           id: cache
            uses: ./.github/actions/bazel-cache
+           with:
+              scope: rust-validate
          - name: Rust tests
            # The ulimit guard runs in the step that launches the bazel server
            # (limits are per-process and the server persists across steps).
@@ -223,6 +222,14 @@ jobs:
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-ported --
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
+         - name: Save Rust Bazel cache
+           if: always() && github.event_name != 'pull_request' && steps.cache.outputs.save-needed == 'true'
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: |
+                 ~/.cache/omp-bazel-disk
+                 ~/.cache/omp-bazel-repo
+              key: ${{ steps.cache.outputs.cache-key }}
 
    # Provides the linux-x64 addon pair every downstream TS job installs.
    #
@@ -246,8 +253,8 @@ jobs:
          contents: read
          actions: write
       outputs:
-         # "<artifact-relative path>=<sha256>" pairs; kata consumers restore
-         # these from the in-cluster stash (see native-artifacts).
+         # "<artifact-relative path>=<sha256>" pairs; native-artifacts uses
+         # the stash only when /opt/bazel-repo-cache is mounted.
          stash: ${{ steps.stage.outputs.stash }}
       steps:
          - uses: actions/checkout@v4
@@ -262,11 +269,8 @@ jobs:
               echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
               echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
 
-         # ---- PR path: rigel-release-built addons from actions/cache ----
-         # `ci-natives` is a plain workspace-relative path on purpose: the
-         # cache version hashes the literal path list, so kata (save) and
-         # hosted (restore) must spell it identically, and upload-artifact
-         # skips dot-directories by default.
+         # This path list must match in the rigel-release save and PR restore;
+         # upload-artifact skips dot-directories by default.
          - name: Restore release-branch-built native addons
            id: natives-cache
            if: github.event_name == 'pull_request'
@@ -286,10 +290,12 @@ jobs:
                 echo "::notice title=Native addons built on PR::No rigel-release build matches this PR's native sources; building the linux-x64 pair here."
               fi
 
-         # ---- build path: rigel-release, or a PR cache miss ----
-         - id: cache
+         - name: Restore native addon Bazel cache
+           id: cache
            if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            uses: ./.github/actions/bazel-cache
+           with:
+              scope: natives-x64
          - name: Build linux-x64 native addons
            if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            run: |
@@ -297,11 +303,9 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               # The addon cdylib links each peak at several GiB of rustc RSS;
               # building several addons in one invocation runs them
-              # concurrently, which OOMs the kata pod and takes the bazel
-              # server with it (exit 37 "Server terminated abruptly", runs
-              # 30556752623 / 30557524371). Build one addon per invocation —
-              # analysis and cached actions are shared through the persistent
-              # server, so only the heavy links serialize.
+              # concurrently, which OOMs the runner and takes the bazel server
+              # with it. Build one addon per invocation so only heavy links
+              # serialize; analysis and cached actions share the server.
               : > "$RUNNER_TEMP/bazel-build.log"
               for target in $NATIVES_X64_TARGETS; do
                 bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
@@ -347,13 +351,9 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/ci-natives/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/ci-natives/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
-         # Kata test jobs download ~120 MB of artifact over the node's NAT
-         # egress (44-68 s per job, on the critical path). Every kata pod
-         # mounts the shared runner-cache PVC at /opt/bazel-repo-cache (the
-         # xwin cache already lives there), so stash the pair content-addressed
-         # beside it; the native-artifacts action restores and re-verifies it
-         # and falls back to the artifact on any miss. Best-effort: a stash
-         # failure only costs consumers the download.
+         # Native-artifacts uses the stash only where /opt/bazel-repo-cache is
+         # mounted; hosted consumers download the artifact. Stashing is
+         # best-effort, so a miss costs consumers only the artifact download.
          - name: Stage native addons for consumers
            id: stage
            shell: bash
@@ -439,6 +439,14 @@ jobs:
               path: ci-natives/natives-linux-x64-*/*.node
               if-no-files-found: error
               retention-days: 1
+         - name: Save native addon Bazel cache
+           if: always() && github.event_name != 'pull_request' && steps.cache.outcome != 'skipped' && steps.cache.outputs.save-needed == 'true'
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: |
+                 ~/.cache/omp-bazel-disk
+                 ~/.cache/omp-bazel-repo
+              key: ${{ steps.cache.outputs.cache-key }}
 
    # The remaining targets (darwin, arm64, musl and win32 cross builds). Only
    # release jobs consume them, so they build beside the TS fan-out instead of
@@ -451,13 +459,16 @@ jobs:
       runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4
-         - id: cache
+         - name: Restore cross-target Bazel cache
+           id: cache
            uses: ./.github/actions/bazel-cache
+           with:
+              scope: natives-cross
          - name: Build cross-target native addons
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              # One addon per invocation, for the OOM reason in native_addons.
+              # One addon per invocation, to limit runner memory use.
               : > "$RUNNER_TEMP/bazel-build.log"
               for target in $NATIVES_CROSS_TARGETS; do
                 bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
@@ -510,6 +521,14 @@ jobs:
                  !bazel-bin/natives-linux-x64-*/*.node
               if-no-files-found: error
               retention-days: 1
+         - name: Save cross-target Bazel cache
+           if: always() && github.event_name != 'pull_request' && steps.cache.outputs.save-needed == 'true'
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: |
+                 ~/.cache/omp-bazel-disk
+                 ~/.cache/omp-bazel-repo
+              key: ${{ steps.cache.outputs.cache-key }}
 
    test_coding_agent_native:
       name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"
