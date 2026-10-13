@@ -75,7 +75,7 @@ function gate(job: string, repository: string, results: Record<string, string>):
 	return truthy(new Evaluator(parsed, context, statusFunctions).evaluate());
 }
 
-/** Resolves release_build, then the jobs that depend on it, as GitHub would. */
+/** Truth table: fails one job, leaves the rest successful (some combos unreachable), and derives release_build's result. */
 function release(repository: string, failing?: string): Record<string, boolean | string> {
 	const results: Record<string, string> = {};
 	if (failing && failing !== "release_build") results[failing] = "failure";
