@@ -31,7 +31,7 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
-import { classifyGatewayError } from "../error/gateway";
+import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
@@ -72,7 +72,7 @@ import { handleSpeech } from "./routes/speech";
 import { handleSystemOne } from "./routes/systemone";
 import { handleTranscriptions } from "./routes/transcriptions";
 import { handleVideoContent, handleVideoPoll, handleVideoSubmit } from "./routes/video";
-import { AuthGatewaySessionStateStore } from "./session-state";
+import { AuthGatewaySessionStateStore, type AuthGatewaySessionStateLease } from "./session-state";
 import type {
 	AuthGatewayServerHandle,
 	AgentCaller,
@@ -262,6 +262,184 @@ function chatRouteRejection(model: Model<Api>): string | undefined {
 	return route && `Model ${model.provider}/${model.id} is a ${kind} model; use ${route}`;
 }
 
+/** How one candidate's setup ended: a reason it cannot run, or what it runs with. */
+type AttemptStart =
+	| { readonly ok: false; readonly reason: "incompatible"; readonly failure: GatewayErrorClassification }
+	| {
+			readonly ok: false;
+			readonly reason: "no_credential" | "store_error";
+			readonly failure: GatewayErrorClassification;
+	  }
+	| {
+			readonly ok: true;
+			readonly streamOpts: SimpleStreamOptions;
+			readonly lease: AuthGatewaySessionStateLease;
+			readonly account: () => string;
+	  };
+
+function incompatibleAttempt(message: string): AttemptStart {
+	return { ok: false, reason: "incompatible", failure: { status: 400, type: "invalid_request_error", message } };
+}
+
+/**
+ * One candidate's setup on a format route: model prechecks, credential,
+ * session-state lease, stream options. Throws the signal's reason when the
+ * request is aborted during credential lookup, so no lease is taken for it.
+ */
+async function prepareFormatAttempt(
+	route: { module: FormatModule; label: string },
+	bootOpts: AuthGatewayRouteOptions,
+	parsed: ParsedFormatRequest,
+	model: Model<Api>,
+	sessionId: string,
+	signal: AbortSignal,
+	peer: string,
+	sessionStates: AuthGatewaySessionStateStore,
+	caller: AgentCaller,
+	clientKey: string | undefined,
+	toolsJson: string | undefined,
+): Promise<AttemptStart> {
+	const kindRejection = chatRouteRejection(model);
+	if (kindRejection) return incompatibleAttempt(kindRejection);
+	const supportsOpenAIImageFileReferences =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	if (
+		route.label === "openai-responses" &&
+		!supportsOpenAIImageFileReferences &&
+		parsed.context.messages.some(
+			message =>
+				message.role === "toolResult" &&
+				message.content.some(
+					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+				),
+		)
+	) {
+		return incompatibleAttempt("OpenAI image file IDs in tool outputs require a Responses-compatible upstream model");
+	}
+
+	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
+	// expected to resolve the credential and pass it as `options.apiKey`.
+	// For OAuth providers this returns the access token (refreshed via the
+	// broker override on AuthStorage when needed).
+	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, signal, peer);
+	signal.throwIfAborted();
+	if ("status" in apiKey) return { ok: false, reason: apiKey.setupReason, failure: apiKey };
+
+	const streamOpts = buildStreamOptions(parsed, model.api, signal);
+	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
+	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
+	// map is non-serializable, so no client can supply it and every turn would
+	// otherwise re-learn each lesson from a fresh upstream rejection. The lease
+	// keeps the entry out of reach of eviction until this request is done with
+	// it, so the caller MUST release it on every exit path.
+	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	const lease = sessionStates.acquire({
+		clientKey,
+		agentAccountId: caller.agentAccountId,
+		model,
+		context: parsed.context,
+		toolsJson,
+		account,
+	});
+	streamOpts.providerSessionState = lease.states;
+	streamOpts.apiKey = buildGatewayApiKeyResolver(
+		bootOpts.storage,
+		model,
+		sessionId,
+		apiKey,
+		signal,
+		route.label,
+		peer,
+		resolvedKey => {
+			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			lease.updateAccount(account);
+		},
+	);
+	return { ok: true, streamOpts, lease, account: () => account };
+}
+
+/**
+ * One candidate's setup on `POST /v1/pi/stream`; see {@link prepareFormatAttempt}.
+ * The client's options are trusted (already allow-listed by `parseRequest`);
+ * only server-controlled fields are injected.
+ */
+async function preparePiNativeAttempt(
+	bootOpts: AuthGatewayRouteOptions,
+	req: Request,
+	parsed: piNative.PiNativeParsedRequest,
+	model: Model<Api>,
+	sessionId: string,
+	signal: AbortSignal,
+	peer: string,
+	sessionStates: AuthGatewaySessionStateStore,
+	caller: AgentCaller,
+	clientKey: string | undefined,
+	toolsJson: string | undefined,
+): Promise<AttemptStart> {
+	const kindRejection = chatRouteRejection(model);
+	if (kindRejection) return incompatibleAttempt(kindRejection);
+
+	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, signal, peer);
+	signal.throwIfAborted();
+	if ("status" in apiKey) return { ok: false, reason: apiKey.setupReason, failure: apiKey };
+
+	// Per-session provider learning, owned by this gateway instance. The map is
+	// non-serializable, so `parseRequest` cannot accept one from the wire and
+	// every turn would otherwise re-learn each lesson from a fresh upstream
+	// rejection. The lease keeps the entry out of reach of eviction until this
+	// request is done with it, so the caller MUST release it on every exit path.
+	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	const lease = sessionStates.acquire({
+		clientKey,
+		agentAccountId: caller.agentAccountId,
+		model,
+		context: parsed.context,
+		toolsJson,
+		account,
+	});
+	// The codex sampling strip mirrors `buildStreamOptions` — Codex rejects
+	// every one with a 400 (#3117).
+	const streamOpts: SimpleStreamOptions = {
+		...parsed.options,
+		signal,
+		cursorExternalToolExecutor: true,
+		providerSessionState: lease.states,
+	};
+	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+	streamOpts.apiKey = buildGatewayApiKeyResolver(
+		bootOpts.storage,
+		model,
+		sessionId,
+		apiKey,
+		signal,
+		"pi-native",
+		peer,
+		resolvedKey => {
+			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			lease.updateAccount(account);
+		},
+	);
+	if (model.api === "openai-codex-responses") {
+		delete streamOpts.temperature;
+		delete streamOpts.topP;
+		delete streamOpts.topK;
+		delete streamOpts.minP;
+		delete streamOpts.stopSequences;
+		delete streamOpts.presencePenalty;
+		delete streamOpts.frequencyPenalty;
+		delete streamOpts.repetitionPenalty;
+	}
+	// Merge gateway-captured passthrough headers under the client's own
+	// headers — the client's values win when they collide.
+	const captured = captureRequestHeaders(req.headers);
+	streamOpts.headers = { ...captured, ...streamOpts.headers };
+	streamOpts.sessionId = sessionId;
+	return { ok: true, streamOpts, lease, account: () => account };
+}
+
 // (handlePassthrough removed — see note above.)
 
 async function handleFormatEndpoint(
@@ -301,6 +479,8 @@ async function handleFormatEndpoint(
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
+	// Checked here too, ahead of parsing, so a non-chat model with a bad body
+	// still gets the kind error; the attempt repeats it for each candidate.
 	const kindRejection = chatRouteRejection(model);
 	if (kindRejection) return route.module.formatError(400, "invalid_request_error", kindRejection);
 	const client = resolveClientIdentity(req.headers);
@@ -329,28 +509,6 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (
-		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
-		parsed.context.messages.some(
-			message =>
-				message.role === "toolResult" &&
-				message.content.some(
-					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-				),
-		)
-	) {
-		return route.module.formatError(
-			400,
-			"invalid_request_error",
-			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
-		);
-	}
-
 	// Sticky credential id: honour the client's `prompt_cache_key` when
 	// supplied (so external session ids align), otherwise derive from
 	// modelId + system + tools + first message. Mirrored into
@@ -360,42 +518,27 @@ async function handleFormatEndpoint(
 	const sessionId = callerSessionId(caller, clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson));
 	parsed.options.promptCacheKey = sessionId;
 
-	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
-	// expected to resolve the credential and pass it as `options.apiKey`.
-	// For OAuth providers this returns the access token (refreshed via the
-	// broker override on AuthStorage when needed).
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
-	if (controller.signal.aborted) return clientClosedResponse(route);
-	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
-
-	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
-	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
-	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
-	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
-	// map is non-serializable, so no client can supply it and every turn would
-	// otherwise re-learn each lesson from a fresh upstream rejection. The lease
-	// keeps the entry out of reach of eviction until this request is done with
-	// it, so it MUST be released on every exit path.
-	const lease = sessionStates.acquire({
-		clientKey,
-		agentAccountId: caller.agentAccountId,
-		model,
-		context: parsed.context,
-		toolsJson,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
-	});
-	streamOpts.providerSessionState = lease.states;
-	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
-		model,
-		sessionId,
-		apiKey,
-		controller.signal,
-		route.label,
-		peer,
-		resolvedKey =>
-			lease.updateAccount(resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey)),
-	);
+	let start: AttemptStart;
+	try {
+		start = await prepareFormatAttempt(
+			route,
+			bootOpts,
+			parsed,
+			model,
+			sessionId,
+			controller.signal,
+			peer,
+			sessionStates,
+			caller,
+			clientKey,
+			toolsJson,
+		);
+	} catch (error) {
+		if (controller.signal.aborted) return clientClosedResponse(route);
+		throw error;
+	}
+	if (!start.ok) return route.module.formatError(start.failure.status, start.failure.type, start.failure.message);
+	const { streamOpts, lease } = start;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -548,8 +691,6 @@ async function handlePiNative(
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	const kindRejection = chatRouteRejection(model);
-	if (kindRejection) return piNative.formatError(400, "invalid_request_error", kindRejection);
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -563,60 +704,27 @@ async function handlePiNative(
 	const clientCacheKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
 	if (clientCacheKey !== undefined) parsed.options.promptCacheKey = callerSessionId(caller, clientCacheKey);
 
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
-	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
-
-	// Per-session provider learning, owned by this gateway instance. The map is
-	// non-serializable, so `parseRequest` cannot accept one from the wire and
-	// every turn would otherwise re-learn each lesson from a fresh upstream
-	// rejection. The lease keeps the entry out of reach of eviction until this
-	// request is done with it, so it MUST be released on every exit path.
-	const lease = sessionStates.acquire({
-		clientKey,
-		agentAccountId: caller.agentAccountId,
-		model,
-		context: parsed.context,
-		toolsJson,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
-	});
-	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
-	// trust the client's options (already allow-listed by `parseRequest`) and
-	// only inject server-controlled fields. The codex sampling strip mirrors
-	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
-	const streamOpts: SimpleStreamOptions = {
-		...parsed.options,
-		signal: controller.signal,
-		cursorExternalToolExecutor: true,
-		providerSessionState: lease.states,
-	};
-	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
-	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
-		model,
-		sessionId,
-		apiKey,
-		controller.signal,
-		"pi-native",
-		peer,
-		resolvedKey =>
-			lease.updateAccount(resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey)),
-	);
-	if (model.api === "openai-codex-responses") {
-		delete streamOpts.temperature;
-		delete streamOpts.topP;
-		delete streamOpts.topK;
-		delete streamOpts.minP;
-		delete streamOpts.stopSequences;
-		delete streamOpts.presencePenalty;
-		delete streamOpts.frequencyPenalty;
-		delete streamOpts.repetitionPenalty;
+	let start: AttemptStart;
+	try {
+		start = await preparePiNativeAttempt(
+			bootOpts,
+			req,
+			parsed,
+			model,
+			sessionId,
+			controller.signal,
+			peer,
+			sessionStates,
+			caller,
+			clientKey,
+			toolsJson,
+		);
+	} catch (error) {
+		if (controller.signal.aborted) return aborted();
+		throw error;
 	}
-	// Merge gateway-captured passthrough headers under the client's own
-	// headers — the client's values win when they collide.
-	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...streamOpts.headers };
-	streamOpts.sessionId = sessionId;
+	if (!start.ok) return piNative.formatError(start.failure.status, start.failure.type, start.failure.message);
+	const { streamOpts, lease } = start;
 
 	logger.info("auth-gateway request", {
 		requestId,
