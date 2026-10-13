@@ -75,21 +75,53 @@ export async function mintTarget(cwd: string, sha: string): Promise<{ tag: strin
 	return { tag, sha: target };
 }
 
+/** GitHub ref API surface, injectable so the create race is testable. */
+export interface TagApi {
+	/** The tag's commit SHA, or null when the ref does not exist. */
+	get(tag: string): Promise<string | null>;
+	/** Creates the ref; resolves "exists" on a 422 "Reference already exists". */
+	create(tag: string, sha: string): Promise<"created" | "exists">;
+}
+
+/** Creates `tag` at `sha`; a ref that already points there, even from a concurrent run, is success. */
+export async function createTag(api: TagApi, tag: string, sha: string): Promise<"created" | "present"> {
+	if ((await api.get(tag)) === null && (await api.create(tag, sha)) === "created") return "created";
+	const actual = await api.get(tag);
+	if (actual !== sha) throw new Error(`${tag} already exists at ${actual}, expected ${sha}`);
+	return "present";
+}
+
+function ghTagApi(repo: string): TagApi {
+	return {
+		async get(tag) {
+			const out = await $`gh api ${`repos/${repo}/git/ref/tags/${tag}`} --jq .object.sha`.quiet().nothrow();
+			if (out.exitCode === 0) return out.text().trim();
+			if (out.stderr.toString().includes("HTTP 404")) return null;
+			throw new Error(`reading ${tag}: ${out.stderr.toString().trim()}`);
+		},
+		async create(tag, sha) {
+			const out =
+				await $`gh api --method POST ${`repos/${repo}/git/refs`} -f ${`ref=refs/tags/${tag}`} -f ${`sha=${sha}`}`
+					.quiet()
+					.nothrow();
+			if (out.exitCode === 0) return "created";
+			const err = `${out.stdout.toString()}${out.stderr.toString()}`;
+			if (err.includes("HTTP 422") && err.includes("Reference already exists")) return "exists";
+			throw new Error(`creating ${tag}: ${err.trim()}`);
+		},
+	};
+}
+
 async function mint(sha: string, repo: string): Promise<void> {
 	const target = await mintTarget(process.cwd(), sha);
 	if (!target) {
 		console.log("No release tag to mint");
 		return;
 	}
-	const remote = await $`gh api ${`repos/${repo}/git/ref/tags/${target.tag}`} --jq .object.sha`.quiet().nothrow();
-	if (remote.exitCode === 0) {
-		const actual = remote.text().trim();
-		if (actual !== target.sha) throw new Error(`${target.tag} already exists at ${actual}, expected ${target.sha}`);
-		console.log(`${target.tag} already points at ${target.sha}`);
-		return;
-	}
-	await $`gh api --method POST ${`repos/${repo}/git/refs`} -f ${`ref=refs/tags/${target.tag}`} -f ${`sha=${target.sha}`}`.quiet();
-	console.log(`Created ${target.tag} at ${target.sha}`);
+	const result = await createTag(ghTagApi(repo), target.tag, target.sha);
+	console.log(
+		result === "created" ? `Created ${target.tag} at ${target.sha}` : `${target.tag} already points at ${target.sha}`,
+	);
 }
 
 if (import.meta.main) {

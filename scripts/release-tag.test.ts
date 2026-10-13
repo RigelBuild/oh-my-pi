@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
-import { checkPr, expectedNextVersion, mintTarget, parseTrackingVersion } from "./release-tag";
+import { checkPr, createTag, expectedNextVersion, mintTarget, parseTrackingVersion, type TagApi } from "./release-tag";
 
 describe("parseTrackingVersion", () => {
 	test("accepts X.Y.Z-rigel.N", () => {
@@ -124,5 +124,50 @@ describe("checkPr", () => {
 		const dir = await repo();
 		const head = await commit(dir, "18.9.2-rigel.1");
 		await expect(checkPr(dir, "0".repeat(40), head)).rejects.toThrow("is not a commit");
+	});
+});
+
+/** A ref store where another minter may create the tag between our read and our create. */
+function fakeApi(initial: string | null, racer?: string): TagApi & { created: string[] } {
+	let ref = initial;
+	const created: string[] = [];
+	return {
+		created,
+		async get() {
+			return ref;
+		},
+		async create(_tag, sha) {
+			if (racer !== undefined) {
+				ref = racer;
+				return "exists";
+			}
+			ref = sha;
+			created.push(sha);
+			return "created";
+		},
+	};
+}
+
+describe("createTag", () => {
+	test("creates a missing tag", async () => {
+		const api = fakeApi(null);
+		expect(await createTag(api, "v1.0.0-rigel.1", "aaa")).toBe("created");
+		expect(api.created).toEqual(["aaa"]);
+	});
+
+	test("accepts a tag a concurrent run created at the same commit", async () => {
+		expect(await createTag(fakeApi(null, "aaa"), "v1.0.0-rigel.1", "aaa")).toBe("present");
+	});
+
+	test("fails when a concurrent run created the tag elsewhere", async () => {
+		await expect(createTag(fakeApi(null, "bbb"), "v1.0.0-rigel.1", "aaa")).rejects.toThrow(
+			"already exists at bbb, expected aaa",
+		);
+	});
+
+	test("fails on an existing tag at another commit without creating", async () => {
+		const api = fakeApi("bbb");
+		await expect(createTag(api, "v1.0.0-rigel.1", "aaa")).rejects.toThrow("already exists at bbb");
+		expect(api.created).toEqual([]);
 	});
 });
