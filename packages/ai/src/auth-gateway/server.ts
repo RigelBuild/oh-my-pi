@@ -31,26 +31,45 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
-import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
+import type { AuthStorage } from "../auth-storage";
+import {
+	classifyGatewayError,
+	classifyUpstreamFailure,
+	type GatewayErrorClassification,
+	type UpstreamFailure,
+} from "../error/gateway";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "../types";
+import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
+import { AssistantMessageEventStream } from "../utils/event-stream";
 import { parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
 import {
 	type AuthGatewayBootOptions,
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	type CandidateFailoverOptions,
+	type FailoverContext,
 	mirrorRequestAbort,
 	normalizeClientSessionKey,
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
 } from "./dispatch";
+import {
+	armBudget,
+	candidateKey,
+	completeAttempt,
+	endWithFailure,
+	type HeldAttempt,
+	holdUntilCommit,
+	sseHoldBody,
+} from "./failover";
 import {
 	callerSessionId,
 	captureRequestHeaders,
@@ -78,6 +97,7 @@ import type {
 	AgentCaller,
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
+	AuthGatewayStreamControl,
 } from "./types";
 import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 
@@ -440,6 +460,482 @@ async function preparePiNativeAttempt(
 	return { ok: true, streamOpts, lease, account: () => account };
 }
 
+const DEFAULT_FAILOVER_DEADLINE_MS = 120_000;
+// Keeps one long provider Retry-After sleep from consuming most of an attempt budget the follower could use.
+const FAILOVER_MAX_RETRY_DELAY_MS = 10_000;
+const DEADLINE_FAILURE: GatewayErrorClassification = {
+	status: 502,
+	type: "upstream_error",
+	message: "Gateway request deadline expired",
+};
+const BUDGET_MESSAGE = "Gateway attempt budget expired";
+
+/** One chat route as the candidate loop sees it: setup per candidate, and its wire encoding. */
+interface FailoverRoute {
+	readonly label: string;
+	readonly requestedModelId: string;
+	readonly context: Context;
+	readonly stream: boolean;
+	formatError(status: number, type: string, message: string): Response;
+	encodeResponse(message: AssistantMessage): unknown;
+	encodeStream(events: AssistantMessageEventStream, control: AuthGatewayStreamControl): ReadableStream<Uint8Array>;
+	prepare(model: Model<Api>, signal: AbortSignal): Promise<AttemptStart>;
+}
+
+interface FailoverRequest {
+	readonly failover: CandidateFailoverOptions;
+	readonly storage: AuthStorage;
+	readonly req: Request;
+	readonly controller: AbortController;
+	readonly model: Model<Api>;
+	readonly client: ClientUsageIdentity;
+	readonly peer: string;
+	readonly requestId: string;
+	readonly startedAt: number;
+}
+
+interface FailedOutcome {
+	readonly kind: "failed";
+	readonly model: Model<Api>;
+	readonly failure: GatewayErrorClassification;
+	/** The upstream error message, replayed as-is once headers are sent. */
+	readonly error?: AssistantMessage;
+}
+
+type FailoverOutcome =
+	| { readonly kind: "answered"; readonly model: Model<Api>; readonly message: AssistantMessage }
+	| { readonly kind: "committed"; readonly relay: AssistantMessageEventStream }
+	| FailedOutcome
+	| { readonly kind: "aborted" };
+
+/** What an attempt that produced no answer means for the client, and for failover. */
+interface AttemptVerdict {
+	readonly outcome: FailedOutcome | { readonly kind: "aborted" };
+	/** Set only when the failure moves on to the next candidate. */
+	readonly upstream?: UpstreamFailure;
+}
+
+/**
+ * Abort causes are decided first: a request abort stops, a budget timeout is
+ * always `server_error`, a foreign abort answers as today. Only the rest is classified.
+ */
+function judgeAttempt(
+	model: Model<Api>,
+	requestSignal: AbortSignal,
+	timedOut: boolean,
+	message: AssistantMessage | undefined,
+	thrown: unknown,
+): AttemptVerdict {
+	if (requestSignal.aborted) return { outcome: { kind: "aborted" } };
+	if (timedOut) {
+		return {
+			outcome: { kind: "failed", model, failure: { status: 502, type: "upstream_error", message: BUDGET_MESSAGE } },
+			upstream: { kind: "server_error", message: BUDGET_MESSAGE },
+		};
+	}
+	if (message === undefined) {
+		const failure = classifyGatewayError(thrown);
+		const outcome: FailedOutcome = { kind: "failed", model, failure };
+		if (failure.status === 499) return { outcome };
+		return { outcome, upstream: classifyUpstreamFailure(model, thrown, undefined, undefined) };
+	}
+	const errorMessage =
+		message.errorMessage ?? (message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
+	if (message.stopReason === "aborted") {
+		return {
+			outcome: { kind: "failed", model, failure: { status: 499, type: "request_aborted", message: errorMessage } },
+		};
+	}
+	const text = message.errorClassificationMessage ?? message.errorMessage;
+	const classified = classifyGatewayError(text ?? errorMessage);
+	return {
+		outcome: { kind: "failed", model, failure: { ...classified, message: errorMessage }, error: message },
+		upstream: classifyUpstreamFailure(model, undefined, message.errorStatus, text),
+	};
+}
+
+/**
+ * Tries candidates in turn until one produces output. A streaming request gets
+ * its 200 once the first `streamSimple` returns; the rest of the loop runs
+ * behind that open body, so a later failure is written as an SSE error.
+ */
+function serveWithFailover(request: FailoverRequest, route: FailoverRoute): Promise<Response> {
+	const { controller, requestId, startedAt } = request;
+	const response = Promise.withResolvers<Response>();
+	let body: PromiseWithResolvers<ReadableStream<Uint8Array>> | undefined;
+	const onCancel = (reason?: unknown): void => {
+		if (!controller.signal.aborted) {
+			controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
+		}
+	};
+	const control: AuthGatewayStreamControl = { signal: controller.signal, onCancel };
+	// Headers can go out before the answering backend is known, so they name only the requested model.
+	const streamHeaders = (model: Model<Api>): Record<string, string> => {
+		const out = gatewayResponseHeaders(model, { requestId });
+		out["x-litellm-model-id"] = route.requestedModelId;
+		delete out["x-litellm-model-api-base"];
+		return out;
+	};
+	const openBody = (model: Model<Api>): PromiseWithResolvers<ReadableStream<Uint8Array>> => {
+		if (body) return body;
+		const opened = Promise.withResolvers<ReadableStream<Uint8Array>>();
+		body = opened;
+		response.resolve(
+			new Response(sseHoldBody(opened.promise, onCancel), {
+				status: 200,
+				headers: {
+					...streamHeaders(model),
+					"Content-Type": "text/event-stream; charset=utf-8",
+					"Cache-Control": "no-cache",
+					Connection: "keep-alive",
+					"X-Accel-Buffering": "no",
+				},
+			}),
+		);
+		return opened;
+	};
+
+	void runFailoverLoop(request, route, openBody).then(
+		outcome => {
+			switch (outcome.kind) {
+				case "answered":
+					response.resolve(
+						json(
+							200,
+							route.encodeResponse(outcome.message),
+							gatewayResponseHeaders(outcome.model, {
+								requestId,
+								costUsd: outcome.message.usage.cost.total,
+								startedAt,
+							}),
+						),
+					);
+					return;
+				case "committed":
+					body?.resolve(route.encodeStream(outcome.relay, control));
+					return;
+				case "failed": {
+					if (!body) {
+						response.resolve(
+							route.formatError(outcome.failure.status, outcome.failure.type, outcome.failure.message),
+						);
+						return;
+					}
+					const relay = new AssistantMessageEventStream();
+					if (outcome.error) {
+						relay.push({
+							type: "error",
+							reason: outcome.error.stopReason === "aborted" ? "aborted" : "error",
+							error: outcome.error,
+						});
+					} else {
+						endWithFailure(relay, outcome.model, outcome.failure);
+					}
+					body.resolve(route.encodeStream(relay, control));
+					return;
+				}
+				case "aborted":
+					if (body) body.resolve(new ReadableStream({ start: stream => stream.close() }));
+					else response.resolve(route.formatError(499, "request_aborted", "client closed request"));
+					return;
+			}
+		},
+		error => {
+			if (body) body.reject(error);
+			else response.reject(error);
+		},
+	);
+	return response.promise;
+}
+
+async function runFailoverLoop(
+	request: FailoverRequest,
+	route: FailoverRoute,
+	openBody: (model: Model<Api>) => void,
+): Promise<FailoverOutcome> {
+	const { failover, req, controller, peer, requestId, startedAt } = request;
+	const deadlineAt =
+		Date.now() + (failover.deadlineMs ?? DEFAULT_FAILOVER_DEADLINE_MS) - (performance.now() - startedAt);
+	let expired = false;
+	// Only a credential setup is cut at the deadline; a started stream never is.
+	let settingUp: AbortController | undefined;
+	// Aborted when the request is aborted, reaches its deadline, or ends; a pending `next` stops being awaited then.
+	const lookupController = new AbortController();
+	const stopLookup = Promise.withResolvers<undefined>();
+	lookupController.signal.addEventListener("abort", () => stopLookup.resolve(undefined), { once: true });
+	const endLookup = (): void => lookupController.abort(new Error("Candidate lookup no longer needed"));
+	controller.signal.addEventListener("abort", endLookup, { once: true });
+	const deadlineTimer = setTimeout(
+		() => {
+			expired = true;
+			settingUp?.abort(new Error(DEADLINE_FAILURE.message));
+			endLookup();
+		},
+		Math.max(0, deadlineAt - Date.now()),
+	);
+	const tried = new Set<string>();
+	const failoverContext = (): FailoverContext => ({ req, tried: new Set(tried), signal: lookupController.signal });
+	// A client that left while a lookup was pending gets the abort, not the earlier candidate's failure.
+	const settleFailure = (outcome: FailedOutcome): FailoverOutcome =>
+		controller.signal.aborted ? { kind: "aborted" } : outcome;
+	const logAttempt = (
+		attempt: number,
+		model: Model<Api>,
+		failure: UpstreamFailure | undefined,
+		status: number | undefined,
+		outcome: "retrying" | "skipped" | "exhausted" | "deadline" | "budget",
+		next: Model<Api> | undefined,
+	): void => {
+		logger.warn("auth-gateway candidate failover", {
+			requestId,
+			format: route.label,
+			model: route.requestedModelId,
+			resolvedProvider: model.provider,
+			resolvedModel: model.id,
+			peer,
+			attempt,
+			failure: failure?.kind,
+			status: failure?.status ?? status,
+			retryAfterMs: failure?.retryAfterMs,
+			elapsedMs: Math.round(performance.now() - startedAt),
+			outcome,
+			next: next && `${next.provider}/${next.id}`,
+		});
+	};
+	// Reports a failed attempt; returns who goes next, or `undefined` to answer with this failure.
+	const failOver = async (
+		attempt: number,
+		model: Model<Api>,
+		failure: UpstreamFailure,
+		timedOut: boolean,
+		lookup: () => Promise<Model<Api> | undefined>,
+	): Promise<Model<Api> | undefined> => {
+		failover.onFailure(model, failure, failoverContext());
+		const next = expired ? undefined : await lookup();
+		const outcome = expired ? "deadline" : timedOut ? "budget" : next ? "retrying" : "exhausted";
+		logAttempt(attempt, model, failure, undefined, outcome, next);
+		return expired ? undefined : next;
+	};
+	// A rejected, stuck, or repeated lookup means no follower: the current candidate's answer or failure stands.
+	const lookupNext = async (): Promise<Model<Api> | undefined> => {
+		let next: Model<Api> | undefined;
+		try {
+			next = await Promise.race([failover.next(route.requestedModelId, failoverContext()), stopLookup.promise]);
+		} catch (error) {
+			logger.warn("auth-gateway candidate lookup failed", {
+				requestId,
+				format: route.label,
+				model: route.requestedModelId,
+				peer,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+		return next && !tried.has(candidateKey(next)) ? next : undefined;
+	};
+
+	let model = request.model;
+	// What the client gets if no later candidate answers.
+	let pending: FailedOutcome | undefined;
+	try {
+		for (let attempt = 1; ; attempt++) {
+			if (controller.signal.aborted) return { kind: "aborted" };
+			if (expired) return pending ?? { kind: "failed", model, failure: DEADLINE_FAILURE };
+			tried.add(candidateKey(model));
+			const attemptController = new AbortController();
+			const forwardAbort = (): void => attemptController.abort(controller.signal.reason);
+			controller.signal.addEventListener("abort", forwardAbort, { once: true });
+			const unlink = (): void => controller.signal.removeEventListener("abort", forwardAbort);
+
+			let start: AttemptStart;
+			const setupCut = Promise.withResolvers<never>();
+			const cutSetup = (): void => setupCut.reject(attemptController.signal.reason);
+			attemptController.signal.addEventListener("abort", cutSetup, { once: true });
+			settingUp = attemptController;
+			try {
+				start = await Promise.race([route.prepare(model, attemptController.signal), setupCut.promise]);
+			} catch (error) {
+				unlink();
+				if (controller.signal.aborted) return { kind: "aborted" };
+				const failure = expired ? DEADLINE_FAILURE : classifyGatewayError(error);
+				const failed: FailedOutcome = { kind: "failed", model, failure };
+				const upstream: UpstreamFailure = { kind: "setup_error", status: failure.status, message: failure.message };
+				const next = await failOver(attempt, model, upstream, false, lookupNext);
+				if (!next) return settleFailure(failed);
+				pending = failed;
+				model = next;
+				continue;
+			} finally {
+				settingUp = undefined;
+				attemptController.signal.removeEventListener("abort", cutSetup);
+			}
+
+			if (!start.ok) {
+				unlink();
+				const failed: FailedOutcome = { kind: "failed", model, failure: start.failure };
+				if (start.reason === "incompatible") {
+					// The first candidate fails as today; a follower that cannot serve this route is passed over.
+					if (attempt === 1) return failed;
+					const next = await lookupNext();
+					logAttempt(attempt, model, undefined, start.failure.status, "skipped", next);
+					if (!next) return settleFailure(pending ?? failed);
+					model = next;
+					continue;
+				}
+				const upstream: UpstreamFailure = {
+					kind: start.reason === "no_credential" ? "credential_exhausted" : "setup_error",
+					status: start.failure.status,
+					message: start.failure.message,
+				};
+				const next = await failOver(attempt, model, upstream, false, lookupNext);
+				if (!next) return settleFailure(failed);
+				pending = failed;
+				model = next;
+				continue;
+			}
+
+			const { streamOpts, lease } = start;
+			const follower = await lookupNext();
+			if (controller.signal.aborted || expired) {
+				lease.release();
+				unlink();
+				if (controller.signal.aborted) return { kind: "aborted" };
+				logAttempt(attempt, model, undefined, DEADLINE_FAILURE.status, "deadline", undefined);
+				return pending ?? { kind: "failed", model, failure: DEADLINE_FAILURE };
+			}
+			// Capped only when a follower can take over; a last candidate keeps today's retry hints.
+			if (follower) {
+				const requested = streamOpts.maxRetryDelayMs;
+				// Zero or less disables the provider cap, so only a positive client value may lower ours.
+				streamOpts.maxRetryDelayMs =
+					requested !== undefined && requested > 0
+						? Math.min(requested, FAILOVER_MAX_RETRY_DELAY_MS)
+						: FAILOVER_MAX_RETRY_DELAY_MS;
+			}
+			const budget = armBudget(
+				attemptController,
+				follower ? Date.now() + Math.max(0, (deadlineAt - Date.now()) / 2) : undefined,
+			);
+			const answering = model;
+			const knownFollower = async (): Promise<Model<Api> | undefined> => follower;
+			logger.info("auth-gateway request", {
+				requestId,
+				format: route.label,
+				model: route.requestedModelId,
+				resolvedProvider: answering.provider,
+				resolvedModel: answering.id,
+				stream: route.stream,
+				peer,
+			});
+
+			// A synchronous `streamSimple` throw is a setup failure on either path, never classified as upstream.
+			const setupThrew = async (error: unknown): Promise<FailoverOutcome | Model<Api>> => {
+				budget.settle();
+				lease.release();
+				unlink();
+				const failure = classifyGatewayError(error);
+				const upstream: UpstreamFailure = { kind: "setup_error", status: failure.status, message: failure.message };
+				const failed: FailedOutcome = { kind: "failed", model: answering, failure };
+				const next = await failOver(attempt, answering, upstream, false, knownFollower);
+				if (!next) return settleFailure(failed);
+				pending = failed;
+				return next;
+			};
+
+			let verdict: AttemptVerdict;
+			if (!route.stream) {
+				let attemptResult: Promise<AssistantMessage>;
+				try {
+					attemptResult = completeAttempt(answering, route.context, streamOpts, budget);
+				} catch (error) {
+					const next = await setupThrew(error);
+					if (!("api" in next)) return next;
+					model = next;
+					continue;
+				}
+				let message: AssistantMessage | undefined;
+				let thrown: unknown;
+				try {
+					message = await attemptResult;
+				} catch (error) {
+					thrown = error;
+				} finally {
+					lease.release();
+					unlink();
+				}
+				if (message) {
+					recordGatewayUsage(
+						request.storage,
+						answering,
+						request.client,
+						message.usage,
+						message.timestamp || undefined,
+					);
+					if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+						return { kind: "answered", model: answering, message };
+					}
+				}
+				verdict = judgeAttempt(answering, controller.signal, budget.timedOut(), message, thrown);
+			} else {
+				let events: AssistantMessageEventStream;
+				try {
+					events = streamSimple(answering, route.context, streamOpts);
+				} catch (error) {
+					const next = await setupThrew(error);
+					if (!("api" in next)) return next;
+					model = next;
+					continue;
+				}
+				openBody(answering);
+				void events
+					.result()
+					.then(message =>
+						recordGatewayUsage(
+							request.storage,
+							answering,
+							request.client,
+							message.usage,
+							message.timestamp || undefined,
+						),
+					)
+					.catch(() => {})
+					.finally(() => {
+						lease.release();
+						unlink();
+					});
+				let held: HeldAttempt | undefined;
+				let thrown: unknown;
+				try {
+					held = await holdUntilCommit(events, budget);
+				} catch (error) {
+					thrown = error;
+				}
+				if (held?.kind === "committed") return { kind: "committed", relay: held.relay };
+				// An attempt that stopped holding without committing must not keep streaming beside the next one.
+				attemptController.abort(new Error("Gateway attempt abandoned before commit"));
+				verdict = judgeAttempt(answering, controller.signal, budget.timedOut(), held?.error, thrown);
+			}
+
+			if (verdict.outcome.kind === "aborted") return verdict.outcome;
+			if (!verdict.upstream) {
+				// A terminal stop still gets its log line; an abort reported by the upstream does not.
+				if (verdict.outcome.failure.status !== 499) {
+					logAttempt(attempt, answering, undefined, verdict.outcome.failure.status, "exhausted", undefined);
+				}
+				return verdict.outcome;
+			}
+			const next = await failOver(attempt, answering, verdict.upstream, budget.timedOut(), knownFollower);
+			if (!next) return settleFailure(verdict.outcome);
+			pending = verdict.outcome;
+			model = next;
+		}
+	} finally {
+		clearTimeout(deadlineTimer);
+		controller.signal.removeEventListener("abort", endLookup);
+		endLookup();
+	}
+}
+
 // (handlePassthrough removed — see note above.)
 
 async function handleFormatEndpoint(
@@ -517,6 +1013,45 @@ async function handleFormatEndpoint(
 	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
 	const sessionId = callerSessionId(caller, clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson));
 	parsed.options.promptCacheKey = sessionId;
+	if (bootOpts.candidateFailover) {
+		return serveWithFailover(
+			{
+				failover: bootOpts.candidateFailover,
+				storage: bootOpts.storage,
+				req,
+				controller,
+				model,
+				client,
+				peer,
+				requestId,
+				startedAt,
+			},
+			{
+				label: route.label,
+				requestedModelId: parsed.modelId,
+				context: parsed.context,
+				stream: parsed.stream,
+				formatError: (status, type, message) => route.module.formatError(status, type, message),
+				encodeResponse: message => route.module.encodeResponse(message, parsed.modelId),
+				encodeStream: (events, control) =>
+					route.module.encodeStream(events, parsed.modelId, parsed.options, control),
+				prepare: (candidate, signal) =>
+					prepareFormatAttempt(
+						route,
+						bootOpts,
+						parsed,
+						candidate,
+						sessionId,
+						signal,
+						peer,
+						sessionStates,
+						caller,
+						clientKey,
+						toolsJson,
+					),
+			},
+		);
+	}
 
 	let start: AttemptStart;
 	try {
@@ -703,6 +1238,44 @@ async function handlePiNative(
 	parsed.options.sessionId = sessionId;
 	const clientCacheKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
 	if (clientCacheKey !== undefined) parsed.options.promptCacheKey = callerSessionId(caller, clientCacheKey);
+	if (bootOpts.candidateFailover) {
+		return serveWithFailover(
+			{
+				failover: bootOpts.candidateFailover,
+				storage: bootOpts.storage,
+				req,
+				controller,
+				model,
+				client,
+				peer,
+				requestId,
+				startedAt,
+			},
+			{
+				label: "pi-native",
+				requestedModelId: parsed.modelId,
+				context: parsed.context,
+				stream: parsed.stream,
+				formatError: piNative.formatError,
+				encodeResponse: message => ({ message }),
+				encodeStream: (events, control) => piNative.encodeStream(events, parsed.modelId, parsed.options, control),
+				prepare: (candidate, signal) =>
+					preparePiNativeAttempt(
+						bootOpts,
+						req,
+						parsed,
+						candidate,
+						sessionId,
+						signal,
+						peer,
+						sessionStates,
+						caller,
+						clientKey,
+						toolsJson,
+					),
+			},
+		);
+	}
 
 	let start: AttemptStart;
 	try {
