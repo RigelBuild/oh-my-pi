@@ -73,11 +73,23 @@ describe("mintTarget", () => {
 		expect(await mintTarget(dir, head)).toBeNull();
 	});
 
-	test("does nothing when the tag already exists", async () => {
+	test("does nothing when the tag already marks the introducing commit", async () => {
 		const dir = await repo();
+		const first = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag -a -m r v18.9.2-rigel.1 ${first}`.cwd(dir).quiet();
 		const head = await commit(dir, "18.9.2-rigel.1");
-		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
 		expect(await mintTarget(dir, head)).toBeNull();
+	});
+
+	test("fails when a second PR reintroduces an already-tagged version", async () => {
+		const dir = await repo();
+		const first = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1 ${first}`.cwd(dir).quiet();
+		await commit(dir);
+		const head = await commit(dir, "18.9.2-rigel.1");
+		await expect(mintTarget(dir, head)).rejects.toThrow(
+			`v18.9.2-rigel.1 already exists at ${first}, but ${head} introduced 18.9.2-rigel.1`,
+		);
 	});
 
 	test("rejects a version that skips N", async () => {

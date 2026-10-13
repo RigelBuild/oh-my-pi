@@ -61,7 +61,6 @@ export async function mintTarget(cwd: string, sha: string): Promise<{ tag: strin
 	const version = await versionAt(cwd, sha);
 	if (version === null) return null;
 	const tag = `v${version}`;
-	if ((await $`git show-ref --verify --quiet ${`refs/tags/${tag}`}`.cwd(cwd).nothrow()).exitCode === 0) return null;
 	// Tag the commit that introduced the version, so a later push doesn't move the release.
 	let target = sha;
 	for (;;) {
@@ -70,6 +69,12 @@ export async function mintTarget(cwd: string, sha: string): Promise<{ tag: strin
 		const parentSha = parent.text().trim();
 		if ((await versionAt(cwd, parentSha)) !== version) break;
 		target = parentSha;
+	}
+	const existing = await $`git rev-parse --verify --quiet ${`refs/tags/${tag}^{commit}`}`.cwd(cwd).quiet().nothrow();
+	if (existing.exitCode === 0) {
+		const actual = existing.text().trim();
+		if (actual !== target) throw new Error(`${tag} already exists at ${actual}, but ${target} introduced ${version}`);
+		return null;
 	}
 	await validateNext(cwd, version);
 	return { tag, sha: target };
