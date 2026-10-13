@@ -1113,7 +1113,8 @@ jobs:
    # clients never read npm.
    release_build:
       name: Publish to build.stencil.so
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+      # build.stencil.so trusts only upstream's OIDC subject; the fork skips it, and so release_brew.
+      if: ${{ github.repository == 'can1357/oh-my-pi' && needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
@@ -1143,7 +1144,8 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
-         needs.release_build.result == 'success' &&
+         (needs.release_build.result == 'success' ||
+          (github.repository != 'can1357/oh-my-pi' && needs.release_build.result == 'skipped')) &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}
       # release_native_leaves must finish first: the core package lists the
