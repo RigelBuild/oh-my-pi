@@ -4,6 +4,8 @@ on:
    # `main` is the resettable upstream mirror; only the gated `rigel-release` builds and releases.
    push:
       branches: [rigel-release]
+      # release-tag.yaml mints these with an App token, so the tag push starts this run.
+      tags: ["v*.*.*-rigel.*"]
       paths:
          - "packages/**"
          - "crates/**"
@@ -71,8 +73,8 @@ permissions:
    contents: read
 
 jobs:
-   # A release is a `v*` tag on a `rigel-release` commit: the branch-push run (or a
-   # dispatch from the tag) is authoritative and builds plus publishes. `release_metadata`
+   # A release is a `v*` tag on a `rigel-release` commit. The tag-push run of an App-minted
+   # `vX.Y.Z-rigel.N` tag (or a dispatch from a tag) builds and publishes. `release_metadata`
    # resolves the tag once so downstream jobs switch on `is-release`.
    release_metadata:
       name: Resolve release metadata
@@ -105,7 +107,8 @@ jobs:
                   ;;
                 refs/heads/rigel-release)
                   if [ "${{ github.event_name }}" != "pull_request" ]; then
-                    release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
+                    # A `-rigel.` tag starts its own tag-push run; releasing here too would publish twice.
+                    release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | grep -v -- '-rigel\.' | head -n1 || true)
                   fi
                   ;;
               esac
@@ -569,7 +572,7 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
+              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/release-tag.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
