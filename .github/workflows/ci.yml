@@ -223,7 +223,7 @@ jobs:
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
          - name: Save Rust Bazel cache
-           if: always() && github.event_name != 'pull_request' && steps.cache.outputs.save-needed == 'true'
+           if: success() && github.ref == 'refs/heads/rigel-release' && steps.cache.outputs.save-needed == 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: |
@@ -297,6 +297,7 @@ jobs:
            with:
               scope: natives-x64
          - name: Build linux-x64 native addons
+           id: build-x64
            if: github.event_name != 'pull_request' || steps.natives-cache.outputs.cache-hit != 'true'
            run: |
               set -eo pipefail
@@ -440,7 +441,7 @@ jobs:
               if-no-files-found: error
               retention-days: 1
          - name: Save native addon Bazel cache
-           if: always() && github.event_name != 'pull_request' && steps.cache.outcome != 'skipped' && steps.cache.outputs.save-needed == 'true'
+           if: always() && steps.build-x64.outcome == 'success' && github.ref == 'refs/heads/rigel-release' && steps.cache.outputs.save-needed == 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: |
@@ -451,8 +452,7 @@ jobs:
    # The remaining targets (darwin, arm64, musl and win32 cross builds). Only
    # release jobs consume them, so they build beside the TS fan-out instead of
    # ahead of it: serially after the pair they held every test job back ~10
-   # min on native-changing rigel-release pushes. Non-PR only, like rust_validate;
-   # the build also keeps the remote cache warm for release runs.
+   # min on native-changing rigel-release pushes. Non-PR only, like rust_validate.
    native_addons_cross:
       name: Build native addons (bazel, cross targets)
       if: github.event_name != 'pull_request'
@@ -465,6 +465,7 @@ jobs:
            with:
               scope: natives-cross
          - name: Build cross-target native addons
+           id: build-cross
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -522,7 +523,7 @@ jobs:
               if-no-files-found: error
               retention-days: 1
          - name: Save cross-target Bazel cache
-           if: always() && github.event_name != 'pull_request' && steps.cache.outputs.save-needed == 'true'
+           if: always() && steps.build-cross.outcome == 'success' && github.ref == 'refs/heads/rigel-release' && steps.cache.outputs.save-needed == 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: |
