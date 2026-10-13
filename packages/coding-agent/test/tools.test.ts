@@ -1793,30 +1793,26 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("bravo.txt");
 			expect(output).not.toContain("alpha.txt");
 		});
-		it("re-reads an archive when contents change but stat identity collides", async () => {
-			const archivePath = path.join(testDir, "stat-collision.zip");
+		it("does not cache an archive whose ctime is too recent to trust", async () => {
+			const archivePath = path.join(testDir, "racy.zip");
 			const initialArchive = createZipArchive([{ path: "alpha.txt", content: "first\n" }]);
-			const rewrittenArchive = createZipArchive([{ path: "bravo.txt", content: "other\n" }]);
-			expect(rewrittenArchive.byteLength).toBe(initialArchive.byteLength);
 			fs.writeFileSync(archivePath, initialArchive);
-			const identicalStat = await Bun.file(archivePath).stat();
-			const realBunFile = Bun.file.bind(Bun);
-			const statSpy = spyOn(Bun, "file").mockImplementation((_source, options) => {
-				const file = realBunFile(archivePath, options);
-				file.stat = async () => identicalStat;
-				return file;
-			});
+			const first = await openArchiveCached(archivePath);
+			expect(first.listDirectory().map(entry => entry.name)).toEqual(["alpha.txt"]);
+			// Same bytes, untouched file: a cached reader would come back by identity.
+			expect(await openArchiveCached(archivePath)).not.toBe(first);
+		});
 
+		it("reuses the cached reader once the archive's ctime is old enough", async () => {
+			const archivePath = path.join(testDir, "settled.zip");
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			const { ctimeMs } = fs.statSync(archivePath);
+			const clock = spyOn(Date, "now").mockReturnValue(ctimeMs + 60_000);
 			try {
-				const firstListing = await openArchiveCached(archivePath);
-				expect(firstListing.listDirectory().map(entry => entry.name)).toContain("alpha.txt");
-
-				fs.writeFileSync(archivePath, rewrittenArchive);
-				const secondListing = await openArchiveCached(archivePath);
-				expect(secondListing.listDirectory().map(entry => entry.name)).toContain("bravo.txt");
-				expect(secondListing.listDirectory().map(entry => entry.name)).not.toContain("alpha.txt");
+				const first = await openArchiveCached(archivePath);
+				expect(await openArchiveCached(archivePath)).toBe(first);
 			} finally {
-				statSpy.mockRestore();
+				clock.mockRestore();
 			}
 		});
 
