@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fixed `RpcClient.stop()` occasionally waiting forever because the agent process was never signaled.
+- Fixed `read` re-listing an archive rewritten in place with the same size and mtime within the same instant.
 
 ## [18.9.2] - 2026-10-11
 

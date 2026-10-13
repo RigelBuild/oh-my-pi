@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,6 +19,7 @@ import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
+import { openArchiveCached } from "../src/tools/read-archive";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 
 import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
@@ -1791,6 +1792,32 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
 			expect(output).toContain("bravo.txt");
 			expect(output).not.toContain("alpha.txt");
+		});
+		it("re-reads an archive when contents change but stat identity collides", async () => {
+			const archivePath = path.join(testDir, "stat-collision.zip");
+			const initialArchive = createZipArchive([{ path: "alpha.txt", content: "first\n" }]);
+			const rewrittenArchive = createZipArchive([{ path: "bravo.txt", content: "other\n" }]);
+			expect(rewrittenArchive.byteLength).toBe(initialArchive.byteLength);
+			fs.writeFileSync(archivePath, initialArchive);
+			const identicalStat = await Bun.file(archivePath).stat();
+			const realBunFile = Bun.file.bind(Bun);
+			const statSpy = spyOn(Bun, "file").mockImplementation((_source, options) => {
+				const file = realBunFile(archivePath, options);
+				file.stat = async () => identicalStat;
+				return file;
+			});
+
+			try {
+				const firstListing = await openArchiveCached(archivePath);
+				expect(firstListing.listDirectory().map(entry => entry.name)).toContain("alpha.txt");
+
+				fs.writeFileSync(archivePath, rewrittenArchive);
+				const secondListing = await openArchiveCached(archivePath);
+				expect(secondListing.listDirectory().map(entry => entry.name)).toContain("bravo.txt");
+				expect(secondListing.listDirectory().map(entry => entry.name)).not.toContain("alpha.txt");
+			} finally {
+				statSpy.mockRestore();
+			}
 		});
 
 		it("should list zip archives without inflating member payloads", async () => {

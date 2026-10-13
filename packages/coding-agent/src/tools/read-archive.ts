@@ -49,17 +49,18 @@ interface CachedArchiveReader {
 	reader: ArchiveReader;
 	ino: number;
 	mtimeMs: number;
-	/** Change time: moves on every write and permission change and cannot be set back, unlike mtime. */
+	/** Change time: moves on every write, but two writes inside one coarse clock tick share it. */
 	ctimeMs: number;
 	size: number;
+	fingerprint: string;
 	entryCount: number;
 }
 
 /**
  * Recently opened archives, so paging through members does not re-read and
- * re-index the archive per read. Bounded by count and by total indexed entries;
- * an entry is reused only while the file's identity (inode, mtime, ctime, size)
- * holds, so a rewrite or a permission change reopens the archive.
+ * re-index the archive per read. Bounded by count and by total indexed entries.
+ * An entry is reused only while the stat identity (inode, mtime, ctime, size)
+ * and a head/tail content fingerprint both hold.
  */
 const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
 	max: 4,
@@ -67,7 +68,18 @@ const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
 	sizeCalculation: cached => Math.max(1, cached.entryCount),
 });
 
-async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
+async function archiveFingerprint(absolutePath: string, size: number): Promise<string> {
+	const file = Bun.file(absolutePath);
+	const sampleSize = 64 * 1024;
+	if (size < sampleSize * 2) {
+		return Bun.hash(new Uint8Array(await file.slice(0, size).arrayBuffer())).toString(16);
+	}
+	const head = new Uint8Array(await file.slice(0, sampleSize).arrayBuffer());
+	const tail = new Uint8Array(await file.slice(size - sampleSize, size).arrayBuffer());
+	return Bun.hash(tail, Bun.hash(head)).toString(16);
+}
+
+export async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 	// A vanished or unreadable archive is reported by the opener, as it always has been.
 	const stat = await Bun.file(absolutePath)
 		.stat()
@@ -79,7 +91,8 @@ async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 		cached.ino === stat.ino &&
 		cached.mtimeMs === stat.mtimeMs &&
 		cached.ctimeMs === stat.ctimeMs &&
-		cached.size === stat.size
+		cached.size === stat.size &&
+		cached.fingerprint === (await archiveFingerprint(absolutePath, stat.size))
 	) {
 		return cached.reader;
 	}
@@ -96,6 +109,7 @@ async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 		mtimeMs: stat.mtimeMs,
 		ctimeMs: stat.ctimeMs,
 		size: stat.size,
+		fingerprint: await archiveFingerprint(absolutePath, stat.size),
 		entryCount,
 	});
 	return reader;
