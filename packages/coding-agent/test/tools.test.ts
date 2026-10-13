@@ -1795,12 +1795,17 @@ describe("Coding Agent Tools", () => {
 		});
 		it("does not cache an archive whose ctime is too recent to trust", async () => {
 			const archivePath = path.join(testDir, "racy.zip");
-			const initialArchive = createZipArchive([{ path: "alpha.txt", content: "first\n" }]);
-			fs.writeFileSync(archivePath, initialArchive);
-			const first = await openArchiveCached(archivePath);
-			expect(first.listDirectory().map(entry => entry.name)).toEqual(["alpha.txt"]);
-			// Same bytes, untouched file: a cached reader would come back by identity.
-			expect(await openArchiveCached(archivePath)).not.toBe(first);
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			const { ctimeMs } = fs.statSync(archivePath);
+			const clock = spyOn(Date, "now").mockReturnValue(ctimeMs + 1_000);
+			try {
+				const first = await openArchiveCached(archivePath);
+				expect(first.listDirectory().map(entry => entry.name)).toEqual(["alpha.txt"]);
+				// Same bytes, untouched file: a cached reader would come back by identity.
+				expect(await openArchiveCached(archivePath)).not.toBe(first);
+			} finally {
+				clock.mockRestore();
+			}
 		});
 
 		it("reuses the cached reader once the archive's ctime is old enough", async () => {

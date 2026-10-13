@@ -49,7 +49,7 @@ interface CachedArchiveReader {
 	reader: ArchiveReader;
 	ino: number;
 	mtimeMs: number;
-	/** Change time: moves on every write and cannot be set back, unlike mtime. */
+	/** Change time: a write stamps it and nothing can set it back, but only at timestamp precision. */
 	ctimeMs: number;
 	size: number;
 	entryCount: number;
@@ -68,9 +68,10 @@ const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
 });
 
 /**
- * File timestamps are coarse (a kernel clock tick, or whole seconds on some
- * filesystems), so a rewrite soon after a stat can keep the same ctime. Only an
- * archive whose ctime is older than this when stat'd can be trusted by identity.
+ * Timestamps are coarse, so a rewrite soon after a stat can keep the same ctime.
+ * Only an archive whose ctime is this much older than the local clock is cached;
+ * like git's racy-index rule, this assumes the filesystem stamps ctime from a clock
+ * within that margin of ours (true for local disks; a skewed network server is not).
  */
 const RACY_CTIME_MS = 2_000;
 
