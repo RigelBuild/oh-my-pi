@@ -24,12 +24,14 @@ export function validateExplicitVersion(version: string): string | null {
 	return /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(normalized) ? normalized : null;
 }
 
-export function releasePlan(version: string): {
+export interface ReleasePlan {
 	tracking: boolean;
 	tagAndPush: boolean;
 	writeRigelVersion: boolean;
 	requireMain: boolean;
-} {
+}
+
+export function releasePlan(version: string): ReleasePlan {
 	const tracking = parseTrackingVersion(version) !== null;
 	return {
 		tracking,
@@ -37,6 +39,25 @@ export function releasePlan(version: string): {
 		writeRigelVersion: tracking,
 		requireMain: !tracking,
 	};
+}
+
+export interface ReleaseOperations {
+	writeRigelVersion(contents: string): Promise<void>;
+	commit(message: string): Promise<void>;
+	tagAndPush(tag: string): Promise<void>;
+	watch(): Promise<boolean>;
+}
+
+export async function finishRelease(
+	version: string,
+	plan: ReleasePlan,
+	ops: ReleaseOperations,
+): Promise<boolean | null> {
+	if (plan.writeRigelVersion) await ops.writeRigelVersion(`${version}\n`);
+	await ops.commit(`chore: bump version to ${version}`);
+	if (!plan.tagAndPush) return null;
+	await ops.tagAndPush(`v${version}`);
+	return await ops.watch();
 }
 
 export function checkExpectedTrackingVersion(
@@ -444,8 +465,6 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		}
 	}
 
-	if (plan.writeRigelVersion) await Bun.write(".github/rigel-version", `${version}\n`);
-
 	// 2. Update package versions
 	console.log(`Updating package versions to ${version}…`);
 	const pkgJsonPaths = await Array.fromAsync(packageJsonGlob.scan("."));
@@ -553,46 +572,53 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 
 	// 7. Commit
 	console.log("Committing...");
-	await git(["add", "."]);
-	await git(["commit", "-m", `chore: bump version to ${version}`]);
+	const success = await finishRelease(version, plan, {
+		writeRigelVersion: async contents => {
+			await Bun.write(".github/rigel-version", contents);
+		},
+		commit: async message => {
+			await git(["add", "."]);
+			await git(["commit", "-m", message]);
+		},
+		tagAndPush: async tagRef => {
+			// 8. Tag, then push branch + tag atomically — pushing the tag by object id.
+			//
+			// This repo is in the global `[maintenance] repo = …` list, so a scheduled
+			// `git maintenance run` fetches origin with `fetch.pruneTags=true` (set
+			// globally) and deletes any local tag not yet on the remote — i.e. the
+			// brand-new release tag. The `-c fetch.pruneTags=false` on our git wrapper
+			// only governs our own git calls, not the concurrent maintenance process, so
+			// a local tag ref may vanish before or while the push resolves it.
+			//
+			// A bare push refspec (`refs/tags/v…` with no `:dst`) re-resolves the tag on
+			// disk during refspec matching (git's remote.c:match_explicit); if the prune
+			// lands in that window git dies with
+			// "refs/tags/v… cannot be resolved to branch", and if it lands before the
+			// push it dies with "src refspec … does not match any". We sidestep both by
+			// pushing the HEAD commit object id straight into the remote tag ref
+			// (`<sha>:refs/tags/v…`): the push has no dependency on a local tag, and the
+			// commit is reachable from main so maintenance cannot prune it. The local
+			// tag we still create is only for `git describe`; losing it is harmless. The
+			// default Git LFS pre-push hook uploads the branch's LFS objects as part of
+			// this same atomic push — no separate `git lfs push` is needed.
+			console.log("Tagging and pushing to remote...");
+			const sha = (await git(["rev-parse", "HEAD"]).text()).trim();
+			await git(["tag", "-f", tagRef]);
+			await git(["push", "--atomic", "origin", "refs/heads/main:refs/heads/main", `${sha}:refs/tags/${tagRef}`]);
+			console.log();
+		},
+		watch: async () => {
+			console.log("Watching CI...");
+			return await watchCI();
+		},
+	});
 	console.log();
 
-	if (!plan.tagAndPush) {
+	if (success === null) {
 		console.log(`Tracking release prepared in commit chore: bump version to ${version}.`);
 		console.log(`Open a PR to rigel-release; merging it mints v${version}.`);
 		return;
 	}
-
-	// 8. Tag, then push branch + tag atomically — pushing the tag by object id.
-	//
-	// This repo is in the global `[maintenance] repo = …` list, so a scheduled
-	// `git maintenance run` fetches origin with `fetch.pruneTags=true` (set
-	// globally) and deletes any local tag not yet on the remote — i.e. the
-	// brand-new release tag. The `-c fetch.pruneTags=false` on our git wrapper
-	// only governs our own git calls, not the concurrent maintenance process, so
-	// a local tag ref may vanish before or while the push resolves it.
-	//
-	// A bare push refspec (`refs/tags/v…` with no `:dst`) re-resolves the tag on
-	// disk during refspec matching (git's remote.c:match_explicit); if the prune
-	// lands in that window git dies with
-	// "refs/tags/v… cannot be resolved to branch", and if it lands before the
-	// push it dies with "src refspec … does not match any". We sidestep both by
-	// pushing the HEAD commit object id straight into the remote tag ref
-	// (`<sha>:refs/tags/v…`): the push has no dependency on a local tag, and the
-	// commit is reachable from main so maintenance cannot prune it. The local
-	// tag we still create is only for `git describe`; losing it is harmless. The
-	// default Git LFS pre-push hook uploads the branch's LFS objects as part of
-	// this same atomic push — no separate `git lfs push` is needed.
-	console.log("Tagging and pushing to remote...");
-	const tagRef = `v${version}`;
-	const sha = (await git(["rev-parse", "HEAD"]).text()).trim();
-	await git(["tag", "-f", tagRef]);
-	await git(["push", "--atomic", "origin", "refs/heads/main:refs/heads/main", `${sha}:refs/tags/${tagRef}`]);
-	console.log();
-
-	// 9. Watch CI
-	console.log("Watching CI...");
-	const success = await watchCI();
 
 	if (success) {
 		console.log(`=== Released v${version} ===`);

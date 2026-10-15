@@ -11,6 +11,7 @@ import {
 	checkExpectedTrackingVersion,
 	isTransientGhError,
 	latestReachableVersionTag,
+	finishRelease,
 	releasePlan,
 	resolveReleaseVersion,
 	runWithTransientRetry,
@@ -79,23 +80,49 @@ describe("tracking release version checks", () => {
 	});
 });
 
-describe("release plan", () => {
-	test("tracking releases only write rigel-version and stop after commit", () => {
-		expect(releasePlan("18.9.2-rigel.1")).toEqual({
-			tracking: true,
-			tagAndPush: false,
-			writeRigelVersion: true,
-			requireMain: false,
+describe("release completion effects", () => {
+	test("tracking completion writes the version file and commits without tagging or watching", async () => {
+		const effects: string[] = [];
+		const result = await finishRelease("18.9.2-rigel.1", releasePlan("18.9.2-rigel.1"), {
+			async writeRigelVersion(contents) {
+				effects.push(`write:${contents}`);
+			},
+			async commit(message) {
+				effects.push(`commit:${message}`);
+			},
+			async tagAndPush(tag) {
+				effects.push(`tagAndPush:${tag}`);
+			},
+			async watch() {
+				effects.push("watch");
+				return true;
+			},
 		});
+
+		expect(result).toBe(null);
+		expect(effects).toEqual(["write:18.9.2-rigel.1\n", "commit:chore: bump version to 18.9.2-rigel.1"]);
 	});
 
-	test("stable releases retain the main, tag, and push path", () => {
-		expect(releasePlan("18.9.2")).toEqual({
-			tracking: false,
-			tagAndPush: true,
-			writeRigelVersion: false,
-			requireMain: true,
+	test("stable completion commits, tags, pushes, and watches without writing rigel-version", async () => {
+		const effects: string[] = [];
+		const result = await finishRelease("18.9.2", releasePlan("18.9.2"), {
+			async writeRigelVersion(contents) {
+				effects.push(`write:${contents}`);
+			},
+			async commit(message) {
+				effects.push(`commit:${message}`);
+			},
+			async tagAndPush(tag) {
+				effects.push(`tagAndPush:${tag}`);
+			},
+			async watch() {
+				effects.push("watch");
+				return true;
+			},
 		});
+
+		expect(result).toBe(true);
+		expect(effects).toEqual(["commit:chore: bump version to 18.9.2", "tagAndPush:v18.9.2", "watch"]);
 	});
 });
 
