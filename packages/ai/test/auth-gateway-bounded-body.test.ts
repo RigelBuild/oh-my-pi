@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { heapStats } from "bun:jsc";
 import { readBoundedRequestBody, RequestBodyTooLargeError } from "../src/auth-gateway/bounded-body";
 
 const limit = 4;
@@ -51,6 +52,31 @@ describe("auth gateway bounded request bodies", () => {
 		);
 		await expect(readBoundedRequestBody(req, limit)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
 		expect(req.body?.locked).toBe(false);
+	});
+
+	it("does not keep one buffer per chunk for a body split into tiny chunks", async () => {
+		const chunks = 20_000;
+		let sent = 0;
+		let liveAtEnd = 0;
+		const req = request(
+			new ReadableStream<Uint8Array>({
+				pull(controller) {
+					if (sent === chunks) {
+						// Every chunk has been handed over; count what the reader still holds.
+						Bun.gc(true);
+						liveAtEnd = heapStats().objectTypeCounts.Uint8Array ?? 0;
+						controller.close();
+						return;
+					}
+					sent++;
+					controller.enqueue(new Uint8Array([sent & 0xff]));
+				},
+			}),
+		);
+		const bytes = await readBoundedRequestBody(req, chunks);
+		expect(bytes.byteLength).toBe(chunks);
+		expect(bytes[chunks - 1]).toBe(chunks & 0xff);
+		expect(liveAtEnd).toBeLessThan(chunks / 2);
 	});
 
 	it("rejects declared oversize without reading the body", async () => {
