@@ -10,7 +10,7 @@
         "sherpa-onnx-node": "1.13.2",
       },
       "devDependencies": {
-        "@actions/expressions": "^0.3.61",
+        "@actions/expressions": "catalog:",
         "@types/bun": "catalog:",
         "@typescript/native-preview": "catalog:",
         "lint-staged": "catalog:",
@@ -336,6 +336,7 @@
     "@ark/schema": "0.56.2",
   },
   "catalog": {
+    "@actions/expressions": "^0.3.61",
     "@babel/generator": "^7.29.7",
     "@babel/parser": "^7.29.7",
     "@babel/traverse": "^7.29.7",
