@@ -584,7 +584,7 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/release-tag.test.ts
+              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/release-tag.test.ts scripts/ci-release-gates.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
@@ -1113,7 +1113,8 @@ jobs:
    # clients never read npm.
    release_build:
       name: Publish to build.stencil.so
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+      # build.stencil.so trusts only upstream's OIDC subject; the fork skips it, and so release_brew.
+      if: ${{ github.repository == 'can1357/oh-my-pi' && needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
@@ -1143,7 +1144,9 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
-         needs.release_build.result == 'success' &&
+         (needs.release_build.result == 'success' ||
+          (github.repository != 'can1357/oh-my-pi' && needs.release_build.result == 'skipped' &&
+           needs.release_gate.result == 'success' && needs.release_github.result == 'success')) &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}
       # release_native_leaves must finish first: the core package lists the
@@ -1151,7 +1154,8 @@ jobs:
       # resolve them the moment the core version is live. release_build too:
       # binary updates install what build.stencil.so published (update-cli.ts),
       # so the build service must lead npm.
-      needs: [release_metadata, release_binary, release_smoke, release_build, release_native_leaves]
+      # The fork skips release_build, so it gates on release_gate/release_github directly.
+      needs: [release_metadata, release_gate, release_binary, release_smoke, release_github, release_build, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
       # short-lived publish token (trusted publishing + provenance). When a
