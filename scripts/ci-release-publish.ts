@@ -45,6 +45,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { generateNpmPackages, LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
 import { fixEmitExtensions } from "./fix-emit-extensions.ts";
+import { parseTrackingVersion } from "./release-tag";
 
 export interface PublishPackage {
 	dir: string;
@@ -141,12 +142,10 @@ function nativeLeafTagFromArgs(argv: readonly string[]): string | null {
 }
 
 const nativeLeafTag = nativeLeafTagFromArgs(process.argv.slice(2));
-/**
- * Choose npm's dist-tag from a package manifest version. Unknown prereleases
- * are rejected rather than accidentally publishing them on the stable channel.
- */
+/** Selects canary and rigel channels, rejecting unknown prereleases. */
 export function npmDistTag(version: string): string {
 	if (/^\d+\.\d+\.\d+-canary\./.test(version)) return "canary";
+	if (parseTrackingVersion(version)) return "rigel";
 	if (/^\d+\.\d+\.\d+-/.test(version)) {
 		throw new Error(`Unsupported prerelease version for npm publish: ${version}`);
 	}
