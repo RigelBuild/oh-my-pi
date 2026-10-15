@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { createAuthGatewayRouter, SHARED_TOKEN_CALLER } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -404,6 +404,30 @@ describe("auth-gateway image multipart limits", () => {
 			expect(response.status).toBe(400);
 			expect(harness.upstreamCalls).toBe(0);
 		} finally {
+			harness.close();
+		}
+	});
+
+	it("rejects a body with no closing delimiter before parsing its parts", async () => {
+		const harness = await createHarness();
+		const boundary = "x-boundary";
+		// formData() would throw too, but only after building every part; the route must not get there.
+		const body = Array.from(
+			{ length: 100 },
+			(_, index) => `--${boundary}\r\n${multipartField(`f${index}`, "x")}\r\n`,
+		).join("");
+		const formData = spyOn(Response.prototype, "formData");
+		try {
+			const response = await harness.route(
+				requestFor("/v1/images/edits", new TextEncoder().encode(body), {
+					headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+				}),
+			);
+			expect(response.status).toBe(400);
+			expect(formData).not.toHaveBeenCalled();
+			expect(harness.upstreamCalls).toBe(0);
+		} finally {
+			formData.mockRestore();
 			harness.close();
 		}
 	});
