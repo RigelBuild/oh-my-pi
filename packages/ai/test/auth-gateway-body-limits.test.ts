@@ -301,9 +301,17 @@ describe("auth-gateway image multipart limits", () => {
 		}
 	});
 
-	it("rejects more than 24 parts behind a quoted boundary with spaces", async () => {
+	// Each header must reject 25 parts written with the boundary formData() would pick.
+	it.each([
+		["a quoted boundary with spaces", " a", `multipart/form-data; boundary=" a"`],
+		[
+			"a decoy boundary inside another quoted parameter",
+			"real-boundary",
+			`multipart/form-data; marker="x; boundary=wrong-boundary"; boundary=real-boundary`,
+		],
+		["a repeated boundary parameter", "real-boundary", "multipart/form-data; boundary=decoy; boundary=real-boundary"],
+	])("rejects more than 24 parts behind %s", async (_label, boundary, contentType) => {
 		const harness = await createHarness();
-		const boundary = " a";
 		const parts = [
 			multipartField("model", imageModel.id),
 			multipartField("prompt", "edit"),
@@ -313,7 +321,7 @@ describe("auth-gateway image multipart limits", () => {
 		try {
 			const response = await harness.route(
 				requestFor("/v1/images/edits", multipartBody(boundary, parts), {
-					headers: { "Content-Type": `multipart/form-data; boundary="${boundary}"` },
+					headers: { "Content-Type": contentType },
 				}),
 			);
 			expect(response.status).toBe(400);

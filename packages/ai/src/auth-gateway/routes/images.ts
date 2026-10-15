@@ -46,6 +46,27 @@ function countMultipartParts(bytes: Uint8Array, boundary: Uint8Array): number {
 	return parts;
 }
 
+// RFC 2046 boundary: 1-70 bchars, not ending in space.
+const BOUNDARY_RE = /^[0-9A-Za-z'()+_,\-./:=? ]{0,69}[0-9A-Za-z'()+_,\-./:=?]$/;
+
+// The single boundary parameter, honouring quoted strings; null when absent, repeated, malformed, or invalid.
+function multipartBoundary(contentType: string): string | null {
+	const params = /;\s*([^=;\s]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;\s"]*))\s*/y;
+	let pos = contentType.indexOf(";");
+	if (pos < 0) return null;
+	let boundary: string | null = null;
+	while (pos < contentType.length) {
+		params.lastIndex = pos;
+		const m = params.exec(contentType);
+		if (!m) return null;
+		pos = params.lastIndex;
+		if (m[1]?.toLowerCase() !== "boundary") continue;
+		if (boundary !== null) return null;
+		boundary = m[2] !== undefined ? m[2].replace(/\\(.)/g, "$1") : (m[3] ?? "");
+	}
+	return boundary !== null && BOUNDARY_RE.test(boundary) ? boundary : null;
+}
+
 function isGatewayImageApi(api: string): boolean {
 	return (
 		api === "openai-images" ||
@@ -76,21 +97,21 @@ async function handleImages(
 		const maxBytes = multipart ? IMAGE_MULTIPART_MAX_BYTES : IMAGE_JSON_MAX_BYTES;
 		const bytes = await readBoundedRequestBody(req, maxBytes, controller.signal);
 		if (multipart) {
-			// A quoted boundary is used verbatim, spaces included, as formData() does.
-			const boundary = /;\s*boundary\s*=\s*(?:"([^"\\]*)"|([^;\s]+))/i.exec(contentType);
-			const boundaryValue = boundary?.[1] ?? boundary?.[2];
+			const boundaryValue = multipartBoundary(contentType);
 			if (!boundaryValue) {
-				return imagesServer.formatError(400, "invalid_request_error", "Multipart body needs a boundary");
+				return imagesServer.formatError(400, "invalid_request_error", "Multipart body needs one valid boundary");
 			}
-			const tooManyParts = (): Response =>
-				imagesServer.formatError(
+			const boundaryBytes = new TextEncoder().encode(`--${boundaryValue}`);
+			if (countMultipartParts(bytes, boundaryBytes) > IMAGE_MULTIPART_MAX_PARTS) {
+				return imagesServer.formatError(
 					400,
 					"invalid_request_error",
 					`Multipart body must not exceed ${IMAGE_MULTIPART_MAX_PARTS} parts`,
 				);
-			const boundaryBytes = new TextEncoder().encode(`--${boundaryValue}`);
-			if (countMultipartParts(bytes, boundaryBytes) > IMAGE_MULTIPART_MAX_PARTS) return tooManyParts();
-			const form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData();
+			}
+			// Parse with the boundary just counted, not the client's header, so both agree.
+			const canonical = `multipart/form-data; boundary="${boundaryValue}"`;
+			const form = await new Response(bytes, { headers: { "Content-Type": canonical } }).formData();
 			const imageFiles = [...form.getAll("image"), ...form.getAll("image[]")].filter(value => value instanceof File);
 			if (imageFiles.length > IMAGE_MULTIPART_MAX_FILES) {
 				return imagesServer.formatError(
