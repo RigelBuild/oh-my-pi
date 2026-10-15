@@ -172,6 +172,22 @@ describe("windows native addon staging", () => {
 		}
 	});
 
+	it("orders prerelease cache directories by SemVer", async () => {
+		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-prerelease-"));
+		try {
+			for (const version of ["1.0.0-rigel.0", "1.0.0-rigel.1", "1.0.0", "1.0.1-rigel.0"]) {
+				await fs.mkdir(path.join(nativesDir, version));
+				await fs.utimes(path.join(nativesDir, version), new Date(0), new Date(0));
+			}
+
+			expect(cleanupStaleNativeVersions({ nativesDir, currentVersion: "1.0.0-rigel.1" })).toEqual([
+				path.join(nativesDir, "1.0.0-rigel.0"),
+			]);
+		} finally {
+			await fs.rm(nativesDir, { recursive: true, force: true });
+		}
+	});
+
 	it("removes only older version directories after the current native version loads", async () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-cache-"));
 		const currentMajor = Number.parseInt(packageJson.version, 10);
