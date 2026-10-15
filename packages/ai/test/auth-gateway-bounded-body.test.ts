@@ -38,6 +38,21 @@ describe("auth gateway bounded request bodies", () => {
 		expect(req.body?.locked).toBe(false);
 	});
 
+	it("still reports overflow when cancelling the stream fails", async () => {
+		const req = request(
+			new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(new Uint8Array(limit + 1));
+				},
+				cancel() {
+					throw new Error("cancel failed");
+				},
+			}),
+		);
+		await expect(readBoundedRequestBody(req, limit)).rejects.toBeInstanceOf(RequestBodyTooLargeError);
+		expect(req.body?.locked).toBe(false);
+	});
+
 	it("rejects declared oversize without reading the body", async () => {
 		let read = false;
 		const req = request(
