@@ -17,7 +17,7 @@
 ### Added
 
 - Added opt-in auth-broker Prometheus usage and subscription metrics with scrape-scoped tokens.
-
+- Added the auth-gateway route option `candidateFailover`. When set, a chat request whose failure before first output is eligible for failover (for example a transport error, 5xx, or rate limit, but not a 400) is retried on the next candidate model when one is available. An attempt budget applies only when a follower exists. The request deadline stops new attempts and aborts a credential setup, but never cuts a started stream.
 
 - Compass credential-pool requests now carry the triggering agent token in an async scope. Writes without a token wait for a scoped poll; revoked-token writes park for a later poll and expose `hasPendingWrites()`.
 

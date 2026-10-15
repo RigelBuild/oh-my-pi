@@ -11,7 +11,7 @@ import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
-import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
+import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
@@ -19,6 +19,31 @@ import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AgentCaller, AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+
+export interface FailoverContext {
+	/** The inbound request, as an opaque token; the fork reads no identity from it. */
+	readonly req: Request;
+	/** `candidateKey` of every candidate tried or skipped so far, including the current one. */
+	readonly tried: ReadonlySet<string>;
+	/** Aborted once the gateway stops waiting for `next`: request abort, deadline, or request end. */
+	readonly signal?: AbortSignal;
+}
+
+export interface CandidateFailoverOptions {
+	/** The candidate after `ctx.tried`, without side effects; `undefined` if none. A rejection means none. */
+	next(modelId: string, ctx: FailoverContext): Promise<Model<Api> | undefined>;
+	/**
+	 * Called once per failed attempt that the classifier marks eligible for failover, and for setup
+	 * failures. Never for a skipped candidate, an abort, or a terminal stop such as a 400. Must not throw.
+	 */
+	onFailure(model: Model<Api>, failure: UpstreamFailure, ctx: FailoverContext): void;
+	/**
+	 * Request deadline in ms from request start; default 120_000. On expiry no
+	 * attempt starts and a running credential setup is aborted (502 or SSE error),
+	 * with or without a follower. A started stream is never cut by it.
+	 */
+	deadlineMs?: number;
+}
 
 /** What the gateway's routes need, whatever transport carries the requests. */
 export interface AuthGatewayRouteOptions {
@@ -46,6 +71,8 @@ export interface AuthGatewayRouteOptions {
 	excludeProviders?: ReadonlySet<string>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
+	/** Chat routes retry an eligible pre-output failure on the next candidate, if any; unset keeps one attempt. */
+	candidateFailover?: CandidateFailoverOptions;
 }
 
 /** The HTTP server's options: the routes' plus its listener and inbound auth. */

@@ -345,7 +345,7 @@ describe("auth-gateway failover hold primitives", () => {
 			clearCustomApis();
 		}
 	});
-	it("keeps the session ID and observes each thinking-loop redispatch", async () => {
+	it("keeps the session ID and re-arms the budget for each thinking-loop redispatch", async () => {
 		registerMockApi();
 		const waitSpy = spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		try {
@@ -356,21 +356,61 @@ describe("auth-gateway failover hold primitives", () => {
 				id: "gpt-5-6-sol",
 				responses: [{ content: [`Healthy lead sentence. ${cycle.repeat(6)}`] }, { content: ["answer"] }],
 			});
-			const observed: AssistantMessageEvent["type"][] = [];
+			const observed: string[] = [];
 			const budget: AttemptBudget = {
 				observe(event) {
 					observed.push(event.type);
 				},
 				settle() {},
+				rearm() {
+					observed.push("rearm");
+				},
 				timedOut: () => false,
 			};
 			const result = await completeAttempt(mock.model, { messages: [] }, { apiKey: "test-key" }, budget);
 			expect(result.content).toEqual([{ type: "text", text: "answer" }]);
 			expect(mock.calls).toHaveLength(2);
 			expect(mock.calls[0]?.options?.sessionId).toBe(mock.calls[1]?.options?.sessionId);
-			expect(observed.filter(type => type === "start")).toHaveLength(2);
-			expect(observed).toContain("error");
-			expect(observed).toContain("done");
+			// The looped output and its error lifted the budget, so the redispatch must restore it first.
+			const rearm = observed.indexOf("rearm");
+			expect(observed.filter(type => type === "rearm")).toHaveLength(1);
+			expect(observed.slice(0, rearm)).toContain("error");
+			expect(observed.slice(rearm + 1)).toEqual(expect.arrayContaining(["start", "done"]));
+		} finally {
+			waitSpy.mockRestore();
+			clearCustomApis();
+		}
+	});
+
+	it("expires the budget instead of redispatching once the retry wait crosses endsAt", async () => {
+		registerMockApi();
+		const start = Date.now();
+		setSystemTime(start);
+		// The retry backoff is where the window runs out.
+		const waitSpy = spyOn(scheduler, "wait").mockImplementation(async () => {
+			setSystemTime(start + 1_000);
+		});
+		try {
+			const cycle =
+				"% shipped. 100% delivered. 100% verified. 100% validated. 100% approved. 100% accepted. 100% merged. 100% deployed. 100% live. 100% operational. 100% successful. 100% excellent. 100% perfect. 100% final. 100% absolute. 100% total. 100% whole. 100% full. 100% entire. 100% complete. 100% done. 100% finished. 100";
+			const mock = createMockModel({
+				provider: "kiro",
+				id: "gpt-5-6-sol",
+				responses: [{ content: [`Healthy lead sentence. ${cycle.repeat(6)}`] }, { content: ["answer"] }],
+			});
+			const attempt = new AbortController();
+			const budget = armBudget(attempt, start + 500);
+			const result = completeAttempt(
+				mock.model,
+				{ messages: [] },
+				{ apiKey: "test-key", signal: attempt.signal },
+				budget,
+			);
+
+			await expect(result).rejects.toThrow("Gateway attempt budget expired");
+			expect(mock.calls).toHaveLength(1);
+			expect(budget.timedOut()).toBe(true);
+			expect(attempt.signal.aborted).toBe(true);
 		} finally {
 			waitSpy.mockRestore();
 			clearCustomApis();
