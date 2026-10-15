@@ -6,6 +6,10 @@
 
 - Added `AuthStorage.keys.hasUsable(provider, { modelId })`, a side-effect-free dry run of `getApiKey`. It is true when an eligible credential is not under a recorded block for that model; it reads existing block marks and does not probe usage or resolve key references. It never advances round-robin, records stickiness, refreshes OAuth, writes or prunes the store, or returns key material.
 
+### Fixed
+
+- The auth gateway now caps image, speech and video request bodies (image JSON 48 MiB, image multipart 36 MiB with at most 24 parts and 16 image files, speech and video JSON 25 MiB) and answers 413 before calling the provider ([RIG-4093](https://linear.app/rigelbuild/issue/RIG-4093)).
+
 ## [18.9.2-rigel.1] - 2026-10-15
 
 ### Breaking Changes

@@ -15,6 +15,36 @@ import {
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
 import type { CallerIdentity } from "../types";
+import { readBoundedRequestBody, RequestBodyTooLargeError } from "../bounded-body";
+
+const IMAGE_JSON_MAX_BYTES = 48 * 1024 * 1024;
+const IMAGE_MULTIPART_MAX_BYTES = 36 * 1024 * 1024;
+const IMAGE_MULTIPART_MAX_PARTS = 24;
+const IMAGE_MULTIPART_MAX_FILES = 16;
+
+// Count part-start delimiters before FormData can expand the bounded wire body.
+function countMultipartParts(bytes: Uint8Array, boundary: Uint8Array): number {
+	let parts = 0;
+	for (let i = 0; i <= bytes.byteLength - boundary.byteLength; i++) {
+		if (i > 0 && (bytes[i - 2] !== 13 || bytes[i - 1] !== 10)) continue;
+		let matches = true;
+		for (let j = 0; j < boundary.byteLength; j++) {
+			if (bytes[i + j] !== boundary[j]) {
+				matches = false;
+				break;
+			}
+		}
+		if (!matches) continue;
+		const end = i + boundary.byteLength;
+		if (bytes[end] === 13 && bytes[end + 1] === 10) {
+			parts++;
+			i = end + 1;
+		} else if (bytes[end] === 45 && bytes[end + 1] === 45) {
+			i = end + 1;
+		}
+	}
+	return parts;
+}
 
 function isGatewayImageApi(api: string): boolean {
 	return (
@@ -39,13 +69,41 @@ async function handleImages(
 	if (controller.signal.aborted) return aborted();
 
 	let body: unknown | FormData;
+	const contentType = req.headers.get("content-type") ?? "";
+	const multipart = kind === "edits" && contentType.toLowerCase().startsWith("multipart/form-data");
 	try {
-		body =
-			kind === "edits" && req.headers.get("content-type")?.includes("multipart/form-data")
-				? await req.formData()
-				: await req.json();
+		const maxBytes = multipart ? IMAGE_MULTIPART_MAX_BYTES : IMAGE_JSON_MAX_BYTES;
+		const bytes = await readBoundedRequestBody(req, maxBytes, controller.signal);
+		if (multipart) {
+			const boundary = /(?:^|;)\s*boundary\s*=\s*(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+			const boundaryBytes = boundary
+				? new TextEncoder().encode(`--${(boundary[1] ?? boundary[2] ?? "").trim()}`)
+				: null;
+			if (boundaryBytes && countMultipartParts(bytes, boundaryBytes) > IMAGE_MULTIPART_MAX_PARTS) {
+				return imagesServer.formatError(
+					400,
+					"invalid_request_error",
+					`Multipart body must not exceed ${IMAGE_MULTIPART_MAX_PARTS} parts`,
+				);
+			}
+			const form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData();
+			const imageFiles = [...form.getAll("image"), ...form.getAll("image[]")].filter(value => value instanceof File);
+			if (imageFiles.length > IMAGE_MULTIPART_MAX_FILES) {
+				return imagesServer.formatError(
+					400,
+					"invalid_request_error",
+					`Multipart body must not exceed ${IMAGE_MULTIPART_MAX_FILES} image files`,
+				);
+			}
+			body = form;
+		} else {
+			body = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+		}
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		if (error instanceof RequestBodyTooLargeError) {
+			return imagesServer.formatError(413, "payload_too_large", error.message);
+		}
 		return imagesServer.formatError(400, "invalid_request_error", `Invalid request body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();

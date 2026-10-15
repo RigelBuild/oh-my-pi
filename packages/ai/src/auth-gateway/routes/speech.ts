@@ -12,8 +12,11 @@ import {
 	resolveGatewayApiKey,
 	resolveGatewayModel,
 } from "../dispatch";
+import { readBoundedRequestBody, RequestBodyTooLargeError } from "../bounded-body";
 import { gatewayResponseHeaders, resolveClientIdentity } from "../http";
 import type { CallerIdentity } from "../types";
+
+const SPEECH_JSON_MAX_BYTES = 25 * 1024 * 1024;
 
 export async function handleSpeech(
 	bootOpts: AuthGatewayRouteOptions,
@@ -29,9 +32,13 @@ export async function handleSpeech(
 
 	let body: unknown;
 	try {
-		body = await req.json();
+		const bytes = await readBoundedRequestBody(req, SPEECH_JSON_MAX_BYTES, controller.signal);
+		body = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		if (error instanceof RequestBodyTooLargeError) {
+			return speechWire.formatError(413, "payload_too_large", error.message);
+		}
 		return speechWire.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
