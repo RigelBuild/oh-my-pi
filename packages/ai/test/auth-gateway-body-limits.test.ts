@@ -331,6 +331,52 @@ describe("auth-gateway image multipart limits", () => {
 		}
 	});
 
+	it("rejects more than 24 parts whose delimiters lack the leading CRLF", async () => {
+		const harness = await createHarness();
+		const boundary = "x-boundary";
+		const parts = [
+			multipartField("model", imageModel.id),
+			multipartField("prompt", "edit"),
+			multipartFile("image", "source.png"),
+			...Array.from({ length: 22 }, (_, index) => multipartField(`extra-${index}`, "x")),
+		];
+		// formData() accepts a delimiter glued to the previous value; a CRLF-anchored count misses it.
+		const glued = `${parts.map(part => `--${boundary}\r\n${part}`).join("")}--${boundary}--\r\n`;
+		try {
+			const response = await harness.route(
+				requestFor("/v1/images/edits", new TextEncoder().encode(glued), {
+					headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+				}),
+			);
+			expect(response.status).toBe(400);
+			expect(harness.upstreamCalls).toBe(0);
+		} finally {
+			harness.close();
+		}
+	});
+
+	it("accepts exactly 24 parts", async () => {
+		const harness = await createHarness();
+		const boundary = "parts-boundary";
+		const parts = [
+			multipartField("model", imageModel.id),
+			multipartField("prompt", "edit"),
+			multipartFile("image", "source.png"),
+			...Array.from({ length: 21 }, (_, index) => multipartField(`extra-${index}`, "x")),
+		];
+		try {
+			const response = await harness.route(
+				requestFor("/v1/images/edits", multipartBody(boundary, parts), {
+					headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+				}),
+			);
+			expect(response.status).toBe(200);
+			expect(harness.upstreamCalls).toBe(1);
+		} finally {
+			harness.close();
+		}
+	});
+
 	it("applies the JSON cap when the media type only starts with multipart/form-data", async () => {
 		const harness = await createHarness();
 		// Over the 36 MiB multipart cap, under the 48 MiB JSON cap.

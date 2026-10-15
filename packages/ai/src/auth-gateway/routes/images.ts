@@ -22,28 +22,17 @@ const IMAGE_MULTIPART_MAX_BYTES = 36 * 1024 * 1024;
 const IMAGE_MULTIPART_MAX_PARTS = 24;
 const IMAGE_MULTIPART_MAX_FILES = 16;
 
-// Count part-start delimiters before FormData can expand the bounded wire body.
-function countMultipartParts(bytes: Uint8Array, boundary: Uint8Array): number {
-	let parts = 0;
-	for (let i = 0; i <= bytes.byteLength - boundary.byteLength; i++) {
-		if (i > 0 && (bytes[i - 2] !== 13 || bytes[i - 1] !== 10)) continue;
-		let matches = true;
-		for (let j = 0; j < boundary.byteLength; j++) {
-			if (bytes[i + j] !== boundary[j]) {
-				matches = false;
-				break;
-			}
+// Count every `--boundary` occurrence, CRLF or not: an upper bound on the parts any parser can produce.
+function countDelimiters(bytes: Uint8Array, delimiter: Uint8Array): number {
+	let count = 0;
+	outer: for (let i = 0; i <= bytes.byteLength - delimiter.byteLength; i++) {
+		for (let j = 0; j < delimiter.byteLength; j++) {
+			if (bytes[i + j] !== delimiter[j]) continue outer;
 		}
-		if (!matches) continue;
-		const end = i + boundary.byteLength;
-		if (bytes[end] === 13 && bytes[end + 1] === 10) {
-			parts++;
-			i = end + 1;
-		} else if (bytes[end] === 45 && bytes[end + 1] === 45) {
-			i = end + 1;
-		}
+		count++;
+		i += delimiter.byteLength - 1;
 	}
-	return parts;
+	return count;
 }
 
 // RFC 2046 boundary: 1-70 bchars, not ending in space.
@@ -101,8 +90,9 @@ async function handleImages(
 			if (!boundaryValue) {
 				return imagesServer.formatError(400, "invalid_request_error", "Multipart body needs one valid boundary");
 			}
-			const boundaryBytes = new TextEncoder().encode(`--${boundaryValue}`);
-			if (countMultipartParts(bytes, boundaryBytes) > IMAGE_MULTIPART_MAX_PARTS) {
+			const delimiter = new TextEncoder().encode(`--${boundaryValue}`);
+			// N parts need N openers plus the closing delimiter.
+			if (countDelimiters(bytes, delimiter) > IMAGE_MULTIPART_MAX_PARTS + 1) {
 				return imagesServer.formatError(
 					400,
 					"invalid_request_error",
