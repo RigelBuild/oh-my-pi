@@ -20,7 +20,9 @@ export async function readBoundedRequestBody(
 	const reader = req.body?.getReader();
 	if (!reader) return new Uint8Array();
 
-	const chunks: Uint8Array[] = [];
+	// Copy into one doubling buffer: keeping each chunk costs per-chunk overhead that a
+	// client controls by splitting the body into tiny chunks.
+	let buffer = new Uint8Array(0);
 	let total = 0;
 	let complete = false;
 	const onAbort = (): void => {
@@ -42,18 +44,16 @@ export async function readBoundedRequestBody(
 				await reader.cancel().catch(() => {});
 				throw new RequestBodyTooLargeError();
 			}
+			if (total + value.byteLength > buffer.byteLength) {
+				const size = Math.max(64 * 1024, buffer.byteLength * 2, total + value.byteLength);
+				const grown = new Uint8Array(Math.min(maxBytes, size));
+				grown.set(buffer.subarray(0, total));
+				buffer = grown;
+			}
+			buffer.set(value, total);
 			total += value.byteLength;
-			chunks.push(value);
 		}
-
-		if (chunks.length === 1) return chunks[0]!;
-		const bytes = new Uint8Array(total);
-		let offset = 0;
-		for (const chunk of chunks) {
-			bytes.set(chunk, offset);
-			offset += chunk.byteLength;
-		}
-		return bytes;
+		return buffer.subarray(0, total);
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
 		if (!complete) await reader.cancel().catch(() => {});
