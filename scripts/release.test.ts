@@ -11,6 +11,7 @@ import {
 	checkExpectedTrackingVersion,
 	isTransientGhError,
 	latestReachableVersionTag,
+	releasePlan,
 	resolveReleaseVersion,
 	runWithTransientRetry,
 	validateExplicitVersion,
@@ -74,6 +75,26 @@ describe("tracking release version checks", () => {
 		expect(checkExpectedTrackingVersion("18.9.2-rigel.2", ["v18.9.1-rigel.99", "v18.9.2-rigel.1"])).toEqual({
 			expected: "18.9.2-rigel.2",
 			matches: true,
+		});
+	});
+});
+
+describe("release plan", () => {
+	test("tracking releases only write rigel-version and stop after commit", () => {
+		expect(releasePlan("18.9.2-rigel.1")).toEqual({
+			tracking: true,
+			tagAndPush: false,
+			writeRigelVersion: true,
+			requireMain: false,
+		});
+	});
+
+	test("stable releases retain the main, tag, and push path", () => {
+		expect(releasePlan("18.9.2")).toEqual({
+			tracking: false,
+			tagAndPush: true,
+			writeRigelVersion: false,
+			requireMain: true,
 		});
 	});
 });

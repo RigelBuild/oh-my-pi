@@ -1,10 +1,7 @@
 #!/usr/bin/env bun
 //
-// Publish an omp release's binaries to the build service (build.stencil.so),
-// which serves them, with binary patches between releases, to update
-// clients. Canary releases (`v<semver>-canary.<n>`) are uploaded with channel
-// `canary`, everything else with channel `stable`.
-//
+// Uploads release binaries to build.stencil.so. Canary uses `canary`; stable versions use `stable`.
+// Rigel tracking releases are rejected because this service has no tracking channel.
 // Usage:
 //   bun scripts/ci-build-upload.ts <tag> <file>...    # all 8 release binaries
 //
@@ -152,6 +149,8 @@ async function main(): Promise<void> {
 	const [tag, ...files] = process.argv.slice(2);
 	if (!tag || files.length === 0) throw new Error("usage: ci-build-upload.ts <tag> <file>...");
 	const version = releaseVersion(tag);
+	if (version.includes("-rigel."))
+		throw new Error(`Rigel tracking releases are not uploaded to the build service: ${version}`);
 	const channel: Channel = version.includes("-canary.") ? "canary" : "stable";
 
 	const described: BuildFile[] = [];
