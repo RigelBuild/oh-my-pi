@@ -15,9 +15,12 @@ import {
 } from "./ci-release-publish";
 
 describe("npm dist-tags", () => {
-	it("routes canaries while rejecting other prereleases", () => {
+	it("routes canary and rigel releases while rejecting other prereleases", () => {
 		expect(npmDistTag("0.13.0-canary.2")).toBe("canary");
+		expect(npmDistTag("18.9.2-rigel.1")).toBe("rigel");
 		expect(npmDistTag("0.13.0")).toBe("latest");
+		expect(() => npmDistTag("18.9.2-rigel.0")).toThrow("Unsupported prerelease version");
+		expect(() => npmDistTag("18.9.2-rigel")).toThrow("Unsupported prerelease version");
 		expect(() => npmDistTag("0.13.0-rc.1")).toThrow("Unsupported prerelease version");
 	});
 });

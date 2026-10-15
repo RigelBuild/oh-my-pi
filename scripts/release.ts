@@ -3,40 +3,35 @@
  * Release script for pi-mono
  *
  * Usage:
- *   bun scripts/release.ts <version|major|minor|patch|canary>
- *                                                        Full release (preflight, version, changelog, commit,
- *                                                        push, watch)
- *   bun scripts/release.ts watch                         Watch CI for current commit
- *   bun scripts/release.ts deps                          Full third-party dependency refresh (bun.lock + Cargo.lock);
- *                                                        land it via PR/main CI before the next release
- *
- * Example: bun scripts/release.ts minor
+ *   bun scripts/release.ts <version|major|minor|patch|canary>   Full release
+ *   bun scripts/release.ts X.Y.Z-rigel.N                       Prepare tracking bump for a rigel-release PR
+ *   bun scripts/release.ts watch                               Watch CI for current commit
+ *   bun scripts/release.ts deps                                Refresh third-party dependencies
  */
 import { $, Glob } from "bun";
 import { compareVersions } from "../packages/utils/src/version.ts";
 import { runChangelogFixer } from "./fix-changelogs";
 import { generateNixBunDeps, resolveNixBunDepsGenerator } from "./gen-nix-bun";
+import { expectedNextVersion, parseTrackingVersion } from "./release-tag";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
 const cargoTomlGlob = new Glob("crates/*/Cargo.toml");
-/**
- * Strict explicit-version guard: three numeric dot-segments with an optional
- * leading `v` and NO prerelease suffix. Prereleases are rejected because the
- * downstream publish (`scripts/ci-release-publish.ts`) runs `npm publish` with
- * no `--tag`, which would promote a prerelease to the npm `latest` dist-tag —
- * hitting every unqualified install and the `/latest` endpoint `omp update`
- * reads. Bump keywords (major/minor/patch) are handled separately and must not
- * be routed through this check.
- *
- * Returns the normalized bare version (leading `v` stripped) when accepted, or
- * `null` when rejected. Callers must use the returned value for all writes so
- * no downstream manifest (package.json, Cargo.toml, tag) ever sees a `v`
- * prefix — Cargo rejects `version = "v17.2.8"`.
- */
+/** Accepts stable or rigel tracking versions, with an optional leading `v`. */
 export function validateExplicitVersion(version: string): string | null {
-	const match = /^v?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(version);
-	return match ? match[1] : null;
+	const normalized = version.startsWith("v") ? version.slice(1) : version;
+	if (parseTrackingVersion(normalized)) return normalized;
+	return /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(normalized) ? normalized : null;
+}
+
+export function checkExpectedTrackingVersion(
+	version: string,
+	tags: readonly string[],
+): { expected: string; matches: boolean } {
+	const parsed = parseTrackingVersion(version);
+	if (!parsed) throw new Error(`Invalid tracking version: ${version}`);
+	const expected = expectedNextVersion(parsed.base, tags);
+	return { expected, matches: version === expected };
 }
 
 function git(args: readonly string[]) {
@@ -343,11 +338,7 @@ async function cmdDeps(): Promise<void> {
 
 async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
-	// Validate explicit versions before any compare: the shared compareVersions
-	// never throws, so without this guard garbage like "999.bad" would be
-	// accepted and written into every package.json / Cargo.toml / tag. The
-	// validator also normalizes a leading `v` to the bare version so every
-	// downstream write (manifests, Cargo.toml, tag) uses `17.2.8`, not `v17.2.8`.
+	// Validate before any compare: compareVersions never throws, so garbage would reach every manifest.
 	if (
 		versionOrBump !== "major" &&
 		versionOrBump !== "minor" &&
@@ -357,22 +348,25 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		const normalized = validateExplicitVersion(versionOrBump);
 		if (normalized === null) {
 			console.error(
-				`Error: Invalid version "${versionOrBump}". Expected a semver like 17.2.8 or v17.2.8 (prereleases such as 17.2.8-rc.1 are not supported by this release path), or a bump keyword (major/minor/patch/canary).`,
+				`Error: Invalid version "${versionOrBump}". Expected a stable version like 17.2.8, a tracking version like 17.2.8-rigel.1, or a bump keyword (major/minor/patch/canary).`,
 			);
 			process.exit(1);
 		}
 		versionOrBump = normalized;
 	}
+	const trackingVersion = parseTrackingVersion(versionOrBump);
 
 	// 1. Pre-flight checks
 	console.log("Pre-flight checks...");
 
-	const branch = await git(["branch", "--show-current"]).text();
-	if (branch.trim() !== "main") {
-		console.error(`Error: Must be on main branch (currently on '${branch.trim()}')`);
-		process.exit(1);
+	if (!trackingVersion) {
+		const branch = await git(["branch", "--show-current"]).text();
+		if (branch.trim() !== "main") {
+			console.error(`Error: Must be on main branch (currently on '${branch.trim()}')`);
+			process.exit(1);
+		}
+		console.log("  On main branch");
 	}
-	console.log("  On main branch");
 
 	const status = await git(["status", "--porcelain"]).text();
 	if (status.trim()) {
@@ -382,7 +376,21 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log("  Working directory clean");
 
-	await checkUpToDate();
+	if (trackingVersion) {
+		await git(["fetch", "origin", "rigel-release", "--tags"]).quiet();
+		const basedOnTrackingBranch = await git(["merge-base", "--is-ancestor", "origin/rigel-release", "HEAD"])
+			.quiet()
+			.nothrow();
+		if (basedOnTrackingBranch.exitCode !== 0) {
+			console.error(
+				"Error: HEAD must include the latest origin/rigel-release commit before preparing a tracking release.",
+			);
+			process.exit(1);
+		}
+		console.log("  Based on origin/rigel-release");
+	} else {
+		await checkUpToDate();
+	}
 
 	const nixBunDepsGenerator = resolveNixBunDepsGenerator();
 	console.log(`  Nix dependency generator: ${nixBunDepsGenerator.kind}`);
@@ -396,16 +404,31 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log(`  Bazel: ${bazel}`);
 
-	const latestTag = await latestReachableVersionTag();
 	let version: string;
-	try {
-		const resolved = resolveReleaseVersion(versionOrBump, latestTag);
-		version = resolved.version;
-		console.log(`  ${resolved.note}\n`);
-	} catch (error) {
-		console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-		process.exit(1);
+	if (trackingVersion) {
+		const tags = (await git(["tag", "--list", `v${trackingVersion.base}-rigel.*`]).text())
+			.split("\n")
+			.filter(Boolean);
+		const { expected, matches } = checkExpectedTrackingVersion(versionOrBump, tags);
+		if (!matches) {
+			console.error(`Error: Expected next tracking version ${expected}, got ${versionOrBump}`);
+			process.exit(1);
+		}
+		version = versionOrBump;
+		console.log(`  Tracking version ${version} is next\n`);
+	} else {
+		const latestTag = await latestReachableVersionTag();
+		try {
+			const resolved = resolveReleaseVersion(versionOrBump, latestTag);
+			version = resolved.version;
+			console.log(`  ${resolved.note}\n`);
+		} catch (error) {
+			console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+			process.exit(1);
+		}
 	}
+
+	if (trackingVersion) await Bun.write(".github/rigel-version", `${version}\n`);
 
 	// 2. Update package versions
 	console.log(`Updating package versions to ${version}…`);
@@ -518,6 +541,12 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	await git(["commit", "-m", `chore: bump version to ${version}`]);
 	console.log();
 
+	if (trackingVersion) {
+		console.log(`Tracking release prepared in commit chore: bump version to ${version}.`);
+		console.log(`Open a PR to rigel-release; merging it mints v${version}.`);
+		return;
+	}
+
 	// 8. Tag, then push branch + tag atomically — pushing the tag by object id.
 	//
 	// This repo is in the global `[maintenance] repo = …` list, so a scheduled
@@ -576,8 +605,11 @@ if (import.meta.main) {
 	const usage = () => {
 		console.error("Usage:");
 		console.error("  bun scripts/release.ts <version|major|minor|patch|canary>   Full release");
-		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
-		console.error("  bun scripts/release.ts deps                          Full third-party dependency refresh");
+		console.error(
+			"  bun scripts/release.ts X.Y.Z-rigel.N                       Prepare tracking bump for a rigel-release PR",
+		);
+		console.error("  bun scripts/release.ts watch                               Watch CI for current commit");
+		console.error("  bun scripts/release.ts deps                                Refresh third-party dependencies");
 	};
 
 	if (!arg) {
