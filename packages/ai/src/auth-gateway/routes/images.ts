@@ -22,15 +22,15 @@ const IMAGE_MULTIPART_MAX_BYTES = 36 * 1024 * 1024;
 const IMAGE_MULTIPART_MAX_PARTS = 24;
 const IMAGE_MULTIPART_MAX_FILES = 16;
 
-// Count every `--boundary` occurrence, CRLF or not: an upper bound on the parts any parser can produce.
-function countDelimiters(bytes: Uint8Array, delimiter: Uint8Array): number {
+// Count `--boundary\r\n` openers. Bun's formData() starts a part exactly there, glued to prior data or not.
+function countPartOpeners(bytes: Uint8Array, opener: Uint8Array): number {
 	let count = 0;
-	outer: for (let i = 0; i <= bytes.byteLength - delimiter.byteLength; i++) {
-		for (let j = 0; j < delimiter.byteLength; j++) {
-			if (bytes[i + j] !== delimiter[j]) continue outer;
+	outer: for (let i = 0; i <= bytes.byteLength - opener.byteLength; i++) {
+		for (let j = 0; j < opener.byteLength; j++) {
+			if (bytes[i + j] !== opener[j]) continue outer;
 		}
 		count++;
-		i += delimiter.byteLength - 1;
+		i += opener.byteLength - 1;
 	}
 	return count;
 }
@@ -90,9 +90,8 @@ async function handleImages(
 			if (!boundaryValue) {
 				return imagesServer.formatError(400, "invalid_request_error", "Multipart body needs one valid boundary");
 			}
-			const delimiter = new TextEncoder().encode(`--${boundaryValue}`);
-			// N parts need N openers plus the closing delimiter.
-			if (countDelimiters(bytes, delimiter) > IMAGE_MULTIPART_MAX_PARTS + 1) {
+			const opener = new TextEncoder().encode(`--${boundaryValue}\r\n`);
+			if (countPartOpeners(bytes, opener) > IMAGE_MULTIPART_MAX_PARTS) {
 				return imagesServer.formatError(
 					400,
 					"invalid_request_error",

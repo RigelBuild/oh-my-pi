@@ -355,14 +355,16 @@ describe("auth-gateway image multipart limits", () => {
 		}
 	});
 
-	it("accepts exactly 24 parts", async () => {
+	it("accepts exactly 24 parts, with boundary-like bytes inside a value", async () => {
 		const harness = await createHarness();
 		const boundary = "parts-boundary";
 		const parts = [
 			multipartField("model", imageModel.id),
 			multipartField("prompt", "edit"),
 			multipartFile("image", "source.png"),
-			...Array.from({ length: 21 }, (_, index) => multipartField(`extra-${index}`, "x")),
+			// Not delimiters: formData() keeps these bytes as data, so they must not count as parts.
+			multipartField("noise", `--${boundary}X --${boundary}-- --${boundary} z`),
+			...Array.from({ length: 20 }, (_, index) => multipartField(`extra-${index}`, "x")),
 		];
 		try {
 			const response = await harness.route(
