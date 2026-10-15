@@ -232,7 +232,17 @@ describe("selectStartupChangelog", () => {
 		const selection = selectStartupChangelog([prerelease], "18.9.1", "18.9.2-rigel.1");
 		expect(selection.latestVersion).toBe("18.9.2-rigel.1");
 		expect(selection.markdown).toContain("## [18.9.2-rigel.1]");
-		expect(selectStartupChangelog([prerelease], "18.9.1", "18.9.2-rigel.1").latestVersion).toBe("18.9.2-rigel.1");
+	});
+
+	test("selects Rigel tracking releases after their stable base", () => {
+		const entries = [
+			release(18, 9, 2, "### Fixed\n\n- Tracking release.", "rigel.1"),
+			release(18, 9, 2, "### Fixed\n\n- Stable release."),
+		];
+		const selection = selectStartupChangelog(entries, "18.9.2", "18.9.2-rigel.1");
+		expect(selection.selectedEntries).toBe(1);
+		expect(selection.markdown).toBe(entries[0].content);
+		expect(selection.latestVersion).toBe("18.9.2-rigel.1");
 	});
 });
 
@@ -285,7 +295,7 @@ describe("parseChangelog", () => {
 		expect(latest.content).toContain(`## [${latestVersion}]`);
 		expect(compareVersions(latestVersion, VERSION)).toBeLessThanOrEqual(0);
 		expect(getNewEntries([latest], VERSION)).toEqual([]);
-		expect(getNewEntries(entries, "0.0.0")).toEqual(entries);
+		expect(getNewEntries(entries, versionString(previous))).toEqual([latest]);
 	});
 
 	test("keeps the prerelease part when filtering versions", () => {
@@ -295,6 +305,25 @@ describe("parseChangelog", () => {
 		];
 		expect(getNewEntries(entries, "18.9.2-rigel.1")).toEqual([entries[1]]);
 		expect(getNewEntries(entries, "18.9.2-rigel.2")).toEqual([]);
+	});
+
+	test("orders Rigel tracking releases after their stable base", () => {
+		const entries = [
+			release(18, 9, 3, "### Fixed\n\n- Next stable release."),
+			release(18, 9, 2, "### Fixed\n\n- Stable base."),
+			release(18, 9, 2, "### Fixed\n\n- Next tracking release.", "rigel.2"),
+		];
+
+		expect(getNewEntries(entries, "18.9.2-rigel.1")).toEqual([entries[0], entries[2]]);
+	});
+
+	test("keeps non-Rigel prereleases before their stable core", () => {
+		const entries = [
+			release(18, 9, 2, "### Fixed\n\n- Stable release."),
+			release(18, 9, 2, "### Fixed\n\n- Canary release.", "canary.1"),
+		];
+
+		expect(getNewEntries(entries, "18.9.2-canary.1")).toEqual([entries[0]]);
 	});
 });
 

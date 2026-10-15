@@ -214,6 +214,7 @@ function comparePrereleaseIdentifier(a, b) {
 	return a === b ? 0 : a < b ? -1 : 1;
 }
 
+// Core versions sort first; Rigel tags follow stable, unlike upstream prereleases.
 function isOlderReleaseVersion(candidate, current) {
 	const candidateVersion = parseReleaseVersion(candidate);
 	const currentVersion = parseReleaseVersion(current);
@@ -222,6 +223,15 @@ function isOlderReleaseVersion(candidate, current) {
 		if (candidateVersion.parts[index] !== currentVersion.parts[index]) {
 			return candidateVersion.parts[index] < currentVersion.parts[index];
 		}
+	}
+
+	const isRigelRelease = version => version?.length === 2 && version[0] === "rigel" && /^(0|[1-9]\d*)$/.test(version[1]);
+	const candidateIsRigel = isRigelRelease(candidateVersion.prerelease);
+	const currentIsRigel = isRigelRelease(currentVersion.prerelease);
+	if (candidateIsRigel || currentIsRigel) {
+		if (!candidateIsRigel) return true;
+		if (!currentIsRigel) return false;
+		return comparePrereleaseIdentifier(candidateVersion.prerelease[1], currentVersion.prerelease[1]) < 0;
 	}
 	if (candidateVersion.prerelease === null || currentVersion.prerelease === null) {
 		return candidateVersion.prerelease !== null && currentVersion.prerelease === null;

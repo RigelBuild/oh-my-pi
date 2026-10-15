@@ -115,7 +115,7 @@ Workspace development skips the version check entirely, so a checkout that pulle
 
 Rust module initialization installs crash diagnostics but does not spawn runtime threads under the dynamic-loader lock. The optional post-load hook installs bounded Windows Tokio and Rayon pools. It is best-effort; older addons or hook failures fall back to napi-rs behavior. Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr, including hook success/failure.
 
-Cache cleanup ignores read/delete failures and removes only directories named with an older `major.minor.patch` release and an mtime at least ten minutes old. `prepareNativeVersionDir()` refreshes the directory mtime before extraction or staging to protect concurrent starts. Cleanup preserves current/future versions, prerelease/non-version names, ordinary files, and recently active directories.
+Cache cleanup ignores read/delete failures and removes directories older than the loaded version under core-first ordering; same-core Rigel releases rank after stable and compare by numeric release number, while other prereleases retain SemVer order. Directories must also have an mtime at least ten minutes old. `prepareNativeVersionDir()` refreshes that timestamp before extraction or staging to protect concurrent starts. Current/future versions, non-version names, ordinary files, and recently active directories remain.
 
 ## Failure diagnostics
 

@@ -313,12 +313,29 @@ async function parseStartupChangelogFile(
 }
 
 /**
- * Compare changelog entries by their SemVer precedence.
+ * Rigel tracks follow their stable base; upstream prereleases retain SemVer precedence.
  */
 function compareChangelogEntries(v1: ChangelogEntry, v2: ChangelogEntry): number {
+	if (v1.major !== v2.major) return v1.major < v2.major ? -1 : 1;
+	if (v1.minor !== v2.minor) return v1.minor < v2.minor ? -1 : 1;
+	if (v1.patch !== v2.patch) return v1.patch < v2.patch ? -1 : 1;
+
+	const first = v1.prerelease;
+	const second = v2.prerelease;
+	const firstRigel = first?.match(/^rigel\.(0|[1-9]\d*)$/);
+	const secondRigel = second?.match(/^rigel\.(0|[1-9]\d*)$/);
+	const firstRank = firstRigel ? 2 : first ? 0 : 1;
+	const secondRank = secondRigel ? 2 : second ? 0 : 1;
+	if (firstRank !== secondRank) return firstRank < secondRank ? -1 : 1;
+	if (firstRigel && secondRigel) {
+		const firstNumber = firstRigel[1];
+		const secondNumber = secondRigel[1];
+		if (firstNumber.length !== secondNumber.length) return firstNumber.length < secondNumber.length ? -1 : 1;
+		return firstNumber === secondNumber ? 0 : firstNumber < secondNumber ? -1 : 1;
+	}
 	return compareVersions(
-		`${v1.major}.${v1.minor}.${v1.patch}${v1.prerelease ? `-${v1.prerelease}` : ""}`,
-		`${v2.major}.${v2.minor}.${v2.patch}${v2.prerelease ? `-${v2.prerelease}` : ""}`,
+		`${v1.major}.${v1.minor}.${v1.patch}${first ? `-${first}` : ""}`,
+		`${v2.major}.${v2.minor}.${v2.patch}${second ? `-${second}` : ""}`,
 	);
 }
 

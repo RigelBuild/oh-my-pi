@@ -129,7 +129,7 @@ Confirm the export is present and `__piNativesBuildVersion()` reports the packag
 
 x64 candidate order is modern → baseline → unsuffixed for a modern host, and baseline → unsuffixed for a baseline host. Compiled and staged Windows loads can also win from `<getNativesDir()>/<version>` before package paths. The root honors `PI_NATIVES_DIR` first (trimmed, `~`-expanded, and normalized; empty or relative values are ignored), then `$XDG_DATA_HOME/omp/natives` when `$XDG_DATA_HOME/omp` exists, otherwise `~/.omp/natives`.
 
-Remove only the stale local artifacts/cache identified by loader diagnostics, then rebuild. The loader best-effort deletes older `major.minor.patch` cache directories after a successful load only when their mtime is at least ten minutes old; it preserves the current-version directory.
+Remove only the stale local artifacts/cache identified by loader diagnostics, then rebuild. After a successful load, the loader best-effort deletes older cache directories under core-first ordering: same-core Rigel releases rank after stable and compare by numeric release number, while other prereleases retain SemVer order; cleanup requires an mtime of at least ten minutes and preserves the current-version directory.
 
 ### Declarations changed but shipping addon did not
 
