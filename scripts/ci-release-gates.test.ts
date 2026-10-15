@@ -84,13 +84,16 @@ function gate(job: string, repository: string, results: Record<string, string>, 
 	return truthy(new Evaluator(parsed, context, statusFunctions).evaluate());
 }
 
-/** Truth table: fails one job, leaves the rest successful (some combos unreachable), and derives release_build's result. */
+/** Truth table: fails one job, leaves the rest successful (some combos unreachable), and derives the leaves' and release_build's results. */
 function release(repository: string, failing?: string, run: Run = {}): Record<string, boolean | string> {
 	const results: Record<string, string> = {};
-	if (failing && failing !== "release_build") results[failing] = "failure";
+	if (failing && failing !== "release_build" && failing !== "release_native_leaves") results[failing] = "failure";
+	const leavesRun = gate("release_native_leaves", repository, results, run);
+	results.release_native_leaves = failing === "release_native_leaves" ? "failure" : leavesRun ? "success" : "skipped";
 	const buildRuns = gate("release_build", repository, results, run);
 	results.release_build = failing === "release_build" ? "failure" : buildRuns ? "success" : "skipped";
 	return {
+		leaves: leavesRun,
 		build: results.release_build,
 		npm: gate("release_npm", repository, results, run),
 		brew: gate("release_brew", repository, results, run),
@@ -99,7 +102,7 @@ function release(repository: string, failing?: string, run: Run = {}): Record<st
 
 describe("release gates on the fork", () => {
 	test("skips build.stencil.so and brew but publishes npm", () => {
-		expect(release(FORK)).toEqual({ build: "skipped", npm: true, brew: false });
+		expect(release(FORK)).toEqual({ leaves: true, build: "skipped", npm: true, brew: false });
 	});
 
 	for (const failing of [
@@ -117,7 +120,7 @@ describe("release gates on the fork", () => {
 
 describe("release gates upstream", () => {
 	test("publishes build.stencil.so, npm, and brew", () => {
-		expect(release(UPSTREAM)).toEqual({ build: "success", npm: true, brew: true });
+		expect(release(UPSTREAM)).toEqual({ leaves: true, build: "success", npm: true, brew: true });
 	});
 
 	for (const failing of ["release_gate", "release_github", "release_build"]) {
@@ -131,30 +134,31 @@ describe("release eligibility", () => {
 	for (const repository of [FORK, UPSTREAM]) {
 		test(`${repository}: a run that is not a release publishes nothing`, () => {
 			expect(release(repository, undefined, { isRelease: false })).toEqual({
+				leaves: false,
 				build: "skipped",
 				npm: false,
 				brew: false,
 			});
 		});
 
-		test(`${repository}: skip_npm blocks npm`, () => {
-			expect(release(repository, undefined, { skipNpm: true }).npm).toBe(false);
+		test(`${repository}: skip_npm blocks the leaves and npm`, () => {
+			expect(release(repository, undefined, { skipNpm: true })).toMatchObject({ leaves: false, npm: false });
 		});
 	}
 
-	test("another copy of the workflow never publishes npm without build.stencil.so", () => {
-		expect(release("someone/oh-my-pi")).toEqual({ build: "skipped", npm: false, brew: false });
+	test("another copy of the workflow publishes nothing to npm", () => {
+		expect(release("someone/oh-my-pi")).toEqual({ leaves: false, build: "skipped", npm: false, brew: false });
 	});
 });
 
 describe("release gates by repository and channel", () => {
 	const cases = [
-		[FORK, "stable", { build: "skipped", npm: true, brew: false }],
-		[FORK, "canary", { build: "skipped", npm: true, brew: false }],
-		[FORK, "rigel", { build: "skipped", npm: true, brew: false }],
-		[UPSTREAM, "stable", { build: "success", npm: true, brew: true }],
-		[UPSTREAM, "canary", { build: "success", npm: true, brew: false }],
-		[UPSTREAM, "rigel", { build: "skipped", npm: false, brew: false }],
+		[FORK, "stable", { leaves: true, build: "skipped", npm: true, brew: false }],
+		[FORK, "canary", { leaves: true, build: "skipped", npm: true, brew: false }],
+		[FORK, "rigel", { leaves: true, build: "skipped", npm: true, brew: false }],
+		[UPSTREAM, "stable", { leaves: true, build: "success", npm: true, brew: true }],
+		[UPSTREAM, "canary", { leaves: true, build: "success", npm: true, brew: false }],
+		[UPSTREAM, "rigel", { leaves: false, build: "skipped", npm: false, brew: false }],
 	] as const;
 	for (const [repository, channel, expected] of cases) {
 		test(`${repository} ${channel}`, () => {
