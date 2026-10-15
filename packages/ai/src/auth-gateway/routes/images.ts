@@ -70,22 +70,26 @@ async function handleImages(
 
 	let body: unknown | FormData;
 	const contentType = req.headers.get("content-type") ?? "";
-	const multipart = kind === "edits" && contentType.toLowerCase().startsWith("multipart/form-data");
+	const mediaType = (contentType.split(";", 1)[0] ?? "").trim().toLowerCase();
+	const multipart = kind === "edits" && mediaType === "multipart/form-data";
 	try {
 		const maxBytes = multipart ? IMAGE_MULTIPART_MAX_BYTES : IMAGE_JSON_MAX_BYTES;
 		const bytes = await readBoundedRequestBody(req, maxBytes, controller.signal);
 		if (multipart) {
-			const boundary = /(?:^|;)\s*boundary\s*=\s*(?:"([^"]+)"|([^;]+))/i.exec(contentType);
-			const boundaryBytes = boundary
-				? new TextEncoder().encode(`--${(boundary[1] ?? boundary[2] ?? "").trim()}`)
-				: null;
-			if (boundaryBytes && countMultipartParts(bytes, boundaryBytes) > IMAGE_MULTIPART_MAX_PARTS) {
-				return imagesServer.formatError(
+			// A quoted boundary is used verbatim, spaces included, as formData() does.
+			const boundary = /;\s*boundary\s*=\s*(?:"([^"\\]*)"|([^;\s]+))/i.exec(contentType);
+			const boundaryValue = boundary?.[1] ?? boundary?.[2];
+			if (!boundaryValue) {
+				return imagesServer.formatError(400, "invalid_request_error", "Multipart body needs a boundary");
+			}
+			const tooManyParts = (): Response =>
+				imagesServer.formatError(
 					400,
 					"invalid_request_error",
 					`Multipart body must not exceed ${IMAGE_MULTIPART_MAX_PARTS} parts`,
 				);
-			}
+			const boundaryBytes = new TextEncoder().encode(`--${boundaryValue}`);
+			if (countMultipartParts(bytes, boundaryBytes) > IMAGE_MULTIPART_MAX_PARTS) return tooManyParts();
 			const form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData();
 			const imageFiles = [...form.getAll("image"), ...form.getAll("image[]")].filter(value => value instanceof File);
 			if (imageFiles.length > IMAGE_MULTIPART_MAX_FILES) {

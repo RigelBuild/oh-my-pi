@@ -301,6 +301,43 @@ describe("auth-gateway image multipart limits", () => {
 		}
 	});
 
+	it("rejects more than 24 parts behind a quoted boundary with spaces", async () => {
+		const harness = await createHarness();
+		const boundary = " a";
+		const parts = [
+			multipartField("model", imageModel.id),
+			multipartField("prompt", "edit"),
+			multipartFile("image", "source.png"),
+			...Array.from({ length: 22 }, (_, index) => multipartField(`extra-${index}`, "x")),
+		];
+		try {
+			const response = await harness.route(
+				requestFor("/v1/images/edits", multipartBody(boundary, parts), {
+					headers: { "Content-Type": `multipart/form-data; boundary="${boundary}"` },
+				}),
+			);
+			expect(response.status).toBe(400);
+			expect(harness.upstreamCalls).toBe(0);
+		} finally {
+			harness.close();
+		}
+	});
+
+	it("applies the JSON cap when the media type only starts with multipart/form-data", async () => {
+		const harness = await createHarness();
+		// Over the 36 MiB multipart cap, under the 48 MiB JSON cap.
+		const prompt = "x".repeat(37 * 1024 * 1024);
+		const body = new TextEncoder().encode(JSON.stringify({ model: imageModel.id, prompt }));
+		try {
+			const response = await harness.route(
+				requestFor("/v1/images/edits", body, { headers: { "Content-Type": "multipart/form-datax" } }),
+			);
+			expect(response.status).not.toBe(413);
+		} finally {
+			harness.close();
+		}
+	});
+
 	it("rejects more than 16 image files before encoding them", async () => {
 		const harness = await createHarness();
 		const boundary = "files-boundary";
