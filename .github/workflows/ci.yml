@@ -505,7 +505,10 @@ jobs:
               # on older macOS.
               grep -aqF OmpAppleFm "$addon" ||
                  { echo "::error::Darwin arm64 addon was built without the Apple Foundation Models bridge"; exit 1; }
-              dylibs="$(llvm-objdump --macho --dylibs-used "$addon")"
+              # Hosted runners ship no llvm-objdump; take it from rustup's llvm-tools on the preinstalled stable toolchain.
+              rustup component add --toolchain stable llvm-tools
+              objdump="$(rustc +stable --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objdump"
+              dylibs="$("$objdump" --macho --dylibs-used "$addon")"
               if grep -E 'libswift|FoundationModels' <<< "$dylibs"; then
                  echo "::error::Darwin arm64 addon links the Swift runtime or FoundationModels directly"; exit 1
               fi
