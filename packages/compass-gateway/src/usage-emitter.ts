@@ -43,7 +43,8 @@ export interface UsageEmitterOptions {
 	now?: () => number;
 	setTimer?: (callback: () => void, delayMs: number) => UsageTimer;
 	clearTimer?: (timer: UsageTimer) => void;
-	newId?: () => string;
+	/** Row id for an event; the default derives it from `requestId`, so a repeated event is stored once. */
+	newId?: (event: GatewayUsageEvent) => string;
 	log?: { warn(msg: string, ctx?: object): void };
 }
 
@@ -64,6 +65,8 @@ const DEFAULT_MAX_EVENTS = 10_000;
 const DEFAULT_MAX_AGE_MS = 300_000;
 const DEFAULT_MAX_BATCH = 500;
 const DEFAULT_RETRY_BASE_MS = 1_000;
+// Fixed namespace for row ids; changing it makes the server count replayed events again.
+const USAGE_ROW_ID_NAMESPACE = "4f0d6a52-3c1e-4b8e-9a57-1d2f6c0b7e31";
 
 export function toTokenUsageEvent(
 	e: GatewayUsageEvent,
@@ -105,7 +108,7 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 	const maxBatch = opts.maxBatch ?? DEFAULT_MAX_BATCH;
 	const retryBaseMs = opts.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
 	const now = opts.now ?? (() => performance.now());
-	const newId = opts.newId ?? (() => crypto.randomUUID());
+	const newId = opts.newId ?? (event => Bun.randomUUIDv5(event.requestId, USAGE_ROW_ID_NAMESPACE));
 	const scheduleTimer =
 		opts.setTimer ??
 		((callback, delayMs) => {
@@ -196,7 +199,10 @@ export function createUsageEmitter(opts: UsageEmitterOptions): UsageEmitter {
 					droppedUnattributed();
 					return;
 				}
-				buffer.push({ row: toTokenUsageEvent(event, attribution, opts.rateVersion, newId()), enqueuedAt: now() });
+				buffer.push({
+					row: toTokenUsageEvent(event, attribution, opts.rateVersion, newId(event)),
+					enqueuedAt: now(),
+				});
 				while (buffer.length > maxEvents) {
 					buffer.shift();
 					dropped++;

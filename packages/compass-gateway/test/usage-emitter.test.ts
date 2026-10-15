@@ -229,22 +229,26 @@ describe("Compass usage emitter", () => {
 		expect(emitter.stats()).toMatchObject({ buffered: 0, sent: 2 });
 		expect(clock.timers.size).toBe(0);
 	});
-	it("uses a UUID id when no id factory is supplied", async () => {
+	it("gives a repeated request id the same UUID row id by default", async () => {
 		const clock = new Clock();
-		let sent: TokenUsageEvent[] = [];
+		const sent: TokenUsageEvent[] = [];
 		const emitter = createUsageEmitter(
 			options(
 				clock,
 				async batch => {
-					sent = batch;
+					sent.push(...batch);
 				},
 				{ newId: undefined },
 			),
 		);
-		emitter.onUsage(event());
+		emitter.onUsage(event({ requestId: "video-job" }));
+		emitter.onUsage(event({ requestId: "video-job" }));
+		emitter.onUsage(event({ requestId: "other" }));
 		await emitter.flush();
-		expect(sent).toHaveLength(1);
-		expect(sent[0]?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+		const [first, repeat, other] = sent.map(row => row.id);
+		expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+		expect(repeat).toBe(first);
+		expect(other).not.toBe(first);
 		await emitter.close();
 	});
 
