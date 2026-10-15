@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed a cancelled or timed-out `browser` open killing the shared headless browser after it had launched, which made later tabs fail with `Failed to connect` or `Connection ended`.
 - Fixed `RpcClient.stop()` occasionally waiting forever because the agent process was never signaled.
 - Fixed `read` re-listing an archive rewritten in place with the same size and mtime within the same instant.
 - Browser attach reuses Chromium through a Linux launcher with literal absolute or relative `exec` targets, including NixOS wrappers, without crossing browser profiles ([RIG-4653](https://linear.app/rigelbuild/issue/RIG-4653)).

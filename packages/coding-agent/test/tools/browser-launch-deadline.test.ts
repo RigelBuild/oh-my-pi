@@ -205,12 +205,21 @@ describe("headless browser launch deadline", () => {
 		async () => {
 			const caller = new AbortController();
 			const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true, signal: caller.signal });
+			const pid = browser.process()?.pid;
+			const killed: Array<number | string> = [];
+			const realKill = process.kill;
+			process.kill = ((target: number, signal?: number | NodeJS.Signals) => {
+				if (Math.abs(target) === pid) killed.push(signal ?? "SIGTERM");
+				return realKill.call(process, target, signal);
+			}) as typeof process.kill;
 			try {
+				// Abort listeners run synchronously, so a kill on abort is recorded before abort() returns.
 				caller.abort(new Error("open cancelled after launch"));
-				// SIGKILL on abort is synchronous, so a dead browser cannot answer this round trip.
+				expect(pid).toBeNumber();
+				expect(killed).toEqual([]);
 				expect(await browser.version()).toContain("Chrome");
-				expect(browser.connected).toBe(true);
 			} finally {
+				process.kill = realKill;
 				await browser.close();
 				if (userDataDir) fs.rmSync(userDataDir, { recursive: true, force: true });
 			}
