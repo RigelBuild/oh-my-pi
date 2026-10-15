@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.9.2-rigel.1] - 2026-10-15
+
+### Added
+
+- Added `postmortem.setCleanupDeadline()` so a long-lived server can let a signal-driven cleanup step (such as an HTTP drain) run past the default 10 s deadline.
+
 ### Fixed
 
 - Fixed `ChildProcess.kill()` silently leaving the child running when the native process handle could not be resolved or used; it now signals the child directly and escalates to SIGKILL after the grace period.
@@ -15,10 +21,6 @@
 ### Fixed
 
 - Fixed parsing of long strings that contain closing delimiters other than double or single quotes.
-
-### Added
-
-- Added `postmortem.setCleanupDeadline()` so a long-lived server can let a signal-driven cleanup step (such as an HTTP drain) run past the default 10 s deadline.
 
 ## [18.9.0] - 2026-10-11
 

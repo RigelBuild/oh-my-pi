@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.9.2-rigel.1] - 2026-10-15
+
 ### Added
 
 - Rigel builds follow the `@rigelbuild/omp-*` packages and `rigel` npm dist-tag when checking for updates.
@@ -10,6 +12,7 @@
 - Added a container-ready auth-gateway boot entrypoint that reads a mounted bearer token and drains requests on SIGTERM; `auth-gateway serve` now shuts down through postmortem cleanup and exits `143` on SIGTERM, after the drain when one is configured (the boot entrypoint defaults to 20 seconds).
 - Added `--reapply-config`: on CLI startup resume or fork (`--resume`/`--continue`/`--fork`) it uses the config-selected model, thinking level, and service tiers instead of the session's saved ones, per setting and per tier family, keeping anything the config leaves unset; an explicit `--model` still pins model and thinking, and `--thinking` still wins for thinking.
 - Added `--session-id <id>` to open a local session by exact ID or create one with that ID; a launch fails if another live omp process holds the ID.
+- Added the `web/litellm` search engine, which uses a LiteLLM API key and configured search tools instead of separate search-provider credentials.
 
 ### Fixed
 
@@ -442,7 +445,6 @@
 - Added `computer.zoom()` and window-local `zoom()` in JavaScript and Python Eval, with native-detail region captures that preserve full-screenshot click coordinates.
 - Added window menus, combined `observe()`, native application discovery/launch, live display handles, bounded input holds, human-approved task control, and macOS Space helpers in both Eval languages.
 - RPC `open_session` and `switch_session` accept an optional `provider`/`modelId` pair that binds the session to that model instead of its saved one, as `--model` does at startup; `RpcClient.openSession()`/`switchSession()` and the Python client's `open_session()`/`switch_session()` take it too ([#13689](https://github.com/can1357/oh-my-pi/pull/13689) by [@alphastorm](https://github.com/alphastorm))
-- Added the `web/litellm` search engine, which uses a LiteLLM API key and configured search tools instead of separate search-provider credentials.
 - Added `compat.statefulResponses` to `models.yml`, so a provider or model can opt into or out of stored Responses chaining without the process-wide `PI_OPENAI_STATEFUL` ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
 - Added the `app.stt.pushToTalk` keybinding, defaulting to `Space`, so push-to-talk can be remapped or disabled independently from speech-to-text and `app.stt.toggle` ([#6592](https://github.com/can1357/oh-my-pi/pull/6592) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added an `expandThinkingBlocks` setting that keeps finished thinking blocks expanded in Tern instead of collapsing them at turn end ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))

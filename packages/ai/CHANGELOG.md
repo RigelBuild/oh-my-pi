@@ -2,30 +2,30 @@
 
 ## [Unreleased]
 
+## [18.9.2-rigel.1] - 2026-10-15
+
 ### Breaking Changes
 
 - `startAuthGateway` takes an `authorize(req)` function in place of `bearerTokens`. It returns the caller's identity (`{ kind: "agent", agentAccountId }` or the enroll caller) or `null` to answer 401; a throw answers 503. Any result that is not an identity with a non-empty id, or an admission with no `Authorization: Bearer` token, also answers 401. Use `bearerTokenAuthorizer(tokens)` to keep the shared-token behavior.
 - `createAuthGatewayRouter(...).route` takes the admitted agent caller as a required third argument. Pass `SHARED_TOKEN_CALLER` for a single-tenant transport.
 - `CallerIdentity` is a union of `AgentCaller` (`kind: "agent"`) and `EnrollCaller` (`kind: "enroll"`). An agent result without `kind: "agent"` answers 401.
 
-### Fixed
-
-- Responses function tools now accept null optional fields from compatible gateways ([RIG-4236](https://linear.app/rigelbuild/issue/RIG-4236)).
-- Exhausted replay-safe empty completions now return an error instead of a successful empty stop ([RIG-4236](https://linear.app/rigelbuild/issue/RIG-4236)).
-- An auth broker started with no bearer tokens now serves credential routes only on a loopback bind (`127.0.0.0/8`, `::1`, `localhost`); on any other bind every route except `/v1/healthz` returns 401.
-
 ### Added
 
 - Added opt-in auth-broker Prometheus usage and subscription metrics with scrape-scoped tokens.
 - Added the auth-gateway route option `candidateFailover`. When set, a chat request whose failure before first output is eligible for failover (for example a transport error, 5xx, or rate limit, but not a 400) is retried on the next candidate model when one is available. An attempt budget applies only when a follower exists. The request deadline stops new attempts and aborts a credential setup, but never cuts a started stream.
-
 - Compass credential-pool requests now carry the triggering agent token in an async scope. Writes without a token wait for a scoped poll; revoked-token writes park for a later poll and expose `hasPendingWrites()`.
-
 - Added `CompassAuthCredentialStore` for versioned credential-pool reads and compare-and-swap updates through the Compass gateway. Requests carry the triggering agent's token so the gateway can confine operations to that agent's pool, and list the optional fields they clear.
 - Added `resolveStorage(caller)` to the auth-gateway options, which serves each admitted caller from its tenant's credential pool (keyed on the optional `CallerIdentity.ownerUserId`, else `agentAccountId`); a throw answers 503. Retained provider session state and the session id providers see are kept per caller.
 - Added optional `routeScope(req, run)` to keep an async request context active through auth-gateway storage resolution and streamed credential refresh.
 - Added the provider-enrollment routes `GET /internal/enroll/providers`, `POST /internal/enroll/authorize-url` and `POST /internal/enroll/exchange`. They build the authorize URL and exchange the code statelessly from the server's state and PKCE material. `withEnrollToken(token, authorize)` admits a server enroll token as the enroll caller, which reaches only these routes; agents get 401 there, and the enroll caller gets 401 on every other authenticated route. Enroll responses carry no CORS grant.
 - Added auth-gateway primitives to hold candidate streams before meaningful output, enforce attempt budgets, and send SSE keepalives while held responses resolve.
+
+### Fixed
+
+- Responses function tools now accept null optional fields from compatible gateways ([RIG-4236](https://linear.app/rigelbuild/issue/RIG-4236)).
+- Exhausted replay-safe empty completions now return an error instead of a successful empty stop ([RIG-4236](https://linear.app/rigelbuild/issue/RIG-4236)).
+- An auth broker started with no bearer tokens now serves credential routes only on a loopback bind (`127.0.0.0/8`, `::1`, `localhost`); on any other bind every route except `/v1/healthz` returns 401.
 
 ## [18.9.2] - 2026-10-11
 
