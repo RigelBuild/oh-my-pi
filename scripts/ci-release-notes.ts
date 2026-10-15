@@ -31,6 +31,7 @@
 
 import { $, Glob } from "bun";
 import { compareVersions } from "../packages/utils/src/version";
+import { parseTrackingVersion } from "./release-tag";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const REPO = process.env.OMP_REPO ?? process.env.GITHUB_REPOSITORY ?? "can1357/oh-my-pi";
@@ -48,25 +49,23 @@ export interface ChangelogVersionSpan {
 }
 
 /**
- * Locate every `## [X.Y.Z]` heading in a changelog and compute the line span
- * up to (but not including) the next `## [` heading. `## [Unreleased]` and
- * other non-semver `## [...]` headings are ignored, but they still act as
- * span boundaries for the preceding version.
+ * Locate every `## [X.Y.Z]` or `## [X.Y.Z-rigel.N]` heading and compute its
+ * span up to the next `## [` heading. Other headings still end the prior span.
  */
 export function enumerateChangelogVersions(content: string): ChangelogVersionSpan[] {
 	const lines = content.split("\n");
 	const spans: ChangelogVersionSpan[] = [];
-	// Indexes of *any* `## [` heading (including Unreleased) so a version's
-	// span ends at the next heading of any kind.
 	const headingIdx: number[] = [];
 	for (let i = 0; i < lines.length; i++) {
 		if (lines[i].startsWith("## [")) headingIdx.push(i);
 	}
 	for (const idx of headingIdx) {
-		const m = lines[idx].match(/^## \[(\d+\.\d+\.\d+)\]/);
-		if (!m) continue;
+		const match = lines[idx].match(/^## \[(\d+\.\d+\.\d+(?:-[^\]]+)?)\]/);
+		if (!match) continue;
+		const version = match[1];
+		if (!/^\d+\.\d+\.\d+$/.test(version) && !parseTrackingVersion(version)) continue;
 		const nextIdx = headingIdx.find(j => j > idx) ?? lines.length;
-		spans.push({ version: m[1], start: idx, end: nextIdx });
+		spans.push({ version, start: idx, end: nextIdx });
 	}
 	return spans;
 }
@@ -174,20 +173,40 @@ async function loadPackageName(pkgDir: string): Promise<string> {
 	}
 }
 
+interface PublishedRelease {
+	tagName?: unknown;
+	isDraft?: unknown;
+	isPrerelease?: unknown;
+}
+
+/** Select the latest published release below the target, including rigel releases for rigel targets. */
+export function selectPublishedFloorTag(targetVersion: string, releases: readonly PublishedRelease[]): string | null {
+	const trackingTarget = parseTrackingVersion(targetVersion) !== null;
+	const candidates = releases
+		.filter(release => release.isDraft !== true)
+		.map(release => ({
+			release,
+			tag: typeof release.tagName === "string" ? release.tagName : "",
+		}))
+		.filter(({ release, tag }) => {
+			if (!tag.startsWith("v")) return false;
+			const version = tag.slice(1);
+			if (trackingTarget && parseTrackingVersion(version)) return compareVersions(version, targetVersion) < 0;
+			return (
+				release.isPrerelease !== true &&
+				/^\d+\.\d+\.\d+$/.test(version) &&
+				compareVersions(version, targetVersion) < 0
+			);
+		})
+		.map(({ tag }) => tag)
+		.sort((a, b) => compareVersions(b, a));
+	return candidates[0]?.replace(/^v/, "") ?? null;
+}
+
 /**
- * Resolve the highest published, non-prerelease, non-draft semver tag strictly
- * below `targetVersion` via `gh release list`.
- *
- * Failure semantics:
- *   - `OMP_RELEASE_NOTES_FLOOR` set → honored verbatim (`""` forces null).
- *   - `gh` succeeded, no candidate < target → `null` (legitimate first-ever
- *     publish; legacy single-version output is correct).
- *   - `gh` itself failed (missing binary, missing `GH_TOKEN` in Actions,
- *     network/auth error) → throws. Letting this degrade to single-version
- *     output silently re-strands silent-tag entries (#2596 review); the CI
- *     step must die loudly so the release is rebuilt with the token wired.
- *     Local runs without `gh` should set `OMP_RELEASE_NOTES_FLOOR=` to opt
- *     into legacy mode explicitly.
+ * Resolve the release-notes floor via `gh release list`.
+ * `OMP_RELEASE_NOTES_FLOOR` overrides (`""` forces null). No candidate → null (first publish).
+ * A `gh` failure throws: degrading to single-version notes would silently drop entries.
  */
 async function resolvePublishedFloorTag(targetVersion: string): Promise<string | null> {
 	const override = process.env.OMP_RELEASE_NOTES_FLOOR;
@@ -195,10 +214,9 @@ async function resolvePublishedFloorTag(targetVersion: string): Promise<string |
 		const stripped = override.replace(/^v/, "").trim();
 		return stripped.length === 0 ? null : stripped;
 	}
-	const res =
-		await $`gh release list --repo ${REPO} --limit 200 --exclude-drafts --exclude-pre-releases --json tagName,isDraft,isPrerelease`
-			.quiet()
-			.nothrow();
+	const res = await $`gh release list --repo ${REPO} --limit 200 --json tagName,isDraft,isPrerelease`
+		.quiet()
+		.nothrow();
 	if (res.exitCode !== 0) {
 		const stderr = res.stderr.toString().trim();
 		throw new Error(
@@ -213,17 +231,8 @@ async function resolvePublishedFloorTag(targetVersion: string): Promise<string |
 	} catch (err) {
 		throw new Error(`gh release list returned non-JSON output: ${(err as Error).message}`);
 	}
-	if (!Array.isArray(raw)) {
-		throw new Error(`gh release list returned a non-array payload: ${typeof raw}`);
-	}
-	const candidates = (raw as Array<{ tagName?: unknown; isDraft?: unknown; isPrerelease?: unknown }>)
-		.filter(t => t.isDraft !== true && t.isPrerelease !== true)
-		.map(t => (typeof t.tagName === "string" ? t.tagName : ""))
-		.filter(tag => !tag.includes("-canary."))
-		.filter(tag => /^v\d+\.\d+\.\d+$/.test(tag))
-		.filter(tag => compareVersions(tag, targetVersion) < 0)
-		.sort((a, b) => compareVersions(b, a));
-	return candidates[0]?.replace(/^v/, "") ?? null;
+	if (!Array.isArray(raw)) throw new Error(`gh release list returned a non-array payload: ${typeof raw}`);
+	return selectPublishedFloorTag(targetVersion, raw as PublishedRelease[]);
 }
 
 async function main(): Promise<void> {

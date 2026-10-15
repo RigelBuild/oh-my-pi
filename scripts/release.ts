@@ -24,6 +24,21 @@ export function validateExplicitVersion(version: string): string | null {
 	return /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(normalized) ? normalized : null;
 }
 
+export function releasePlan(version: string): {
+	tracking: boolean;
+	tagAndPush: boolean;
+	writeRigelVersion: boolean;
+	requireMain: boolean;
+} {
+	const tracking = parseTrackingVersion(version) !== null;
+	return {
+		tracking,
+		tagAndPush: !tracking,
+		writeRigelVersion: tracking,
+		requireMain: !tracking,
+	};
+}
+
 export function checkExpectedTrackingVersion(
 	version: string,
 	tags: readonly string[],
@@ -354,12 +369,13 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		}
 		versionOrBump = normalized;
 	}
+	const plan = releasePlan(versionOrBump);
 	const trackingVersion = parseTrackingVersion(versionOrBump);
 
 	// 1. Pre-flight checks
 	console.log("Pre-flight checks...");
 
-	if (!trackingVersion) {
+	if (plan.requireMain) {
 		const branch = await git(["branch", "--show-current"]).text();
 		if (branch.trim() !== "main") {
 			console.error(`Error: Must be on main branch (currently on '${branch.trim()}')`);
@@ -376,7 +392,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log("  Working directory clean");
 
-	if (trackingVersion) {
+	if (plan.tracking) {
 		await git(["fetch", "origin", "rigel-release", "--tags"]).quiet();
 		const basedOnTrackingBranch = await git(["merge-base", "--is-ancestor", "origin/rigel-release", "HEAD"])
 			.quiet()
@@ -428,7 +444,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		}
 	}
 
-	if (trackingVersion) await Bun.write(".github/rigel-version", `${version}\n`);
+	if (plan.writeRigelVersion) await Bun.write(".github/rigel-version", `${version}\n`);
 
 	// 2. Update package versions
 	console.log(`Updating package versions to ${version}…`);
@@ -541,7 +557,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	await git(["commit", "-m", `chore: bump version to ${version}`]);
 	console.log();
 
-	if (trackingVersion) {
+	if (!plan.tagAndPush) {
 		console.log(`Tracking release prepared in commit chore: bump version to ${version}.`);
 		console.log(`Open a PR to rigel-release; merging it mints v${version}.`);
 		return;
