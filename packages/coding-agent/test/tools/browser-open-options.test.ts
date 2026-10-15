@@ -102,7 +102,9 @@ describe("browser open options CDP helpers", () => {
 	) {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-download-test-"));
 		const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-download-test-"));
-		tempDirs.push(directory, elsewhere);
+		const tabId = crypto.randomUUID();
+		const stagingDirectory = path.join(os.tmpdir(), `omp-downloads-${tabId}`);
+		tempDirs.push(directory, elsewhere, stagingDirectory);
 		const listeners = new Map<string, (event: unknown) => void>();
 		const session = {
 			on: (event: string, listener: (event: unknown) => void) => listeners.set(event, listener),
@@ -112,7 +114,7 @@ describe("browser open options CDP helpers", () => {
 		};
 		const browser = { target: () => ({ createCDPSession: async () => session }) } as unknown as Browser;
 		const page = { frames: () => [{ _id: "frame" }], browserContext: () => ({}) } as unknown as Page;
-		const downloads = new DownloadManager(browser, page, "tab", { perTab });
+		const downloads = new DownloadManager(browser, page, tabId, { perTab });
 		const complete = async (
 			guid: unknown,
 			filePath: string | undefined,
@@ -126,7 +128,7 @@ describe("browser open options CDP helpers", () => {
 			listeners.get("Browser.downloadProgress")!({ guid, state: "completed", receivedBytes: 5, filePath });
 			return (await waiting).path;
 		};
-		return { directory, elsewhere, downloads, complete };
+		return { directory, elsewhere, downloads, complete, stagingDirectory };
 	}
 
 	it("moves only a file saved under its download GUID, under the last segment of the suggested name", async () => {
@@ -238,6 +240,25 @@ describe("browser open options CDP helpers", () => {
 		}
 		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("bytes");
 		expect(await fs.readdir(directory)).toEqual(["report.txt"]);
+	});
+
+	it("stages per-tab downloads outside the requested downloads directory", async () => {
+		const behaviors: unknown[] = [];
+		const { directory, complete, stagingDirectory } = await fakeDownloads(async (method, params) => {
+			if (method === "Browser.setDownloadBehavior") behaviors.push(params);
+		});
+		const guid = crypto.randomUUID();
+		const saved = path.join(stagingDirectory, guid);
+		await fs.mkdir(stagingDirectory, { recursive: true });
+		await Bun.write(saved, "bytes");
+
+		expect(await complete(guid, saved, "report.txt")).toBe(path.join(directory, "report.txt"));
+		expect(behaviors.length).toBeGreaterThan(0);
+		for (const params of behaviors) {
+			expect(params).toMatchObject({ behavior: "allowAndName", downloadPath: stagingDirectory });
+		}
+		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("bytes");
+		expect(await Bun.file(saved).exists()).toBe(false);
 	});
 
 	it("keeps real file names and leaves files in place in a browser the user drives", async () => {

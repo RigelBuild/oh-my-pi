@@ -72,17 +72,19 @@ export class DownloadManager {
 	}
 
 	/**
-	 * Point the browser's one download folder at this tab's folder. Per tab, files are saved under their download GUID
-	 * so tabs never overwrite each other's, and each tab moves its own into its folder under the suggested name.
+	 * Point the browser's one download folder at this tab's private staging folder. Chromium writes intermediates
+	 * there, so a download another tab started never shows up in this tab's requested folder.
 	 */
 	async enable(directory?: string): Promise<void> {
 		const resolved = path.resolve(directory ?? this.#defaultDirectory);
+		const downloadDirectory = this.#perTab ? this.#defaultDirectory : resolved;
 		await fs.mkdir(resolved, { recursive: true });
+		if (downloadDirectory !== resolved) await fs.mkdir(downloadDirectory, { recursive: true });
 		if (!this.#session) await this.#attach();
 		const context = this.#page.browserContext() as { id?: string };
 		await this.#session!.send("Browser.setDownloadBehavior", {
 			behavior: this.#perTab ? "allowAndName" : "allow",
-			downloadPath: resolved,
+			downloadPath: downloadDirectory,
 			eventsEnabled: true,
 			...(context.id ? { browserContextId: context.id } : {}),
 		});
@@ -174,7 +176,8 @@ export class DownloadManager {
 
 	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
 		const directory = this.#directory ?? this.#defaultDirectory;
-		const source = filePath ?? path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename);
+		const downloadDirectory = this.#perTab ? this.#defaultDirectory : directory;
+		const source = filePath ?? path.join(downloadDirectory, this.#perTab ? pending.guid : pending.suggestedFilename);
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
 				await fs.stat(source);
