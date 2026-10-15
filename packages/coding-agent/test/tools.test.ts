@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,6 +19,7 @@ import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
+import { openArchiveCached } from "../src/tools/read-archive";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 
 import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
@@ -1791,6 +1792,33 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
 			expect(output).toContain("bravo.txt");
 			expect(output).not.toContain("alpha.txt");
+		});
+		it("does not cache an archive whose ctime is too recent to trust", async () => {
+			const archivePath = path.join(testDir, "racy.zip");
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			const { ctimeMs } = fs.statSync(archivePath);
+			const clock = spyOn(Date, "now").mockReturnValue(ctimeMs + 1_000);
+			try {
+				const first = await openArchiveCached(archivePath);
+				expect(first.listDirectory().map(entry => entry.name)).toEqual(["alpha.txt"]);
+				// Same bytes, untouched file: a cached reader would come back by identity.
+				expect(await openArchiveCached(archivePath)).not.toBe(first);
+			} finally {
+				clock.mockRestore();
+			}
+		});
+
+		it("reuses the cached reader once the archive's ctime is old enough", async () => {
+			const archivePath = path.join(testDir, "settled.zip");
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			const { ctimeMs } = fs.statSync(archivePath);
+			const clock = spyOn(Date, "now").mockReturnValue(ctimeMs + 60_000);
+			try {
+				const first = await openArchiveCached(archivePath);
+				expect(await openArchiveCached(archivePath)).toBe(first);
+			} finally {
+				clock.mockRestore();
+			}
 		});
 
 		it("should list zip archives without inflating member payloads", async () => {

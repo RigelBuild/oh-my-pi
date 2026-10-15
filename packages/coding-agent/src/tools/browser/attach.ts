@@ -292,32 +292,66 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 	return status !== null && status >= 200 && status < 300;
 }
 
-/**
- * Resolve a distro wrapper script to its exec target (e.g.
- * /opt/google/chrome/google-chrome is bash ending in
- * `exec -a "$0" "$HERE/chrome" "$@"` with $HERE = dirname of the wrapper).
- * Scans line-by-line for the final `exec ... $HERE/...` command so helper
- * invocations are never mistaken for the application. Returns null for
- * binaries and wrappers without an exec command. Size-guarded so real
- * binaries are never read into memory.
- */
+/** Follow at most four unambiguous literal execs; never treat a generic dispatcher as Chromium. */
 async function resolveWrapperTarget(wrapperPath: string): Promise<string | null> {
 	if (process.platform !== "linux") return null;
-	const stat = await fs.stat(wrapperPath).catch(() => null);
-	if (!stat || !stat.isFile() || stat.size > 65_536) return null;
-	const content = await Bun.file(wrapperPath)
-		.text()
-		.catch(() => null);
-	if (!content || content.charCodeAt(0) === 0x7f) return null;
-	let target: string | null = null;
-	const execRegex = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
-	for (const line of content.split("\n")) {
-		const match = execRegex.exec(line);
-		if (match?.[1]) target = match[1];
+	const prefix = String.raw`^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?`;
+	const relativeExec = new RegExp(
+		`${prefix}(?:"\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)"|\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+))(?=\\s|$)`,
+	);
+	const absoluteExec = new RegExp(`${prefix}(?:(["'])(/[^"'\x60\\r\\n]+)\\1|(/[^\\s"'\x60;$}>&|<]+))(?=\\s|$)`);
+	// One leading redirection: optional fd/{var}/&, operator, then a word or process substitution.
+	const leadingRedirect = /^(?:\d+|\{\w+\}|&)?(?:<>|>>|>\||[<>]&?)\s*(?:[<>]\([^)]*\)|"[^"]*"|'[^']*'|[^\s"'<>]+)\s*/;
+	let current = wrapperPath;
+	const seen = new Set<string>();
+	for (let depth = 0; depth <= 4; depth++) {
+		const resolved = await fs.realpath(current).catch(() => null);
+		if (!resolved || seen.has(resolved)) return null;
+		seen.add(resolved);
+		const stat = await fs.stat(resolved).catch(() => null);
+		if (!stat?.isFile()) return null;
+		if (stat.size > 65_536) {
+			return depth > 0 &&
+				(CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) || path.basename(resolved) === "vivaldi-bin")
+				? resolved
+				: null;
+		}
+		const content = await Bun.file(resolved)
+			.text()
+			.catch(() => null);
+		if (!content) return null;
+		if (content.charCodeAt(0) === 0x7f) {
+			return depth > 0 &&
+				(CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) || path.basename(resolved) === "vivaldi-bin")
+				? resolved
+				: null;
+		}
+		if (content.includes("<<")) return null;
+		if (/\b(?:then|else|do)\s+exec\s/.test(content)) return null;
+		if (depth === 4) return null;
+		let target: string | null = null;
+		for (const rawLine of content.split("\n")) {
+			if (!/^\s*exec\s/.test(rawLine)) continue;
+			// `exec < /dev/null` only rewires fds (google-chrome does this); drop leading redirections
+			// so `exec 2>/dev/null "$HERE/chrome"` still parses and fd-only execs are skipped.
+			let rest = rawLine.replace(/^\s*exec\s+/, "");
+			for (let m = leadingRedirect.exec(rest); m?.[0]; m = leadingRedirect.exec(rest))
+				rest = rest.slice(m[0].length);
+			if (!rest.trim()) continue;
+			const line = `exec ${rest}`;
+			const relative = relativeExec.exec(line);
+			const absolute = absoluteExec.exec(line);
+			const next =
+				relative?.[1] || relative?.[2]
+					? path.join(path.dirname(resolved), relative[1] ?? relative[2]!)
+					: (absolute?.[2] ?? absolute?.[3]);
+			if (!next || target) return null;
+			target = next;
+		}
+		if (!target || target.includes("$") || target.includes("\\")) return null;
+		current = target;
 	}
-	if (!target) return null;
-	const joined = path.join(path.dirname(wrapperPath), target);
-	return fs.realpath(joined).catch(() => joined);
+	return null;
 }
 
 /**
