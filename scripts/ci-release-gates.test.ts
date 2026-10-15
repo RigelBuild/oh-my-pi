@@ -52,14 +52,14 @@ const statusFunctions = new Map(
 	]),
 );
 
-function gate(job: string, repository: string, results: Record<string, string>): boolean {
+function gate(job: string, repository: string, results: Record<string, string>, channel = "stable"): boolean {
 	const source = jobs[job]?.if;
 	if (!source) throw new Error(`${job} has no if:`);
 	const expr = source.replace(/^\$\{\{([\s\S]*)\}\}$/, "$1");
 	const needs: Record<string, data.ExpressionData> = {
 		release_metadata: dict({
 			result: new data.StringData("success"),
-			outputs: dict({ "is-release": new data.StringData("true"), channel: new data.StringData("stable") }),
+			outputs: dict({ "is-release": new data.StringData("true"), channel: new data.StringData(channel) }),
 		}),
 	};
 	for (const name of jobs[job]?.needs ?? []) {
@@ -76,15 +76,15 @@ function gate(job: string, repository: string, results: Record<string, string>):
 }
 
 /** Truth table: fails one job, leaves the rest successful (some combos unreachable), and derives release_build's result. */
-function release(repository: string, failing?: string): Record<string, boolean | string> {
+function release(repository: string, failing?: string, channel = "stable"): Record<string, boolean | string> {
 	const results: Record<string, string> = {};
 	if (failing && failing !== "release_build") results[failing] = "failure";
-	const buildRuns = gate("release_build", repository, results);
+	const buildRuns = gate("release_build", repository, results, channel);
 	results.release_build = failing === "release_build" ? "failure" : buildRuns ? "success" : "skipped";
 	return {
 		build: results.release_build,
-		npm: gate("release_npm", repository, results),
-		brew: gate("release_brew", repository, results),
+		npm: gate("release_npm", repository, results, channel),
+		brew: gate("release_brew", repository, results, channel),
 	};
 }
 
@@ -116,4 +116,12 @@ describe("release gates upstream", () => {
 			expect(release(UPSTREAM, failing)).toMatchObject({ npm: false, brew: false });
 		});
 	}
+
+	test("a rigel release skips build.stencil.so and brew but publishes npm", () => {
+		expect(release(UPSTREAM, undefined, "rigel")).toEqual({ build: "skipped", npm: true, brew: false });
+	});
+
+	test("a failed release_gate blocks a rigel release's npm", () => {
+		expect(release(UPSTREAM, "release_gate", "rigel").npm).toBe(false);
+	});
 });
