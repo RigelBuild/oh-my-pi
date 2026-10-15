@@ -116,12 +116,26 @@ describe("release gates upstream", () => {
 			expect(release(UPSTREAM, failing)).toMatchObject({ npm: false, brew: false });
 		});
 	}
+});
 
-	test("a rigel release skips build.stencil.so and brew but publishes npm", () => {
-		expect(release(UPSTREAM, undefined, "rigel")).toEqual({ build: "skipped", npm: true, brew: false });
-	});
+describe("release gates by repository and channel", () => {
+	const cases = [
+		[FORK, "stable", { build: "skipped", npm: true, brew: false }],
+		[FORK, "canary", { build: "skipped", npm: true, brew: false }],
+		[FORK, "rigel", { build: "skipped", npm: true, brew: false }],
+		[UPSTREAM, "stable", { build: "success", npm: true, brew: true }],
+		[UPSTREAM, "canary", { build: "success", npm: true, brew: false }],
+		[UPSTREAM, "rigel", { build: "skipped", npm: true, brew: false }],
+	] as const;
+	for (const [repository, channel, expected] of cases) {
+		test(`${repository} ${channel}`, () => {
+			expect(release(repository, undefined, channel)).toEqual(expected);
+		});
+	}
 
-	test("a failed release_gate blocks a rigel release's npm", () => {
-		expect(release(UPSTREAM, "release_gate", "rigel").npm).toBe(false);
-	});
+	for (const failing of ["release_gate", "release_github", "release_native_leaves"]) {
+		test(`a failed ${failing} blocks a rigel release's npm`, () => {
+			expect(release(UPSTREAM, failing, "rigel").npm).toBe(false);
+		});
+	}
 });
