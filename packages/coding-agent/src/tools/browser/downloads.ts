@@ -48,8 +48,10 @@ export class DownloadManager {
 	readonly #browser: Browser;
 	readonly #page: Page;
 	readonly #defaultDirectory: string;
+	readonly #tabId: string;
 	readonly #perTab: boolean;
 	#directory?: string;
+	#stagingDirectory?: string;
 	#arming?: Promise<void>;
 	#session?: CDPSession;
 	readonly #pending = new Map<string, PendingDownload>();
@@ -67,19 +69,31 @@ export class DownloadManager {
 	constructor(browser: Browser, page: Page, tabId: string, options: { perTab: boolean }) {
 		this.#browser = browser;
 		this.#page = page;
+		this.#tabId = tabId;
 		this.#defaultDirectory = path.join(os.tmpdir(), `omp-downloads-${tabId}`);
 		this.#perTab = options.perTab;
 	}
 
 	/**
-	 * Point the browser's one download folder at this tab's private staging folder. Chromium writes intermediates
-	 * there, so a download another tab started never shows up in this tab's requested folder.
+	 * Chromium shares its download path across tabs, so intermediates stay in a private directory under this tab's
+	 * requested folder until they can be moved into its root.
 	 */
 	async enable(directory?: string): Promise<void> {
 		const resolved = path.resolve(directory ?? this.#defaultDirectory);
-		const downloadDirectory = this.#perTab ? this.#defaultDirectory : resolved;
 		await fs.mkdir(resolved, { recursive: true });
-		if (downloadDirectory !== resolved) await fs.mkdir(downloadDirectory, { recursive: true });
+		let downloadDirectory = resolved;
+		if (this.#perTab) {
+			const stagingDirectory = path.join(resolved, `.omp-downloads-staging-${this.#tabId}`);
+			await fs.mkdir(stagingDirectory, { mode: 0o700 }).catch(error => {
+				if (!hasFsCode(error, "EEXIST")) throw error;
+			});
+			if (!(await fs.lstat(stagingDirectory)).isDirectory()) {
+				throw new ToolError(`Download staging path is not a directory: ${stagingDirectory}`);
+			}
+			await fs.chmod(stagingDirectory, 0o700);
+			this.#stagingDirectory = stagingDirectory;
+			downloadDirectory = stagingDirectory;
+		}
 		if (!this.#session) await this.#attach();
 		const context = this.#page.browserContext() as { id?: string };
 		await this.#session!.send("Browser.setDownloadBehavior", {
@@ -134,18 +148,23 @@ export class DownloadManager {
 		return this.#completed.map(download => ({ ...download }));
 	}
 
-	/** Detach event listeners and reject outstanding waits. */
+	/** Detach event listeners, reject outstanding waits, and remove this tab's staging directory once it is empty. */
 	async close(): Promise<void> {
 		const session = this.#session;
-		if (!session) return;
-		if (this.#willBegin) session.off("Browser.downloadWillBegin", this.#willBegin);
-		if (this.#progress) session.off("Browser.downloadProgress", this.#progress);
-		for (const waiter of this.#waiters.splice(0)) {
-			if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-			waiter.reject(new ToolError("Tab closed while waiting for a download"));
+		if (session) {
+			if (this.#willBegin) session.off("Browser.downloadWillBegin", this.#willBegin);
+			if (this.#progress) session.off("Browser.downloadProgress", this.#progress);
+			for (const waiter of this.#waiters.splice(0)) {
+				if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+				waiter.reject(new ToolError("Tab closed while waiting for a download"));
+			}
+			this.#session = undefined;
+			await session.detach().catch(() => undefined);
 		}
-		this.#session = undefined;
-		await session.detach().catch(() => undefined);
+		const stagingDirectory = this.#stagingDirectory;
+		this.#stagingDirectory = undefined;
+		// Another tab's in-flight download may still be staged here, so never delete a non-empty directory.
+		if (stagingDirectory) await fs.rmdir(stagingDirectory).catch(() => undefined);
 	}
 
 	async #attach(): Promise<void> {
@@ -176,15 +195,25 @@ export class DownloadManager {
 
 	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
 		const directory = this.#directory ?? this.#defaultDirectory;
-		const downloadDirectory = this.#perTab ? this.#defaultDirectory : directory;
+		const downloadDirectory = this.#perTab ? (this.#stagingDirectory ?? this.#defaultDirectory) : directory;
 		const source = filePath ?? path.join(downloadDirectory, this.#perTab ? pending.guid : pending.suggestedFilename);
+		let sourceFound = false;
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
 				await fs.stat(source);
+				sourceFound = true;
 				break;
 			} catch {
 				await Bun.sleep(10);
 			}
+		}
+		if (this.#perTab && filePath === undefined && !sourceFound) {
+			this.#rejectNext(
+				new ToolError(
+					`Download failed: ${pending.url}: completed file was not found in this tab's staging directory`,
+				),
+			);
+			return;
 		}
 		const name = typeof pending.suggestedFilename === "string" ? path.basename(pending.suggestedFilename) : "";
 		const target = path.join(directory, name);
