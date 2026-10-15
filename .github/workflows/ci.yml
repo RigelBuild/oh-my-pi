@@ -78,8 +78,7 @@ jobs:
       outputs:
          is-release: ${{ steps.detect.outputs.is-release }}
          release-tag: ${{ steps.detect.outputs.release-tag }}
-         # Canary tags publish to npm's canary dist-tag (derived script-side), mark
-         # the GitHub release prerelease, and skip the stable-only brew tap.
+         # Canary and rigel releases are prereleases; only stable releases update the brew tap.
          channel: ${{ steps.detect.outputs.channel }}
       steps:
          # Release-branch runs fetch tags so `git tag --points-at HEAD` sees the new `v*`.
@@ -112,6 +111,8 @@ jobs:
               fi
               if [[ "$release_tag" == *-canary.* ]]; then
                 channel=canary
+              elif [[ "$release_tag" == *-rigel.* ]]; then
+                channel=rigel
               fi
               {
                 echo "is-release=$is_release"
@@ -584,7 +585,7 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/release-tag.test.ts scripts/ci-release-gates.test.ts
+              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/release-tag.test.ts scripts/ci-release-gates.test.ts scripts/ci-release-publish.test.ts scripts/ci-release-notes.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
@@ -1096,7 +1097,7 @@ jobs:
            uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
            with:
               tag_name: ${{ needs.release_metadata.outputs.release-tag }}
-              prerelease: ${{ needs.release_metadata.outputs.channel == 'canary' }}
+              prerelease: ${{ needs.release_metadata.outputs.channel == 'canary' || needs.release_metadata.outputs.channel == 'rigel' }}
               files: |
                  packages/coding-agent/binaries/omp-*
                  packages/browser-relay/dist/omp-browser-relay-extension.zip
@@ -1113,8 +1114,9 @@ jobs:
    # clients never read npm.
    release_build:
       name: Publish to build.stencil.so
-      # build.stencil.so trusts only upstream's OIDC subject; the fork skips it, and so release_brew.
-      if: ${{ github.repository == 'can1357/oh-my-pi' && needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+      # build.stencil.so trusts only upstream's OIDC subject and has no rigel channel; those skip it, and so release_brew.
+      if: ${{ github.repository == 'can1357/oh-my-pi' && needs.release_metadata.outputs.channel != 'rigel' &&
+         needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
@@ -1145,7 +1147,7 @@ jobs:
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
          (needs.release_build.result == 'success' ||
-          (github.repository != 'can1357/oh-my-pi' && needs.release_build.result == 'skipped' &&
+          ((github.repository != 'can1357/oh-my-pi' || needs.release_metadata.outputs.channel == 'rigel') && needs.release_build.result == 'skipped' &&
            needs.release_gate.result == 'success' && needs.release_github.result == 'success')) &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}
@@ -1154,7 +1156,7 @@ jobs:
       # resolve them the moment the core version is live. release_build too:
       # binary updates install what build.stencil.so published (update-cli.ts),
       # so the build service must lead npm.
-      # The fork skips release_build, so it gates on release_gate/release_github directly.
+      # The fork and rigel releases skip release_build, so they gate on release_gate/release_github directly.
       needs: [release_metadata, release_gate, release_binary, release_smoke, release_github, release_build, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
@@ -1214,7 +1216,7 @@ jobs:
    release_brew:
       name: Update Homebrew tap
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_metadata.outputs.channel != 'canary' &&
+         needs.release_metadata.outputs.channel == 'stable' &&
          needs.release_build.result == 'success' }}
       needs: [release_metadata, release_build]
       runs-on: ubuntu-22.04

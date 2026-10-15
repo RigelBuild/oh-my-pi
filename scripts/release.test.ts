@@ -8,14 +8,22 @@ import {
 	applyPackageVersion,
 	bumpCanaryVersion,
 	bumpVersion,
+	checkExpectedTrackingVersion,
 	isTransientGhError,
 	latestReachableVersionTag,
+	finishRelease,
+	releasePlan,
 	resolveReleaseVersion,
 	runWithTransientRetry,
 	validateExplicitVersion,
 } from "./release";
 
 describe("validateExplicitVersion", () => {
+	test("accepts leading v prefix and normalizes stable versions", () => {
+		expect(validateExplicitVersion("v17.2.8")).toBe("17.2.8");
+		expect(validateExplicitVersion("V17.2.8")).toBe(null);
+	});
+
 	test("rejects malformed versions", () => {
 		expect(validateExplicitVersion("999.bad")).toBe(null);
 		expect(validateExplicitVersion("17")).toBe(null);
@@ -35,9 +43,11 @@ describe("validateExplicitVersion", () => {
 		expect(validateExplicitVersion("18.0.00")).toBe(null);
 	});
 
-	test("rejects prerelease suffixes (not supported by this release path)", () => {
-		// Prereleases would be published as npm `latest` because the downstream
-		// publish runs `npm publish` with no `--tag`.
+	test("accepts rigel tracking versions and rejects other prerelease suffixes", () => {
+		expect(validateExplicitVersion("v18.9.2-rigel.1")).toBe("18.9.2-rigel.1");
+		expect(validateExplicitVersion("18.9.2-rigel.0")).toBe(null);
+		expect(validateExplicitVersion("18.9.2-rigel.01")).toBe(null);
+		expect(validateExplicitVersion("18.9.2-canary.1")).toBe(null);
 		expect(validateExplicitVersion("17.2.8-rc.1")).toBe(null);
 		expect(validateExplicitVersion("v17.2.8-beta")).toBe(null);
 		expect(validateExplicitVersion("1.0.0-alpha")).toBe(null);
@@ -45,10 +55,74 @@ describe("validateExplicitVersion", () => {
 		expect(validateExplicitVersion("1.0.0-0.3.7")).toBe(null);
 		expect(validateExplicitVersion("1.0.0-x.7.z.92")).toBe(null);
 	});
+});
 
-	test("accepts leading v prefix and normalizes to the bare version", () => {
-		expect(validateExplicitVersion("v17.2.8")).toBe("17.2.8");
-		expect(validateExplicitVersion("V17.2.8")).toBe(null);
+describe("tracking release version checks", () => {
+	test("accepts the expected next number", () => {
+		expect(checkExpectedTrackingVersion("18.9.2-rigel.3", ["v18.9.2-rigel.1", "v18.9.2-rigel.2"])).toEqual({
+			expected: "18.9.2-rigel.3",
+			matches: true,
+		});
+	});
+
+	test("rejects a number other than the expected next number", () => {
+		expect(checkExpectedTrackingVersion("18.9.2-rigel.4", ["v18.9.2-rigel.1", "v18.9.2-rigel.2"])).toEqual({
+			expected: "18.9.2-rigel.3",
+			matches: false,
+		});
+	});
+
+	test("ignores tags for other base versions", () => {
+		expect(checkExpectedTrackingVersion("18.9.2-rigel.2", ["v18.9.1-rigel.99", "v18.9.2-rigel.1"])).toEqual({
+			expected: "18.9.2-rigel.2",
+			matches: true,
+		});
+	});
+});
+
+describe("release completion effects", () => {
+	test("tracking completion writes the version file and commits without tagging or watching", async () => {
+		const effects: string[] = [];
+		const result = await finishRelease("18.9.2-rigel.1", releasePlan("18.9.2-rigel.1"), {
+			async writeRigelVersion(contents) {
+				effects.push(`write:${contents}`);
+			},
+			async commit(message) {
+				effects.push(`commit:${message}`);
+			},
+			async tagAndPush(tag) {
+				effects.push(`tagAndPush:${tag}`);
+			},
+			async watch() {
+				effects.push("watch");
+				return true;
+			},
+		});
+
+		expect(result).toBe(null);
+		expect(effects).toEqual(["write:18.9.2-rigel.1\n", "commit:chore: bump version to 18.9.2-rigel.1"]);
+	});
+
+	test("stable completion commits, tags, pushes, and watches without writing rigel-version", async () => {
+		const effects: string[] = [];
+		const result = await finishRelease("18.9.2", releasePlan("18.9.2"), {
+			async writeRigelVersion(contents) {
+				effects.push(`write:${contents}`);
+			},
+			async commit(message) {
+				effects.push(`commit:${message}`);
+			},
+			async tagAndPush(tag) {
+				effects.push(`tagAndPush:${tag}`);
+			},
+			async watch() {
+				effects.push("watch");
+				return true;
+			},
+		});
+
+		expect(result).toBe(true);
+		expect(effects).toEqual(["commit:chore: bump version to 18.9.2", "tagAndPush:v18.9.2", "watch"]);
 	});
 });
 
