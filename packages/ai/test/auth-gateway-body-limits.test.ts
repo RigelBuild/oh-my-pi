@@ -355,7 +355,7 @@ describe("auth-gateway image multipart limits", () => {
 		}
 	});
 
-	it("accepts exactly 24 parts, with boundary-like bytes inside a value", async () => {
+	it("accepts exactly 24 parts with boundary-like bytes in a value and an epilogue", async () => {
 		const harness = await createHarness();
 		const boundary = "parts-boundary";
 		const parts = [
@@ -366,14 +366,43 @@ describe("auth-gateway image multipart limits", () => {
 			multipartField("noise", `--${boundary}X --${boundary}-- --${boundary} z`),
 			...Array.from({ length: 20 }, (_, index) => multipartField(`extra-${index}`, "x")),
 		];
+		// An epilogue after the close delimiter is ignored by formData(), so its opener must not count.
+		const body = new TextEncoder().encode(
+			`${new TextDecoder().decode(multipartBody(boundary, parts))}--${boundary}\r\nepilogue`,
+		);
 		try {
 			const response = await harness.route(
-				requestFor("/v1/images/edits", multipartBody(boundary, parts), {
+				requestFor("/v1/images/edits", body, {
 					headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
 				}),
 			);
 			expect(response.status).toBe(200);
 			expect(harness.upstreamCalls).toBe(1);
+		} finally {
+			harness.close();
+		}
+	});
+
+	it("counts parts that follow an early close delimiter", async () => {
+		const harness = await createHarness();
+		const boundary = "x-boundary";
+		const parts = [
+			multipartField("model", imageModel.id),
+			multipartField("prompt", "edit"),
+			multipartFile("image", "source.png"),
+			...Array.from({ length: 22 }, (_, index) => multipartField(`extra-${index}`, "x")),
+		];
+		// formData() keeps parsing past a mid-body `--boundary--`, so later openers are still parts.
+		const [first, ...rest] = parts;
+		const body = `--${boundary}\r\n${first}\r\n--${boundary}--\r\n${rest.map(part => `--${boundary}\r\n${part}\r\n`).join("")}--${boundary}--\r\n`;
+		try {
+			const response = await harness.route(
+				requestFor("/v1/images/edits", new TextEncoder().encode(body), {
+					headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+				}),
+			);
+			expect(response.status).toBe(400);
+			expect(harness.upstreamCalls).toBe(0);
 		} finally {
 			harness.close();
 		}

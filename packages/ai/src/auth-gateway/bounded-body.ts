@@ -38,7 +38,8 @@ export async function readBoundedRequestBody(
 				break;
 			}
 			if (value.byteLength > maxBytes - total) {
-				await reader.cancel();
+				// A failing cancel must not turn the 413 into a malformed-body 400.
+				await reader.cancel().catch(() => {});
 				throw new RequestBodyTooLargeError();
 			}
 			total += value.byteLength;
