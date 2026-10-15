@@ -18,6 +18,7 @@ import {
 	type CandidateFailoverOptions,
 	createAuthGatewayRouter,
 	type FailoverContext,
+	type GatewayUsageEvent,
 	SHARED_TOKEN_CALLER,
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
@@ -268,6 +269,7 @@ interface FailoverFixtureOptions {
 	readonly direct?: Readonly<Record<string, Model<Api>>>;
 	/** Replaces the chain's `next`; the default walks `candidates` in order. */
 	readonly next?: CandidateFailoverOptions["next"];
+	readonly onUsage?: AuthGatewayRouteOptions["onUsage"];
 }
 
 interface FailoverFixture {
@@ -316,6 +318,7 @@ async function startFailoverGateway(options: FailoverFixtureOptions): Promise<Fa
 			...(options.next && { next: options.next }),
 		},
 		...(options.fetch && { fetch: options.fetch }),
+		...(options.onUsage && { onUsage: options.onUsage }),
 	};
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
@@ -1121,6 +1124,50 @@ describe("auth-gateway candidate failover", () => {
 			await gateway.cleanup();
 		}
 	});
+
+	it.each([true, false])(
+		"reports each nonzero attempt's usage once under its own request id (stream=%p)",
+		async stream => {
+			const up = upstream({ [B_HOST]: () => googleAnswer("answer from B") });
+			const events: GatewayUsageEvent[] = [];
+			const gateway = await startFailoverGateway({
+				candidates: [a, b],
+				fetch: up.fetch,
+				onUsage: event => {
+					events.push(event);
+				},
+			});
+			const spent = reply(a, {
+				stopReason: "error",
+				errorMessage: "The model is overloaded.",
+				usage: {
+					input: 5,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 5,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			});
+			using _streams = scriptStreams({
+				[a.id]: options => handStream(a, options?.signal, [{ type: "error", reason: "error", error: spent }]),
+			});
+			try {
+				const response = await send(gateway.url, CHAT, stream);
+				expect(await response.text()).toContain("answer from B");
+				await settle();
+
+				const requestId = response.headers.get("x-request-id") ?? "";
+				expect(requestId).not.toBe("");
+				expect(events.map(event => [event.model, event.outcome, event.requestId])).toEqual([
+					[a.id, "error", `${requestId}:a1`],
+					[b.id, "ok", requestId],
+				]);
+			} finally {
+				await gateway.cleanup();
+			}
+		},
+	);
 
 	describe("maxRetryDelayMs", () => {
 		it.each([

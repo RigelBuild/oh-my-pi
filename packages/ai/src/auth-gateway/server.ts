@@ -31,7 +31,6 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AuthStorage } from "../auth-storage";
 import {
 	classifyGatewayError,
 	classifyUpstreamFailure,
@@ -649,6 +648,11 @@ function serveWithFailover(request: FailoverRequest, route: FailoverRoute): Prom
 	return response.promise;
 }
 
+// Only the answer keeps the bare request id; consumers dedupe on it, so a failed attempt's spend needs its own.
+function attemptUsageId(requestId: string, attempt: number, stopReason: string): string {
+	return gatewayUsageOutcome(stopReason) === "ok" ? requestId : `${requestId}:a${attempt}`;
+}
+
 async function runFailoverLoop(
 	request: FailoverRequest,
 	route: FailoverRoute,
@@ -866,7 +870,7 @@ async function runFailoverLoop(
 				}
 				if (message) {
 					recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
-						requestId,
+						requestId: attemptUsageId(requestId, attempt, message.stopReason),
 						outcome: gatewayUsageOutcome(message.stopReason),
 						at: message.timestamp || undefined,
 						account: account(),
@@ -891,7 +895,7 @@ async function runFailoverLoop(
 					.result()
 					.then(message =>
 						recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
-							requestId,
+							requestId: attemptUsageId(requestId, attempt, message.stopReason),
 							outcome: gatewayUsageOutcome(message.stopReason),
 							at: message.timestamp || undefined,
 							account: account(),
