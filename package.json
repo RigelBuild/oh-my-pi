@@ -3,13 +3,17 @@
 	"private": true,
 	"homepage": "https://omp.sh",
 	"license": "MIT",
-	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
 	"workspaces": {
 		"packages": [
 			"packages/*",
 			"python/robomp/web"
 		],
 		"catalog": {
+			"@actions/expressions": "^0.3.61",
 			"@babel/generator": "^7.29.7",
 			"@babel/parser": "^7.29.7",
 			"@babel/traverse": "^7.29.7",
@@ -172,7 +176,7 @@
 		"sherpa-onnx-node": "1.13.2"
 	},
 	"devDependencies": {
-		"@actions/expressions": "^0.3.61",
+		"@actions/expressions": "catalog:",
 		"@types/bun": "catalog:",
 		"@typescript/native-preview": "catalog:",
 		"lint-staged": "catalog:",

@@ -1145,7 +1145,7 @@ jobs:
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
          (needs.release_build.result == 'success' ||
-          (github.repository != 'can1357/oh-my-pi' && needs.release_build.result == 'skipped' &&
+          (github.repository == 'RigelBuild/oh-my-pi' && needs.release_build.result == 'skipped' &&
            needs.release_gate.result == 'success' && needs.release_github.result == 'success')) &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}

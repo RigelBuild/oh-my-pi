@@ -52,14 +52,22 @@ const statusFunctions = new Map(
 	]),
 );
 
-function gate(job: string, repository: string, results: Record<string, string>): boolean {
+interface Run {
+	isRelease?: boolean;
+	skipNpm?: boolean;
+}
+
+function gate(job: string, repository: string, results: Record<string, string>, run: Run = {}): boolean {
 	const source = jobs[job]?.if;
 	if (!source) throw new Error(`${job} has no if:`);
 	const expr = source.replace(/^\$\{\{([\s\S]*)\}\}$/, "$1");
 	const needs: Record<string, data.ExpressionData> = {
 		release_metadata: dict({
 			result: new data.StringData("success"),
-			outputs: dict({ "is-release": new data.StringData("true"), channel: new data.StringData("stable") }),
+			outputs: dict({
+				"is-release": new data.StringData(String(run.isRelease ?? true)),
+				channel: new data.StringData("stable"),
+			}),
 		}),
 	};
 	for (const name of jobs[job]?.needs ?? []) {
@@ -68,7 +76,7 @@ function gate(job: string, repository: string, results: Record<string, string>):
 	const context = dict({
 		github: dict({ repository: new data.StringData(repository) }),
 		needs: dict(needs),
-		inputs: dict({ skip_npm: new data.BooleanData(false) }),
+		inputs: dict({ skip_npm: new data.BooleanData(run.skipNpm ?? false) }),
 	});
 	const lexed = new Lexer(expr).lex();
 	const parsed = new Parser(lexed.tokens, ["github", "needs", "inputs"], [...statusFunctions.values()]).parse();
@@ -76,15 +84,15 @@ function gate(job: string, repository: string, results: Record<string, string>):
 }
 
 /** Truth table: fails one job, leaves the rest successful (some combos unreachable), and derives release_build's result. */
-function release(repository: string, failing?: string): Record<string, boolean | string> {
+function release(repository: string, failing?: string, run: Run = {}): Record<string, boolean | string> {
 	const results: Record<string, string> = {};
 	if (failing && failing !== "release_build") results[failing] = "failure";
-	const buildRuns = gate("release_build", repository, results);
+	const buildRuns = gate("release_build", repository, results, run);
 	results.release_build = failing === "release_build" ? "failure" : buildRuns ? "success" : "skipped";
 	return {
 		build: results.release_build,
-		npm: gate("release_npm", repository, results),
-		brew: gate("release_brew", repository, results),
+		npm: gate("release_npm", repository, results, run),
+		brew: gate("release_brew", repository, results, run),
 	};
 }
 
@@ -116,4 +124,24 @@ describe("release gates upstream", () => {
 			expect(release(UPSTREAM, failing)).toMatchObject({ npm: false, brew: false });
 		});
 	}
+});
+
+describe("release eligibility", () => {
+	for (const repository of [FORK, UPSTREAM]) {
+		test(`${repository}: a run that is not a release publishes nothing`, () => {
+			expect(release(repository, undefined, { isRelease: false })).toEqual({
+				build: "skipped",
+				npm: false,
+				brew: false,
+			});
+		});
+
+		test(`${repository}: skip_npm blocks npm`, () => {
+			expect(release(repository, undefined, { skipNpm: true }).npm).toBe(false);
+		});
+	}
+
+	test("another copy of the workflow never publishes npm without build.stencil.so", () => {
+		expect(release("someone/oh-my-pi")).toEqual({ build: "skipped", npm: false, brew: false });
+	});
 });
