@@ -383,6 +383,59 @@ describe("last changelog marker", () => {
 		});
 	});
 
+	test("streams Rigel notes and advances a stable marker to the Rigel release", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("18.9.2", agentDir);
+			const changelogPath = path.join(agentDir, "CHANGELOG.md");
+			const history = [
+				release(18, 9, 2, "### Fixed\n\n- Rigel release notes.", "rigel.1"),
+				release(18, 9, 2, "### Fixed\n\n- Stable release notes."),
+			];
+			await Bun.write(changelogPath, `# Changelog\n\n${history.map(entry => entry.content).join("\n\n")}\n`);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "summary",
+				currentVersion: "18.9.2-rigel.1",
+				changelogPath,
+				agentDir,
+			});
+
+			expect(selection?.markdown).toContain("- Rigel release notes.");
+			expect(selection?.latestVersion).toBe("18.9.2-rigel.1");
+			expect(await readLastChangelogVersion(agentDir)).toBe("18.9.2-rigel.1");
+		});
+	});
+
+	test("hidden mode advances a stable marker for a Rigel upgrade", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("18.9.2", agentDir);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: "18.9.2-rigel.1",
+				agentDir,
+			});
+
+			expect(selection).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe("18.9.2-rigel.1");
+		});
+	});
+
+	test("a stable downgrade does not replace a Rigel marker", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("18.9.2-rigel.1", agentDir);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: "18.9.2",
+				agentDir,
+			});
+
+			expect(selection).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe("18.9.2-rigel.1");
+		});
+	});
+
 	test("summary mode keeps the last unseen release of a changelog that ends in a newline", async () => {
 		await withTempAgentDir(async agentDir => {
 			await writeLastChangelogVersion("1.0.0", agentDir);

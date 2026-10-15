@@ -172,18 +172,20 @@ describe("windows native addon staging", () => {
 		}
 	});
 
-	it("orders prerelease cache directories by SemVer", async () => {
+	it("orders Rigel releases after their stable base", async () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-prerelease-"));
 		const staleVersions = ["1.0.0-rigel.9", "1.0.0-rigel.2", "1.0.0", "0.9.9"];
 		const retainedVersions = ["1.0.0-rigel.11", "1.0.1"];
 		try {
-			for (const version of [...staleVersions, "1.0.0-rigel.10", ...retainedVersions]) {
+			for (const version of [...staleVersions, "1.0.0-rigel.10", ...retainedVersions, "1.0.0-canary.1"]) {
 				await fs.mkdir(path.join(nativesDir, version));
 				await fs.utimes(path.join(nativesDir, version), new Date(0), new Date(0));
 			}
 
 			const removed = cleanupStaleNativeVersions({ nativesDir, currentVersion: "1.0.0-rigel.10" });
-			expect(removed.map(filePath => path.basename(filePath)).sort()).toEqual(staleVersions.sort());
+			expect(removed.map(filePath => path.basename(filePath)).sort()).toEqual(
+				[...staleVersions, "1.0.0-canary.1"].sort(),
+			);
 			expect((await fs.readdir(nativesDir)).sort()).toEqual([...retainedVersions, "1.0.0-rigel.10"].sort());
 		} finally {
 			await fs.rm(nativesDir, { recursive: true, force: true });
