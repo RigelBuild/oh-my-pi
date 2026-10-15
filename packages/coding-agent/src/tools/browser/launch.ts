@@ -481,6 +481,12 @@ export interface LaunchHeadlessOptions extends HeadlessLaunchFeatures {
 	args?: readonly string[];
 	/** Additional exact Puppeteer default arguments to suppress. */
 	ignoreDefaultArgs?: readonly string[];
+	/** Aborts the launch and kills the spawned browser. */
+	signal?: AbortSignal;
+	/** Remaining caller budget; bounds puppeteer's wait for the DevTools endpoint. */
+	timeoutMs?: number;
+	/** Per-CDP-command timeout; defaults to {@link BROWSER_PROTOCOL_TIMEOUT_MS}. */
+	protocolTimeoutMs?: number;
 }
 
 /** Result of a headless Chromium launch. */
@@ -534,13 +540,13 @@ export function buildHeadlessLaunchArgs(
 }
 
 export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promise<LaunchHeadlessResult> {
+	const startedAt = performance.now();
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	const initialViewport = {
 		width: vp.width,
 		height: vp.height,
 		deviceScaleFactor: vp.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	};
-	const puppeteer = await loadPuppeteer();
 	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		allowFileAccess: opts.allowFileAccess,
@@ -549,33 +555,72 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);
 	}
 	// Own the Chromium profile directory instead of letting puppeteer-core create
-	// (and delete) a temporary one. Passing `--user-data-dir` makes puppeteer
-	// treat the profile as non-temporary, so `ChromeLauncher.cleanUserDataDir`
-	// becomes a no-op and can no longer reject its eager process-exit hook with an
-	// unhandled EBUSY when Chromium still holds the profile lock on Windows
-	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
+	// (and delete) a temporary one: its eager exit-hook cleanup rejects with an
+	// unhandled EBUSY on Windows while Chromium holds the lock (issue #7058).
 	let userDataDir: string | undefined;
-	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
-		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
-		launchArgs.push(`--user-data-dir=${userDataDir}`);
-	}
+	let phase: "executable resolve" | "ws endpoint" | "cdp handshake" | "page target" = "executable resolve";
 	try {
-		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
+		opts.signal?.throwIfAborted();
+		const puppeteer = await loadPuppeteer();
 		const executablePath = await ensureChromiumExecutable();
-		const browser = await puppeteer.launch({
-			headless: opts.headless,
-			defaultViewport: opts.headless ? initialViewport : null,
-			executablePath,
-			args: launchArgs,
-			ignoreDefaultArgs: [
-				...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
-			],
-			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
-		});
+		if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
+			userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
+			launchArgs.push(`--user-data-dir=${userDataDir}`);
+			await seedOwnedProfilePreferences(userDataDir);
+		}
+		const remaining = () => Math.max(1, (opts.timeoutMs ?? 30_000) - (performance.now() - startedAt));
+		phase = "cdp handshake";
+		// Puppeteer's timeout stops at the DevTools URL; the WebSocket upgrade after it
+		// has only a fixed bound. This deadline aborts the launch (killing Chromium) at
+		// the caller's budget and is disarmed once the launch resolves.
+		const deadline = new AbortController();
+		const deadlineTimer = setTimeout(
+			() => deadline.abort(new Error(`timed out after ${opts.timeoutMs ?? 30_000} ms`)),
+			remaining(),
+		);
+		const launchSignal = opts.signal ? AbortSignal.any([opts.signal, deadline.signal]) : deadline.signal;
+		let browser: Browser;
+		try {
+			browser = await untilAborted(launchSignal, () =>
+				puppeteer.launch({
+					headless: opts.headless,
+					defaultViewport: opts.headless ? initialViewport : null,
+					executablePath,
+					args: launchArgs,
+					ignoreDefaultArgs: [
+						...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
+					],
+					protocolTimeout: opts.protocolTimeoutMs ?? BROWSER_PROTOCOL_TIMEOUT_MS,
+					signal: launchSignal,
+					timeout: remaining(),
+					// Waited below so a timeout there is reported as the page-target phase.
+					waitForInitialPage: false,
+				}),
+			);
+		} catch (error) {
+			if (deadline.signal.aborted && !opts.signal?.aborted) throw deadline.signal.reason;
+			throw error;
+		} finally {
+			clearTimeout(deadlineTimer);
+		}
+		phase = "page target";
+		try {
+			await browser.waitForTarget(target => target.type() === "page", {
+				timeout: remaining(),
+				signal: opts.signal,
+			});
+		} catch (error) {
+			await browser.close().catch(() => undefined);
+			throw error;
+		}
 		return { browser, userDataDir };
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
-		throw error;
+		// Caller cancellation keeps its AbortError identity; only timeouts get a phase label.
+		if (opts.signal?.aborted) throw error;
+		const message = error instanceof Error ? error.message : String(error);
+		if (phase === "cdp handshake" && /WS endpoint URL/i.test(message)) phase = "ws endpoint";
+		throw new Error(`Headless browser ${phase} failed: ${message}`, { cause: error });
 	}
 }
 
