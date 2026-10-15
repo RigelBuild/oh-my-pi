@@ -199,4 +199,22 @@ describe("headless browser launch deadline", () => {
 		},
 		45_000,
 	);
+
+	it.skipIf(process.platform !== "linux")(
+		"keeps a launched browser alive when the caller signal aborts afterwards",
+		async () => {
+			const caller = new AbortController();
+			const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true, signal: caller.signal });
+			try {
+				caller.abort(new Error("open cancelled after launch"));
+				// SIGKILL on abort is synchronous, so a dead browser cannot answer this round trip.
+				expect(await browser.version()).toContain("Chrome");
+				expect(browser.connected).toBe(true);
+			} finally {
+				await browser.close();
+				if (userDataDir) fs.rmSync(userDataDir, { recursive: true, force: true });
+			}
+		},
+		60_000,
+	);
 });
