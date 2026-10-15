@@ -571,14 +571,19 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		const remaining = () => Math.max(1, (opts.timeoutMs ?? 30_000) - (performance.now() - startedAt));
 		phase = "cdp handshake";
 		// Puppeteer's timeout stops at the DevTools URL; the WebSocket upgrade after it
-		// has only a fixed bound. This deadline aborts the launch (killing Chromium) at
-		// the caller's budget and is disarmed once the launch resolves.
+		// has only a fixed bound. Puppeteer kills Chromium whenever its signal aborts,
+		// even after launch, so it gets one that stops following ours once launch settles.
 		const deadline = new AbortController();
+		const launchAbort = new AbortController();
 		const deadlineTimer = setTimeout(
 			() => deadline.abort(new Error(`timed out after ${opts.timeoutMs ?? 30_000} ms`)),
 			remaining(),
 		);
-		const launchSignal = opts.signal ? AbortSignal.any([opts.signal, deadline.signal]) : deadline.signal;
+		const upstream = opts.signal ? AbortSignal.any([opts.signal, deadline.signal]) : deadline.signal;
+		const forwardAbort = () => launchAbort.abort(upstream.reason);
+		if (upstream.aborted) forwardAbort();
+		else upstream.addEventListener("abort", forwardAbort, { once: true });
+		const launchSignal = launchAbort.signal;
 		let browser: Browser;
 		try {
 			browser = await untilAborted(launchSignal, () =>
@@ -602,6 +607,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			throw error;
 		} finally {
 			clearTimeout(deadlineTimer);
+			upstream.removeEventListener("abort", forwardAbort);
 		}
 		phase = "page target";
 		try {
