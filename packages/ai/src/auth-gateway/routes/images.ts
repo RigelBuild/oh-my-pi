@@ -22,11 +22,13 @@ const IMAGE_MULTIPART_MAX_BYTES = 36 * 1024 * 1024;
 const IMAGE_MULTIPART_MAX_PARTS = 24;
 const IMAGE_MULTIPART_MAX_FILES = 16;
 
-// Count `--boundary\r\n` openers before the last `--boundary--`. Bun's formData() starts a part at any
-// such opener, glued to prior data or not, and ignores everything after the last close.
-function countPartOpeners(bytes: Uint8Array, boundary: string): number {
+// Count `--boundary\r\n` openers before the last `--boundary--`; null when there is no close.
+// Bun's formData() starts a part at any such opener, glued to prior data or not, ignores
+// everything after the last close, and without a close throws only after parsing every part.
+function countPartOpeners(bytes: Uint8Array, boundary: string): number | null {
 	const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	const end = view.lastIndexOf(`--${boundary}--`);
+	if (end === -1) return null;
 	const opener = `--${boundary}\r\n`;
 	let count = 0;
 	for (let i = view.indexOf(opener); i !== -1 && i < end; i = view.indexOf(opener, i + opener.length)) count++;
@@ -88,7 +90,11 @@ async function handleImages(
 			if (!boundaryValue) {
 				return imagesServer.formatError(400, "invalid_request_error", "Multipart body needs one valid boundary");
 			}
-			if (countPartOpeners(bytes, boundaryValue) > IMAGE_MULTIPART_MAX_PARTS) {
+			const partCount = countPartOpeners(bytes, boundaryValue);
+			if (partCount === null) {
+				return imagesServer.formatError(400, "invalid_request_error", "Multipart body has no closing boundary");
+			}
+			if (partCount > IMAGE_MULTIPART_MAX_PARTS) {
 				return imagesServer.formatError(
 					400,
 					"invalid_request_error",
