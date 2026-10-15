@@ -55,6 +55,7 @@ const statusFunctions = new Map(
 interface Run {
 	isRelease?: boolean;
 	skipNpm?: boolean;
+	channel?: string;
 }
 
 function gate(job: string, repository: string, results: Record<string, string>, run: Run = {}): boolean {
@@ -66,7 +67,7 @@ function gate(job: string, repository: string, results: Record<string, string>, 
 			result: new data.StringData("success"),
 			outputs: dict({
 				"is-release": new data.StringData(String(run.isRelease ?? true)),
-				channel: new data.StringData("stable"),
+				channel: new data.StringData(run.channel ?? "stable"),
 			}),
 		}),
 	};
@@ -124,6 +125,20 @@ describe("release gates upstream", () => {
 			expect(release(UPSTREAM, failing)).toMatchObject({ npm: false, brew: false });
 		});
 	}
+
+	test("a rigel release skips build.stencil.so, brew, and npm", () => {
+		expect(release(UPSTREAM, undefined, { channel: "rigel" })).toEqual({ build: "skipped", npm: false, brew: false });
+	});
+});
+
+describe("rigel releases on the fork", () => {
+	test("skip build.stencil.so and brew but publish npm", () => {
+		expect(release(FORK, undefined, { channel: "rigel" })).toEqual({ build: "skipped", npm: true, brew: false });
+	});
+
+	test("a failed release_gate blocks npm", () => {
+		expect(release(FORK, "release_gate", { channel: "rigel" }).npm).toBe(false);
+	});
 });
 
 describe("release eligibility", () => {

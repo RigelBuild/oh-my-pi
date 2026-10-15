@@ -1114,8 +1114,9 @@ jobs:
    # clients never read npm.
    release_build:
       name: Publish to build.stencil.so
-      # build.stencil.so trusts only upstream's OIDC subject; the fork skips it, and so release_brew.
-      if: ${{ github.repository == 'can1357/oh-my-pi' && needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+      # build.stencil.so trusts only upstream's OIDC subject and has no rigel channel; those skip it, and so release_brew.
+      if: ${{ github.repository == 'can1357/oh-my-pi' && needs.release_metadata.outputs.channel != 'rigel' &&
+         needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
