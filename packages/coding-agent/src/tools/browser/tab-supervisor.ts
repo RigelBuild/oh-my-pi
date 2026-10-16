@@ -1717,16 +1717,11 @@ function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
 	}
 }
 
-/** Resolves `false` when the tab was closed while its new worker started; the new worker is then discarded. */
-async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number): Promise<boolean> {
-	// Same deadline carry-over as acquireTabImpl: the inline-fallback retry
-	// must not restart the recycle's init budget.
-	const startedAt = performance.now();
-	const oldWorker = tab.worker;
-	await oldWorker.terminate().catch(() => undefined);
+/** Init payload that reattaches a fresh worker to `tab`'s existing page. */
+function buildRecyclePayload(tab: WorkerTabSession): WorkerInitPayload {
 	const browserWSEndpoint = tab.browser.browser.wsEndpoint();
 	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
-	const payload: WorkerInitPayload = {
+	return {
 		mode: "attach",
 		browserWSEndpoint,
 		safeDir: getPuppeteerDir(),
@@ -1740,6 +1735,16 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		activateForScreenshot: tab.activateForScreenshot,
 		downloadStagingDirectory: downloadStagingDirectory(tab.browser),
 	};
+}
+
+/** Resolves `false` when the tab was closed while its new worker started; the new worker is then discarded. */
+async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number): Promise<boolean> {
+	// Same deadline carry-over as acquireTabImpl: the inline-fallback retry
+	// must not restart the recycle's init budget.
+	const startedAt = performance.now();
+	const oldWorker = tab.worker;
+	await oldWorker.terminate().catch(() => undefined);
+	const payload = buildRecyclePayload(tab);
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.
 	const publish = async (replacement: WorkerHandle, info: ReadyInfo): Promise<boolean> => {
@@ -2172,6 +2177,19 @@ export function initializeTabWorkerForTest(
 	deadlineStart: number = performance.now(),
 ): Promise<ReadyInfo> {
 	return initializeTabWorker(worker, payload, timeoutMs, deadlineStart);
+}
+
+/** Test hook for the init payload a new tab's worker receives. */
+export function buildInitPayloadForTest(
+	browser: PuppeteerBrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<WorkerInitPayload> {
+	return buildInitPayload(browser, opts);
+}
+
+/** Test hook for the init payload a recycled tab's worker receives. */
+export function buildRecyclePayloadForTest(tab: WorkerTabSession): WorkerInitPayload {
+	return buildRecyclePayload(tab);
 }
 
 function errorFromWorkerEvent(event: ErrorEvent): Error {

@@ -95,7 +95,7 @@ export type WorkerInitPayload =
 			activateForScreenshot?: boolean;
 			/**
 			 * Download folder shared by every tab of this browser. Unset for a browser the user drives (connected,
-			 * relay): downloads keep its one browser-wide folder and real file names, since the user's own land there too.
+			 * relay): downloads keep its one browser-wide folder and real file names, since the user's own downloads land there too.
 			 */
 			downloadStagingDirectory?: string;
 	  };

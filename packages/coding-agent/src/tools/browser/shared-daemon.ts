@@ -182,13 +182,7 @@ async function adoptOrStart(
 		await stopQuietly(client, name, "Shared browser", signal);
 		return undefined;
 	}
-	if (claimed) {
-		await seedOwnedProfilePreferences(userDataDir);
-		// The profile outlives each Chrome; downloads a dead one left staged belong to no tab of the new one.
-		await fs
-			.rm(path.join(userDataDir, DOWNLOAD_STAGING_DIRNAME), { recursive: true, force: true })
-			.catch(() => undefined);
-	}
+	if (claimed) await seedOwnedProfilePreferences(userDataDir);
 	try {
 		const started = await client.request(
 			{

@@ -266,8 +266,10 @@ async function entryKind(file: string): Promise<"file" | "missing" | "other"> {
 }
 
 /**
- * Create `directory` readable only by this user, or accept an existing one only if it already is. Fails closed rather
- * than repairing: a chmod by path could follow a symlink swapped in after the check.
+ * POSIX: create `directory` owned by this user with mode 0700, or fail closed on an existing one that is not; a chmod
+ * by path could follow a symlink swapped in after the check. Windows: only the directory type is checked, and the
+ * folder inherits its parent's ACL; every parent used (the temp profile under %TEMP%, the shared profile under the OMP
+ * state dir, the puppeteer dir) is inside the user's own profile.
  */
 async function ensurePrivateDirectory(directory: string): Promise<void> {
 	await fs.mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });

@@ -444,6 +444,8 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			return;
 		}
 		if (handle.browser.connected) {
+			// Read before close: a launch with the caller's own --user-data-dir stages under the browser's id.
+			const staging = handle.userDataDir ? undefined : stagingDirectoryToRemove(handle);
 			// Puppeteer's `browser.close()` resolves only once the Chromium
 			// process fully exits. A wedged Chromium (a known Windows failure
 			// mode) leaves this await pending forever, freezing `releaseTab` in
@@ -456,6 +458,7 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 				logger.debug("Failed to close headless browser; force-killing", { error: (err as Error).message });
 				if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
 			}
+			if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 		}
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
@@ -474,6 +477,8 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		}
 		return;
 	}
+	// Read before disconnecting; only a browser OMP launched and now kills loses its staging folder.
+	const staging = opts.kill && handle.subprocess ? stagingDirectoryToRemove(handle) : undefined;
 	if (handle.browser.connected) {
 		try {
 			handle.browser.disconnect();
@@ -484,10 +489,21 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 	// A discovered CDP PID is borrowed, not ours to kill on close or abort.
 	if (opts.kill && handle.subprocess && handle.subprocess.exitCode === null) {
 		await gracefulKillTreeOnce(handle.subprocess.pid);
-		const staging = downloadStagingDirectory(handle);
 		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 	}
 }
+
+/** A staging lookup failure must not abort the rest of a dispose. */
+function stagingDirectoryToRemove(handle: PuppeteerBrowserHandle): string | undefined {
+	try {
+		return downloadStagingDirectory(handle);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Chromium's browser target id, the last segment of its `ws://…/devtools/browser/<id>` endpoint. */
+const BROWSER_TARGET_ID = /\/devtools\/browser\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 /**
  * The one download folder every tab of `handle`'s browser points Chromium at, or undefined for a browser the user
@@ -500,9 +516,11 @@ export function downloadStagingDirectory(handle: PuppeteerBrowserHandle): string
 		const profile = sharedBrowserProfileDir(handle.sharedDaemon.projectDir, handle.sharedDaemon.name);
 		return path.join(profile, DOWNLOAD_STAGING_DIRNAME);
 	}
-	// A spawned app's profile may be the user's own, so its staging folder is keyed by the app instead.
-	const identity = Bun.hash.wyhash(handle.key).toString(16).padStart(16, "0");
-	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, identity);
+	// Spawned apps and launches with the caller's own profile: the profile may be the user's, and handles with different
+	// keys can reuse one running browser, so key by the browser itself.
+	const browserId = BROWSER_TARGET_ID.exec(handle.browser.wsEndpoint())?.[1];
+	if (!browserId) throw new ToolError("Browser websocket endpoint does not name a browser target");
+	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, browserId.toLowerCase());
 }
 
 /**
