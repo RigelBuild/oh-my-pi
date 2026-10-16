@@ -52,14 +52,23 @@ const statusFunctions = new Map(
 	]),
 );
 
-function gate(job: string, repository: string, results: Record<string, string>, channel = "stable"): boolean {
+interface Run {
+	isRelease?: boolean;
+	skipNpm?: boolean;
+	channel?: string;
+}
+
+function gate(job: string, repository: string, results: Record<string, string>, run: Run = {}): boolean {
 	const source = jobs[job]?.if;
 	if (!source) throw new Error(`${job} has no if:`);
 	const expr = source.replace(/^\$\{\{([\s\S]*)\}\}$/, "$1");
 	const needs: Record<string, data.ExpressionData> = {
 		release_metadata: dict({
 			result: new data.StringData("success"),
-			outputs: dict({ "is-release": new data.StringData("true"), channel: new data.StringData(channel) }),
+			outputs: dict({
+				"is-release": new data.StringData(String(run.isRelease ?? true)),
+				channel: new data.StringData(run.channel ?? "stable"),
+			}),
 		}),
 	};
 	for (const name of jobs[job]?.needs ?? []) {
@@ -68,29 +77,32 @@ function gate(job: string, repository: string, results: Record<string, string>, 
 	const context = dict({
 		github: dict({ repository: new data.StringData(repository) }),
 		needs: dict(needs),
-		inputs: dict({ skip_npm: new data.BooleanData(false) }),
+		inputs: dict({ skip_npm: new data.BooleanData(run.skipNpm ?? false) }),
 	});
 	const lexed = new Lexer(expr).lex();
 	const parsed = new Parser(lexed.tokens, ["github", "needs", "inputs"], [...statusFunctions.values()]).parse();
 	return truthy(new Evaluator(parsed, context, statusFunctions).evaluate());
 }
 
-/** Truth table: fails one job, leaves the rest successful (some combos unreachable), and derives release_build's result. */
-function release(repository: string, failing?: string, channel = "stable"): Record<string, boolean | string> {
+/** Truth table: fails one job, leaves the rest successful (some combos unreachable), and derives the leaves' and release_build's results. */
+function release(repository: string, failing?: string, run: Run = {}): Record<string, boolean | string> {
 	const results: Record<string, string> = {};
-	if (failing && failing !== "release_build") results[failing] = "failure";
-	const buildRuns = gate("release_build", repository, results, channel);
+	if (failing && failing !== "release_build" && failing !== "release_native_leaves") results[failing] = "failure";
+	const leavesRun = gate("release_native_leaves", repository, results, run);
+	results.release_native_leaves = failing === "release_native_leaves" ? "failure" : leavesRun ? "success" : "skipped";
+	const buildRuns = gate("release_build", repository, results, run);
 	results.release_build = failing === "release_build" ? "failure" : buildRuns ? "success" : "skipped";
 	return {
+		leaves: leavesRun,
 		build: results.release_build,
-		npm: gate("release_npm", repository, results, channel),
-		brew: gate("release_brew", repository, results, channel),
+		npm: gate("release_npm", repository, results, run),
+		brew: gate("release_brew", repository, results, run),
 	};
 }
 
 describe("release gates on the fork", () => {
 	test("skips build.stencil.so and brew but publishes npm", () => {
-		expect(release(FORK)).toEqual({ build: "skipped", npm: true, brew: false });
+		expect(release(FORK)).toEqual({ leaves: true, build: "skipped", npm: true, brew: false });
 	});
 
 	for (const failing of [
@@ -108,7 +120,7 @@ describe("release gates on the fork", () => {
 
 describe("release gates upstream", () => {
 	test("publishes build.stencil.so, npm, and brew", () => {
-		expect(release(UPSTREAM)).toEqual({ build: "success", npm: true, brew: true });
+		expect(release(UPSTREAM)).toEqual({ leaves: true, build: "success", npm: true, brew: true });
 	});
 
 	for (const failing of ["release_gate", "release_github", "release_build"]) {
@@ -118,24 +130,45 @@ describe("release gates upstream", () => {
 	}
 });
 
+describe("release eligibility", () => {
+	for (const repository of [FORK, UPSTREAM]) {
+		test(`${repository}: a run that is not a release publishes nothing`, () => {
+			expect(release(repository, undefined, { isRelease: false })).toEqual({
+				leaves: false,
+				build: "skipped",
+				npm: false,
+				brew: false,
+			});
+		});
+
+		test(`${repository}: skip_npm blocks the leaves and npm`, () => {
+			expect(release(repository, undefined, { skipNpm: true })).toMatchObject({ leaves: false, npm: false });
+		});
+	}
+
+	test("another copy of the workflow publishes nothing to npm", () => {
+		expect(release("someone/oh-my-pi")).toEqual({ leaves: false, build: "skipped", npm: false, brew: false });
+	});
+});
+
 describe("release gates by repository and channel", () => {
 	const cases = [
-		[FORK, "stable", { build: "skipped", npm: true, brew: false }],
-		[FORK, "canary", { build: "skipped", npm: true, brew: false }],
-		[FORK, "rigel", { build: "skipped", npm: true, brew: false }],
-		[UPSTREAM, "stable", { build: "success", npm: true, brew: true }],
-		[UPSTREAM, "canary", { build: "success", npm: true, brew: false }],
-		[UPSTREAM, "rigel", { build: "skipped", npm: true, brew: false }],
+		[FORK, "stable", { leaves: true, build: "skipped", npm: true, brew: false }],
+		[FORK, "canary", { leaves: true, build: "skipped", npm: true, brew: false }],
+		[FORK, "rigel", { leaves: true, build: "skipped", npm: true, brew: false }],
+		[UPSTREAM, "stable", { leaves: true, build: "success", npm: true, brew: true }],
+		[UPSTREAM, "canary", { leaves: true, build: "success", npm: true, brew: false }],
+		[UPSTREAM, "rigel", { leaves: false, build: "skipped", npm: false, brew: false }],
 	] as const;
 	for (const [repository, channel, expected] of cases) {
 		test(`${repository} ${channel}`, () => {
-			expect(release(repository, undefined, channel)).toEqual(expected);
+			expect(release(repository, undefined, { channel })).toEqual(expected);
 		});
 	}
 
 	for (const failing of ["release_gate", "release_github", "release_native_leaves"]) {
 		test(`a failed ${failing} blocks a rigel release's npm`, () => {
-			expect(release(UPSTREAM, failing, "rigel").npm).toBe(false);
+			expect(release(FORK, failing, { channel: "rigel" }).npm).toBe(false);
 		});
 	}
 });

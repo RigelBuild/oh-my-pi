@@ -965,7 +965,10 @@ jobs:
    # packages/natives/native), so no per-platform runners are needed.
    release_native_leaves:
       name: Publish native leaf packages
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+      # Same repositories as release_npm: the fork, or upstream on a non-rigel channel.
+      if: ${{ (github.repository == 'RigelBuild/oh-my-pi' ||
+          (github.repository == 'can1357/oh-my-pi' && needs.release_metadata.outputs.channel != 'rigel')) &&
+         needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_gate.result == 'success' &&
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
@@ -1147,7 +1150,7 @@ jobs:
          needs.release_binary.result == 'success' &&
          needs.release_smoke.result == 'success' &&
          (needs.release_build.result == 'success' ||
-          ((github.repository != 'can1357/oh-my-pi' || needs.release_metadata.outputs.channel == 'rigel') && needs.release_build.result == 'skipped' &&
+          (github.repository == 'RigelBuild/oh-my-pi' && needs.release_build.result == 'skipped' &&
            needs.release_gate.result == 'success' && needs.release_github.result == 'success')) &&
          needs.release_native_leaves.result == 'success' &&
          !inputs.skip_npm }}
@@ -1156,7 +1159,7 @@ jobs:
       # resolve them the moment the core version is live. release_build too:
       # binary updates install what build.stencil.so published (update-cli.ts),
       # so the build service must lead npm.
-      # The fork and rigel releases skip release_build, so they gate on release_gate/release_github directly.
+      # The fork skips release_build, so it gates on release_gate/release_github directly.
       needs: [release_metadata, release_gate, release_binary, release_smoke, release_github, release_build, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
