@@ -244,37 +244,71 @@ describe("browser open options CDP helpers", () => {
 		expect(await Bun.file(saved).text()).toBe("bytes");
 	});
 
-	it("queues a failed move in order with completed downloads for waits that come later", async () => {
+	it("delivers outcomes in completion order even when an earlier one settles slower", async () => {
+		const { directory, stagingDirectory, downloads, emit, frameId } = await fakeDownloads();
+		await downloads.enable(directory);
+		// The first file never appears, so its completion polls before failing; the second is ready at once.
+		const missing = crypto.randomUUID();
+		const guid = crypto.randomUUID();
+		await Bun.write(path.join(stagingDirectory, guid), "second");
+		for (const [id, name] of [
+			[missing, "first.txt"],
+			[guid, "second.txt"],
+		]) {
+			emit("Browser.downloadWillBegin", { guid: id, url: "https://example.com/", suggestedFilename: name, frameId });
+			emit("Browser.downloadProgress", { guid: id, state: "completed", receivedBytes: 5 });
+		}
+
+		const error = await rejectionOf(downloads.wait());
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain(
+			`completed file was not found: ${path.join(stagingDirectory, missing)}`,
+		);
+		expect((await downloads.wait()).path).toBe(path.join(directory, "second.txt"));
+		expect(downloads.list().map(download => download.path)).toEqual([path.join(directory, "second.txt")]);
+	});
+
+	it("queues a failed move for a wait that comes later", async () => {
 		const { directory, stagingDirectory, downloads, emit, frameId } = await fakeDownloads();
 		await downloads.enable(directory);
 		const failing = crypto.randomUUID();
-		const guid = crypto.randomUUID();
 		await Bun.write(path.join(stagingDirectory, failing), "first");
-		await Bun.write(path.join(stagingDirectory, guid), "second");
-		const finish = (id: string, suggestedFilename: string) => {
-			emit("Browser.downloadWillBegin", { guid: id, url: "https://example.com/", suggestedFilename, frameId });
-			emit("Browser.downloadProgress", { guid: id, state: "completed", receivedBytes: 5 });
-		};
 		const renamed = Promise.withResolvers<void>();
 		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
 			renamed.resolve();
 			throw Object.assign(new Error("move failed"), { code: "EACCES" });
 		});
 		try {
-			finish(failing, "first.txt");
-			// The failure settles in microtasks after the rename rejects, before any later I/O turn.
+			emit("Browser.downloadWillBegin", {
+				guid: failing,
+				url: "https://example.com/",
+				suggestedFilename: "first.txt",
+				frameId,
+			});
+			emit("Browser.downloadProgress", { guid: failing, state: "completed", receivedBytes: 5 });
 			await renamed.promise;
 		} finally {
 			rename.mockRestore();
 		}
-		finish(guid, "second.txt");
-		while (downloads.list().length === 0) await new Promise<void>(resolve => setImmediate(resolve));
-
 		const error = await rejectionOf(downloads.wait());
 		expect(error).toBeInstanceOf(ToolError);
 		expect((error as ToolError).message).toContain(`left it at ${path.join(stagingDirectory, failing)}`);
-		expect((await downloads.wait()).path).toBe(path.join(directory, "second.txt"));
-		expect(downloads.list().map(download => download.path)).toEqual([path.join(directory, "second.txt")]);
+		expect(downloads.list()).toEqual([]);
+	});
+
+	it("rejects an already-aborted wait without taking the queued outcome", async () => {
+		const { directory, downloads, emit, frameId } = await fakeDownloads();
+		await downloads.enable(directory);
+		const guid = crypto.randomUUID();
+		emit("Browser.downloadWillBegin", { guid, url: "https://example.com/a", suggestedFilename: "a.txt", frameId });
+		emit("Browser.downloadProgress", { guid, state: "canceled", receivedBytes: 0 });
+		// A cancel settles in microtasks, so one macrotask turn is enough to have it queued.
+		await new Promise<void>(resolve => setImmediate(resolve));
+		const controller = new AbortController();
+		const reason = new Error("stop");
+		controller.abort(reason);
+		expect(await rejectionOf(downloads.wait(controller.signal))).toBe(reason);
+		expect(((await rejectionOf(downloads.wait())) as Error).message).toBe("Download canceled: https://example.com/a");
 	});
 
 	it("rejects the wait and keeps the same-named file when a cross-device move fails to copy", async () => {

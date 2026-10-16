@@ -63,6 +63,8 @@ export class DownloadManager {
 	readonly #pending = new Map<string, PendingDownload>();
 	readonly #completed: BrowserDownload[] = [];
 	readonly #unclaimed: DownloadOutcome[] = [];
+	// Completions settle one at a time so waits see them in the order Chromium finished them.
+	#settling: Promise<void> = Promise.resolve();
 	readonly #waiters: DownloadWaiter[] = [];
 	#willBegin?: (event: DownloadStarted & { frameId: string }) => void;
 	#progress?: (event: DownloadProgress) => void;
@@ -105,9 +107,9 @@ export class DownloadManager {
 
 	/** Wait for the next unclaimed completed download. */
 	async wait(signal?: AbortSignal): Promise<BrowserDownload> {
+		// A rejected `arming` nobody awaits would surface as an unhandled rejection; an aborted wait takes nothing queued.
+		if (signal?.aborted) throw signal.reason;
 		if (this.#unclaimed.length === 0) {
-			// A rejected `arming` nobody awaits would surface as an unhandled rejection.
-			if (signal?.aborted) throw signal.reason;
 			// The tab that pointed Chromium last resets it to the browser's default folder when it closes, so re-point it.
 			const arming = (this.#arming ??= this.enable(this.#directory).finally(() => {
 				this.#arming = undefined;
@@ -172,12 +174,16 @@ export class DownloadManager {
 			if (event.state === "inProgress") return;
 			this.#pending.delete(event.guid);
 			if (event.state === "canceled") {
-				this.#deliver({ error: new ToolError(`Download canceled: ${pending.url}`) });
+				this.#settling = this.#settling.then(() =>
+					this.#deliver({ error: new ToolError(`Download canceled: ${pending.url}`) }),
+				);
 				return;
 			}
-			void this.#complete(pending, event.filePath).catch(error => {
-				this.#fail(pending, toError(error).message);
-			});
+			this.#settling = this.#settling.then(() =>
+				this.#complete(pending, event.filePath).catch(error => {
+					this.#fail(pending, toError(error).message);
+				}),
+			);
 		};
 		session.on("Browser.downloadWillBegin", this.#willBegin);
 		session.on("Browser.downloadProgress", this.#progress);
