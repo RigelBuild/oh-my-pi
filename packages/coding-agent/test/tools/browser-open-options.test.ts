@@ -311,6 +311,25 @@ describe("browser open options CDP helpers", () => {
 		expect(((await rejectionOf(downloads.wait())) as Error).message).toBe("Download canceled: https://example.com/a");
 	});
 
+	it("keeps settling later downloads after settling one throws", async () => {
+		const { directory, stagingDirectory, downloads, emit, frameId } = await fakeDownloads();
+		await downloads.enable(directory);
+		// Formatting this URL throws, so both the cancel's delivery and its failure report throw.
+		const url = {
+			toString(): string {
+				throw new Error("unprintable url");
+			},
+		};
+		const broken = crypto.randomUUID();
+		emit("Browser.downloadWillBegin", { guid: broken, url, suggestedFilename: "broken.txt", frameId });
+		emit("Browser.downloadProgress", { guid: broken, state: "canceled", receivedBytes: 0 });
+		const guid = crypto.randomUUID();
+		await Bun.write(path.join(stagingDirectory, guid), "second");
+		emit("Browser.downloadWillBegin", { guid, url: "https://example.com/", suggestedFilename: "second.txt", frameId });
+		emit("Browser.downloadProgress", { guid, state: "completed", receivedBytes: 6 });
+		expect((await downloads.wait()).path).toBe(path.join(directory, "second.txt"));
+	});
+
 	it("rejects the wait and keeps the same-named file when a cross-device move fails to copy", async () => {
 		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
