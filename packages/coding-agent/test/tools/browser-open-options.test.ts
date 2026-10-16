@@ -325,7 +325,12 @@ describe("browser open options CDP helpers", () => {
 		emit("Browser.downloadProgress", { guid: broken, state: "canceled", receivedBytes: 0 });
 		const guid = crypto.randomUUID();
 		await Bun.write(path.join(stagingDirectory, guid), "second");
-		emit("Browser.downloadWillBegin", { guid, url: "https://example.com/", suggestedFilename: "second.txt", frameId });
+		emit("Browser.downloadWillBegin", {
+			guid,
+			url: "https://example.com/",
+			suggestedFilename: "second.txt",
+			frameId,
+		});
 		emit("Browser.downloadProgress", { guid, state: "completed", receivedBytes: 6 });
 		expect((await downloads.wait()).path).toBe(path.join(directory, "second.txt"));
 	});
