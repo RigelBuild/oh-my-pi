@@ -96,39 +96,60 @@ describe("browser open options CDP helpers", () => {
 		]);
 	});
 
-	async function fakeDownloads(
-		send: (method: string, params: unknown) => Promise<unknown> = async () => undefined,
-		perTab = true,
-	) {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-download-test-"));
-		const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-download-test-"));
-		const tabId = crypto.randomUUID();
-		const stagingDirectory = path.join(directory, `.omp-downloads-staging-${tabId}`);
-		tempDirs.push(directory, elsewhere);
-		const listeners = new Map<string, (event: unknown) => void>();
+	/** One fake browser whose tabs share a CDP session and a staging folder, as tabs of one Chromium do. */
+	async function fakeBrowser(send: (method: string, params: unknown) => Promise<unknown> = async () => undefined) {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-download-test-"));
+		tempDirs.push(root);
+		const stagingDirectory = path.join(root, "profile", "omp-download-staging");
+		const listeners = new Map<string, Set<(event: unknown) => void>>();
 		const session = {
-			on: (event: string, listener: (event: unknown) => void) => listeners.set(event, listener),
-			off: () => undefined,
+			on: (event: string, listener: (event: unknown) => void) => {
+				const set = listeners.get(event) ?? new Set();
+				set.add(listener);
+				listeners.set(event, set);
+			},
+			off: (event: string, listener: (event: unknown) => void) => listeners.get(event)?.delete(listener),
 			send,
 			detach: async () => undefined,
 		};
 		const browser = { target: () => ({ createCDPSession: async () => session }) } as unknown as Browser;
-		const page = { frames: () => [{ _id: "frame" }], browserContext: () => ({}) } as unknown as Page;
-		const downloads = new DownloadManager(browser, page, tabId, { perTab });
-		const complete = async (
-			guid: unknown,
-			filePath: string | undefined,
-			suggestedFilename: unknown = "../../report.txt",
-		) => {
-			if (!downloads.arming) await downloads.enable(directory);
-			const waiting = downloads.wait();
-			await downloads.arming;
-			const started = { guid, url: "https://example.com/", suggestedFilename, frameId: "frame" };
-			listeners.get("Browser.downloadWillBegin")!(started);
-			listeners.get("Browser.downloadProgress")!({ guid, state: "completed", receivedBytes: 5, filePath });
-			return (await waiting).path;
+		const emit = (event: string, payload: unknown) => {
+			for (const listener of listeners.get(event) ?? []) listener(payload);
 		};
-		return { directory, elsewhere, downloads, complete, stagingDirectory };
+		const tab = async (perTab = true) => {
+			const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-download-test-"));
+			const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-download-test-"));
+			tempDirs.push(directory, elsewhere);
+			const frameId = crypto.randomUUID();
+			const page = { frames: () => [{ _id: frameId }], browserContext: () => ({}) } as unknown as Page;
+			const downloads = new DownloadManager(
+				browser,
+				page,
+				crypto.randomUUID(),
+				perTab ? { perTab: true, stagingDirectory } : { perTab: false },
+			);
+			const complete = async (
+				guid: unknown,
+				filePath: string | undefined,
+				suggestedFilename: unknown = "../../report.txt",
+			) => {
+				if (!downloads.arming) await downloads.enable(directory);
+				const waiting = downloads.wait();
+				await downloads.arming;
+				emit("Browser.downloadWillBegin", { guid, url: "https://example.com/", suggestedFilename, frameId });
+				emit("Browser.downloadProgress", { guid, state: "completed", receivedBytes: 5, filePath });
+				return (await waiting).path;
+			};
+			return { directory, elsewhere, downloads, complete, stagingDirectory };
+		};
+		return { stagingDirectory, tab };
+	}
+
+	async function fakeDownloads(
+		send: (method: string, params: unknown) => Promise<unknown> = async () => undefined,
+		perTab = true,
+	) {
+		return await (await fakeBrowser(send)).tab(perTab);
 	}
 
 	it("moves only a file saved under its download GUID, under the last segment of the suggested name", async () => {
@@ -181,10 +202,9 @@ describe("browser open options CDP helpers", () => {
 	});
 
 	it("keeps a directory named like the download when the rename takes the Windows replacement path", async () => {
-		const { directory, stagingDirectory, complete } = await fakeDownloads();
+		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
-		const saved = path.join(stagingDirectory, guid);
-		await fs.mkdir(stagingDirectory, { recursive: true });
+		const saved = path.join(elsewhere, guid);
 		await Bun.write(saved, "bytes");
 		await Bun.write(path.join(directory, "report.txt", "notes.txt"), "notes");
 		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
@@ -199,32 +219,55 @@ describe("browser open options CDP helpers", () => {
 		expect(await Bun.file(saved).text()).toBe("bytes");
 	});
 
-	it("keeps the same-named file when a staging move fails", async () => {
-		const { directory, stagingDirectory, complete } = await fakeDownloads();
+	it("keeps the same-named file when a cross-device move fails to copy", async () => {
+		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
-		const saved = path.join(stagingDirectory, guid);
-		await fs.mkdir(stagingDirectory, { recursive: true });
+		const saved = path.join(elsewhere, guid);
 		await Bun.write(saved, "bytes");
 		await Bun.write(path.join(directory, "report.txt"), "earlier report");
 		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
-			throw Object.assign(new Error("move failed"), { code: "EIO" });
+			throw Object.assign(new Error("cross-device link not permitted"), { code: "EXDEV" });
+		});
+		const copyFile = spyOn(nodeFs.promises, "copyFile").mockImplementationOnce(async () => {
+			throw Object.assign(new Error("i/o error"), { code: "EIO" });
 		});
 		try {
 			expect(await complete(guid, saved)).toBe(saved);
 		} finally {
 			rename.mockRestore();
+			copyFile.mockRestore();
 		}
 		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("earlier report");
-		expect((await fs.readdir(directory)).filter(name => !name.startsWith(".omp-downloads-staging-")).sort()).toEqual([
-			"report.txt",
-		]);
+		expect(await fs.readdir(directory)).toEqual(["report.txt"]);
 	});
 
-	it("reports the moved file when its staging entry remains after a failed rename", async () => {
+	it("reports the moved file when a cross-device move cannot remove the source", async () => {
+		const { directory, elsewhere, complete } = await fakeDownloads();
+		const guid = crypto.randomUUID();
+		const saved = path.join(elsewhere, guid);
+		await Bun.write(saved, "bytes");
+		await Bun.write(path.join(directory, "report.txt"), "earlier report");
+		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
+			throw Object.assign(new Error("cross-device link not permitted"), { code: "EXDEV" });
+		});
+		const unlink = spyOn(nodeFs.promises, "unlink").mockImplementationOnce(async () => {
+			throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+		});
+		try {
+			expect(await complete(guid, saved)).toBe(path.join(directory, "report.txt"));
+		} finally {
+			rename.mockRestore();
+			unlink.mockRestore();
+		}
+		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("bytes");
+		expect(await fs.readdir(directory)).toEqual(["report.txt"]);
+	});
+
+	it("returns the staged path and keeps the same-named file when the move out of staging fails", async () => {
 		const { directory, stagingDirectory, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
 		const saved = path.join(stagingDirectory, guid);
-		await fs.mkdir(stagingDirectory, { recursive: true });
+		await fs.mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
 		await Bun.write(saved, "bytes");
 		await Bun.write(path.join(directory, "report.txt"), "earlier report");
 		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
@@ -236,19 +279,19 @@ describe("browser open options CDP helpers", () => {
 			rename.mockRestore();
 		}
 		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("earlier report");
+		expect(await Bun.file(saved).text()).toBe("bytes");
 	});
 
-	it("stages per-tab downloads under the requested directory with private permissions", async () => {
+	it("stages per-tab downloads in the browser's private staging directory, outside the requested one", async () => {
 		const behaviors: unknown[] = [];
 		const { directory, complete, stagingDirectory, downloads } = await fakeDownloads(async (method, params) => {
 			if (method === "Browser.setDownloadBehavior") behaviors.push(params);
 		});
 		const guid = crypto.randomUUID();
 		const saved = path.join(stagingDirectory, guid);
-		await fs.mkdir(stagingDirectory, { recursive: true });
+		await downloads.enable(directory);
 		await Bun.write(saved, "bytes");
 
-		expect(await fs.chmod(stagingDirectory, 0o755)).toBeUndefined();
 		expect(await complete(guid, undefined, "report.txt")).toBe(path.join(directory, "report.txt"));
 		expect(behaviors.length).toBeGreaterThan(0);
 		for (const params of behaviors) {
@@ -256,9 +299,73 @@ describe("browser open options CDP helpers", () => {
 		}
 		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("bytes");
 		expect(await Bun.file(saved).exists()).toBe(false);
+		expect(await fs.readdir(directory)).toEqual(["report.txt"]);
 		if (process.platform !== "win32") expect((await fs.stat(stagingDirectory)).mode & 0o777).toBe(0o700);
-		await downloads.close();
-		await expect(fs.stat(stagingDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("sends the identical staging path from every tab of one browser", async () => {
+		const paths: unknown[] = [];
+		const browser = await fakeBrowser(async (method, params) => {
+			if (method === "Browser.setDownloadBehavior") paths.push(Reflect.get(params as object, "downloadPath"));
+		});
+		const first = await browser.tab();
+		const second = await browser.tab();
+
+		await first.downloads.enable(first.directory);
+		await second.downloads.enable(second.directory);
+		await first.downloads.enable(first.directory);
+
+		expect(paths).toEqual([browser.stagingDirectory, browser.stagingDirectory, browser.stagingDirectory]);
+	});
+
+	it("finds a tab's completed download without a filePath after another tab enabled downloads", async () => {
+		const browser = await fakeBrowser();
+		const first = await browser.tab();
+		const second = await browser.tab();
+		await first.downloads.enable(first.directory);
+		await second.downloads.enable(second.directory);
+		const guid = crypto.randomUUID();
+		await Bun.write(path.join(browser.stagingDirectory, guid), "bytes");
+
+		expect(await first.complete(guid, undefined, "report.txt")).toBe(path.join(first.directory, "report.txt"));
+		expect(await Bun.file(path.join(first.directory, "report.txt")).text()).toBe("bytes");
+		expect(await fs.readdir(second.directory)).toEqual([]);
+	});
+
+	it("keeps the staging directory and another tab's staged download when one tab closes", async () => {
+		const browser = await fakeBrowser();
+		const first = await browser.tab();
+		const second = await browser.tab();
+		await first.downloads.enable(first.directory);
+		await second.downloads.enable(second.directory);
+		const guid = crypto.randomUUID();
+		await Bun.write(path.join(browser.stagingDirectory, guid), "bytes");
+
+		await second.downloads.close();
+
+		expect((await fs.stat(browser.stagingDirectory)).isDirectory()).toBe(true);
+		expect(await first.complete(guid, undefined, "report.txt")).toBe(path.join(first.directory, "report.txt"));
+	});
+
+	it.skipIf(process.platform === "win32")("refuses a staging path that is a symlink", async () => {
+		const { downloads, directory, elsewhere, stagingDirectory } = await fakeDownloads();
+		await fs.mkdir(path.dirname(stagingDirectory), { recursive: true });
+		await fs.chmod(elsewhere, 0o700);
+		await fs.symlink(elsewhere, stagingDirectory);
+
+		const error = await rejectionOf(downloads.enable(directory));
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain("not a directory");
+	});
+
+	it.skipIf(process.platform === "win32")("refuses an existing staging directory other users can read", async () => {
+		const { downloads, directory, stagingDirectory } = await fakeDownloads();
+		await fs.mkdir(stagingDirectory, { recursive: true });
+		await fs.chmod(stagingDirectory, 0o755);
+
+		const error = await rejectionOf(downloads.enable(directory));
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain("open to other users");
 	});
 
 	it("keeps real file names and leaves files in place in a browser the user drives", async () => {
@@ -570,9 +677,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 			await invoke({ action: "open", name: secondTab, url: `${server.url.href}?tab=second`, downloads: second });
 			gateOpened.resolve();
 			expect((await firstDownload).path).toBe(path.join(first, "fixture.bin"));
-			const secondEntries = await fs.readdir(second);
-			expect(secondEntries).toEqual([expect.stringMatching(/^\.omp-downloads-staging-/)]);
-			expect(await fs.readdir(path.join(second, secondEntries[0]!))).toEqual([]);
+			expect(await Bun.file(path.join(first, "fixture.bin")).text()).toBe("tab first, download 1\n");
+			expect(await fs.readdir(second)).toEqual([]);
 
 			expect((await download(secondTab)).path).toBe(path.join(second, "fixture.bin"));
 			expect(await Bun.file(path.join(second, "fixture.bin")).text()).toBe("tab second, download 2\n");

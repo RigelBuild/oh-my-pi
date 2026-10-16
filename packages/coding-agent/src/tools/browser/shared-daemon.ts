@@ -62,6 +62,14 @@ export function sharedBrowserDaemonName(headless: boolean): string {
 	return headless ? "omp.browser.headless" : "omp.browser.headed";
 }
 
+/** Folder, inside a browser's private profile, that every tab of that browser sends Chromium's downloads to. */
+export const DOWNLOAD_STAGING_DIRNAME = "omp-download-staging";
+
+/** Stable profile of a shared browser daemon; it outlives single launches and goes with the project's runtime dir. */
+export function sharedBrowserProfileDir(projectDir: string, daemonName: string): string {
+	return path.join(daemonRuntimeDir(projectDir), `${daemonName}.profile`);
+}
+
 function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
 }
@@ -102,7 +110,7 @@ export async function ensureSharedBrowser(opts: {
 	const name = sharedBrowserDaemonName(opts.headless);
 	// Stable profile under the broker's runtime dir: reused across launches, and
 	// never contended by pre-daemon Chromiums that used throwaway temp profiles.
-	const userDataDir = path.join(daemonRuntimeDir(client.projectDir), `${name}.profile`);
+	const userDataDir = sharedBrowserProfileDir(client.projectDir, name);
 	const launch = await resolveSharedBrowserLaunchSpec({
 		headless: opts.headless,
 		userDataDir,
@@ -174,7 +182,13 @@ async function adoptOrStart(
 		await stopQuietly(client, name, "Shared browser", signal);
 		return undefined;
 	}
-	if (claimed) await seedOwnedProfilePreferences(userDataDir);
+	if (claimed) {
+		await seedOwnedProfilePreferences(userDataDir);
+		// The profile outlives each Chrome; downloads a dead one left staged belong to no tab of the new one.
+		await fs
+			.rm(path.join(userDataDir, DOWNLOAD_STAGING_DIRNAME), { recursive: true, force: true })
+			.catch(() => undefined);
+	}
 	try {
 		const started = await client.request(
 			{

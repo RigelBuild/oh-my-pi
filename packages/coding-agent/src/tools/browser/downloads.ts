@@ -43,15 +43,19 @@ interface DownloadWaiter {
 /** Chromium names an `allowAndName` download after its GUID, a lowercase UUID. */
 const DOWNLOAD_GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Per tab, files are saved under their download GUID in `stagingDirectory`, the one folder every tab of the browser
+ * shares, and each tab moves its own into its folder. A browser the user drives keeps its folder and real names.
+ */
+export type DownloadManagerOptions = { perTab: false } | { perTab: true; stagingDirectory: string };
+
 /** Owns tab-scoped Chromium download behavior and completion events. */
 export class DownloadManager {
 	readonly #browser: Browser;
 	readonly #page: Page;
 	readonly #defaultDirectory: string;
-	readonly #tabId: string;
-	readonly #perTab: boolean;
+	readonly #stagingDirectory?: string;
 	#directory?: string;
-	#stagingDirectory?: string;
 	#arming?: Promise<void>;
 	#session?: CDPSession;
 	readonly #pending = new Map<string, PendingDownload>();
@@ -62,43 +66,30 @@ export class DownloadManager {
 	#progress?: (event: DownloadProgress) => void;
 
 	/**
-	 * `perTab` gives each tab its own folder by saving under download GUIDs and moving each tab's own files. Leave it off
-	 * for a browser the user drives (connected, relay): there the folder also receives the user's own downloads, which
-	 * would otherwise be saved under bare GUIDs nobody renames.
+	 * `perTab` gives each tab its own folder by moving each tab's own files out of the browser's staging folder. Leave it
+	 * off for a browser the user drives (connected, relay): there the folder also receives the user's own downloads,
+	 * which would otherwise be saved under bare GUIDs nobody renames.
 	 */
-	constructor(browser: Browser, page: Page, tabId: string, options: { perTab: boolean }) {
+	constructor(browser: Browser, page: Page, tabId: string, options: DownloadManagerOptions) {
 		this.#browser = browser;
 		this.#page = page;
-		this.#tabId = tabId;
 		this.#defaultDirectory = path.join(os.tmpdir(), `omp-downloads-${tabId}`);
-		this.#perTab = options.perTab;
+		if (options.perTab) this.#stagingDirectory = options.stagingDirectory;
 	}
 
 	/**
-	 * Chromium shares its download path across tabs, so intermediates stay in a private directory under this tab's
-	 * requested folder until they can be moved into its root.
+	 * Chromium keeps one download path per browser context and fixes each download's target when it starts, so every
+	 * tab sends the same staging path; a per-tab path would send one tab's downloads into another's folder.
 	 */
 	async enable(directory?: string): Promise<void> {
 		const resolved = path.resolve(directory ?? this.#defaultDirectory);
 		await fs.mkdir(resolved, { recursive: true });
-		let downloadDirectory = resolved;
-		if (this.#perTab) {
-			const stagingDirectory = path.join(resolved, `.omp-downloads-staging-${this.#tabId}`);
-			await fs.mkdir(stagingDirectory, { mode: 0o700 }).catch(error => {
-				if (!hasFsCode(error, "EEXIST")) throw error;
-			});
-			if (!(await fs.lstat(stagingDirectory)).isDirectory()) {
-				throw new ToolError(`Download staging path is not a directory: ${stagingDirectory}`);
-			}
-			await fs.chmod(stagingDirectory, 0o700);
-			this.#stagingDirectory = stagingDirectory;
-			downloadDirectory = stagingDirectory;
-		}
+		if (this.#stagingDirectory) await ensurePrivateDirectory(this.#stagingDirectory);
 		if (!this.#session) await this.#attach();
 		const context = this.#page.browserContext() as { id?: string };
 		await this.#session!.send("Browser.setDownloadBehavior", {
-			behavior: this.#perTab ? "allowAndName" : "allow",
-			downloadPath: downloadDirectory,
+			behavior: this.#stagingDirectory ? "allowAndName" : "allow",
+			downloadPath: this.#stagingDirectory ?? resolved,
 			eventsEnabled: true,
 			...(context.id ? { browserContextId: context.id } : {}),
 		});
@@ -148,23 +139,18 @@ export class DownloadManager {
 		return this.#completed.map(download => ({ ...download }));
 	}
 
-	/** Detach event listeners, reject outstanding waits, and remove this tab's staging directory once it is empty. */
+	/** Detach event listeners and reject outstanding waits. */
 	async close(): Promise<void> {
 		const session = this.#session;
-		if (session) {
-			if (this.#willBegin) session.off("Browser.downloadWillBegin", this.#willBegin);
-			if (this.#progress) session.off("Browser.downloadProgress", this.#progress);
-			for (const waiter of this.#waiters.splice(0)) {
-				if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-				waiter.reject(new ToolError("Tab closed while waiting for a download"));
-			}
-			this.#session = undefined;
-			await session.detach().catch(() => undefined);
+		if (!session) return;
+		if (this.#willBegin) session.off("Browser.downloadWillBegin", this.#willBegin);
+		if (this.#progress) session.off("Browser.downloadProgress", this.#progress);
+		for (const waiter of this.#waiters.splice(0)) {
+			if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+			waiter.reject(new ToolError("Tab closed while waiting for a download"));
 		}
-		const stagingDirectory = this.#stagingDirectory;
-		this.#stagingDirectory = undefined;
-		// Another tab's in-flight download may still be staged here, so never delete a non-empty directory.
-		if (stagingDirectory) await fs.rmdir(stagingDirectory).catch(() => undefined);
+		this.#session = undefined;
+		await session.detach().catch(() => undefined);
 	}
 
 	async #attach(): Promise<void> {
@@ -195,8 +181,9 @@ export class DownloadManager {
 
 	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
 		const directory = this.#directory ?? this.#defaultDirectory;
-		const downloadDirectory = this.#perTab ? (this.#stagingDirectory ?? this.#defaultDirectory) : directory;
-		const source = filePath ?? path.join(downloadDirectory, this.#perTab ? pending.guid : pending.suggestedFilename);
+		const staging = this.#stagingDirectory;
+		const source =
+			filePath ?? (staging ? path.join(staging, pending.guid) : path.join(directory, pending.suggestedFilename));
 		let sourceFound = false;
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
@@ -207,10 +194,10 @@ export class DownloadManager {
 				await Bun.sleep(10);
 			}
 		}
-		if (this.#perTab && filePath === undefined && !sourceFound) {
+		if (staging && filePath === undefined && !sourceFound) {
 			this.#rejectNext(
 				new ToolError(
-					`Download failed: ${pending.url}: completed file was not found in this tab's staging directory`,
+					`Download failed: ${pending.url}: completed file was not found in the browser's download staging directory`,
 				),
 			);
 			return;
@@ -220,7 +207,7 @@ export class DownloadManager {
 		// Only the last segment of the suggested name is used; anything else, or a download that cannot be moved, is
 		// reported where Chromium saved it.
 		const movable =
-			this.#perTab &&
+			staging !== undefined &&
 			name !== "" &&
 			name !== "." &&
 			name !== ".." &&
@@ -275,6 +262,26 @@ async function entryKind(file: string): Promise<"file" | "missing" | "other"> {
 		return (await fs.lstat(file)).isFile() ? "file" : "other";
 	} catch (error) {
 		return isEnoent(error) ? "missing" : "other";
+	}
+}
+
+/**
+ * Create `directory` readable only by this user, or accept an existing one only if it already is. Fails closed rather
+ * than repairing: a chmod by path could follow a symlink swapped in after the check.
+ */
+async function ensurePrivateDirectory(directory: string): Promise<void> {
+	await fs.mkdir(path.dirname(directory), { recursive: true, mode: 0o700 });
+	await fs.mkdir(directory, { mode: 0o700 }).catch(error => {
+		if (!hasFsCode(error, "EEXIST")) throw error;
+	});
+	const stats = await fs.lstat(directory);
+	if (!stats.isDirectory()) throw new ToolError(`Download staging path is not a directory: ${directory}`);
+	if (process.platform === "win32") return;
+	if (stats.uid !== process.getuid?.()) {
+		throw new ToolError(`Download staging directory is owned by another user: ${directory}`);
+	}
+	if ((stats.mode & 0o077) !== 0) {
+		throw new ToolError(`Download staging directory is open to other users: ${directory}`);
 	}
 }
 

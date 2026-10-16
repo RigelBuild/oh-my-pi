@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- Fixed browser tabs writing Chromium `.crdownload` files into another tab's downloads folder by staging them in a private subdirectory of each requested folder.
+- Fixed browser downloads landing in another tab's downloads folder, or not being found, when tabs of one browser set different folders: every tab now stages downloads in one private folder inside the browser's profile and moves each into its own folder.
 - Fixed a cancelled or timed-out `browser` open killing the shared headless browser after it had launched, which made later tabs fail with `Failed to connect` or `Connection ended`.
 - Fixed `RpcClient.stop()` occasionally waiting forever because the agent process was never signaled.
 - Fixed `read` re-listing an archive rewritten in place with the same size and mtime within the same instant.

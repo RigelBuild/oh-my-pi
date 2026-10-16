@@ -32,6 +32,7 @@ import {
 	type BrowserHandle,
 	type BrowserKindTag,
 	type CmuxBrowserHandle,
+	downloadStagingDirectory,
 	holdBrowser,
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
@@ -1612,6 +1613,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			allowedDomains: opts.allowedDomains,
 			initScripts: opts.initScripts,
 			downloadsPath: opts.downloadsPath,
+			downloadStagingDirectory: downloadStagingDirectory(browser),
 			userAgent: opts.userAgent,
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		};
@@ -1640,7 +1642,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		activateForScreenshot,
-		userDriven,
+		downloadStagingDirectory: downloadStagingDirectory(browser),
 	};
 }
 
@@ -1736,7 +1738,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		recover: true,
 		emulateFocus: tab.kindTag === "headless",
 		activateForScreenshot: tab.activateForScreenshot,
-		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
+		downloadStagingDirectory: downloadStagingDirectory(tab.browser),
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.

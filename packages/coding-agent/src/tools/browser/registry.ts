@@ -1,5 +1,14 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getLogsDir, isCompiledBinary, logger, untilAborted, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
+import {
+	getLogsDir,
+	getPuppeteerDir,
+	isCompiledBinary,
+	logger,
+	untilAborted,
+	withTimeout,
+	workerHostEntry,
+} from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
@@ -20,7 +29,7 @@ import { reapOrphanSharedTargets } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
-import { ensureSharedBrowser } from "./shared-daemon";
+import { DOWNLOAD_STAGING_DIRNAME, ensureSharedBrowser, sharedBrowserProfileDir } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
 
@@ -475,7 +484,25 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 	// A discovered CDP PID is borrowed, not ours to kill on close or abort.
 	if (opts.kill && handle.subprocess && handle.subprocess.exitCode === null) {
 		await gracefulKillTreeOnce(handle.subprocess.pid);
+		const staging = downloadStagingDirectory(handle);
+		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 	}
+}
+
+/**
+ * The one download folder every tab of `handle`'s browser points Chromium at, or undefined for a browser the user
+ * drives. It lives in the browser's private profile, so it goes with that profile, and every process derives the same path.
+ */
+export function downloadStagingDirectory(handle: PuppeteerBrowserHandle): string | undefined {
+	if (handle.kind.kind === "connected" || handle.kind.kind === "relay") return undefined;
+	if (handle.userDataDir) return path.join(handle.userDataDir, DOWNLOAD_STAGING_DIRNAME);
+	if (handle.sharedDaemon) {
+		const profile = sharedBrowserProfileDir(handle.sharedDaemon.projectDir, handle.sharedDaemon.name);
+		return path.join(profile, DOWNLOAD_STAGING_DIRNAME);
+	}
+	// A spawned app's profile may be the user's own, so its staging folder is keyed by the app instead.
+	const identity = Bun.hash.wyhash(handle.key).toString(16).padStart(16, "0");
+	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, identity);
 }
 
 /**
