@@ -57,6 +57,8 @@ export type WorkerInitPayload =
 			initScripts?: string[];
 			/** Absolute directory enabled for completed downloads. */
 			downloadsPath?: string;
+			/** Download folder shared by every tab of this browser; see the attach payload's field. */
+			downloadStagingDirectory?: string;
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
@@ -92,10 +94,10 @@ export type WorkerInitPayload =
 			 */
 			activateForScreenshot?: boolean;
 			/**
-			 * The user drives this browser (connected, relay): downloads keep its one browser-wide folder and real file
-			 * names, since the user's own downloads land there too. Unset means an OMP-launched browser.
+			 * Download folder shared by every tab of this browser. Unset for a browser the user drives (connected,
+			 * relay): downloads keep its one browser-wide folder and real file names, since the user's own downloads land there too.
 			 */
-			userDriven?: boolean;
+			downloadStagingDirectory?: string;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
