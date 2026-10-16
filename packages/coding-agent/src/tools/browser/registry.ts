@@ -487,8 +487,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		}
 	}
 	// A discovered CDP PID is borrowed, not ours to kill on close or abort.
-	if (opts.kill && handle.subprocess && handle.subprocess.exitCode === null) {
-		await gracefulKillTreeOnce(handle.subprocess.pid);
+	if (opts.kill && handle.subprocess) {
+		if (handle.subprocess.exitCode === null) await gracefulKillTreeOnce(handle.subprocess.pid);
+		// The owned process is gone either way, so nothing still writes to its staging folder.
 		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 	}
 }
@@ -505,22 +506,29 @@ function stagingDirectoryToRemove(handle: PuppeteerBrowserHandle): string | unde
 /** Chromium's browser target id, the last segment of its `ws://…/devtools/browser/<id>` endpoint. */
 const BROWSER_TARGET_ID = /\/devtools\/browser\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
+/** Names one running Chrome the same way for every connection to it: its target id, else a hash of its endpoint. */
+function browserInstanceId(handle: PuppeteerBrowserHandle): string {
+	const endpoint = handle.browser.wsEndpoint();
+	const targetId = BROWSER_TARGET_ID.exec(endpoint)?.[1];
+	return targetId ? targetId.toLowerCase() : Bun.hash.wyhash(endpoint).toString(16).padStart(16, "0");
+}
+
 /**
  * The one download folder every tab of `handle`'s browser points Chromium at, or undefined for a browser the user
- * drives. It lives in the browser's private profile, so it goes with that profile, and every process derives the same path.
+ * drives. An OMP-owned profile (temp launch, shared daemon) holds it and it goes with that profile; any other browser
+ * stages under the puppeteer dir, keyed by the running browser, and that folder is removed only when OMP kills it.
  */
 export function downloadStagingDirectory(handle: PuppeteerBrowserHandle): string | undefined {
 	if (handle.kind.kind === "connected" || handle.kind.kind === "relay") return undefined;
 	if (handle.userDataDir) return path.join(handle.userDataDir, DOWNLOAD_STAGING_DIRNAME);
 	if (handle.sharedDaemon) {
+		// The daemon's profile outlives each Chrome, so key by the Chrome; the profile lock makes every sibling dead.
 		const profile = sharedBrowserProfileDir(handle.sharedDaemon.projectDir, handle.sharedDaemon.name);
-		return path.join(profile, DOWNLOAD_STAGING_DIRNAME);
+		return path.join(profile, DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle));
 	}
-	// Spawned apps and launches with the caller's own profile: the profile may be the user's, and handles with different
-	// keys can reuse one running browser, so key by the browser itself.
-	const browserId = BROWSER_TARGET_ID.exec(handle.browser.wsEndpoint())?.[1];
-	if (!browserId) throw new ToolError("Browser websocket endpoint does not name a browser target");
-	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, browserId.toLowerCase());
+	// Spawned apps and launches with the caller's own profile: that profile may be the user's, so stage outside it.
+	// An OMP crash while a spawned app runs leaves this folder behind; nothing can tell it from a live browser's.
+	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle));
 }
 
 /**
@@ -568,7 +576,7 @@ async function openSharedHeadlessHandle(
 		// accumulation without a background timer. Best-effort and detached so a
 		// slow reap never delays the open (issue #10022).
 		void reapOrphanSharedTargets(browser, { projectDir: shared.projectDir, daemonName: shared.daemonName });
-		return {
+		const handle: PuppeteerBrowserHandle = {
 			key: browserKey(kind),
 			kind,
 			browser,
@@ -576,11 +584,33 @@ async function openSharedHeadlessHandle(
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
 		};
+		const staging = downloadStagingDirectory(handle);
+		if (staging) void sweepDeadSharedStaging(staging);
+		return handle;
 	} catch (err) {
 		if (err instanceof ToolAbortError || err instanceof ToolError) throw err;
 		if (opts.signal?.aborted) throw new ToolAbortError("Browser open aborted");
 		throw new ToolError(`Shared browser attach failed: ${err instanceof Error ? err.message : String(err)}`);
 	}
+}
+
+const sweptSharedStaging = new Set<string>();
+
+/**
+ * Remove every sibling of a shared daemon's current staging folder, once per process. Chrome's profile lock allows one
+ * Chrome per profile, so a sibling keyed by another browser belongs to a Chrome that is gone.
+ */
+export async function sweepDeadSharedStaging(staging: string): Promise<void> {
+	if (sweptSharedStaging.has(staging)) return;
+	sweptSharedStaging.add(staging);
+	const parent = path.dirname(staging);
+	const current = path.basename(staging);
+	const entries = await fs.readdir(parent).catch(() => [] as string[]);
+	await Promise.all(
+		entries
+			.filter(entry => entry !== current)
+			.map(entry => fs.rm(path.join(parent, entry), { recursive: true, force: true }).catch(() => undefined)),
+	);
 }
 
 /** Test-only accessor for the module-global browsers map. */

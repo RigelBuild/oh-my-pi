@@ -219,7 +219,7 @@ describe("browser open options CDP helpers", () => {
 		expect(await Bun.file(saved).text()).toBe("bytes");
 	});
 
-	it("keeps the same-named file when a cross-device move fails to copy", async () => {
+	it("rejects the wait and keeps the same-named file when a cross-device move fails to copy", async () => {
 		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
 		const saved = path.join(elsewhere, guid);
@@ -231,12 +231,16 @@ describe("browser open options CDP helpers", () => {
 		const copyFile = spyOn(nodeFs.promises, "copyFile").mockImplementationOnce(async () => {
 			throw Object.assign(new Error("i/o error"), { code: "EIO" });
 		});
+		let error: unknown;
 		try {
-			expect(await complete(guid, saved)).toBe(saved);
+			error = await rejectionOf(complete(guid, saved));
 		} finally {
 			rename.mockRestore();
 			copyFile.mockRestore();
 		}
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain(directory);
+		expect((error as ToolError).message).toContain("i/o error");
 		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("earlier report");
 		expect(await fs.readdir(directory)).toEqual(["report.txt"]);
 	});
@@ -263,7 +267,7 @@ describe("browser open options CDP helpers", () => {
 		expect(await fs.readdir(directory)).toEqual(["report.txt"]);
 	});
 
-	it("returns the staged path and keeps the same-named file when the move out of staging fails", async () => {
+	it("rejects the wait instead of returning the staged path when the move out of staging fails", async () => {
 		const { directory, stagingDirectory, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
 		const saved = path.join(stagingDirectory, guid);
@@ -273,13 +277,28 @@ describe("browser open options CDP helpers", () => {
 		const rename = spyOn(nodeFs.promises, "rename").mockImplementationOnce(async () => {
 			throw Object.assign(new Error("move failed"), { code: "EACCES" });
 		});
+		let error: unknown;
 		try {
-			expect(await complete(guid, saved)).toBe(saved);
+			error = await rejectionOf(complete(guid, saved));
 		} finally {
 			rename.mockRestore();
 		}
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain(directory);
+		expect((error as ToolError).message).toContain("move failed");
 		expect(await Bun.file(path.join(directory, "report.txt")).text()).toBe("earlier report");
-		expect(await Bun.file(saved).text()).toBe("bytes");
+	});
+
+	it("moves a download with an unusable suggested name into the requested folder under its GUID", async () => {
+		const { directory, stagingDirectory, complete } = await fakeDownloads();
+		const guid = crypto.randomUUID();
+		const saved = path.join(stagingDirectory, guid);
+		await fs.mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+		await Bun.write(saved, "bytes");
+
+		expect(await complete(guid, saved, "..")).toBe(path.join(directory, guid));
+		expect(await Bun.file(path.join(directory, guid)).text()).toBe("bytes");
+		expect(await Bun.file(saved).exists()).toBe(false);
 	});
 
 	it("stages per-tab downloads in the browser's private staging directory, outside the requested one", async () => {
@@ -383,14 +402,14 @@ describe("browser open options CDP helpers", () => {
 		for (const params of behaviors) expect(params).toMatchObject({ behavior: "allow" });
 	});
 
-	it("reports a download whose suggested name is not a string where Chromium saved it", async () => {
-		const { elsewhere, complete } = await fakeDownloads();
+	it("moves a download whose suggested name is not a string into the requested folder under its GUID", async () => {
+		const { directory, elsewhere, complete } = await fakeDownloads();
 		const guid = crypto.randomUUID();
 		const saved = path.join(elsewhere, guid);
 		await Bun.write(saved, "bytes");
 
-		expect(await complete(guid, saved, null)).toBe(saved);
-		expect(await Bun.file(saved).text()).toBe("bytes");
+		expect(await complete(guid, saved, null)).toBe(path.join(directory, guid));
+		expect(await Bun.file(path.join(directory, guid)).text()).toBe("bytes");
 	});
 
 	it("rejects the wait when a completed download cannot be read", async () => {

@@ -203,21 +203,24 @@ export class DownloadManager {
 			return;
 		}
 		const name = typeof pending.suggestedFilename === "string" ? path.basename(pending.suggestedFilename) : "";
-		const target = path.join(directory, name);
-		// Only the last segment of the suggested name is used; anything else, or a download that cannot be moved, is
-		// reported where Chromium saved it.
-		const movable =
-			staging !== undefined &&
-			name !== "" &&
-			name !== "." &&
-			name !== ".." &&
-			(await canMoveDownload(source, pending.guid, target));
-		const downloadPath = movable
-			? await moveDownload(source, target).then(
-					() => target,
-					() => source,
-				)
-			: source;
+		// Staging goes when the browser does, so an unsafe name still moves out, under the download's GUID.
+		const safeName = name !== "" && name !== "." && name !== ".." ? name : pending.guid;
+		const target = path.join(directory, safeName);
+		// Only a regular file saved under its GUID moves; anything else is reported where Chromium saved it.
+		const movable = staging !== undefined && (await canMoveDownload(source, pending.guid, target));
+		if (movable) {
+			try {
+				await moveDownload(source, target);
+			} catch (error) {
+				this.#rejectNext(
+					new ToolError(
+						`Download failed: ${pending.url}: could not move it into ${directory}: ${toError(error).message}`,
+					),
+				);
+				return;
+			}
+		}
+		const downloadPath = movable ? target : source;
 		const download: BrowserDownload = {
 			path: downloadPath,
 			suggestedFilename: pending.suggestedFilename,
