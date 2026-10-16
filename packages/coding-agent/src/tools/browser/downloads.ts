@@ -173,17 +173,15 @@ export class DownloadManager {
 			pending.receivedBytes = event.receivedBytes;
 			if (event.state === "inProgress") return;
 			this.#pending.delete(event.guid);
-			if (event.state === "canceled") {
-				this.#settling = this.#settling.then(() =>
-					this.#deliver({ error: new ToolError(`Download canceled: ${pending.url}`) }),
-				);
-				return;
-			}
-			this.#settling = this.#settling.then(() =>
-				this.#complete(pending, event.filePath).catch(error => {
-					this.#fail(pending, toError(error).message);
-				}),
-			);
+			const settle =
+				event.state === "canceled"
+					? async () => this.#deliver({ error: new ToolError(`Download canceled: ${pending.url}`) })
+					: () => this.#complete(pending, event.filePath);
+			// Each link ends resolved, so one failure can neither wedge later completions nor go unreported.
+			this.#settling = this.#settling
+				.then(settle)
+				.catch(error => this.#fail(pending, toError(error).message))
+				.catch(() => undefined);
 		};
 		session.on("Browser.downloadWillBegin", this.#willBegin);
 		session.on("Browser.downloadProgress", this.#progress);
