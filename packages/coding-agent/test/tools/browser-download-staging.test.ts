@@ -1,14 +1,27 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
+import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
+import type { DaemonOperation, DaemonRpcResult } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import * as browserAttach from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import * as browserLaunch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
+	type BrowserHandle,
 	browserKey,
 	downloadStagingDirectory,
 	type PuppeteerBrowserHandle,
 	type PuppeteerBrowserKind,
-	sweepDeadSharedStaging,
+	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import {
+	DOWNLOAD_STAGING_DIRNAME,
+	ensureSharedBrowser,
+	sharedBrowserDaemonName,
+	sharedBrowserProfileDir,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/shared-daemon";
+import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import {
 	buildInitPayloadForTest,
 	buildRecyclePayloadForTest,
@@ -87,7 +100,7 @@ describe("downloadStagingDirectory", () => {
 		expect(payload.downloadStagingDirectory).toBe(staging);
 	});
 
-	it("keys a shared daemon's staging by its browser and sweeps the folders of dead ones", async () => {
+	it("keys a shared daemon's staging by its browser", async () => {
 		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-staging-project-"));
 		tempDirs.push(projectDir);
 		const guid = crypto.randomUUID();
@@ -95,16 +108,115 @@ describe("downloadStagingDirectory", () => {
 			sharedDaemon: { name: "omp.browser.headless", projectDir },
 		});
 		const staging = downloadStagingDirectory(shared);
-		if (!staging) throw new Error("shared daemon has no staging folder");
-		expect(path.basename(staging)).toBe(guid);
-		const dead = path.join(path.dirname(staging), crypto.randomUUID());
-		await Bun.write(path.join(dead, "leftover"), "bytes");
-		await Bun.write(path.join(staging, "live"), "bytes");
+		expect(staging).toBe(
+			path.join(sharedBrowserProfileDir(projectDir, "omp.browser.headless"), DOWNLOAD_STAGING_DIRNAME, guid),
+		);
+	});
 
-		await sweepDeadSharedStaging(staging);
+	it("removes a disconnected process-local browser's staging folder on dispose", async () => {
+		const ws = endpoint();
+		const local = handle({ kind: "headless", headless: true }, ws);
+		Object.assign(local.browser, { connected: false });
+		const staging = downloadStagingDirectory(local);
+		if (!staging) throw new Error("process-local browser has no staging folder");
+		await Bun.write(path.join(staging, "leftover"), "bytes");
 
-		expect(await fs.readdir(path.dirname(staging))).toEqual([guid]);
-		expect(await Bun.file(path.join(staging, "live")).text()).toBe("bytes");
+		await releaseBrowser(local as BrowserHandle, { kill: true });
+
+		expect(await Bun.file(path.join(staging, "leftover")).exists()).toBe(false);
+	});
+});
+
+describe("shared daemon staging sweep", () => {
+	/** Run `ensureSharedBrowser` against a fake broker that either already runs Chrome at `ws` or starts it there. */
+	async function ensureWith(projectDir: string, ws: string, running: boolean) {
+		const name = sharedBrowserDaemonName(true);
+		const now = Date.now();
+		const daemon: DaemonSnapshot = {
+			name,
+			id: "staging",
+			state: "ready",
+			createdAt: now,
+			startedAt: now,
+			readyAt: now,
+			readyMatch: `DevTools listening on ${ws}`,
+			restartCount: 0,
+			outputBytes: 0,
+			persist: false,
+			detached: false,
+		};
+		let starts = 0;
+		const client = {
+			projectDir,
+			onCompletion: () => () => {},
+			close() {},
+			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
+				if (operation.op === "describe") {
+					if (!running) throw new Error(`Unknown daemon ${operation.name}`);
+					return { op: "describe", daemon } as DaemonRpcResult;
+				}
+				if (operation.op === "start") {
+					starts++;
+					return { op: "start", daemon, readyTimedOut: false };
+				}
+				throw new Error(`Unexpected broker op ${operation.op}`);
+			},
+		} as unknown as DaemonBrokerClient;
+		const spies = [
+			spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client),
+			spyOn(browserLaunch, "resolveSharedBrowserLaunchSpec").mockResolvedValue({
+				executablePath: "/fake/chrome",
+				args: [],
+			}),
+			spyOn(browserAttach, "probeCdpStatus").mockResolvedValue(200),
+			spyOn(browserLaunch, "seedOwnedProfilePreferences").mockResolvedValue(undefined),
+		];
+		try {
+			const shared = await ensureSharedBrowser({ projectDir, headless: true });
+			return {
+				shared,
+				starts,
+				parent: path.join(sharedBrowserProfileDir(projectDir, name), DOWNLOAD_STAGING_DIRNAME),
+			};
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
+	}
+
+	async function seedStaging(projectDir: string, ids: string[]): Promise<void> {
+		const parent = path.join(
+			sharedBrowserProfileDir(projectDir, sharedBrowserDaemonName(true)),
+			DOWNLOAD_STAGING_DIRNAME,
+		);
+		for (const id of ids) await Bun.write(path.join(parent, id, "leftover"), "bytes");
+	}
+
+	it("sweeps dead siblings and keeps the fresh Chrome's folder after starting it", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-staging-project-"));
+		tempDirs.push(projectDir);
+		const fresh = crypto.randomUUID();
+		const dead = crypto.randomUUID();
+		await seedStaging(projectDir, [fresh, dead]);
+
+		const { shared, starts, parent } = await ensureWith(projectDir, endpoint(fresh), false);
+
+		expect(shared?.wsEndpoint).toBe(endpoint(fresh));
+		expect(starts).toBe(1);
+		expect(await fs.readdir(parent)).toEqual([fresh]);
+	});
+
+	it("sweeps nothing when adopting a running Chrome", async () => {
+		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-staging-project-"));
+		tempDirs.push(projectDir);
+		const live = crypto.randomUUID();
+		const other = crypto.randomUUID();
+		await seedStaging(projectDir, [live, other]);
+
+		const { shared, starts, parent } = await ensureWith(projectDir, endpoint(live), true);
+
+		expect(shared?.wsEndpoint).toBe(endpoint(live));
+		expect(starts).toBe(0);
+		expect((await fs.readdir(parent)).sort()).toEqual([live, other].sort());
 	});
 });
 

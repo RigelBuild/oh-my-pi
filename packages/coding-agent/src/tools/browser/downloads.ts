@@ -40,6 +40,8 @@ interface DownloadWaiter {
 	onAbort?: () => void;
 }
 
+type DownloadOutcome = { download: BrowserDownload } | { error: ToolError };
+
 /** Chromium names an `allowAndName` download after its GUID, a lowercase UUID. */
 const DOWNLOAD_GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -60,7 +62,7 @@ export class DownloadManager {
 	#session?: CDPSession;
 	readonly #pending = new Map<string, PendingDownload>();
 	readonly #completed: BrowserDownload[] = [];
-	readonly #unclaimed: BrowserDownload[] = [];
+	readonly #unclaimed: DownloadOutcome[] = [];
 	readonly #waiters: DownloadWaiter[] = [];
 	#willBegin?: (event: DownloadStarted & { frameId: string }) => void;
 	#progress?: (event: DownloadProgress) => void;
@@ -119,7 +121,10 @@ export class DownloadManager {
 			}
 		}
 		const ready = this.#unclaimed.shift();
-		if (ready) return { ...ready };
+		if (ready) {
+			if ("error" in ready) throw ready.error;
+			return { ...ready.download };
+		}
 		if (signal?.aborted) throw signal.reason;
 		return await new Promise<BrowserDownload>((resolve, reject) => {
 			const waiter: DownloadWaiter = { resolve, reject, signal };
@@ -167,11 +172,11 @@ export class DownloadManager {
 			if (event.state === "inProgress") return;
 			this.#pending.delete(event.guid);
 			if (event.state === "canceled") {
-				this.#rejectNext(new ToolError(`Download canceled: ${pending.url}`));
+				this.#deliver({ error: new ToolError(`Download canceled: ${pending.url}`) });
 				return;
 			}
 			void this.#complete(pending, event.filePath).catch(error => {
-				this.#rejectNext(new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`));
+				this.#fail(pending, toError(error).message);
 			});
 		};
 		session.on("Browser.downloadWillBegin", this.#willBegin);
@@ -194,54 +199,61 @@ export class DownloadManager {
 				await Bun.sleep(10);
 			}
 		}
-		if (staging && filePath === undefined && !sourceFound) {
-			this.#rejectNext(
-				new ToolError(
-					`Download failed: ${pending.url}: completed file was not found in the browser's download staging directory`,
-				),
-			);
+		const report = (downloadPath: string) =>
+			this.#deliver({
+				download: {
+					path: downloadPath,
+					suggestedFilename: pending.suggestedFilename,
+					url: pending.url,
+					bytes: pending.receivedBytes,
+				},
+			});
+		// A browser the user drives keeps its downloads where Chromium saved them.
+		if (!staging) {
+			report(source);
+			return;
+		}
+		if (!sourceFound) {
+			this.#fail(pending, `completed file was not found: ${source}`);
+			return;
+		}
+		// The peer names the GUID and the saved path, so only a regular file saved under its GUID may move.
+		if (!(await isGuidDownload(source, pending.guid))) {
+			this.#fail(pending, `${source} is not a file saved under its download GUID; left it in place`);
 			return;
 		}
 		const name = typeof pending.suggestedFilename === "string" ? path.basename(pending.suggestedFilename) : "";
-		// Staging goes when the browser does, so an unsafe name still moves out, under the download's GUID.
-		const safeName = name !== "" && name !== "." && name !== ".." ? name : pending.guid;
-		const target = path.join(directory, safeName);
-		// Only a regular file saved under its GUID moves; anything else is reported where Chromium saved it.
-		const movable = staging !== undefined && (await canMoveDownload(source, pending.guid, target));
-		if (movable) {
-			try {
-				await moveDownload(source, target);
-			} catch (error) {
-				this.#rejectNext(
-					new ToolError(
-						`Download failed: ${pending.url}: could not move it into ${directory}: ${toError(error).message}`,
-					),
-				);
-				return;
-			}
+		// Staging goes when the browser does, so an unusable name, or one a directory or symlink holds, moves under the GUID.
+		let target = path.join(directory, name !== "" && name !== "." && name !== ".." ? name : pending.guid);
+		if ((await entryKind(target)) === "other") target = path.join(directory, pending.guid);
+		if ((await entryKind(target)) === "other") {
+			this.#fail(pending, `${target} is not a file it may replace; left it at ${source}`);
+			return;
 		}
-		const downloadPath = movable ? target : source;
-		const download: BrowserDownload = {
-			path: downloadPath,
-			suggestedFilename: pending.suggestedFilename,
-			url: pending.url,
-			bytes: pending.receivedBytes,
-		};
-		this.#completed.push(download);
+		try {
+			await moveDownload(source, target);
+		} catch (error) {
+			this.#fail(pending, `could not move it into ${directory}: ${toError(error).message}; left it at ${source}`);
+			return;
+		}
+		report(target);
+	}
+
+	#fail(pending: PendingDownload, reason: string): void {
+		this.#deliver({ error: new ToolError(`Download failed: ${pending.url}: ${reason}`) });
+	}
+
+	/** Hand an outcome to the oldest waiter, or queue it, failures in order with successes, for the next `wait()`. */
+	#deliver(outcome: DownloadOutcome): void {
+		if ("download" in outcome) this.#completed.push(outcome.download);
 		const waiter = this.#waiters.shift();
 		if (!waiter) {
-			this.#unclaimed.push(download);
+			this.#unclaimed.push(outcome);
 			return;
 		}
 		if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-		waiter.resolve({ ...download });
-	}
-
-	#rejectNext(error: ToolError): void {
-		const waiter = this.#waiters.shift();
-		if (!waiter) return;
-		if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-		waiter.reject(error);
+		if ("error" in outcome) waiter.reject(outcome.error);
+		else waiter.resolve({ ...outcome.download });
 	}
 
 	#removeWaiter(waiter: DownloadWaiter): void {
@@ -250,13 +262,10 @@ export class DownloadManager {
 	}
 }
 
-/**
- * Whether `source` is a regular file saved under a UUID-shaped download GUID, and `target` is free or a file it may
- * replace. The peer names the GUID, the saved path and the suggested name, so a symlink or directory stays where it is.
- */
-async function canMoveDownload(source: string, guid: string, target: string): Promise<boolean> {
+/** Whether `source` is a regular file, not a symlink or directory, saved under a UUID-shaped download GUID. */
+async function isGuidDownload(source: string, guid: string): Promise<boolean> {
 	if (!DOWNLOAD_GUID.test(guid) || path.basename(source) !== guid) return false;
-	return (await entryKind(source)) === "file" && (await entryKind(target)) !== "other";
+	return (await entryKind(source)) === "file";
 }
 
 /** What a path names, without following a symlink there. */
@@ -285,8 +294,9 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
 	if (stats.uid !== process.getuid?.()) {
 		throw new ToolError(`Download staging directory is owned by another user: ${directory}`);
 	}
-	if ((stats.mode & 0o077) !== 0) {
-		throw new ToolError(`Download staging directory is open to other users: ${directory}`);
+	// Chromium must create and list files in it; a folder without owner rwx would fail each download later instead.
+	if ((stats.mode & 0o077) !== 0 || (stats.mode & 0o700) !== 0o700) {
+		throw new ToolError(`Download staging directory is open to other users or not usable by its owner: ${directory}`);
 	}
 }
 

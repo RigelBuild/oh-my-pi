@@ -29,7 +29,12 @@ import { reapOrphanSharedTargets } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
-import { DOWNLOAD_STAGING_DIRNAME, ensureSharedBrowser, sharedBrowserProfileDir } from "./shared-daemon";
+import {
+	browserInstanceId,
+	DOWNLOAD_STAGING_DIRNAME,
+	ensureSharedBrowser,
+	sharedBrowserProfileDir,
+} from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
 
@@ -443,9 +448,10 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			}
 			return;
 		}
+		// Read before close: a launch with the caller's own --user-data-dir stages under the browser's id. A disconnected
+		// browser still names its endpoint, so its staging goes too.
+		const staging = handle.userDataDir ? undefined : stagingDirectoryToRemove(handle);
 		if (handle.browser.connected) {
-			// Read before close: a launch with the caller's own --user-data-dir stages under the browser's id.
-			const staging = handle.userDataDir ? undefined : stagingDirectoryToRemove(handle);
 			// Puppeteer's `browser.close()` resolves only once the Chromium
 			// process fully exits. A wedged Chromium (a known Windows failure
 			// mode) leaves this await pending forever, freezing `releaseTab` in
@@ -458,8 +464,8 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 				logger.debug("Failed to close headless browser; force-killing", { error: (err as Error).message });
 				if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
 			}
-			if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 		}
+		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
 		// exited. Tolerant of the Windows lock-held window (issue #7058).
@@ -503,16 +509,6 @@ function stagingDirectoryToRemove(handle: PuppeteerBrowserHandle): string | unde
 	}
 }
 
-/** Chromium's browser target id, the last segment of its `ws://…/devtools/browser/<id>` endpoint. */
-const BROWSER_TARGET_ID = /\/devtools\/browser\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
-
-/** Names one running Chrome the same way for every connection to it: its target id, else a hash of its endpoint. */
-function browserInstanceId(handle: PuppeteerBrowserHandle): string {
-	const endpoint = handle.browser.wsEndpoint();
-	const targetId = BROWSER_TARGET_ID.exec(endpoint)?.[1];
-	return targetId ? targetId.toLowerCase() : Bun.hash.wyhash(endpoint).toString(16).padStart(16, "0");
-}
-
 /**
  * The one download folder every tab of `handle`'s browser points Chromium at, or undefined for a browser the user
  * drives. An OMP-owned profile (temp launch, shared daemon) holds it and it goes with that profile; any other browser
@@ -524,11 +520,11 @@ export function downloadStagingDirectory(handle: PuppeteerBrowserHandle): string
 	if (handle.sharedDaemon) {
 		// The daemon's profile outlives each Chrome, so key by the Chrome; the profile lock makes every sibling dead.
 		const profile = sharedBrowserProfileDir(handle.sharedDaemon.projectDir, handle.sharedDaemon.name);
-		return path.join(profile, DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle));
+		return path.join(profile, DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle.browser.wsEndpoint()));
 	}
 	// Spawned apps and launches with the caller's own profile: that profile may be the user's, so stage outside it.
-	// An OMP crash while a spawned app runs leaves this folder behind; nothing can tell it from a live browser's.
-	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle));
+	// Still leaked: a reused or kill:false spawned app's folder, and any folder whose browser outlived an OMP crash.
+	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle.browser.wsEndpoint()));
 }
 
 /**
@@ -576,7 +572,7 @@ async function openSharedHeadlessHandle(
 		// accumulation without a background timer. Best-effort and detached so a
 		// slow reap never delays the open (issue #10022).
 		void reapOrphanSharedTargets(browser, { projectDir: shared.projectDir, daemonName: shared.daemonName });
-		const handle: PuppeteerBrowserHandle = {
+		return {
 			key: browserKey(kind),
 			kind,
 			browser,
@@ -584,33 +580,11 @@ async function openSharedHeadlessHandle(
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
 		};
-		const staging = downloadStagingDirectory(handle);
-		if (staging) void sweepDeadSharedStaging(staging);
-		return handle;
 	} catch (err) {
 		if (err instanceof ToolAbortError || err instanceof ToolError) throw err;
 		if (opts.signal?.aborted) throw new ToolAbortError("Browser open aborted");
 		throw new ToolError(`Shared browser attach failed: ${err instanceof Error ? err.message : String(err)}`);
 	}
-}
-
-const sweptSharedStaging = new Set<string>();
-
-/**
- * Remove every sibling of a shared daemon's current staging folder, once per process. Chrome's profile lock allows one
- * Chrome per profile, so a sibling keyed by another browser belongs to a Chrome that is gone.
- */
-export async function sweepDeadSharedStaging(staging: string): Promise<void> {
-	if (sweptSharedStaging.has(staging)) return;
-	sweptSharedStaging.add(staging);
-	const parent = path.dirname(staging);
-	const current = path.basename(staging);
-	const entries = await fs.readdir(parent).catch(() => [] as string[]);
-	await Promise.all(
-		entries
-			.filter(entry => entry !== current)
-			.map(entry => fs.rm(path.join(parent, entry), { recursive: true, force: true }).catch(() => undefined)),
-	);
 }
 
 /** Test-only accessor for the module-global browsers map. */

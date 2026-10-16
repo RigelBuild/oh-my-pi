@@ -70,6 +70,30 @@ export function sharedBrowserProfileDir(projectDir: string, daemonName: string):
 	return path.join(daemonRuntimeDir(projectDir), `${daemonName}.profile`);
 }
 
+/** Chromium's browser target id, the last segment of its `ws://…/devtools/browser/<id>` endpoint. */
+const BROWSER_TARGET_ID = /\/devtools\/browser\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/** Names one running Chrome the same way for every connection to it: its target id, else a hash of its endpoint. */
+export function browserInstanceId(wsEndpoint: string): string {
+	const targetId = BROWSER_TARGET_ID.exec(wsEndpoint)?.[1];
+	return targetId ? targetId.toLowerCase() : Bun.hash.wyhash(wsEndpoint).toString(16).padStart(16, "0");
+}
+
+/**
+ * Remove the staging folders of every Chrome but the one at `wsEndpoint`. Only the client that just started that Chrome
+ * calls this, under the profile claim: Chrome's profile lock makes every other one dead, and no newer one can exist yet.
+ */
+async function sweepDeadStaging(userDataDir: string, wsEndpoint: string): Promise<void> {
+	const parent = path.join(userDataDir, DOWNLOAD_STAGING_DIRNAME);
+	const current = browserInstanceId(wsEndpoint);
+	const entries = await fs.readdir(parent).catch(() => [] as string[]);
+	await Promise.all(
+		entries
+			.filter(entry => entry !== current)
+			.map(entry => fs.rm(path.join(parent, entry), { recursive: true, force: true }).catch(() => undefined)),
+	);
+}
+
 function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
 }
@@ -205,6 +229,7 @@ async function adoptOrStart(
 		if (started.op !== "start") return undefined;
 		const wsEndpoint = started.readyTimedOut ? undefined : wsEndpointOf(started.daemon);
 		if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
+			if (claimed) await sweepDeadStaging(userDataDir, wsEndpoint);
 			return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
 		}
 		await stopQuietly(client, name, "Shared browser", signal);
