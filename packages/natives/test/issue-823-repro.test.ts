@@ -29,6 +29,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	detectCompiledBinary,
 	type EmbeddedAddonFile,
@@ -38,6 +39,37 @@ import {
 } from "../native/loader-state.js";
 
 describe("issue 823: standalone-binary native loader path resolution", () => {
+	it("resolves platform leaves using the installed core package name", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-leaf-resolve-"));
+		try {
+			for (const packageName of ["@oh-my-pi/pi-natives", "@rigelbuild/omp-natives"]) {
+				const installRoot = path.join(root, packageName.startsWith("@rigelbuild/") ? "rigel" : "upstream");
+				const coreDir = path.join(installRoot, "node_modules", ...packageName.split("/"));
+				const nativeDir = path.join(coreDir, "native");
+				const loaderPath = path.join(nativeDir, "loader-state.js");
+				const platformTag = `linux-${process.arch}`;
+				const leafName = `${packageName}-${platformTag}`;
+				const leafDir = path.join(installRoot, "node_modules", ...leafName.split("/"));
+				await fs.mkdir(nativeDir, { recursive: true });
+				await fs.mkdir(leafDir, { recursive: true });
+				await Promise.all(
+					["loader-state.js", "embedded-addon.js", "version-sentinel.js"].map(file =>
+						fs.copyFile(new URL(`../native/${file}`, import.meta.url), path.join(nativeDir, file)),
+					),
+				);
+				await Bun.write(
+					path.join(coreDir, "package.json"),
+					JSON.stringify({ name: packageName, version: "1.0.0", type: "module" }),
+				);
+				await Bun.write(path.join(leafDir, "package.json"), JSON.stringify({ name: leafName, version: "1.0.0" }));
+				const loader = await import(pathToFileURL(loaderPath).href);
+				const ctx = loader.initLoaderContext({ platform: "linux", isCompiledBinary: false, nativeDir });
+				expect(ctx.leafPackageDir).toBe(leafDir);
+			}
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
 	it("detects compiled-binary mode from embedded-addon presence when env and url markers are absent", () => {
 		// Mirrors what a Bun standalone binary actually sees on linux-x64 / WSL:
 		// - `process.env.PI_COMPILED` is undefined (the build flag does not substitute property accesses).

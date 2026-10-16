@@ -2,11 +2,12 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { $ } from "bun";
 import {
 	createKeyedMutex,
 	legalPayloadFiles,
 	npmDistTag,
-	type PublishJob,
+	renameAndInspectPackedTarball,
 	packages,
 	prepareNativeCorePackage,
 	rewriteManifest,
@@ -22,6 +23,31 @@ describe("npm dist-tags", () => {
 		expect(() => npmDistTag("18.9.2-rigel.0")).toThrow("Unsupported prerelease version");
 		expect(() => npmDistTag("18.9.2-rigel")).toThrow("Unsupported prerelease version");
 		expect(() => npmDistTag("0.13.0-rc.1")).toThrow("Unsupported prerelease version");
+	});
+});
+
+describe("packed release identity", () => {
+	it("renames a bun-packed manifest before inspecting its publish identity", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-publish-rename-"));
+		try {
+			const pkgDir = path.join(root, "package");
+			const destination = path.join(root, "packed");
+			await fs.mkdir(pkgDir);
+			await fs.mkdir(destination);
+			await Bun.write(
+				path.join(pkgDir, "package.json"),
+				JSON.stringify({ name: "@oh-my-pi/pi-catalog", version: "18.9.2-rigel.1" }),
+			);
+			await Bun.write(path.join(pkgDir, "index.js"), "export {};\n");
+			await $`bun pm pack --quiet --destination ${destination}`.cwd(pkgDir).quiet();
+			const tarball = (await fs.readdir(destination)).find(file => file.endsWith(".tgz"));
+			if (!tarball) throw new Error("bun pm pack did not create a tarball");
+			const packed = await renameAndInspectPackedTarball(path.join(destination, tarball));
+			expect(packed.name).toBe("@rigelbuild/omp-catalog");
+			expect(packed.version).toBe("18.9.2-rigel.1");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -180,6 +206,14 @@ describe("published legal payloads", () => {
 				}),
 			);
 			const manifest = await prepareNativeCorePackage(pkgDir, false);
+			expect(manifest.optionalDependencies).toEqual({
+				"@oh-my-pi/pi-natives-linux-x64": "15.5.15",
+				"@oh-my-pi/pi-natives-linux-arm64": "15.5.15",
+				"@oh-my-pi/pi-natives-darwin-x64": "15.5.15",
+				"@oh-my-pi/pi-natives-darwin-arm64": "15.5.15",
+				"@oh-my-pi/pi-natives-win32-x64": "15.5.15",
+				"@oh-my-pi/pi-natives-win32-arm64": "15.5.15",
+			});
 			expect(manifest.files).toEqual([
 				"native/index.js",
 				"native/index.d.ts",

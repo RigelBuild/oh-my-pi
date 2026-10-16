@@ -74,7 +74,7 @@ function getNativesDir() {
 function resolveLeafPackageDir(platformTag) {
 	try {
 		const require_ = createRequire(import.meta.url);
-		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
+		return path.dirname(require_.resolve(`${packageJson.name}-${platformTag}/package.json`));
 	} catch {
 		return null;
 	}
