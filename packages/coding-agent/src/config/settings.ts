@@ -39,7 +39,7 @@ import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../sessi
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { replaceFileAtomically } from "../utils/atomic-file";
 import { isRegisteredSearchEngine } from "../web/search/provider";
-import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
+import { stringifyYamlConfig, updateYamlConfigSource } from "@oh-my-pi/pi-utils/yaml-config";
 import {
 	type AnySetting,
 	all as allSettings,
@@ -123,6 +123,10 @@ function yamlGenerationsMatch(left: YamlGeneration, right: YamlGeneration): bool
 		case "unreadable":
 			return false;
 	}
+}
+
+function yamlSourceForWrite(loaded: LockedYamlLoadResult): string | undefined {
+	return loaded.settings !== null && loaded.generation.kind === "content" ? loaded.generation.source : undefined;
 }
 
 type MainYamlReadResult = {
@@ -3552,6 +3556,23 @@ export class Settings {
 	// Saving
 	// ─────────────────────────────────────────────────────────────────────────
 
+	async #serializeYamlForWrite(
+		filePath: string,
+		settings: RawSettings,
+		baseSource?: string,
+	): Promise<string | undefined> {
+		if (baseSource === undefined) return stringifyYamlConfig(settings);
+		const update = await updateYamlConfigSource(baseSource, settings);
+		if (update.kind === "unchanged") return undefined;
+		if (update.kind === "unpreservable") {
+			throw new Error(
+				`Settings config cannot be updated in place: ${filePath}: ${update.reason}; ` +
+					"fix the file or move it aside (the pending change is kept for retry)",
+			);
+		}
+		return update.content;
+	}
+
 	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
 		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		let removeTemp = false;
@@ -3699,8 +3720,14 @@ export class Settings {
 				if (shouldWrite) {
 					// Merging pending changes can reproduce the file exactly (a change reverted before the
 					// debounce fired, an external edit that already holds the value): leave it untouched.
-					const content = stringifyYamlConfig(current);
-					if (loaded.generation.kind !== "content" || loaded.generation.source !== content) {
+					const baseSource = yamlSourceForWrite(loaded);
+					const content = await this.#serializeYamlForWrite(writePath, current, baseSource);
+					if (
+						content !== undefined &&
+						(baseSource !== undefined ||
+							loaded.generation.kind !== "content" ||
+							loaded.generation.source !== content)
+					) {
 						await this.#writeYamlAtomically(writePath, content);
 					}
 				}
@@ -3862,7 +3889,8 @@ export class Settings {
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
 
-				await this.#writeYamlAtomically(writePath, stringifyYamlConfig(projectSettings));
+				const content = await this.#serializeYamlForWrite(writePath, projectSettings, yamlSourceForWrite(loaded));
+				if (content !== undefined) await this.#writeYamlAtomically(writePath, content);
 				this.#projectFileSettings = structuredClone(projectSettings);
 				this.#quarantinedYamlTargets.delete(projectConfigPath);
 			});
