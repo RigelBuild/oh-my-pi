@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -75,14 +75,13 @@ const commitFile = async (cwd: string, name: string) => {
 	git(cwd, "commit", "-q", "-m", `add ${name}`);
 };
 
-// Each test owns its fixture through `await using`. A body that outlives its
-// timeout keeps working on its own repo instead of the next test's.
+// Each test owns its repo through `await using`, and worktree paths hash that
+// repo, so a body that outlives its timeout cannot touch a later test's files.
 async function makeFixture() {
 	const dir = await TempDir.create("@omp-session-wt-");
 	const root = await fs.realpath(dir.path());
 	const repo = path.join(root, "repo");
 	await fs.mkdir(repo);
-	setWorktreesDir(path.join(root, "wt"));
 	git(repo, "init", "-q", "-b", "main");
 	git(repo, "config", "core.autocrlf", "false");
 	await Bun.write(path.join(repo, "tracked.txt"), "base\n");
@@ -92,21 +91,31 @@ async function makeFixture() {
 }
 
 describe("session worktree helpers (real git)", () => {
+	let worktrees: TempDir;
 	let savedEnv: string | undefined;
 	let savedCwd: string;
 	const branch = "wt/test-session";
 
-	beforeEach(() => {
+	beforeAll(async () => {
 		savedEnv = process.env.OMP_WORKTREE_DIR;
-		savedCwd = process.cwd();
 		delete process.env.OMP_WORKTREE_DIR;
+		worktrees = await TempDir.create("@omp-session-wt-dirs-");
+		setWorktreesDir(worktrees.path());
+	});
+
+	afterAll(async () => {
+		setWorktreesDir(undefined);
+		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+		else process.env.OMP_WORKTREE_DIR = savedEnv;
+		await worktrees.remove();
+	});
+
+	beforeEach(() => {
+		savedCwd = process.cwd();
 	});
 
 	afterEach(() => {
 		process.chdir(savedCwd);
-		setWorktreesDir(undefined);
-		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
-		else process.env.OMP_WORKTREE_DIR = savedEnv;
 	});
 
 	const create = (repo: string, keepChanges = true, name = branch) =>
@@ -120,8 +129,9 @@ describe("session worktree helpers (real git)", () => {
 		await fs.mkdir(plain);
 		await fs.mkdir(unborn);
 		git(unborn, "init", "-q");
+		const before = await fs.readdir(worktrees.path());
 		await expect(createSessionWorktree(unborn, Settings.isolated(), branch)).rejects.toThrow("has no commits");
-		expect(await exists(path.join(root, "wt"))).toBe(false);
+		expect(await fs.readdir(worktrees.path())).toEqual(before);
 		const wt = await create(repo);
 		expect(await canAutoCreateWorktree(repo)).toBe(true);
 		expect(await canAutoCreateWorktree(plain)).toBe(false);
