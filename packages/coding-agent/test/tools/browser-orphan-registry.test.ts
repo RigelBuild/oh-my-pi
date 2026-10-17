@@ -252,7 +252,7 @@ function makeLaggingCloseBrowser(targetId: string) {
 	const destroy = () => {
 		listed = false;
 		if (!discovering) return;
-		for (const listener of [...listeners]) listener({ targetId });
+		for (const listener of listeners) listener({ targetId });
 	};
 	return { browser, destroy, listenerCount: () => listeners.size, closeRequested: () => closeRequested };
 }
@@ -262,16 +262,15 @@ async function settleState<T>(promise: Promise<T>): Promise<"pending" | T> {
 }
 
 describe("orphan-registry — closeCdpTarget", () => {
-	it("reports a close as soon as Chromium removes the target, well before the timeout", async () => {
+	it("reports a close as soon as Chromium removes the target, without waiting for the timeout", async () => {
 		const { browser, destroy, listenerCount, closeRequested } = makeLaggingCloseBrowser("lagging");
-		const started = performance.now();
-		const closing = closeCdpTarget(browser, "lagging", { confirmTimeoutMs: 10_000 });
+		// Far past the test's own timeout: only the targetDestroyed event can settle this close in time.
+		const closing = closeCdpTarget(browser, "lagging", { confirmTimeoutMs: 60_000 });
 		while (!closeRequested()) await Bun.sleep(1);
 		// Chromium answers closeTarget before it removes the target; the close is not done yet.
 		expect(await settleState(closing)).toBe("pending");
 		destroy();
 		expect(await closing).toBe(true);
-		expect(performance.now() - started).toBeLessThan(1_000);
 		expect(listenerCount()).toBe(0);
 	});
 
