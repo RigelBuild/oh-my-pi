@@ -243,16 +243,16 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		return;
 	}
 	try {
+		// A Rigel binary updates by reinstalling from GitHub releases, so `omp update` cannot help.
+		if (isCompiledBinary() && isRigelBuildVersion(currentVersion)) return;
 		// Checkouts update through git and a manager (Tern) updates its omp itself:
 		// "run omp update" would be wrong advice for both.
 		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
 		const channel = cfgUpdateChannel.get(settings);
-		// A compiled upstream binary updates from the build service; a Rigel build
-		// follows its npm dist-tag, like any other Rigel installation.
-		const { version } =
-			isCompiledBinary() && !isRigelBuildVersion(currentVersion)
-				? await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion })
-				: await getLatestRelease({ timeoutMs: 5_000, channel }, currentVersion);
+		// Compiled upstream binaries update from the build service; npm installs use npm.
+		const { version } = isCompiledBinary()
+			? await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion })
+			: await getLatestRelease({ timeoutMs: 5_000, channel }, currentVersion);
 		return Bun.semver.order(version, currentVersion) > 0 ? version : undefined;
 	} catch {
 		return undefined;
