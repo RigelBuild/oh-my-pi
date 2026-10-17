@@ -214,31 +214,51 @@ export async function collectOrphanTargets(
 
 /**
  * Close a page target by id through a fresh CDP session. Returns true only
- * when CDP confirms the close or confirms the target no longer exists; a
- * dropped connection or transient protocol failure returns false so durable
- * ownership remains available for a later retry.
+ * when the target has left `Target.getTargets`; a dropped connection, a
+ * transient protocol failure, or a target still listed after
+ * `confirmTimeoutMs` returns false so durable ownership remains available for
+ * a later retry.
  */
-export async function closeCdpTarget(browser: Browser, targetId: string): Promise<boolean> {
+export async function closeCdpTarget(
+	browser: Browser,
+	targetId: string,
+	{ confirmTimeoutMs = 2_000 }: { confirmTimeoutMs?: number } = {},
+): Promise<boolean> {
 	const session = await browser
 		.target()
 		.createCDPSession()
 		.catch(() => null);
 	if (!session) return false;
+	const { promise: destroyed, resolve } = Promise.withResolvers<void>();
+	const onDestroyed = (event: { targetId: string }) => {
+		if (event.targetId === targetId) resolve();
+	};
+	session.on("Target.targetDestroyed", onDestroyed);
+	const isListed = async () => {
+		const { targetInfos } = await session.send("Target.getTargets");
+		return targetInfos.some(info => info.targetId === targetId);
+	};
 	try {
 		try {
 			const result = await session.send("Target.closeTarget", { targetId });
-			if (result.success) return true;
+			if (!result.success) return false;
 		} catch {
 			// A concurrent reaper or the page itself may already have closed the
 			// target. Confirm absence before treating the cleanup as complete.
+			return !(await isListed().catch(() => true));
 		}
+		// Chromium answers closeTarget before it drops the target from getTargets.
+		if (!(await isListed().catch(() => true))) return true;
+		const timer = Promise.withResolvers<void>();
+		const handle = setTimeout(timer.resolve, confirmTimeoutMs);
 		try {
-			const { targetInfos } = await session.send("Target.getTargets");
-			return !targetInfos.some(info => info.targetId === targetId);
-		} catch {
-			return false;
+			await Promise.race([destroyed, timer.promise]);
+		} finally {
+			clearTimeout(handle);
 		}
+		return !(await isListed().catch(() => true));
 	} finally {
+		session.off("Target.targetDestroyed", onDestroyed);
 		await session.detach().catch(() => undefined);
 	}
 }

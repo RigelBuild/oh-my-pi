@@ -17,6 +17,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
 import {
+	closeCdpTarget,
 	collectOrphanTargets,
 	forgetSharedTarget,
 	reapOrphanSharedTargets,
@@ -66,6 +67,8 @@ function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Se
 			closed.push(params.targetId);
 			return { success: true };
 		},
+		on: () => undefined,
+		off: () => undefined,
 		detach: async () => undefined,
 	};
 	return {
@@ -214,5 +217,54 @@ describe("orphan-registry — reap", () => {
 		expect(retryCount).toBe(1);
 		expect(retryClosed).toEqual(["retry-later"]);
 		expect(await Bun.file(path.join(registryDir(scope), `${dead}.json`)).exists()).toBe(false);
+	});
+});
+
+/** Session stub where a successful close leaves the target listed until `destroy` fires `Target.targetDestroyed`. */
+function makeLaggingCloseBrowser(targetId: string) {
+	const listeners = new Set<(event: { targetId: string }) => void>();
+	let listed = true;
+	const session = {
+		send: async (method: string) => {
+			if (method === "Target.closeTarget") return { success: true };
+			if (method === "Target.getTargets") return { targetInfos: listed ? [{ targetId }] : [] };
+			return {};
+		},
+		on: (event: string, listener: (event: { targetId: string }) => void) => {
+			if (event === "Target.targetDestroyed") listeners.add(listener);
+		},
+		off: (event: string, listener: (event: { targetId: string }) => void) => {
+			if (event === "Target.targetDestroyed") listeners.delete(listener);
+		},
+		detach: async () => undefined,
+	};
+	const browser = { target: () => ({ createCDPSession: async () => session }) } as unknown as Browser;
+	const destroy = () => {
+		listed = false;
+		for (const listener of [...listeners]) listener({ targetId });
+	};
+	return { browser, destroy, listenerCount: () => listeners.size };
+}
+
+describe("orphan-registry — closeCdpTarget", () => {
+	it("reports a close only after the target has left Target.getTargets", async () => {
+		const { browser, destroy, listenerCount } = makeLaggingCloseBrowser("lagging");
+		let settled = false;
+		const closing = closeCdpTarget(browser, "lagging").then(result => {
+			settled = true;
+			return result;
+		});
+		// Chromium answers closeTarget before it removes the target; the close is not done yet.
+		for (let i = 0; i < 50 && listenerCount() === 0 && !settled; i++) await Bun.sleep(1);
+		expect(settled).toBe(false);
+		destroy();
+		expect(await closing).toBe(true);
+		expect(listenerCount()).toBe(0);
+	});
+
+	it("returns false when the target is never removed after a successful close", async () => {
+		const { browser, listenerCount } = makeLaggingCloseBrowser("stuck");
+		expect(await closeCdpTarget(browser, "stuck", { confirmTimeoutMs: 20 })).toBe(false);
+		expect(listenerCount()).toBe(0);
 	});
 });
