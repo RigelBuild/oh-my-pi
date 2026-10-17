@@ -14,6 +14,10 @@
 - Added `--session-id <id>` to open a local session by exact ID or create one with that ID; a launch fails if another live omp process holds the ID.
 - Added the `web/litellm` search engine, which uses a LiteLLM API key and configured search tools instead of separate search-provider credentials.
 
+### Changed
+
+- Settings saves now preserve comments and key order in `config.yml`, and the values and styles of untouched nodes. Whitespace can normalize when another value changes. A config `yaml` cannot edit safely (duplicate keys, anchors) rejects the save with an actionable error instead of being rewritten.
+
 ### Fixed
 
 - Fixed releasing a headless browser tab reporting its page closed while Chromium still listed it: closing a page target now waits until Chromium has removed it, and a page still listed after 2 seconds counts as not closed, so the shared-browser cleanup retries it.

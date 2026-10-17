@@ -22,6 +22,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
+import { markSetupWizardComplete } from "../src/modes/setup";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import {
 	cfgSymbolPreset,
@@ -30,6 +31,7 @@ import {
 	cfgThemeDark,
 	cfgTerminalShowProgress,
 	cfgSetupVersion,
+	cfgComposerShape,
 	cfgStatusLineLeftSegments,
 	cfgSpellingAutocomplete,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -81,6 +83,33 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgModelRoles, cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+
+const COMMENTED_CONFIG = [
+	"# file-top comment",
+	"setupVersion: 1 # inline after value",
+	"",
+	"# above key",
+	"compaction:",
+	"  strategy: handoff",
+	"  remoteEnabled: false",
+	"",
+	"modelRoles:",
+	"  # above nested key",
+	"  default: anthropic/claude-opus-4 # pinned on purpose",
+	"  advisor: moonshot/kimi-k2",
+	"",
+	"custom:",
+	"  tags:",
+	"    # inside a list",
+	"    - alpha # first item",
+	"    - beta",
+	"",
+	"dev:",
+	"  autoqa:",
+	"    consent: unset",
+	"",
+].join("\n");
+
 import { cfgEvalJs } from "@oh-my-pi/pi-coding-agent/eval/settings";
 
 /** Lets microtask-coalesced setting listeners run. */
@@ -418,6 +447,111 @@ describe("Settings", () => {
 				custom: { keep: true },
 			});
 			expect(await Bun.file(backupPath).text()).toBe(corrupted);
+		});
+
+		it("setupVersion migration keeps comments and lands the four key changes", async () => {
+			const configPath = getConfigPath();
+			await Bun.write(configPath, COMMENTED_CONFIG);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			cfgComposerShape.set(settings, "band");
+			await markSetupWizardComplete(settings, 2);
+
+			const saved = await Bun.file(configPath).text();
+			for (const comment of [
+				"# file-top comment",
+				"# inline after value",
+				"# above key",
+				"# above nested key",
+				"# pinned on purpose",
+				"# inside a list",
+				"# first item",
+			]) {
+				expect(saved).toContain(comment);
+			}
+			const parsed = YAML.parse(saved);
+			expect(parsed).toMatchObject({
+				setupVersion: 2,
+				dev: { autoqaConsent: "unset" },
+				compaction: { methodOrder: ["handoff", "soft"] },
+				composer: { shape: "band" },
+				custom: { tags: ["alpha", "beta"] },
+				modelRoles: {
+					default: "anthropic/claude-opus-4",
+					advisor: "moonshot/kimi-k2",
+				},
+			});
+			expect(parsed).not.toHaveProperty("dev.autoqa");
+			expect(parsed).not.toHaveProperty("compaction.strategy");
+			expect(parsed).not.toHaveProperty("compaction.remoteEnabled");
+		});
+
+		it("makes a second setupVersion migration a byte-identical no-op", async () => {
+			const configPath = getConfigPath();
+			await Bun.write(configPath, COMMENTED_CONFIG);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			await markSetupWizardComplete(settings, 2);
+			const firstWrite = await Bun.file(configPath).text();
+
+			resetSettingsForTest();
+			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
+			await markSetupWizardComplete(reloaded, 2);
+			expect(await Bun.file(configPath).text()).toBe(firstWrite);
+		});
+
+		it("keeps per-role comments when one global model role changes", async () => {
+			await Bun.write(getConfigPath(), COMMENTED_CONFIG);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.setModelRole("default", "openai/gpt-5.2-codex");
+			await settings.flush();
+
+			const saved = await Bun.file(getConfigPath()).text();
+			expect(saved).toContain("# pinned on purpose");
+			expect(saved).toContain("# above nested key");
+			expect(YAML.parse(saved)).toMatchObject({
+				modelRoles: { default: "openai/gpt-5.2-codex", advisor: "moonshot/kimi-k2" },
+			});
+		});
+
+		it("keeps project config comments when a project role is set", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			const commentedProject = COMMENTED_CONFIG;
+			await Bun.write(getConfigPath(), "modelRoleStorage: project\n");
+			await Bun.write(projectConfigPath, commentedProject);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.setProjectModelRole("smol", "anthropic/claude-haiku-4-5");
+			await settings.flush();
+
+			const saved = await Bun.file(projectConfigPath).text();
+			expect(saved).toContain("# file-top comment");
+			expect(saved).toContain("# pinned on purpose");
+			expect(YAML.parse(saved)).toMatchObject({
+				modelRoles: {
+					default: "anthropic/claude-opus-4",
+					advisor: "moonshot/kimi-k2",
+					smol: "anthropic/claude-haiku-4-5",
+				},
+			});
+		});
+
+		it("rejects duplicate-key config without leaking values and retains the pending change", async () => {
+			const configPath = getConfigPath();
+			const original = "searxng:\n  token: FIRST-FAKE-CREDENTIAL\n  token: SECOND-FAKE-CREDENTIAL\n";
+			await Bun.write(configPath, original);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			cfgComposerShape.set(settings, "band");
+			await expect(settings.flush()).rejects.toThrow("DUPLICATE_KEY");
+			await expect(settings.flush()).rejects.toThrow(/line 3/);
+
+			const error = await settings.flush().then(
+				() => "",
+				value => String(value),
+			);
+			expect(error).not.toContain("searxng");
+			expect(error).not.toContain("FIRST-FAKE-CREDENTIAL");
+			expect(error).not.toContain("SECOND-FAKE-CREDENTIAL");
+			expect(await Bun.file(configPath).text()).toBe(original);
+			expect(fs.readdirSync(agentDir).some(name => name.startsWith("config.yml.broken-"))).toBe(false);
+			expect(cfgComposerShape.get(settings)).toBe("band");
 		});
 
 		it("preserves a symlinked main config while atomically updating its target", async () => {
