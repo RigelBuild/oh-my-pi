@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AuthStorage.keys.hasUsable(provider, { modelId })`, a side-effect-free dry run of `getApiKey`. It is true when an eligible credential is not under a recorded block for that model; it reads existing block marks and does not probe usage or resolve key references. It never advances round-robin, records stickiness, refreshes OAuth, writes or prunes the store, or returns key material.
+- Added `createStableNameResolver` for the auth gateway, which resolves a stable model name to the first candidate the caller's pool can serve and supplies `listAliases` rows, and `CompassModelRegistry`, which reads that registry from the Compass Server and re-reads it when its version changes.
 
 ## [18.9.2-rigel.1] - 2026-10-15
 
