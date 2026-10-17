@@ -6,6 +6,8 @@ export type {
 	AuthGatewayRouteOptions,
 	CandidateFailoverOptions,
 	FailoverContext,
+	GatewayUsageEvent,
+	GatewayUsageOutcome,
 	ModelResolver,
 } from "./auth-gateway/dispatch";
 export * from "./auth-gateway/types";

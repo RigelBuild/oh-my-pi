@@ -7,6 +7,8 @@ import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { GatewayUsageEvent } from "@oh-my-pi/pi-ai/auth-gateway";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { logger } from "@oh-my-pi/pi-utils";
 
 interface UpstreamRequest {
@@ -19,8 +21,10 @@ interface Harness {
 	url: string;
 	storage: AuthStorage;
 	upstream: UpstreamRequest[];
+	attemptedKeys: Array<string | null>;
 	handle: AuthGatewayServerHandle;
 	dir: string;
+	events: GatewayUsageEvent[];
 }
 
 function embeddingModel(
@@ -45,22 +49,33 @@ function embeddingModel(
 	} satisfies ModelSpec<Api>);
 }
 
-async function boot(trustProxyHeaders = false): Promise<Harness> {
+async function boot({
+	apiKeys,
+	trustProxyHeaders = false,
+}: { apiKeys?: readonly string[]; trustProxyHeaders?: boolean } = {}): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-embeddings-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.keys.setRuntime("openai", "openai-secret");
+	if (apiKeys) {
+		await storage.credentials.set(
+			"openai",
+			apiKeys.map(key => ({ type: "api_key", key })),
+		);
+	} else {
+		storage.keys.setRuntime("openai", "openai-secret");
+	}
 	storage.keys.setRuntime("openrouter", "openrouter-secret");
 	const direct = embeddingModel("openai", "text-embedding-3-small");
 	const routed = embeddingModel("openrouter", "qwen/qwen3-embedding-8b");
 	const wrongApi = embeddingModel("openai", "gpt-5.5", "openai-responses");
 	const upstream: UpstreamRequest[] = [];
+	const events: GatewayUsageEvent[] = [];
+	const attemptedKeys: Array<string | null> = [];
 	const fetchImpl: FetchImpl = async (input, init) => {
+		const authorization = new Headers(init?.headers).get("authorization");
+		attemptedKeys.push(authorization);
+		if (apiKeys && authorization === "Bearer key-one") throw new ProviderHttpError("expired credential", 401);
 		const body: unknown = JSON.parse(String(init?.body));
-		upstream.push({
-			url: String(input),
-			authorization: new Headers(init?.headers).get("authorization"),
-			body,
-		});
+		upstream.push({ url: String(input), authorization, body });
 		if (body && typeof body === "object" && Reflect.get(body, "encoding_format") === "base64") {
 			return Response.json({
 				object: "list",
@@ -89,8 +104,11 @@ async function boot(trustProxyHeaders = false): Promise<Harness> {
 		},
 		version: "test",
 		fetch: fetchImpl,
+		onUsage: event => {
+			events.push(event);
+		},
 	});
-	return { url: handle.url, storage, upstream, handle, dir };
+	return { url: handle.url, storage, upstream, attemptedKeys, handle, dir, events };
 }
 
 async function close(harness: Harness | undefined): Promise<void> {
@@ -153,6 +171,37 @@ describe("auth-gateway POST /v1/embeddings", () => {
 			costUsd: 0.0000001,
 			client: { app: "vector-client" },
 		});
+		expect(harness.events).toHaveLength(1);
+		expect(harness.events[0]).toMatchObject({
+			requestId: response.headers.get("x-request-id"),
+			provider: "openai",
+			model: "text-embedding-3-small",
+			outcome: "ok",
+		});
+	});
+	it("attributes usage to the runtime API key account", async () => {
+		harness = await boot();
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "account attribution" }),
+		});
+		expect(response.status).toBe(200);
+		expect(harness.events).toHaveLength(1);
+		expect(harness.events[0]?.account).toBe(`key:${Bun.hash("openai-secret").toString(36)}`);
+	});
+
+	it("attributes rotated usage to the key that served the embedding", async () => {
+		harness = await boot({ apiKeys: ["key-one", "key-two"] });
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "rotate key" }),
+		});
+		expect(harness.attemptedKeys).toEqual(["Bearer key-one", "Bearer key-two"]);
+		expect(response.status).toBe(200);
+		expect(harness.events).toHaveLength(1);
+		expect(harness.events[0]?.account).toBe(`key:${Bun.hash("key-two").toString(36)}`);
 	});
 
 	it("passes OpenRouter base64 embeddings and provider-reported cost through", async () => {
@@ -289,7 +338,7 @@ describe("auth-gateway POST /v1/embeddings", () => {
 	});
 
 	it("uses proxy peer headers for authenticated requests only with explicit trust", async () => {
-		harness = await boot(true);
+		harness = await boot({ trustProxyHeaders: true });
 		const events: logger.LogEvent[] = [];
 		const dispose = logger.registerLogSink(event => {
 			if (event.message === "auth-gateway request" || event.message === "auth-gateway request unauthorized")
