@@ -10,11 +10,18 @@ import {
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
+	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import type { CallerIdentity } from "../types";
 
 /** OpenRouter-compatible `POST /v1/rerank` gateway handler. */
-export async function handleRerank(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
+export async function handleRerank(
+	bootOpts: AuthGatewayRouteOptions,
+	req: Request,
+	peer: string,
+	caller: CallerIdentity,
+): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
@@ -32,7 +39,8 @@ export async function handleRerank(bootOpts: AuthGatewayRouteOptions, req: Reque
 	}
 	if (controller.signal.aborted) return aborted();
 
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) return rerankWire.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (model.api !== "openrouter-rerank") {
 		return rerankWire.formatError(400, "invalid_request_error", `Model ${parsed.modelId} does not support reranking`);

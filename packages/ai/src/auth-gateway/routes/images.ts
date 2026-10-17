@@ -11,8 +11,10 @@ import {
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
+	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import type { CallerIdentity } from "../types";
 
 function isGatewayImageApi(api: string): boolean {
 	return (
@@ -28,6 +30,7 @@ async function handleImages(
 	req: Request,
 	peer: string,
 	kind: imagesServer.ImageRequestKind,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -55,7 +58,8 @@ async function handleImages(
 		return imagesServer.formatError(400, "invalid_request_error", message);
 	}
 
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) {
 		return imagesServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
@@ -127,10 +131,16 @@ export function handleImageGenerations(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
+	caller: CallerIdentity,
 ): Promise<Response> {
-	return handleImages(bootOpts, req, peer, "generations");
+	return handleImages(bootOpts, req, peer, "generations", caller);
 }
 
-export function handleImageEdits(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
-	return handleImages(bootOpts, req, peer, "edits");
+export function handleImageEdits(
+	bootOpts: AuthGatewayRouteOptions,
+	req: Request,
+	peer: string,
+	caller: CallerIdentity,
+): Promise<Response> {
+	return handleImages(bootOpts, req, peer, "edits", caller);
 }

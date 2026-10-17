@@ -27,6 +27,7 @@
 - Added optional `routeScope(req, run)` to keep an async request context active through auth-gateway storage resolution and streamed credential refresh.
 - Added the provider-enrollment routes `GET /internal/enroll/providers`, `POST /internal/enroll/authorize-url` and `POST /internal/enroll/exchange`. They build the authorize URL and exchange the code statelessly from the server's state and PKCE material. `withEnrollToken(token, authorize)` admits a server enroll token as the enroll caller, which reaches only these routes; agents get 401 there, and the enroll caller gets 401 on every other authenticated route. Enroll responses carry no CORS grant.
 - Added auth-gateway primitives to hold candidate streams before meaningful output, enforce attempt budgets, and send SSE keepalives while held responses resolve.
+- The auth-gateway model resolver accepts synchronous or asynchronous resolution with the admitted caller; `/v1/models` can list bare stable-name aliases while preserving provider-qualified rows.
 
 ## [18.9.2] - 2026-10-11
 

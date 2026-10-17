@@ -24,13 +24,16 @@ import {
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
+	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import type { CallerIdentity } from "../types";
 
 export async function handleSystemOne(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -56,7 +59,8 @@ export async function handleSystemOne(
 		return systemOne.formatError(422, "invalid_request_error", message);
 	}
 
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) {
 		return systemOne.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}

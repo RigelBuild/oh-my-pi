@@ -4,11 +4,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import {
+	createAuthGatewayRouter,
 	type AgentCaller,
 	type AuthGatewayAuthorizer,
 	type AuthGatewayServerHandle,
 	bearerTokenAuthorizer,
 	type CallerIdentity,
+	ModelResolverUnavailableError,
+	resolveGatewayModel,
+	SHARED_TOKEN_CALLER,
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -17,10 +21,16 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 
+interface ResolverCall {
+	modelId: string;
+	caller: CallerIdentity;
+}
+
 interface Harness {
 	handle: AuthGatewayServerHandle;
 	mock: MockModel;
 	resolved: string[];
+	resolverCalls: ResolverCall[];
 	/** `Authorization` of every upstream call that went through the `fetch` seam. */
 	upstreamKeys: (string | null)[];
 	close(): Promise<void>;
@@ -40,7 +50,12 @@ function rawAuthorizer(result: unknown): AuthGatewayAuthorizer {
 	return () => result as CallerIdentity | null;
 }
 
-async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Promise<Harness> {
+async function boot(
+	authorize: AuthGatewayAuthorizer,
+	perAgentPools = true,
+	resolverFailure = false,
+	mockModelId = "mock/authorize",
+): Promise<Harness> {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-authorize-"));
 	const shared = await AuthStorage.create(path.join(dir, "shared.db"));
@@ -54,7 +69,7 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 		pools.set(agent, pool);
 	}
 	const resolved: string[] = [];
-	const mock = createMockModel({ provider: "openrouter", id: "mock/authorize" });
+	const mock = createMockModel({ provider: "openrouter", id: mockModelId });
 	const embedding = buildModel({
 		id: "text-embedding-3-small",
 		name: "text-embedding-3-small",
@@ -69,6 +84,7 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 		kind: "embedding",
 		supportsTools: false,
 	} satisfies ModelSpec<Api>);
+	const resolverCalls: ResolverCall[] = [];
 	const upstreamKeys: (string | null)[] = [];
 	const fetchImpl: FetchImpl = async (_input, init) => {
 		upstreamKeys.push(new Headers(init?.headers).get("authorization"));
@@ -92,13 +108,18 @@ async function boot(authorize: AuthGatewayAuthorizer, perAgentPools = true): Pro
 					return pool;
 				}
 			: undefined,
-		resolveModel: id => (id === embedding.id ? embedding : mock.model),
+		resolveModel: async (id, caller) => {
+			resolverCalls.push({ modelId: id, caller });
+			if (resolverFailure) throw new Error("resolver backend unavailable");
+			return id === embedding.id ? embedding : mock.model;
+		},
 		version: "test",
 		fetch: fetchImpl,
 	});
 	return {
 		handle,
 		mock,
+		resolverCalls,
 		resolved,
 		upstreamKeys,
 		close: async () => {
@@ -354,5 +375,176 @@ describe("auth-gateway authorize seam", () => {
 		harness.mock.push({ content: ["ok"] });
 		const response = await chat(harness, {}, {}, "/v1/chat/completions?k=anything");
 		expect(response.status).toBe(200);
+	});
+
+	it("passes the admitted caller to chat and embedding model resolution", async () => {
+		harness = await boot(agentAuthorizer);
+		harness.mock.push({ content: ["chat"] });
+		const chatResponse = await chat(harness, { Authorization: "Bearer token-a" });
+		expect(chatResponse.status).toBe(200);
+		const embeddingResponse = await fetch(`${harness.handle.url}/v1/embeddings`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: "Bearer token-b" },
+			body: JSON.stringify({ model: "text-embedding-3-small", input: "hi" }),
+		});
+		expect(embeddingResponse.status).toBe(200);
+		expect(harness.resolverCalls).toEqual([
+			{ modelId: "mock/authorize", caller: { kind: "agent", agentAccountId: "agent-a" } },
+			{ modelId: "text-embedding-3-small", caller: { kind: "agent", agentAccountId: "agent-b" } },
+		]);
+	});
+
+	it("awaits an asynchronous model resolver", async () => {
+		harness = await boot(agentAuthorizer);
+		harness.mock.push({ content: ["async resolver"] });
+		const response = await chat(harness, { Authorization: "Bearer token-a" });
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ choices: [{ message: { content: "async resolver" } }] });
+	});
+
+	it("answers 503 when model resolution fails", async () => {
+		harness = await boot(agentAuthorizer, true, true);
+		const response = await chat(harness, { Authorization: "Bearer token-a" });
+		expect(await response.json()).toEqual({ error: "model resolver unavailable" });
+	});
+
+	it("preserves resolver failures and reports only the cause class", async () => {
+		harness = await boot(agentAuthorizer, true, true);
+		const log = captureWarnings();
+		try {
+			const response = await chat(harness, { Authorization: "Bearer token-a" });
+			expect(response.status).toBe(503);
+			expect(await response.json()).toEqual({ error: "model resolver unavailable" });
+			const event = log.events.find(item => item.message === "auth-gateway model resolver unavailable");
+			expect(event?.context).toMatchObject({ cause: "Error" });
+			expect(JSON.stringify(log.events)).not.toContain("resolver backend unavailable");
+		} finally {
+			log.dispose();
+		}
+	});
+
+	it("retains the original resolver exception as its cause", async () => {
+		const cause = new Error("resolver backend unavailable");
+		let caught: unknown;
+		try {
+			await resolveGatewayModel(
+				() => {
+					throw cause;
+				},
+				"model",
+				SHARED_TOKEN_CALLER,
+			);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(ModelResolverUnavailableError);
+		if (!(caught instanceof ModelResolverUnavailableError)) throw new Error("expected resolver error");
+		expect(caught.cause).toBe(cause);
+	});
+
+	it("stamps replayed Anthropic assistant turns with the resolved model", async () => {
+		harness = await boot(agentAuthorizer, true, false, "real-y");
+		harness.mock.push({ content: ["ok"] });
+		const response = await fetch(`${harness.handle.url}/v1/messages`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: "Bearer token-a" },
+			body: JSON.stringify({
+				model: "stable-x",
+				max_tokens: 32,
+				stream: false,
+				messages: [
+					{ role: "user", content: "first" },
+					{ role: "assistant", content: [{ type: "thinking", thinking: "prior", signature: "sig" }] },
+					{ role: "user", content: "continue" },
+				],
+			}),
+		});
+		expect(response.status).toBe(200);
+		const assistant = harness.mock.calls[0]?.context.messages.find(message => message.role === "assistant");
+		expect(assistant).toMatchObject({ model: "real-y", provider: "openrouter" });
+	});
+
+	it("keeps pi-native replayed assistant provenance unchanged", async () => {
+		harness = await boot(agentAuthorizer, true, false, "real-y");
+		harness.mock.push({ content: ["ok"] });
+		const response = await fetch(`${harness.handle.url}/v1/pi/stream`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: "Bearer token-a" },
+			body: JSON.stringify({
+				modelId: "stable-x",
+				stream: false,
+				context: {
+					messages: [
+						{ role: "user", content: "first", timestamp: 1 },
+						{
+							role: "assistant",
+							content: [{ type: "text", text: "prior" }],
+							api: "anthropic-messages",
+							provider: "anthropic",
+							model: "stable-x",
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "stop",
+							timestamp: 2,
+						},
+						{ role: "user", content: "continue", timestamp: 3 },
+					],
+				},
+			}),
+		});
+		expect(response.status).toBe(200);
+		const assistant = harness.mock.calls[0]?.context.messages.find(message => message.role === "assistant");
+		expect(assistant).toMatchObject({ model: "stable-x", provider: "anthropic", api: "anthropic-messages" });
+	});
+
+	it("returns 499 when the format or pi-native resolver completes after cancellation", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-resolver-abort-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.keys.setRuntime("openrouter", "test-key");
+
+		try {
+			for (const [pathname, body] of [
+				["/v1/chat/completions", { model: "stable-x", messages: [{ role: "user", content: "hi" }], stream: false }],
+				["/v1/pi/stream", { modelId: "stable-x", context: { messages: [] }, stream: false }],
+			] as const) {
+				const started = Promise.withResolvers<void>();
+				const pending = Promise.withResolvers<MockModel | undefined>();
+				const router = createAuthGatewayRouter({
+					storage,
+					resolveModel: () => {
+						started.resolve();
+						return pending.promise;
+					},
+				});
+				const controller = new AbortController();
+				const result = router.route(
+					new Request(`http://gateway${pathname}`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify(body),
+						signal: controller.signal,
+					}),
+					"test-peer",
+					SHARED_TOKEN_CALLER,
+				);
+				await started.promise;
+				controller.abort();
+				pending.resolve(undefined);
+				const response = await result;
+				expect(response.status).toBe(499);
+				router.close();
+			}
+		} finally {
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
 	});
 });

@@ -16,9 +16,32 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { extractProviderRetryHint } from "../utils/retry-after";
-import type { AgentCaller, AuthGatewayServerOptions } from "./types";
+import type { AgentCaller, AuthGatewayServerOptions, CallerIdentity } from "./types";
 
-export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+export type ModelResolver = (
+	modelId: string,
+	/** The admitted request identity used to resolve against the caller's credential pool. */
+	caller: CallerIdentity,
+) => Model<Api> | undefined | Promise<Model<Api> | undefined>;
+
+export class ModelResolverUnavailableError extends Error {
+	constructor(options?: ErrorOptions) {
+		super("model resolver unavailable", options);
+		this.name = "ModelResolverUnavailableError";
+	}
+}
+
+export async function resolveGatewayModel(
+	resolver: ModelResolver,
+	modelId: string,
+	caller: CallerIdentity,
+): Promise<Model<Api> | undefined> {
+	try {
+		return await resolver(modelId, caller);
+	} catch (cause) {
+		throw new ModelResolverUnavailableError({ cause });
+	}
+}
 
 export interface FailoverContext {
 	/** The inbound request, as an opaque token; the fork reads no identity from it. */
@@ -86,15 +109,16 @@ export interface AuthGatewayRouteOptions {
 	/** Wraps each routed request, including its `resolveStorage` call. */
 	routeScope?: <T>(req: Request, run: () => Promise<T>) => Promise<T>;
 	/**
-	 * Resolve a client-requested model id to a pi-ai Model. Caller supplies
-	 * this from a ModelRegistry (lives in `coding-agent` to avoid an inverse
-	 * dependency in `pi-ai`).
+	 * Resolve the requested model id with the admitted caller to a pi-ai Model.
+	 * May return synchronously or asynchronously; the gateway awaits either form.
 	 */
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
 	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
 	excludeProviders?: ReadonlySet<string>;
+	/** Optional stable-name rows, projected independently from provider-qualified model rows. */
+	listAliases?: () => Iterable<{ id: string; model: Model<Api> }>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 	/** Chat routes retry an eligible pre-output failure on the next candidate, if any; unset keeps one attempt. */

@@ -10,14 +10,17 @@ import {
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
+	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import type { CallerIdentity } from "../types";
 
 /** OpenAI-compatible `POST /v1/embeddings` gateway handler. */
 export async function handleEmbeddings(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
+	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -36,7 +39,8 @@ export async function handleEmbeddings(
 	}
 	if (controller.signal.aborted) return aborted();
 
-	const model = bootOpts.resolveModel(parsed.modelId);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
+	if (controller.signal.aborted) return aborted();
 	if (!model) {
 		return embeddings.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
