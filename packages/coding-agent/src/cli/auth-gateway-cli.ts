@@ -164,7 +164,7 @@ const CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
  * (`/v1/rerank`), video (`/v1/videos/*`). Other kinds (tiny, search) have no
  * wire and stay off the served catalog so `/v1/models` never advertises them.
  */
-const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
+export const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
 	"chat",
 	"judge",
 	"image",
