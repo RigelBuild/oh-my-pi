@@ -27,7 +27,7 @@
  *   bun scripts/setup-npm-trust.ts --dry-run       Print the commands, change nothing
  *   bun scripts/setup-npm-trust.ts --force         Replace any existing config (revoke + recreate)
  *   bun scripts/setup-npm-trust.ts --only a,b      Limit to specific package names
- *   bun scripts/setup-npm-trust.ts --repo o/r      Override the GitHub repo (default: from package.json)
+ *   bun scripts/setup-npm-trust.ts --repo o/r      Override the GitHub repo (default: RigelBuild/oh-my-pi)
  *   bun scripts/setup-npm-trust.ts --workflow f    Override the workflow file (default: ci.yml)
  */
 
@@ -43,7 +43,7 @@ import { renamePackageName } from "./rigel-scope-rename.ts";
 const repoRoot = path.join(import.meta.dir, "..");
 const MIN_NPM = "11.16.0";
 const DEFAULT_WORKFLOW = "ci.yml";
-const FALLBACK_REPO = "can1357/oh-my-pi";
+const DEFAULT_REPO = "RigelBuild/oh-my-pi";
 const PLACEHOLDER_VERSION = "0.0.0";
 
 interface NativeLeafTarget {
@@ -131,7 +131,7 @@ function printUsageAndExit(code = 0): never {
 			"  --dry-run         Print the npm trust commands, change nothing",
 			"  --force           Replace an existing config (revoke + recreate)",
 			"  --only a,b,c      Limit to the named packages",
-			"  --repo owner/repo Override the GitHub repo (default: from package.json)",
+			"  --repo owner/repo Override the GitHub repo (default: RigelBuild/oh-my-pi)",
 			"  --workflow file   Override the workflow filename (default: ci.yml)",
 			"  -h, --help        Show this help",
 		].join("\n"),
@@ -139,29 +139,18 @@ function printUsageAndExit(code = 0): never {
 	process.exit(code);
 }
 
-/** Parse `owner/repo` out of a package.json `repository` field. */
-function parseRepo(repository: { url?: string } | string | undefined): string | null {
-	const url = typeof repository === "string" ? repository : repository?.url;
-	if (!url) return null;
-	const match = url.match(/github\.com[/:]([^/]+)\/(.+?)(?:\.git)?$/);
-	return match ? `${match[1]}/${match[2]}` : null;
-}
-
 interface ManifestShape {
 	name?: string;
 	private?: boolean;
-	repository?: { url?: string } | string;
 }
 
-/** The npm package names to configure, plus a repo slug inferred from a manifest. */
-async function collectTargets(): Promise<{ names: string[]; repoFromManifest: string | null }> {
+/** The npm package names to configure, using the published Rigel scope. */
+async function collectTargets(): Promise<string[]> {
 	const seen = new Set<string>();
 	const names: string[] = [];
-	let repoFromManifest: string | null = null;
 	for (const pkg of packages) {
 		const manifest = (await Bun.file(path.join(repoRoot, pkg.dir, "package.json")).json()) as ManifestShape;
 		if (manifest.private) continue;
-		repoFromManifest ??= parseRepo(manifest.repository);
 		// The fork publishes under the Rigel scope; trust config targets the
 		// published names, not the on-repo `@oh-my-pi/*` workspace names.
 		if (typeof manifest.name === "string") {
@@ -183,10 +172,9 @@ async function collectTargets(): Promise<{ names: string[]; repoFromManifest: st
 			}
 		}
 	}
-	return { names, repoFromManifest };
+	return names;
 }
 
-/** Run npm with the terminal attached so the web 2FA flow stays interactive. */
 function npmInteractive(args: readonly string[]): Promise<number> {
 	return Bun.spawn(["npm", ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
 }
@@ -324,7 +312,7 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	const { names, repoFromManifest } = await collectTargets();
+	const names = await collectTargets();
 	let targets = names;
 	if (opts.only) {
 		const only = opts.only;
@@ -337,7 +325,7 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	const repo = opts.repo ?? repoFromManifest ?? FALLBACK_REPO;
+	const repo = opts.repo ?? DEFAULT_REPO;
 	const workflow = opts.workflow;
 
 	if (!(await Bun.file(path.join(repoRoot, ".github", "workflows", workflow)).exists())) {
