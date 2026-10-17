@@ -239,6 +239,8 @@ export async function closeCdpTarget(
 		return targetInfos.some(info => info.targetId === targetId);
 	};
 	try {
+		// A fresh session receives targetDestroyed only with discovery on.
+		await session.send("Target.setDiscoverTargets", { discover: true }).catch(() => undefined);
 		try {
 			const result = await session.send("Target.closeTarget", { targetId });
 			if (!result.success) return false;
