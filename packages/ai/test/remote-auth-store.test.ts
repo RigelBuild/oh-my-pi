@@ -1078,6 +1078,48 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 	});
 
+	test("peekCredentialBlock matches getCredentialBlock on live and expired snapshot blocks", () => {
+		const liveUntil = Date.now() + 60_000;
+		const expiredUntil = Date.now() - 1;
+		const blocks = [
+			{ providerKey: "anthropic:oauth", blockScope: "shared", blockedUntilMs: liveUntil },
+			{ providerKey: "anthropic:oauth", blockScope: "", blockedUntilMs: expiredUntil },
+		];
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" }),
+			streamSnapshots: false,
+			initialSnapshot: {
+				generation: 1,
+				generatedAt: Date.now(),
+				serverNowMs: Date.now(),
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [
+					{
+						id: 7,
+						provider: "anthropic",
+						credential: {
+							type: "oauth",
+							access: "remote-access",
+							refresh: REMOTE_REFRESH_SENTINEL,
+							expires: liveUntil,
+						},
+						identityKey: "email:remote@example.com",
+						rotatesInMs: null,
+						blocks,
+					},
+				],
+			},
+		});
+		try {
+			expect(remoteStore.peekCredentialBlock(7, "anthropic:oauth", "shared")).toBe(liveUntil);
+			expect(remoteStore.peekCredentialBlock(7, "anthropic:oauth", "")).toBeUndefined();
+			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "shared")).toBe(liveUntil);
+			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "")).toBeUndefined();
+		} finally {
+			remoteStore.close();
+		}
+	});
+
 	test("ingestUsageReport overlays only the matching Anthropic report and getUsageReport returns the overlaid Fable row", async () => {
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
 		const remoteStore = new RemoteAuthCredentialStore({

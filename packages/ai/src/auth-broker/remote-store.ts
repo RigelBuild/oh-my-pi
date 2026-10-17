@@ -712,10 +712,13 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		this.#noteActivity();
-		// Expired rows are pruned on snapshot apply, not per read; filter inline.
+		return this.peekCredentialBlock(credentialId, providerKey, blockScope);
+	}
+
+	/** Expired rows are pruned on snapshot apply, not per read; filter inline. */
+	peekCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		const entry = this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
-		if (!entry?.blocks) return undefined;
-		const block = entry.blocks.find(
+		const block = entry?.blocks?.find(
 			candidate => candidate.providerKey === providerKey && candidate.blockScope === blockScope,
 		);
 		if (!block || block.blockedUntilMs <= Date.now()) return undefined;

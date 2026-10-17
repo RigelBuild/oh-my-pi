@@ -53,6 +53,14 @@ export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 /** OAuth bearer and credential chosen for a request, with its durable row id when available. */
 export type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
 
+/** Dry-run outcome for one credential tier: no candidates, only blocked candidates, or one selectable. */
+export type CredentialAvailability = "absent" | "blocked" | "usable";
+
+/** Whether an OAuth row can serve now, or after the refresh `getApiKey` would perform. */
+export function oauthCanRefreshOrUse(credential: OAuthCredential, nowMs: number): boolean {
+	return credential.refresh.trim().length > 0 || nowMs + OAUTH_REFRESH_SKEW_MS < credential.expires;
+}
+
 /** Options for CredentialSelector.tryOAuth when evaluating one OAuth credential. */
 export type TryOAuthOptions = {
 	checkUsage: boolean;
@@ -182,6 +190,51 @@ export class CredentialSelector {
 		}
 
 		return fallback;
+	}
+
+	/** Strategy and block scopes a request for `modelId` honours; shared by selection and dry runs. */
+	requestBlockRouting(
+		provider: string,
+		modelId: string | undefined,
+	): {
+		strategy: CredentialRankingStrategy | undefined;
+		rankingContext: CredentialRankingContext;
+		blockScope: string | undefined;
+		blockScopes: readonly string[];
+	} {
+		const strategy = this.#deps.strategies(provider);
+		const rankingContext: CredentialRankingContext = { modelId };
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		// Reads honour every scope that applies; the scalar is for args that persist.
+		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		return { strategy, rankingContext, blockScope, blockScopes };
+	}
+
+	/**
+	 * Whether a `type` row passing `filter` is unblocked for a `modelId` request, using the block
+	 * scopes selection reads. Pure: no round-robin advance, affinity write, refresh, or usage probe.
+	 */
+	availability(
+		provider: string,
+		type: AuthCredential["type"],
+		modelId: string | undefined,
+		filter?: (credential: AuthCredential) => boolean,
+	): CredentialAvailability {
+		const providerKey = providerTypeKey(provider, type);
+		const { strategy, blockScopes } = this.requestBlockRouting(provider, modelId);
+		// selectApiKey reads scoped blocks only under a ranking strategy; resolveOAuth always does.
+		const scopes = type === "oauth" || strategy ? blockScopes : undefined;
+		const candidates = this.#deps.pool
+			.credentials(provider)
+			.map((credential, index) => ({ credential, index }))
+			.filter(({ credential }) => credential.type === type && (filter?.(credential) ?? true));
+		if (candidates.length === 0) return "absent";
+		// selectApiKey hands out a sole API key without reading its blocks.
+		if (type === "api_key" && candidates.length === 1) return "usable";
+		for (const { index } of candidates) {
+			if (!this.#deps.blocks.isBlockedPeek(provider, providerKey, index, scopes)) return "usable";
+		}
+		return "blocked";
 	}
 
 	async #rankApiKeySelections(args: {
@@ -322,11 +375,7 @@ export class CredentialSelector {
 			return fallback;
 		}
 
-		const rankingContext: CredentialRankingContext = {
-			modelId: options?.modelId,
-		};
-		const blockScope = strategy.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const { rankingContext, blockScope, blockScopes } = this.requestBlockRouting(provider, options?.modelId);
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
@@ -542,13 +591,10 @@ export class CredentialSelector {
 
 		const providerKey = providerTypeKey(provider, "oauth");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
-		const strategy = this.#deps.strategies(provider);
-		const rankingContext: CredentialRankingContext = {
-			modelId: options?.modelId,
-		};
-		const blockScope = strategy?.blockScope?.(rankingContext);
-		// Reads honour every scope that applies; the scalar above is for args that persist.
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const { strategy, rankingContext, blockScope, blockScopes } = this.requestBlockRouting(
+			provider,
+			options?.modelId,
+		);
 		const planGate = strategy?.planGate?.(rankingContext);
 		const hasPlanRequirement = planGate !== undefined;
 		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;
@@ -575,9 +621,7 @@ export class CredentialSelector {
 				? credentials.find(entry => entry.index === sessionPreferredIndex)?.credential
 				: undefined;
 		const sessionPreferredCanRefreshOrUse =
-			sessionPreferredCredential !== undefined &&
-			(sessionPreferredCredential.refresh.trim().length > 0 ||
-				Date.now() + OAUTH_REFRESH_SKEW_MS < sessionPreferredCredential.expires);
+			sessionPreferredCredential !== undefined && oauthCanRefreshOrUse(sessionPreferredCredential, Date.now());
 		// Skip ranking when the session already has a working preferred credential and its prompt
 		// cache may still be warm. Providers without a verified idle boundary retain indefinite
 		// stickiness rather than risk switching while their prompt cache remains warm. New sessions

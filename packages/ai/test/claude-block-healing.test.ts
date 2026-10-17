@@ -102,6 +102,8 @@ function makeHarness(report: UsageReport, blockScope = "tier:fable"): HealHarnes
 		async deleteAuthCredentials() {},
 		getCredentialBlock: (credentialId: number, _providerKey: string, scope: string) =>
 			blocks.get(`${credentialId}:${scope}`),
+		peekCredentialBlock: (credentialId: number, _providerKey: string, scope: string) =>
+			blocks.get(`${credentialId}:${scope}`),
 		upsertCredentialBlock: block => {
 			blocks.set(`${block.credentialId}:${block.blockScope}`, block.blockedUntilMs);
 		},
