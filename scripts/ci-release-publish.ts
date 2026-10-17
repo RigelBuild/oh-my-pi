@@ -46,6 +46,7 @@ import { $ } from "bun";
 import { generateNpmPackages, LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
 import { fixEmitExtensions } from "./fix-emit-extensions.ts";
 import { parseTrackingVersion } from "./release-tag";
+import { assertNoRenameCollisions, renameTarballScope } from "./rigel-scope-rename.ts";
 
 export interface PublishPackage {
 	dir: string;
@@ -186,6 +187,18 @@ export const packages: PublishPackage[] = [
 		packLock: STATS_CLIENT_LOCK,
 	},
 ];
+
+async function assertPublishSetHasNoRenameCollisions(): Promise<void> {
+	const names: string[] = [];
+	for (const pkg of packages) {
+		const manifest = (await Bun.file(path.join(repoRoot, pkg.dir, "package.json")).json()) as PackageManifest;
+		if (!manifest.private && typeof manifest.name === "string") names.push(manifest.name);
+		if (pkg.kind === "native") {
+			for (const target of LEAF_TARGETS) names.push(`@oh-my-pi/pi-natives-${target.tag}`);
+		}
+	}
+	assertNoRenameCollisions(names);
+}
 
 function rewriteSrcToTypes(value: string): string {
 	if (!value.startsWith("./src/")) return value;
@@ -378,6 +391,11 @@ export async function inspectPackedTarball(tarballPath: string): Promise<PackedT
 	return { name: manifest.name, version: manifest.version, path: tarballPath };
 }
 
+export async function renameAndInspectPackedTarball(tarballPath: string): Promise<PackedTarball> {
+	await renameTarballScope(tarballPath);
+	return inspectPackedTarball(tarballPath);
+}
+
 /** Collects one package's output so concurrent publishes print as whole blocks. */
 export type PublishLog = (line: string) => void;
 
@@ -451,7 +469,7 @@ function publishTargetJob(target: PublishTarget, packLocks: KeyedMutex): Publish
 				await discard();
 				throw new Error(`bun pm pack produced no tarball for ${name} (${path.relative(repoRoot, dir)})`);
 			}
-			packed = await inspectPackedTarball(path.join(destination, tarball));
+			packed = await renameAndInspectPackedTarball(path.join(destination, tarball));
 		},
 		async publish(log) {
 			if (isDryRun) return;
@@ -592,6 +610,7 @@ export async function runPublishJobs(
 const PUBLISH_CONCURRENCY = 6;
 
 async function publishNativeLeafPackage(tag: string): Promise<string[]> {
+	await assertPublishSetHasNoRenameCollisions();
 	const pkg = packages.find(candidate => candidate.kind === "native");
 	if (!pkg) throw new Error("No native package configured");
 	const pkgDir = path.join(repoRoot, pkg.dir);
@@ -642,6 +661,7 @@ function workspaceDependencies(manifest: PackageManifest): string[] {
  * failed package names/dirs.
  */
 async function publishWorkspacePackages(): Promise<string[]> {
+	await assertPublishSetHasNoRenameCollisions();
 	const failed: string[] = [];
 	const prepared: { target: PublishTarget; prepack: boolean; manifest: PackageManifest }[] = [];
 	for (const pkg of packages) {

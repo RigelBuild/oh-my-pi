@@ -319,4 +319,64 @@ export const observed = { role: actionBar([actionButton("Go", "go")]).p.role, li
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
+	it("collects canonical keys with installed Rigel specifiers", async () => {
+		using tempDir = TempDir.createSync("@omp-rigel-pi-packages-");
+		const fakePackageDir = path.join(tempDir.path(), "node_modules", "@rigelbuild", "omp-coding-agent");
+		const packageNames = ["agent-core", "ai", "catalog", "coding-agent", "natives", "tui", "utils"];
+		await fs.mkdir(fakePackageDir, { recursive: true });
+		await Bun.write(
+			path.join(fakePackageDir, "package.json"),
+			JSON.stringify({ name: "@rigelbuild/omp-coding-agent", exports: { ".": "./index.ts" } }),
+		);
+		for (const packageName of packageNames) {
+			const packageRoot = path.join(tempDir.path(), "node_modules", "@rigelbuild", `omp-${packageName}`);
+			await fs.mkdir(packageRoot, { recursive: true });
+			await Bun.write(
+				path.join(packageRoot, "package.json"),
+				JSON.stringify({
+					name: `@rigelbuild/omp-${packageName}`,
+					exports: { ".": "./index.ts", "./probe": "./probe.ts" },
+				}),
+			);
+			await Bun.write(
+				path.join(packageRoot, "index.ts"),
+				`export const packageName = ${JSON.stringify(packageName)};`,
+			);
+			await Bun.write(path.join(packageRoot, "probe.ts"), `export const probe = ${JSON.stringify(packageName)};`);
+		}
+
+		const entries = await collectBundledPiEntries(fakePackageDir);
+		const entryByKey = new Map(entries.map(entry => [entry.key, entry]));
+		expect(entries.every(entry => entry.key === "typebox" || entry.key.startsWith("@oh-my-pi/pi-"))).toBe(true);
+		expect(entryByKey.get("@oh-my-pi/pi-agent-core")?.importSpecifier).toBe("@rigelbuild/omp-agent-core");
+		expect(entryByKey.get("@oh-my-pi/pi-coding-agent/probe")?.importSpecifier).toBe(
+			"@rigelbuild/omp-coding-agent/probe",
+		);
+		expect(entryByKey.get("@oh-my-pi/pi-coding-agent/probe")?.key).toBe("@oh-my-pi/pi-coding-agent/probe");
+		expect(entryByKey.get("@oh-my-pi/pi-natives/probe")?.importSpecifier).toBe("@rigelbuild/omp-natives/probe");
+		expect(entryByKey.get("@oh-my-pi/pi-tui/probe")?.importSpecifier).toBe("@rigelbuild/omp-tui/probe");
+		expect(entryByKey.get("@oh-my-pi/pi-utils")?.importSpecifier).toBe("@rigelbuild/omp-utils");
+		expect(entryByKey.get("@oh-my-pi/pi-utils/probe")?.importSpecifier).toBe("@rigelbuild/omp-utils/probe");
+		expect(Bun.resolveSync("@rigelbuild/omp-agent-core", fakePackageDir)).toBe(
+			path.join(tempDir.path(), "node_modules", "@rigelbuild", "omp-agent-core", "index.ts"),
+		);
+		expect(Bun.resolveSync("@rigelbuild/omp-utils/probe", fakePackageDir)).toBe(
+			path.join(tempDir.path(), "node_modules", "@rigelbuild", "omp-utils", "probe.ts"),
+		);
+	});
+
+	it("preserves upstream registry output", () => {
+		const packageDir = path.resolve(import.meta.dir, "../..");
+		const shimSpecifiers: Record<string, string> = {
+			"@oh-my-pi/pi-ai": path.join(packageDir, "src", "extensibility", "legacy-pi-ai-shim.ts"),
+			"@oh-my-pi/pi-coding-agent": path.join(packageDir, "src", "extensibility", "legacy-pi-coding-agent-shim.ts"),
+			"@oh-my-pi/pi-tui": path.join(packageDir, "src", "extensibility", "legacy-pi-tui-shim.ts"),
+			typebox: path.join(packageDir, "src", "extensibility", "legacy-typebox.ts"),
+		};
+		const upstreamEntries = bundledEntries.map(entry => ({
+			...entry,
+			importSpecifier: shimSpecifiers[entry.key] ?? entry.key,
+		}));
+		expect(__renderLegacyPiVirtualModule(bundledEntries)).toBe(__renderLegacyPiVirtualModule(upstreamEntries));
+	});
 });

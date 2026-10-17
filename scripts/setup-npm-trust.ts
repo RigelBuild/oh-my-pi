@@ -27,7 +27,7 @@
  *   bun scripts/setup-npm-trust.ts --dry-run       Print the commands, change nothing
  *   bun scripts/setup-npm-trust.ts --force         Replace any existing config (revoke + recreate)
  *   bun scripts/setup-npm-trust.ts --only a,b      Limit to specific package names
- *   bun scripts/setup-npm-trust.ts --repo o/r      Override the GitHub repo (default: from package.json)
+ *   bun scripts/setup-npm-trust.ts --repo o/r      Override the GitHub repo (default: RigelBuild/oh-my-pi)
  *   bun scripts/setup-npm-trust.ts --workflow f    Override the workflow file (default: ci.yml)
  */
 
@@ -38,11 +38,12 @@ import { $ } from "bun";
 import { LEAF_TARGETS } from "../packages/natives/scripts/gen-npm-packages.ts";
 import { compareVersions } from "../packages/utils/src/version.ts";
 import { packages } from "./ci-release-publish.ts";
+import { renamePackageName } from "./rigel-scope-rename.ts";
 
 const repoRoot = path.join(import.meta.dir, "..");
 const MIN_NPM = "11.16.0";
 const DEFAULT_WORKFLOW = "ci.yml";
-const FALLBACK_REPO = "can1357/oh-my-pi";
+const DEFAULT_REPO = "RigelBuild/oh-my-pi";
 const PLACEHOLDER_VERSION = "0.0.0";
 
 interface NativeLeafTarget {
@@ -130,7 +131,7 @@ function printUsageAndExit(code = 0): never {
 			"  --dry-run         Print the npm trust commands, change nothing",
 			"  --force           Replace an existing config (revoke + recreate)",
 			"  --only a,b,c      Limit to the named packages",
-			"  --repo owner/repo Override the GitHub repo (default: from package.json)",
+			"  --repo owner/repo Override the GitHub repo (default: RigelBuild/oh-my-pi)",
 			"  --workflow file   Override the workflow filename (default: ci.yml)",
 			"  -h, --help        Show this help",
 		].join("\n"),
@@ -138,38 +139,32 @@ function printUsageAndExit(code = 0): never {
 	process.exit(code);
 }
 
-/** Parse `owner/repo` out of a package.json `repository` field. */
-function parseRepo(repository: { url?: string } | string | undefined): string | null {
-	const url = typeof repository === "string" ? repository : repository?.url;
-	if (!url) return null;
-	const match = url.match(/github\.com[/:]([^/]+)\/(.+?)(?:\.git)?$/);
-	return match ? `${match[1]}/${match[2]}` : null;
-}
-
 interface ManifestShape {
 	name?: string;
 	private?: boolean;
-	repository?: { url?: string } | string;
 }
 
-/** The npm package names to configure, plus a repo slug inferred from a manifest. */
-async function collectTargets(): Promise<{ names: string[]; repoFromManifest: string | null }> {
+/** The npm package names to configure, using the published Rigel scope. */
+async function collectTargets(): Promise<string[]> {
 	const seen = new Set<string>();
 	const names: string[] = [];
-	let repoFromManifest: string | null = null;
 	for (const pkg of packages) {
 		const manifest = (await Bun.file(path.join(repoRoot, pkg.dir, "package.json")).json()) as ManifestShape;
 		if (manifest.private) continue;
-		repoFromManifest ??= parseRepo(manifest.repository);
-		if (typeof manifest.name === "string" && !seen.has(manifest.name)) {
-			seen.add(manifest.name);
-			names.push(manifest.name);
+		// The fork publishes under the Rigel scope; trust config targets the
+		// published names, not the on-repo `@oh-my-pi/*` workspace names.
+		if (typeof manifest.name === "string") {
+			const published = renamePackageName(manifest.name);
+			if (!seen.has(published)) {
+				seen.add(published);
+				names.push(published);
+			}
 		}
 		// Native leaves are generated per platform at release time; each is its
 		// own published package and needs its own trusted-publisher link.
 		if (pkg.kind === "native") {
 			for (const target of LEAF_TARGETS) {
-				const leaf = `@oh-my-pi/pi-natives-${target.tag}`;
+				const leaf = nativeLeafName(target.tag);
 				if (!seen.has(leaf)) {
 					seen.add(leaf);
 					names.push(leaf);
@@ -177,10 +172,9 @@ async function collectTargets(): Promise<{ names: string[]; repoFromManifest: st
 			}
 		}
 	}
-	return { names, repoFromManifest };
+	return names;
 }
 
-/** Run npm with the terminal attached so the web 2FA flow stays interactive. */
 function npmInteractive(args: readonly string[]): Promise<number> {
 	return Bun.spawn(["npm", ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
 }
@@ -235,8 +229,9 @@ async function waitForPackageExists(name: string): Promise<boolean> {
 	return false;
 }
 
+/** Use Rigel names for trust setup and native placeholders. */
 function nativeLeafName(tag: string): string {
-	return `@oh-my-pi/pi-natives-${tag}`;
+	return renamePackageName(`@oh-my-pi/pi-natives-${tag}`);
 }
 
 function nativeLeafTargetForPackage(name: string): NativeLeafTarget | null {
@@ -254,7 +249,7 @@ function placeholderManifest(name: string, target: NativeLeafTarget, repo: strin
 	return {
 		name,
 		version: PLACEHOLDER_VERSION,
-		description: `Placeholder for the ${target.tag} native addon of @oh-my-pi/pi-natives. The real binary is published during release.`,
+		description: `Placeholder for the ${target.tag} native addon of ${renamePackageName("@oh-my-pi/pi-natives")}. The real binary is published during release.`,
 		license: "MIT",
 		os: [target.os],
 		cpu: [target.cpu],
@@ -276,7 +271,7 @@ function placeholderReadme(name: string, target: NativeLeafTarget): string {
 	return [
 		`# ${name}`,
 		"",
-		`Placeholder package reserving the npm name for the \`${target.tag}\` native addon of \`@oh-my-pi/pi-natives\`.`,
+		`Placeholder package reserving the npm name for the \`${target.tag}\` native addon of \`${renamePackageName("@oh-my-pi/pi-natives")}\`.`,
 		"",
 		`This \`${PLACEHOLDER_VERSION}\` release ships no binary. The real, versioned platform addon is generated during release and installed as an optional dependency of the core package.`,
 		"",
@@ -317,7 +312,7 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	const { names, repoFromManifest } = await collectTargets();
+	const names = await collectTargets();
 	let targets = names;
 	if (opts.only) {
 		const only = opts.only;
@@ -330,7 +325,7 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	const repo = opts.repo ?? repoFromManifest ?? FALLBACK_REPO;
+	const repo = opts.repo ?? DEFAULT_REPO;
 	const workflow = opts.workflow;
 
 	if (!(await Bun.file(path.join(repoRoot, ".github", "workflows", workflow)).exists())) {
