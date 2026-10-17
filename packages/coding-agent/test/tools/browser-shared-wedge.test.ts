@@ -107,6 +107,8 @@ function makeWedgeHandle(scope: SharedTargetScope, options: WedgeOptions = {}): 
 			}
 			return await new Promise<never>(() => {});
 		},
+		on: () => undefined,
+		off: () => undefined,
 		detach: async (): Promise<void> => undefined,
 	};
 	const handle: Record<string, unknown> = {

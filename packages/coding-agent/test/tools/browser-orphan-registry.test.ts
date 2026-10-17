@@ -17,6 +17,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
 import {
+	closeCdpTarget,
 	collectOrphanTargets,
 	forgetSharedTarget,
 	reapOrphanSharedTargets,
@@ -58,6 +59,7 @@ async function deadPid(): Promise<number> {
 function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Set()): Browser {
 	const session = {
 		send: async (method: string, params?: { targetId: string }) => {
+			if (method === "Target.setDiscoverTargets") return {};
 			if (method === "Target.getTargets") {
 				return { targetInfos: [...failTargets].map(targetId => ({ targetId })) };
 			}
@@ -66,6 +68,8 @@ function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Se
 			closed.push(params.targetId);
 			return { success: true };
 		},
+		on: () => undefined,
+		off: () => undefined,
 		detach: async () => undefined,
 	};
 	return {
@@ -214,5 +218,69 @@ describe("orphan-registry — reap", () => {
 		expect(retryCount).toBe(1);
 		expect(retryClosed).toEqual(["retry-later"]);
 		expect(await Bun.file(path.join(registryDir(scope), `${dead}.json`)).exists()).toBe(false);
+	});
+});
+
+/**
+ * Session stub where a successful close leaves the target listed until `destroy`. Like Chromium,
+ * it delivers `Target.targetDestroyed` only after `Target.setDiscoverTargets` enabled discovery.
+ */
+function makeLaggingCloseBrowser(targetId: string) {
+	const listeners = new Set<(event: { targetId: string }) => void>();
+	let listed = true;
+	let discovering = false;
+	let closeRequested = false;
+	const session = {
+		send: async (method: string, params?: { discover?: boolean }) => {
+			if (method === "Target.setDiscoverTargets") discovering = params?.discover === true;
+			if (method === "Target.closeTarget") {
+				closeRequested = true;
+				return { success: true };
+			}
+			if (method === "Target.getTargets") return { targetInfos: listed ? [{ targetId }] : [] };
+			return {};
+		},
+		on: (event: string, listener: (event: { targetId: string }) => void) => {
+			if (event === "Target.targetDestroyed") listeners.add(listener);
+		},
+		off: (event: string, listener: (event: { targetId: string }) => void) => {
+			if (event === "Target.targetDestroyed") listeners.delete(listener);
+		},
+		detach: async () => undefined,
+	};
+	const browser = { target: () => ({ createCDPSession: async () => session }) } as unknown as Browser;
+	const destroy = () => {
+		listed = false;
+		if (!discovering) return;
+		for (const listener of listeners) listener({ targetId });
+	};
+	return { browser, destroy, listenerCount: () => listeners.size, closeRequested: () => closeRequested };
+}
+
+async function settleState<T>(promise: Promise<T>): Promise<"pending" | T> {
+	return await Promise.race([promise, Bun.sleep(5).then(() => "pending" as const)]);
+}
+
+describe("orphan-registry — closeCdpTarget", () => {
+	it("reports a close as soon as Chromium removes the target, without waiting for the timeout", async () => {
+		const { browser, destroy, listenerCount, closeRequested } = makeLaggingCloseBrowser("lagging");
+		// Far past the test's own timeout: only the targetDestroyed event can settle this close in time.
+		const closing = closeCdpTarget(browser, "lagging", { confirmTimeoutMs: 60_000 });
+		while (!closeRequested()) await Bun.sleep(1);
+		// Chromium answers closeTarget before it removes the target; the close is not done yet.
+		expect(await settleState(closing)).toBe("pending");
+		destroy();
+		expect(await closing).toBe(true);
+		expect(listenerCount()).toBe(0);
+	});
+
+	it("waits the confirm timeout, then reports a target that is never removed as not closed", async () => {
+		const { browser, listenerCount } = makeLaggingCloseBrowser("stuck");
+		const started = performance.now();
+		const closing = closeCdpTarget(browser, "stuck", { confirmTimeoutMs: 200 });
+		expect(await settleState(closing)).toBe("pending");
+		expect(await closing).toBe(false);
+		expect(performance.now() - started).toBeGreaterThanOrEqual(190);
+		expect(listenerCount()).toBe(0);
 	});
 });
