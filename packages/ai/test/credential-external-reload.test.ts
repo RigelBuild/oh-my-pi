@@ -52,6 +52,8 @@ function makeExternallyMutableStore(rows: StoredAuthCredential[]): ExternalStore
 		async deleteAuthCredentials() {},
 		getCredentialBlock: (credentialId: number, _providerKey: string, blockScope: string) =>
 			blocks.get(`${credentialId}:${blockScope}`),
+		peekCredentialBlock: (credentialId: number, _providerKey: string, blockScope: string) =>
+			blocks.get(`${credentialId}:${blockScope}`),
 		upsertCredentialBlock: block => {
 			blocks.set(`${block.credentialId}:${block.blockScope}`, block.blockedUntilMs);
 		},

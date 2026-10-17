@@ -1627,14 +1627,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
+		this.#sweepExpiredCredentialBlocks();
+		return this.peekCredentialBlock(credentialId, providerKey, blockScope);
+	}
+
+	peekCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		// Current callers use meter scopes. The physical shared row exists only
 		// for direct SQLite readers from pre-meter releases.
 		if (providerKey === LEGACY_CODEX_BLOCK_PROVIDER_KEY && blockScope === LEGACY_CODEX_BLOCK_SCOPE) {
 			return undefined;
 		}
-		this.#sweepExpiredCredentialBlocks();
 		const row = this.#getCredentialBlockStmt.get(credentialId, providerKey, blockScope, Date.now()) as
-			| { blocked_until_ms?: number; updated_at?: number }
+			| { blocked_until_ms?: number }
 			| undefined;
 		return typeof row?.blocked_until_ms === "number" ? row.blocked_until_ms : undefined;
 	}

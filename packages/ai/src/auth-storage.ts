@@ -159,7 +159,13 @@ export class AuthStorage {
 	 * `store` is closed and the current store stays active.
 	 */
 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
-		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+		let next: AuthStorageModules;
+		try {
+			next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+		} catch (error) {
+			store.close();
+			throw error;
+		}
 		try {
 			await next.pool.reload();
 		} catch (error) {

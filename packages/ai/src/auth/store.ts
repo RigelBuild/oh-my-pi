@@ -98,6 +98,8 @@ export interface CredentialCacheStore {
 export interface CredentialBlockStore {
 	/** Non-expired block for one (credential, providerKey, scope) key, or undefined. */
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined;
+	/** {@link getCredentialBlock} without expiry cleanup or activity tracking, for dry runs. */
+	peekCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined;
 	/**
 	 * Non-expired blocks for one credential and providerKey, keyed by block
 	 * scope (`""` is unscoped), in one read. Optional: selectors fall back to
