@@ -342,6 +342,30 @@ test("an RPC past its deadline fails as deadline_exceeded", async () => {
 	expect(error instanceof CompassRpcError ? error.code : undefined).toBe("deadline_exceeded");
 });
 
+test("the registry refuses a base URL that would send its token in plaintext off loopback", () => {
+	const build = (baseUrl: string, token = "registry-token") => () => new CompassModelRegistry({ baseUrl, token });
+	expect(build("")).toThrow("Compass baseUrl must not be empty");
+	expect(build("compass.example")).toThrow("Compass baseUrl must be an absolute URL");
+	expect(build("http://compass.example")).toThrow("Compass baseUrl must use https unless it is a loopback address");
+	expect(build("http://compass.example", "")).toThrow("Compass baseUrl must use https");
+	expect(build("http://127.0.0.1:8443")).not.toThrow();
+});
+
+test("the registry strips trailing slashes from its base URL", async () => {
+	const server = fakeRegistryServer({ version: "1", registry: { entries: {} } });
+	const urls: string[] = [];
+	const registry = new CompassModelRegistry({
+		...registryOptions(server),
+		baseUrl: "https://compass.example//",
+		fetch: (input, init) => {
+			urls.push(String(input));
+			return server.fetch(input, init);
+		},
+	});
+	await registry.current();
+	expect(urls[0]).toBe(`https://compass.example${VERSION_PATH}`);
+});
+
 test("listing a cold registry starts its load so the next listing shows the aliases", async () => {
 	const anthropic = createMockModel({ provider: "anthropic", id: candidates[0].modelId });
 	const server = fakeRegistryServer({ version: "1", registry: { entries: { [STABLE_NAME]: { candidates } } } });
