@@ -1,9 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { setWorktreesDir, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import {
 	canAutoCreateWorktree,
@@ -76,48 +75,64 @@ const commitFile = async (cwd: string, name: string) => {
 	git(cwd, "commit", "-q", "-m", `add ${name}`);
 };
 
+// Each test owns its repo through `await using`, and worktree paths hash that
+// repo, so a body that outlives its timeout cannot touch a later test's files.
+async function makeFixture() {
+	const dir = await TempDir.create("@omp-session-wt-");
+	const root = await fs.realpath(dir.path());
+	const repo = path.join(root, "repo");
+	await fs.mkdir(repo);
+	git(repo, "init", "-q", "-b", "main");
+	git(repo, "config", "core.autocrlf", "false");
+	await Bun.write(path.join(repo, "tracked.txt"), "base\n");
+	git(repo, "add", ".");
+	git(repo, "commit", "-q", "-m", "init");
+	return { root, repo, [Symbol.asyncDispose]: () => dir[Symbol.asyncDispose]() };
+}
+
 describe("session worktree helpers (real git)", () => {
-	let root: string;
-	let repo: string;
+	let worktrees: TempDir;
 	let savedEnv: string | undefined;
 	let savedCwd: string;
 	const branch = "wt/test-session";
 
-	beforeEach(async () => {
-		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-wt-")));
-		repo = path.join(root, "repo");
-		await fs.mkdir(repo);
+	beforeAll(async () => {
 		savedEnv = process.env.OMP_WORKTREE_DIR;
-		savedCwd = process.cwd();
 		delete process.env.OMP_WORKTREE_DIR;
-		setWorktreesDir(path.join(root, "wt"));
-		git(repo, "init", "-q", "-b", "main");
-		git(repo, "config", "core.autocrlf", "false");
-		await Bun.write(path.join(repo, "tracked.txt"), "base\n");
-		git(repo, "add", ".");
-		git(repo, "commit", "-q", "-m", "init");
+		worktrees = await TempDir.create("@omp-session-wt-dirs-");
+		setWorktreesDir(worktrees.path());
 	});
 
-	afterEach(async () => {
-		process.chdir(savedCwd);
+	afterAll(async () => {
 		setWorktreesDir(undefined);
 		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
 		else process.env.OMP_WORKTREE_DIR = savedEnv;
-		await fs.rm(root, { recursive: true, force: true });
+		await worktrees.remove();
 	});
 
-	const create = (keepChanges = true, name = branch) =>
+	beforeEach(() => {
+		savedCwd = process.cwd();
+	});
+
+	afterEach(() => {
+		process.chdir(savedCwd);
+	});
+
+	const create = (repo: string, keepChanges = true, name = branch) =>
 		createSessionWorktree(repo, Settings.isolated(), name, { keepChanges });
 
 	it("offers a worktree only in a primary checkout with commits", async () => {
+		await using fx = await makeFixture();
+		const { root, repo } = fx;
 		const plain = path.join(root, "plain");
 		const unborn = path.join(root, "unborn");
 		await fs.mkdir(plain);
 		await fs.mkdir(unborn);
 		git(unborn, "init", "-q");
+		const before = await fs.readdir(worktrees.path());
 		await expect(createSessionWorktree(unborn, Settings.isolated(), branch)).rejects.toThrow("has no commits");
-		expect(await exists(path.join(root, "wt"))).toBe(false);
-		const wt = await create();
+		expect(await fs.readdir(worktrees.path())).toEqual(before);
+		const wt = await create(repo);
 		expect(await canAutoCreateWorktree(repo)).toBe(true);
 		expect(await canAutoCreateWorktree(plain)).toBe(false);
 		expect(await canAutoCreateWorktree(unborn)).toBe(false);
@@ -125,7 +140,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("removes a clean worktree and deletes its branch", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		expect(worktreePaths(repo)).toContain(wt.path);
 		expect(await inspectSessionWorktree(wt)).toEqual(clean);
 		await removeSessionWorktree(wt, false);
@@ -135,7 +152,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("keeps the branch at the new commit when the worktree moved", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		await commitFile(wt.path, "new.txt");
 		const tip = git(wt.path, "rev-parse", "HEAD");
 		expect(await inspectSessionWorktree(wt)).toEqual({ ...clean, moved: true });
@@ -146,7 +165,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("prompts instead of removing when commits exist only on a detached HEAD", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		git(wt.path, "switch", "-q", "--detach");
 		await commitFile(wt.path, "detached.txt");
 		expect(await inspectSessionWorktree(wt)).toEqual({ ...clean, offBranch: true });
@@ -167,7 +188,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("reports moved from the source repo when the worktree dir was deleted externally", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		await commitFile(wt.path, "new.txt");
 		await fs.rm(wt.path, { recursive: true, force: true });
 		git(repo, "worktree", "prune");
@@ -176,7 +199,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("rejects and keeps the branch when git cannot remove the worktree", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		await fs.rm(wt.path, { recursive: true, force: true });
 		git(repo, "worktree", "prune");
 		await expect(removeSessionWorktree(wt, false)).rejects.toThrow(`branch '${branch}' kept`);
@@ -184,9 +209,11 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("starts from clean HEAD with keepChanges:false and reports worktree edits as dirty", async () => {
+		await using fx = await makeFixture();
+		const { repo } = fx;
 		await Bun.write(path.join(repo, "tracked.txt"), "edited\n");
 		await Bun.write(path.join(repo, "untracked.txt"), "u\n");
-		const wt = await create(false);
+		const wt = await create(repo, false);
 		expect(wt.keptChanges).toBe(false);
 		expect(wt.baseCommit).toBe(git(repo, "rev-parse", "HEAD"));
 		expect(await Bun.file(path.join(wt.path, "tracked.txt")).text()).toBe("base\n");
@@ -200,8 +227,10 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("plans newest first and removes from inside the newest worktree", async () => {
-		const older = await create(true, "wt/older");
-		const newer = await create(true, "wt/newer");
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const older = await create(repo, true, "wt/older");
+		const newer = await create(repo, true, "wt/newer");
 		const plan = await planWorktreeExit(
 			[older, newer],
 			"remove",
@@ -222,7 +251,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("keeps a worktree removed without a prompt that changed after planning", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		const plan = await planWorktreeExit(
 			[wt],
 			"remove",
@@ -238,7 +269,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("keeps a confirmed dirty worktree that got more uncommitted edits after the prompt", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		await Bun.write(path.join(wt.path, "dirty.txt"), "d\n");
 		const plan = await planWorktreeExit(
 			[wt],
@@ -255,7 +288,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("removes a confirmed dirty worktree, keeps a moved branch, and names it in the resume note", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		await commitFile(wt.path, "work.txt");
 		const tip = git(wt.path, "rev-parse", "HEAD");
 		await Bun.write(path.join(wt.path, "dirty.txt"), "d\n");
@@ -275,7 +310,9 @@ describe("session worktree helpers (real git)", () => {
 	});
 
 	it("returns a message instead of throwing when removal fails", async () => {
-		const wt = await create();
+		await using fx = await makeFixture();
+		const { repo } = fx;
+		const wt = await create(repo);
 		const plan = await planWorktreeExit(
 			[wt],
 			"remove",
