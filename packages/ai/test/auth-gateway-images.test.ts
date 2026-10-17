@@ -343,6 +343,28 @@ describe("auth gateway images", () => {
 			expect(upstreamCalls).toBe(0);
 		});
 	});
+	it("rejects image JSON above the wire cap before provider dispatch", async () => {
+		const model = imageModel("openai", "gpt-image-limit", "openai-images");
+		let upstreamCalls = 0;
+		const fetchStub: FetchImpl = async () => {
+			upstreamCalls++;
+			return Response.json({ data: [{ b64_json: IMAGE_DATA }] });
+		};
+		await withGateway([model], fetchStub, async url => {
+			const prefix = JSON.stringify({ model: model.id, prompt: "paint" });
+			const body = `${prefix}${" ".repeat(48 * 1024 * 1024 + 1 - new TextEncoder().encode(prefix).byteLength)}`;
+			const response = await fetch(`${url}/v1/images/generations`, {
+				method: "POST",
+				headers: {
+					Authorization: "Bearer gateway-token",
+					"Content-Type": "application/json",
+				},
+				body,
+			});
+			expect(response.status).toBe(413);
+			expect(upstreamCalls).toBe(0);
+		});
+	});
 
 	it("downloads URL image responses into canonical inline bytes", async () => {
 		const model = imageModel("openai", "url-image-test", "openai-images");

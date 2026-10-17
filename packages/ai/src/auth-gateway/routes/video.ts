@@ -15,8 +15,11 @@ import {
 	resolveGatewayApiKey,
 	resolveGatewayModel,
 } from "../dispatch";
+import { readBoundedRequestBody, RequestBodyTooLargeError } from "../bounded-body";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
 import type { CallerIdentity } from "../types";
+
+const VIDEO_JSON_MAX_BYTES = 25 * 1024 * 1024;
 
 interface ResolvedVideoRequest {
 	model: Model<Api>;
@@ -145,12 +148,19 @@ export async function handleVideoSubmit(
 	if (controller.signal.aborted) return aborted();
 	let parsed: videoServer.VideoParsedRequest;
 	try {
-		parsed = videoServer.parseRequest(await req.json());
+		const bytes = await readBoundedRequestBody(req, VIDEO_JSON_MAX_BYTES, controller.signal);
+		parsed = videoServer.parseRequest(JSON.parse(new TextDecoder().decode(bytes)) as unknown);
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		const tooLarge = error instanceof RequestBodyTooLargeError;
 		const message = error instanceof Error ? error.message : String(error);
-		return videoServer.formatError(400, "invalid_request_error", message);
+		return videoServer.formatError(
+			tooLarge ? 413 : 400,
+			tooLarge ? "payload_too_large" : "invalid_request_error",
+			message,
+		);
 	}
+	if (controller.signal.aborted) return aborted();
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
 	if (controller.signal.aborted) return aborted();
 	if (!model) return videoServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
