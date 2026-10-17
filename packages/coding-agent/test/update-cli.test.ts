@@ -42,6 +42,9 @@ import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
+// Upstream-path tests pin a non-Rigel running version, so they hold on a Rigel build too.
+const UPSTREAM = "18.9.2";
+
 const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 
 const tempDirs: string[] = [];
@@ -603,7 +606,7 @@ describe("update-cli package manager commands", () => {
 	});
 
 	it("pins npm package installs to the official registry and the checked native package versions", () => {
-		const args = buildNpmInstallArgs("16.3.15", "win32-x64");
+		const args = buildNpmInstallArgs("16.3.15", "win32-x64", undefined, {}, UPSTREAM);
 
 		expect(args.slice(0, 2)).toEqual(["install", "-g"]);
 		expect(args).toContain("--registry=https://registry.npmjs.org/");
@@ -644,17 +647,17 @@ describe("update-cli npm rename contract", () => {
 	it("adds --force to npm argv only for rename migrations so the old package's bin can be clobbered", () => {
 		const packages = { pkg: "@new/omp", natives: "@new/natives" };
 		expect(buildNpmInstallArgs("17.0.0", "linux-x64", packages, { force: true })).toContain("--force");
-		expect(buildNpmInstallArgs("16.3.15", "win32-x64")).not.toContain("--force");
+		expect(buildNpmInstallArgs("16.3.15", "win32-x64", undefined, {}, UPSTREAM)).not.toContain("--force");
 	});
 
 	it("removes the old agent package and its natives companions when both names moved", () => {
 		const packages = { pkg: "@new/omp", natives: "@new/natives" };
-		expect(buildRenameCleanupPackages(packages, "darwin-arm64")).toEqual([
+		expect(buildRenameCleanupPackages(packages, "darwin-arm64", UPSTREAM)).toEqual([
 			"@oh-my-pi/pi-coding-agent",
 			"@oh-my-pi/pi-natives",
 			"@oh-my-pi/pi-natives-darwin-arm64",
 		]);
-		expect(buildRenameCleanupPackages(packages, "linux-arm")).toEqual([
+		expect(buildRenameCleanupPackages(packages, "linux-arm", UPSTREAM)).toEqual([
 			"@oh-my-pi/pi-coding-agent",
 			"@oh-my-pi/pi-natives",
 		]);
@@ -662,8 +665,8 @@ describe("update-cli npm rename contract", () => {
 
 	it("keeps the natives packages on an agent-only rename so cleanup cannot strip the addon the new install pinned", () => {
 		const packages = { pkg: "@new/omp", natives: "@oh-my-pi/pi-natives" };
-		expect(buildRenameCleanupPackages(packages, "darwin-arm64")).toEqual(["@oh-my-pi/pi-coding-agent"]);
-		expect(buildRenameCleanupPackages(packages, "linux-arm")).toEqual(["@oh-my-pi/pi-coding-agent"]);
+		expect(buildRenameCleanupPackages(packages, "darwin-arm64", UPSTREAM)).toEqual(["@oh-my-pi/pi-coding-agent"]);
+		expect(buildRenameCleanupPackages(packages, "linux-arm", UPSTREAM)).toEqual(["@oh-my-pi/pi-coding-agent"]);
 	});
 });
 
@@ -775,7 +778,7 @@ describe("update-cli bun install command", () => {
 		//     is already pointed at the official registry but its cache predates
 		//     the release.
 		// See https://github.com/can1357/oh-my-pi/issues/1686.
-		const args = buildBunInstallArgs("15.7.6", "linux-x64");
+		const args = buildBunInstallArgs("15.7.6", "linux-x64", undefined, {}, UPSTREAM);
 		expect(args.slice(0, 5)).toEqual([
 			"install",
 			"-g",
@@ -793,7 +796,7 @@ describe("update-cli bun install command", () => {
 		// disk is from a different release than this loader`. See
 		// https://github.com/can1357/oh-my-pi/issues/1824.
 		for (const tag of ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64"]) {
-			const args = buildBunInstallArgs("15.9.0", tag);
+			const args = buildBunInstallArgs("15.9.0", tag, undefined, {}, UPSTREAM);
 			expect(args).toContain("@oh-my-pi/pi-natives@15.9.0");
 			expect(args).toContain(`@oh-my-pi/pi-natives-${tag}@15.9.0`);
 		}
@@ -805,7 +808,7 @@ describe("update-cli bun install command", () => {
 		// truly is unsupported — but we never request a leaf the release
 		// pipeline doesn't publish, otherwise bun aborts with EBADPLATFORM
 		// and hides the real diagnostic from `loadNative`'s aggregated error.
-		const args = buildBunInstallArgs("15.9.0", "linux-arm");
+		const args = buildBunInstallArgs("15.9.0", "linux-arm", undefined, {}, UPSTREAM);
 		expect(args).toContain("@oh-my-pi/pi-natives@15.9.0");
 		expect(args.some(arg => arg.startsWith("@oh-my-pi/pi-natives-"))).toBe(false);
 	});

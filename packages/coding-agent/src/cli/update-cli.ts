@@ -1121,11 +1121,11 @@ async function isNativeExecutable(filePath: string): Promise<boolean> {
  * build's. A patch is applied only to a file whose SHA-256 is the patch's
  * base, so a wrong guess costs a whole-file download, never a broken install.
  */
-async function installedBuildVersion(targetPath: string): Promise<string> {
+async function installedBuildVersion(targetPath: string, currentVersion: string = VERSION): Promise<string> {
 	const real = tryRealpath(targetPath);
-	if (isCompiledBinary() && real !== undefined && real === tryRealpath(process.execPath)) return VERSION;
-	if (!(await isNativeExecutable(targetPath))) return VERSION;
-	return (await reportedVersionAtPath(targetPath)) ?? VERSION;
+	if (isCompiledBinary() && real !== undefined && real === tryRealpath(process.execPath)) return currentVersion;
+	if (!(await isNativeExecutable(targetPath))) return currentVersion;
+	return (await reportedVersionAtPath(targetPath)) ?? currentVersion;
 }
 
 /**
@@ -2176,7 +2176,7 @@ async function runBinaryUpdate(
 	}
 	let build: BuildAnswer;
 	try {
-		const fromVersion = target ? await installedBuildVersion(target.path) : currentVersion;
+		const fromVersion = target ? await installedBuildVersion(target.path, currentVersion) : currentVersion;
 		build = await fetchBuild({ channel: request.channel }, { fromVersion });
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
@@ -2217,7 +2217,8 @@ async function updateToStandaloneBinary(
 		);
 	}
 	const target = await resolveUpdateTarget({ allowPackageManagers: false });
-	const fromVersion = target.method === "binary" ? await installedBuildVersion(target.path) : currentVersion;
+	const fromVersion =
+		target.method === "binary" ? await installedBuildVersion(target.path, currentVersion) : currentVersion;
 	const build = await fetchBuild({ channel }, { fromVersion });
 	if (compareVersions(build.version, release.version) < 0 && compareVersions(build.version, currentVersion) <= 0) {
 		throw new Error(

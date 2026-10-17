@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { currentBuildHost } from "../../src/cli/build-service";
 import { fixedNpmRegistry } from "../../src/cli/npm-registry";
 import {
@@ -24,6 +24,8 @@ describe("isRigelBuildVersion", () => {
 	});
 });
 const npmjs = fixedNpmRegistry();
+// Upstream-path tests pin a non-Rigel running version, so they hold on a Rigel build too.
+const UPSTREAM = "18.9.2";
 
 type FetchInput = string | URL | Request;
 type FetchInit = RequestInit | BunFetchRequestInit;
@@ -87,7 +89,7 @@ describe("runUpdateCommand version source", () => {
 		quiet();
 		const requests = stubFetch(() => Response.json({ version: "999.0.0" }));
 
-		await runUpdateCommand({ force: false, check: true });
+		await runUpdateCommand({ force: false, check: true }, UPSTREAM);
 
 		expect(requests.length).toBeGreaterThan(0);
 		expect(requests.some(request => request.url.startsWith("https://build.test/"))).toBe(false);
@@ -183,7 +185,7 @@ describe("runUpdateCommand version source", () => {
 			const next = "#!/bin/sh\necho omp/999.0.0\n";
 			const { target, fileName } = await currentBuildHost();
 			process.env.PI_BUILD_URL = "https://build.test";
-			const check = `https://build.test/api/products/omp/latest/${target}?channel=stable&from_version=${VERSION}`;
+			const check = `https://build.test/api/products/omp/latest/${target}?channel=stable&from_version=${UPSTREAM}`;
 			const { logs } = quiet();
 			const requests = stubFetch(url => {
 				if (url === check) {
@@ -197,7 +199,7 @@ describe("runUpdateCommand version source", () => {
 				return new Response(null, { status: 404 });
 			});
 
-			await runUpdateCommand({ force: false, check: false });
+			await runUpdateCommand({ force: false, check: false }, UPSTREAM);
 
 			expect(requests.map(request => request.url)).toEqual([check, "https://r2.test/omp"]);
 			expect(await Bun.file(ompPath).text()).toBe(next);
@@ -256,7 +258,7 @@ describe("getLatestRelease rename pointers", () => {
 			},
 		});
 
-		const release = await getLatestRelease({ registries: npmjs });
+		const release = await getLatestRelease({ registries: npmjs }, UPSTREAM);
 
 		expect(release.version).toBe("999.1.0");
 		expect(release.dist).toBe("npm");
@@ -271,7 +273,7 @@ describe("getLatestRelease rename pointers", () => {
 			"@oh-my-pi/pi-coding-agent": { version: "999.0.0-canary.1" },
 		});
 
-		await getLatestRelease({ channel: "canary", registries: npmjs });
+		await getLatestRelease({ channel: "canary", registries: npmjs }, UPSTREAM);
 
 		expect(urls).toEqual(["https://registry.npmjs.org/@oh-my-pi%2fpi-coding-agent/canary"]);
 	});
@@ -284,7 +286,7 @@ describe("getLatestRelease rename pointers", () => {
 			},
 		});
 
-		const release = await getLatestRelease({ registries: npmjs });
+		const release = await getLatestRelease({ registries: npmjs }, UPSTREAM);
 
 		expect(urls).toHaveLength(1);
 		expect(release.version).toBe("999.0.0");
@@ -315,7 +317,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed });
+		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
 
 		expect(requests).toEqual([
 			{
@@ -391,7 +393,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed });
+		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
 
 		expect(urls).toEqual([
 			"https://npm.corp.example/api/npm/feed/@oh-my-pi%2fpi-coding-agent/latest",
@@ -416,7 +418,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed });
+		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
 
 		expect(urls).toEqual(["https://npm.corp.example/api/npm/feed/@oh-my-pi%2fpi-coding-agent/latest"]);
 		expect(release.version).toBe("999.3.0");
@@ -440,7 +442,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed });
+		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
 
 		expect(urls).toHaveLength(2);
 		expect(release.version).toBe("999.4.0");
@@ -463,7 +465,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed });
+		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
 
 		expect(urls).toHaveLength(2);
 		expect(release.version).toBe("999.5.0");
@@ -486,7 +488,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		await expect(getLatestRelease({ registries: feed })).rejects.toThrow("connection reset mid-body");
+		await expect(getLatestRelease({ registries: feed }, UPSTREAM)).rejects.toThrow("connection reset mid-body");
 		expect(urls).toHaveLength(1);
 	});
 
@@ -501,7 +503,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		await expect(getLatestRelease({ channel: "canary", registries: feed })).rejects.toThrow(
+		await expect(getLatestRelease({ channel: "canary", registries: feed }, UPSTREAM)).rejects.toThrow(
 			"No canary release has been published",
 		);
 	});
@@ -524,7 +526,7 @@ describe("getLatestRelease proxy errors", () => {
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
 
-		const err = await getLatestRelease({ timeoutMs: 5000, registries: npmjs }).then(
+		const err = await getLatestRelease({ timeoutMs: 5000, registries: npmjs }, UPSTREAM).then(
 			() => null,
 			(e: unknown) => e as Error,
 		);
