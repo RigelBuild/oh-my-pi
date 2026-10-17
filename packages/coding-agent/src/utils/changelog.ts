@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { compareVersions, getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
@@ -11,6 +11,7 @@ export interface ChangelogEntry {
 	major: number;
 	minor: number;
 	patch: number;
+	prerelease?: string;
 	content: string;
 }
 
@@ -201,8 +202,7 @@ function parseChangelogContent(content: string): ChangelogEntry[] {
 	const entries: ChangelogEntry[] = [];
 
 	let currentLines: string[] = [];
-	let currentVersion: { major: number; minor: number; patch: number } | null = null;
-
+	let currentVersion: ChangelogEntry | null = null;
 	for (const line of lines) {
 		if (line.startsWith("## ")) {
 			if (currentVersion && currentLines.length > 0) {
@@ -212,13 +212,10 @@ function parseChangelogContent(content: string): ChangelogEntry[] {
 				});
 			}
 
-			const versionMatch = line.match(/##\s+\[?(\d+)\.(\d+)\.(\d+)\]?/);
-			if (versionMatch) {
-				currentVersion = {
-					major: Number.parseInt(versionMatch[1], 10),
-					minor: Number.parseInt(versionMatch[2], 10),
-					patch: Number.parseInt(versionMatch[3], 10),
-				};
+			const versionMatch = line.match(/^##\s+\[?([^\]\s]+)\]?/);
+			const parsedVersion = parseChangelogVersion(versionMatch?.[1]);
+			if (parsedVersion) {
+				currentVersion = parsedVersion;
 				currentLines = [line];
 			} else {
 				currentVersion = null;
@@ -235,7 +232,6 @@ function parseChangelogContent(content: string): ChangelogEntry[] {
 			content: currentLines.join("\n").trim(),
 		});
 	}
-
 	return entries;
 }
 
@@ -281,20 +277,15 @@ async function parseStartupChangelogFile(
 		}
 
 		finishCurrentEntry();
-		const versionMatch = line.match(/##\s+\[?(\d+)\.(\d+)\.(\d+)\]?/);
-		if (!versionMatch) return false;
+		const versionMatch = line.match(/^##\s+\[?([^\]\s]+)\]?/);
+		const parsedVersion = parseChangelogVersion(versionMatch?.[1]);
+		if (!parsedVersion) return false;
 
-		const version = {
-			major: Number.parseInt(versionMatch[1], 10),
-			minor: Number.parseInt(versionMatch[2], 10),
-			patch: Number.parseInt(versionMatch[3], 10),
-			content: "",
-		};
-		if (compareChangelogEntries(version, lastVersion) <= 0) return true;
+		if (compareChangelogEntries(parsedVersion, lastVersion) <= 0) return true;
 
 		totalUnseenEntries++;
 		if (entries.length < RECENT_CHANGELOG_ENTRY_LIMIT) {
-			currentVersion = version;
+			currentVersion = parsedVersion;
 			currentLines = [line];
 		}
 		return false;
@@ -322,20 +313,39 @@ async function parseStartupChangelogFile(
 }
 
 /**
- * Compare changelog entries by their parsed version parts.
- * Returns: -1 if v1 < v2, 0 if v1 === v2, 1 if v1 > v2
+ * Rigel tracks follow their stable base; upstream prereleases retain SemVer precedence.
  */
 function compareChangelogEntries(v1: ChangelogEntry, v2: ChangelogEntry): number {
-	if (v1.major !== v2.major) return v1.major - v2.major;
-	if (v1.minor !== v2.minor) return v1.minor - v2.minor;
-	return v1.patch - v2.patch;
+	if (v1.major !== v2.major) return v1.major < v2.major ? -1 : 1;
+	if (v1.minor !== v2.minor) return v1.minor < v2.minor ? -1 : 1;
+	if (v1.patch !== v2.patch) return v1.patch < v2.patch ? -1 : 1;
+
+	const first = v1.prerelease;
+	const second = v2.prerelease;
+	const firstRigel = first?.match(/^rigel\.(0|[1-9]\d*)$/);
+	const secondRigel = second?.match(/^rigel\.(0|[1-9]\d*)$/);
+	const firstRank = firstRigel ? 2 : first ? 0 : 1;
+	const secondRank = secondRigel ? 2 : second ? 0 : 1;
+	if (firstRank !== secondRank) return firstRank < secondRank ? -1 : 1;
+	if (firstRigel && secondRigel) {
+		const firstNumber = firstRigel[1];
+		const secondNumber = secondRigel[1];
+		if (firstNumber.length !== secondNumber.length) return firstNumber.length < secondNumber.length ? -1 : 1;
+		return firstNumber === secondNumber ? 0 : firstNumber < secondNumber ? -1 : 1;
+	}
+	return compareVersions(
+		`${v1.major}.${v1.minor}.${v1.patch}${first ? `-${first}` : ""}`,
+		`${v2.major}.${v2.minor}.${v2.patch}${second ? `-${second}` : ""}`,
+	);
 }
 
 /**
- * Parse an omp changelog marker version into comparable parts.
+ * Parse stable and prerelease omp versions from changelog markers.
  */
 export function parseChangelogVersion(version: string | undefined): ChangelogEntry | undefined {
-	const match = version?.match(/^(\d+)\.(\d+)\.(\d+)$/);
+	const match = version?.match(
+		/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$/,
+	);
 	if (!match) {
 		return undefined;
 	}
@@ -344,6 +354,7 @@ export function parseChangelogVersion(version: string | undefined): ChangelogEnt
 		major: Number.parseInt(match[1], 10),
 		minor: Number.parseInt(match[2], 10),
 		patch: Number.parseInt(match[3], 10),
+		...(match[4] === undefined ? {} : { prerelease: match[4] }),
 		content: "",
 	};
 }
@@ -409,7 +420,9 @@ function selectStartupChangelogEntries(
 		truncated: rendered.truncated,
 		selectedEntries: newEntries.length,
 		totalUnseenEntries,
-		latestVersion: latestEntry ? `${latestEntry.major}.${latestEntry.minor}.${latestEntry.patch}` : undefined,
+		latestVersion: latestEntry
+			? `${latestEntry.major}.${latestEntry.minor}.${latestEntry.patch}${latestEntry.prerelease ? `-${latestEntry.prerelease}` : ""}`
+			: undefined,
 		...summary,
 	};
 }

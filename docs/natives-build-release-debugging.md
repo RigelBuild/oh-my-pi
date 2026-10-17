@@ -299,7 +299,7 @@ Typical local loop:
 2. In a workspace checkout, loader skips npm leaf packages and resolves package-local `native/` then executable-dir candidates per filename. Installed packages probe the platform leaf first.
 3. Generated declarations in `native/index.d.ts` describe the public TS API. The default Cargo-backed host build regenerates them; after a Rust API change, `build:bindings` explicitly performs the same generation.
 4. On Windows package installs, the loader first copies a `node_modules` addon into the versioned cache so a running process does not lock the file Bun must replace during a later global update.
-5. After a successful load, older `major.minor.patch` cache directories with mtime at least ten minutes old are removed best-effort; cleanup failures never abort startup.
+5. After a successful load, older cache directories are removed best-effort under core-first ordering: same-core Rigel releases rank after stable and compare by numeric release number, while other prereleases retain SemVer order; cleanup requires an mtime of at least ten minutes.
 
 ## Shipped/compiled binary workflow
 

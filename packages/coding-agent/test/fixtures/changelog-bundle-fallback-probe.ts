@@ -11,7 +11,9 @@ const latest = entries[0];
 // so the only local contract is "the bundled fallback asset parsed into a real
 // release entry" — not that the latest entry matches the package version (a
 // release may legally ship without coding-agent changelog content).
-const version = latest ? `${latest.major}.${latest.minor}.${latest.patch}` : undefined;
+const version = latest
+	? `${latest.major}.${latest.minor}.${latest.patch}${latest.prerelease ? `-${latest.prerelease}` : ""}`
+	: undefined;
 if (version === undefined || !latest?.content.startsWith(`## [${version}]`)) {
 	throw new Error(`Bundled changelog fallback did not parse a release entry: ${JSON.stringify({ version })}`);
 }

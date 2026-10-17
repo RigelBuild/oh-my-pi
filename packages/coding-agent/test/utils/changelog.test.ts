@@ -14,7 +14,7 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
+import { compareVersions, removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
 import { lookup } from "../../src/config/registry";
 import { Settings } from "../../src/config/settings";
 import {
@@ -48,10 +48,10 @@ const hasPtyHarness =
 	(await Bun.file("/usr/bin/timeout").exists());
 const PTY_STARTUP_OUTPUT_CEILING = 512 * 1024;
 
-function release(major: number, minor: number, patch: number, body: string): ChangelogEntry {
-	const heading = `## [${major}.${minor}.${patch}] - 2026-07-11`;
+function release(major: number, minor: number, patch: number, body: string, prerelease?: string): ChangelogEntry {
+	const heading = `## [${major}.${minor}.${patch}${prerelease ? `-${prerelease}` : ""}] - 2026-07-11`;
 	const content = `${heading}\n\n${body.trimEnd()}`;
-	return { major, minor, patch, content };
+	return { major, minor, patch, ...(prerelease ? { prerelease } : {}), content };
 }
 
 describe("startup changelog mode settings", () => {
@@ -220,6 +220,30 @@ describe("selectStartupChangelog", () => {
 		expect(selection.markdown).not.toContain("TAIL-THREE");
 		expect(Buffer.byteLength(selection.markdown ?? "")).toBeLessThanOrEqual(STARTUP_CHANGELOG_MAX_BYTES);
 	});
+
+	test("selects prerelease changelog updates over their previous stable release", () => {
+		const prerelease = {
+			major: 18,
+			minor: 9,
+			patch: 2,
+			prerelease: "rigel.1",
+			content: "## [18.9.2-rigel.1] - 2026-10-15\n\n### Fixed\n\n- Prerelease change.",
+		};
+		const selection = selectStartupChangelog([prerelease], "18.9.1", "18.9.2-rigel.1");
+		expect(selection.latestVersion).toBe("18.9.2-rigel.1");
+		expect(selection.markdown).toContain("## [18.9.2-rigel.1]");
+	});
+
+	test("selects Rigel tracking releases after their stable base", () => {
+		const entries = [
+			release(18, 9, 2, "### Fixed\n\n- Tracking release.", "rigel.1"),
+			release(18, 9, 2, "### Fixed\n\n- Stable release."),
+		];
+		const selection = selectStartupChangelog(entries, "18.9.2", "18.9.2-rigel.1");
+		expect(selection.selectedEntries).toBe(1);
+		expect(selection.markdown).toBe(entries[0].content);
+		expect(selection.latestVersion).toBe("18.9.2-rigel.1");
+	});
 });
 
 describe("formatStartupChangelogSummary", () => {
@@ -263,17 +287,43 @@ describe("parseChangelog", () => {
 		const latest = entries[0];
 		const previous = entries[1];
 
-		// A release with no user-facing coding-agent changes gets no changelog
-		// section (scripts/release.ts skips empty [Unreleased]), so the newest
-		// section may lag VERSION — but it must never be ahead of it.
-		expect(latest).toBeDefined();
-		const latestVersion = `${latest?.major}.${latest?.minor}.${latest?.patch}`;
-		expect(latest?.content).toContain(`## [${latestVersion}]`);
-		expect(getNewEntries(entries, VERSION)).toEqual([]);
-		expect(previous).toBeDefined();
+		if (!latest || !previous) throw new Error("Expected at least two changelog releases");
+		const versionString = (entry: ChangelogEntry) =>
+			`${entry.major}.${entry.minor}.${entry.patch}${entry.prerelease ? `-${entry.prerelease}` : ""}`;
+		// A release may ship without a coding-agent section, so the newest one may lag VERSION but never lead it.
+		const latestVersion = versionString(latest);
+		expect(latest.content).toContain(`## [${latestVersion}]`);
+		expect(compareVersions(latestVersion, VERSION)).toBeLessThanOrEqual(0);
+		expect(getNewEntries([latest], VERSION)).toEqual([]);
+		expect(getNewEntries(entries, versionString(previous))).toEqual([latest]);
+	});
 
-		const previousVersion = `${previous?.major}.${previous?.minor}.${previous?.patch}`;
-		expect(getNewEntries(entries, previousVersion)).toEqual([latest]);
+	test("keeps the prerelease part when filtering versions", () => {
+		const entries = [
+			release(18, 9, 2, "### Fixed\n\n- First tracking release.", "rigel.1"),
+			release(18, 9, 2, "### Fixed\n\n- Second tracking release.", "rigel.2"),
+		];
+		expect(getNewEntries(entries, "18.9.2-rigel.1")).toEqual([entries[1]]);
+		expect(getNewEntries(entries, "18.9.2-rigel.2")).toEqual([]);
+	});
+
+	test("orders Rigel tracking releases after their stable base", () => {
+		const entries = [
+			release(18, 9, 3, "### Fixed\n\n- Next stable release."),
+			release(18, 9, 2, "### Fixed\n\n- Stable base."),
+			release(18, 9, 2, "### Fixed\n\n- Next tracking release.", "rigel.2"),
+		];
+
+		expect(getNewEntries(entries, "18.9.2-rigel.1")).toEqual([entries[0], entries[2]]);
+	});
+
+	test("keeps non-Rigel prereleases before their stable core", () => {
+		const entries = [
+			release(18, 9, 2, "### Fixed\n\n- Stable release."),
+			release(18, 9, 2, "### Fixed\n\n- Canary release.", "canary.1"),
+		];
+
+		expect(getNewEntries(entries, "18.9.2-canary.1")).toEqual([entries[0]]);
 	});
 });
 
@@ -330,6 +380,59 @@ describe("last changelog marker", () => {
 
 			expect(downgradeDisplay).toBeUndefined();
 			expect(await readLastChangelogVersion(agentDir)).toBe("3.0.0");
+		});
+	});
+
+	test("streams Rigel notes and advances a stable marker to the Rigel release", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("18.9.2", agentDir);
+			const changelogPath = path.join(agentDir, "CHANGELOG.md");
+			const history = [
+				release(18, 9, 2, "### Fixed\n\n- Rigel release notes.", "rigel.1"),
+				release(18, 9, 2, "### Fixed\n\n- Stable release notes."),
+			];
+			await Bun.write(changelogPath, `# Changelog\n\n${history.map(entry => entry.content).join("\n\n")}\n`);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "summary",
+				currentVersion: "18.9.2-rigel.1",
+				changelogPath,
+				agentDir,
+			});
+
+			expect(selection?.markdown).toContain("- Rigel release notes.");
+			expect(selection?.latestVersion).toBe("18.9.2-rigel.1");
+			expect(await readLastChangelogVersion(agentDir)).toBe("18.9.2-rigel.1");
+		});
+	});
+
+	test("hidden mode advances a stable marker for a Rigel upgrade", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("18.9.2", agentDir);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: "18.9.2-rigel.1",
+				agentDir,
+			});
+
+			expect(selection).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe("18.9.2-rigel.1");
+		});
+	});
+
+	test("a stable downgrade does not replace a Rigel marker", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("18.9.2-rigel.1", agentDir);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "hidden",
+				currentVersion: "18.9.2",
+				agentDir,
+			});
+
+			expect(selection).toBeUndefined();
+			expect(await readLastChangelogVersion(agentDir)).toBe("18.9.2-rigel.1");
 		});
 	});
 

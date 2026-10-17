@@ -172,6 +172,41 @@ describe("windows native addon staging", () => {
 		}
 	});
 
+	it("orders Rigel releases after their stable base", async () => {
+		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-prerelease-"));
+		const staleVersions = ["1.0.0-rigel.9", "1.0.0-rigel.2", "1.0.0", "0.9.9"];
+		const retainedVersions = ["1.0.0-rigel.11", "1.0.1"];
+		try {
+			for (const version of [...staleVersions, "1.0.0-rigel.10", ...retainedVersions, "1.0.0-canary.1"]) {
+				await fs.mkdir(path.join(nativesDir, version));
+				await fs.utimes(path.join(nativesDir, version), new Date(0), new Date(0));
+			}
+
+			const removed = cleanupStaleNativeVersions({ nativesDir, currentVersion: "1.0.0-rigel.10" });
+			expect(removed.map(filePath => path.basename(filePath)).sort()).toEqual(
+				[...staleVersions, "1.0.0-canary.1"].sort(),
+			);
+			expect((await fs.readdir(nativesDir)).sort()).toEqual([...retainedVersions, "1.0.0-rigel.10"].sort());
+		} finally {
+			await fs.rm(nativesDir, { recursive: true, force: true });
+		}
+	});
+
+	it("removes canary cache directories before their stable core", async () => {
+		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-canary-"));
+		try {
+			for (const version of ["1.0.0-canary.1", "1.0.0"]) {
+				await fs.mkdir(path.join(nativesDir, version));
+				await fs.utimes(path.join(nativesDir, version), new Date(0), new Date(0));
+			}
+
+			const removed = cleanupStaleNativeVersions({ nativesDir, currentVersion: "1.0.0" });
+			expect(removed.map(filePath => path.basename(filePath))).toEqual(["1.0.0-canary.1"]);
+		} finally {
+			await fs.rm(nativesDir, { recursive: true, force: true });
+		}
+	});
+
 	it("removes only older version directories after the current native version loads", async () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-cache-"));
 		const currentMajor = Number.parseInt(packageJson.version, 10);

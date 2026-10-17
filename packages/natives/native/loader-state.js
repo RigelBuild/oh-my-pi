@@ -194,18 +194,55 @@ export function resolveLoaderCandidates({
 // =========================================================================
 
 function parseReleaseVersion(version) {
-	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-	return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+	const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$/.exec(version);
+	return match
+		? {
+				parts: [Number(match[1]), Number(match[2]), Number(match[3])],
+				prerelease: match[4]?.split(".") ?? null,
+			}
+		: null;
 }
 
+function comparePrereleaseIdentifier(a, b) {
+	const aNumeric = /^\d+$/.test(a);
+	const bNumeric = /^\d+$/.test(b);
+	if (aNumeric && bNumeric) {
+		if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+		return a === b ? 0 : a < b ? -1 : 1;
+	}
+	if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+	return a === b ? 0 : a < b ? -1 : 1;
+}
+
+// Core versions sort first; Rigel tags follow stable, unlike upstream prereleases.
 function isOlderReleaseVersion(candidate, current) {
-	const candidateParts = parseReleaseVersion(candidate);
-	const currentParts = parseReleaseVersion(current);
-	if (!candidateParts || !currentParts) return false;
-	for (let index = 0; index < candidateParts.length; index++) {
-		if (candidateParts[index] !== currentParts[index]) {
-			return candidateParts[index] < currentParts[index];
+	const candidateVersion = parseReleaseVersion(candidate);
+	const currentVersion = parseReleaseVersion(current);
+	if (!candidateVersion || !currentVersion) return false;
+	for (let index = 0; index < candidateVersion.parts.length; index++) {
+		if (candidateVersion.parts[index] !== currentVersion.parts[index]) {
+			return candidateVersion.parts[index] < currentVersion.parts[index];
 		}
+	}
+
+	const isRigelRelease = version => version?.length === 2 && version[0] === "rigel" && /^(0|[1-9]\d*)$/.test(version[1]);
+	const candidateIsRigel = isRigelRelease(candidateVersion.prerelease);
+	const currentIsRigel = isRigelRelease(currentVersion.prerelease);
+	if (candidateIsRigel || currentIsRigel) {
+		if (!candidateIsRigel) return true;
+		if (!currentIsRigel) return false;
+		return comparePrereleaseIdentifier(candidateVersion.prerelease[1], currentVersion.prerelease[1]) < 0;
+	}
+	if (candidateVersion.prerelease === null || currentVersion.prerelease === null) {
+		return candidateVersion.prerelease !== null && currentVersion.prerelease === null;
+	}
+	for (let index = 0; index < Math.max(candidateVersion.prerelease.length, currentVersion.prerelease.length); index++) {
+		const candidatePart = candidateVersion.prerelease[index];
+		const currentPart = currentVersion.prerelease[index];
+		if (candidatePart === undefined) return true;
+		if (currentPart === undefined) return false;
+		const comparison = comparePrereleaseIdentifier(candidatePart, currentPart);
+		if (comparison !== 0) return comparison < 0;
 	}
 	return false;
 }
