@@ -15,6 +15,46 @@ import {
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
 import type { CallerIdentity } from "../types";
+import { readBoundedRequestBody, RequestBodyTooLargeError } from "../bounded-body";
+
+const IMAGE_JSON_MAX_BYTES = 48 * 1024 * 1024;
+const IMAGE_MULTIPART_MAX_BYTES = 36 * 1024 * 1024;
+const IMAGE_MULTIPART_MAX_PARTS = 24;
+const IMAGE_MULTIPART_MAX_FILES = 16;
+
+// Count `--boundary\r\n` openers before the last `--boundary--`; null when there is no close.
+// Bun's formData() starts a part at any such opener, glued to prior data or not, ignores
+// everything after the last close, and without a close throws only after parsing every part.
+function countPartOpeners(bytes: Uint8Array, boundary: string): number | null {
+	const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const end = view.lastIndexOf(`--${boundary}--`);
+	if (end === -1) return null;
+	const opener = `--${boundary}\r\n`;
+	let count = 0;
+	for (let i = view.indexOf(opener); i !== -1 && i < end; i = view.indexOf(opener, i + opener.length)) count++;
+	return count;
+}
+
+// RFC 2046 boundary: 1-70 bchars, not ending in space.
+const BOUNDARY_RE = /^[0-9A-Za-z'()+_,\-./:=? ]{0,69}[0-9A-Za-z'()+_,\-./:=?]$/;
+
+// The single boundary parameter, honouring quoted strings; null when absent, repeated, malformed, or invalid.
+function multipartBoundary(contentType: string): string | null {
+	const params = /;\s*([^=;\s]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;\s"]*))\s*/y;
+	let pos = contentType.indexOf(";");
+	if (pos < 0) return null;
+	let boundary: string | null = null;
+	while (pos < contentType.length) {
+		params.lastIndex = pos;
+		const m = params.exec(contentType);
+		if (!m) return null;
+		pos = params.lastIndex;
+		if (m[1]?.toLowerCase() !== "boundary") continue;
+		if (boundary !== null) return null;
+		boundary = m[2] !== undefined ? m[2].replace(/\\(.)/g, "$1") : (m[3] ?? "");
+	}
+	return boundary !== null && BOUNDARY_RE.test(boundary) ? boundary : null;
+}
 
 function isGatewayImageApi(api: string): boolean {
 	return (
@@ -39,13 +79,48 @@ async function handleImages(
 	if (controller.signal.aborted) return aborted();
 
 	let body: unknown | FormData;
+	const contentType = req.headers.get("content-type") ?? "";
+	const mediaType = (contentType.split(";", 1)[0] ?? "").trim().toLowerCase();
+	const multipart = kind === "edits" && mediaType === "multipart/form-data";
 	try {
-		body =
-			kind === "edits" && req.headers.get("content-type")?.includes("multipart/form-data")
-				? await req.formData()
-				: await req.json();
+		const maxBytes = multipart ? IMAGE_MULTIPART_MAX_BYTES : IMAGE_JSON_MAX_BYTES;
+		const bytes = await readBoundedRequestBody(req, maxBytes, controller.signal);
+		if (multipart) {
+			const boundaryValue = multipartBoundary(contentType);
+			if (!boundaryValue) {
+				return imagesServer.formatError(400, "invalid_request_error", "Multipart body needs one valid boundary");
+			}
+			const partCount = countPartOpeners(bytes, boundaryValue);
+			if (partCount === null) {
+				return imagesServer.formatError(400, "invalid_request_error", "Multipart body has no closing boundary");
+			}
+			if (partCount > IMAGE_MULTIPART_MAX_PARTS) {
+				return imagesServer.formatError(
+					400,
+					"invalid_request_error",
+					`Multipart body must not exceed ${IMAGE_MULTIPART_MAX_PARTS} parts`,
+				);
+			}
+			// Parse with the boundary just counted, not the client's header, so both agree.
+			const canonical = `multipart/form-data; boundary="${boundaryValue}"`;
+			const form = await new Response(bytes, { headers: { "Content-Type": canonical } }).formData();
+			const imageFiles = [...form.getAll("image"), ...form.getAll("image[]")].filter(value => value instanceof File);
+			if (imageFiles.length > IMAGE_MULTIPART_MAX_FILES) {
+				return imagesServer.formatError(
+					400,
+					"invalid_request_error",
+					`Multipart body must not exceed ${IMAGE_MULTIPART_MAX_FILES} image files`,
+				);
+			}
+			body = form;
+		} else {
+			body = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+		}
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		if (error instanceof RequestBodyTooLargeError) {
+			return imagesServer.formatError(413, "payload_too_large", error.message);
+		}
 		return imagesServer.formatError(400, "invalid_request_error", `Invalid request body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
