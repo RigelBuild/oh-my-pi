@@ -4,6 +4,7 @@
 
 ### Added
 
+- Rigel builds follow the `@rigelbuild/omp-*` packages and `rigel` npm dist-tag when checking for updates.
 - Added hiding a pending `ask` question without answering it: `Alt+H` (`app.ask.hide`) or the Hide button in Tern collapses the dialog to one line; the same key, `Enter`, or Show brings it back ([#15400](https://github.com/can1357/oh-my-pi/pull/15400) by [@H4vC](https://github.com/H4vC))
 - Added broker `token --metrics` and `serve --enable-metrics` options for scrape-only usage reporting.
 - Added a container-ready auth-gateway boot entrypoint that reads a mounted bearer token and drains requests on SIGTERM; `auth-gateway serve` now shuts down through postmortem cleanup and exits `143` on SIGTERM, after the drain when one is configured (the boot entrypoint defaults to 20 seconds).
