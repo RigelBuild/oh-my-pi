@@ -343,7 +343,10 @@ test("an RPC past its deadline fails as deadline_exceeded", async () => {
 });
 
 test("the registry refuses a base URL that would send its token in plaintext off loopback", () => {
-	const build = (baseUrl: string, token = "registry-token") => () => new CompassModelRegistry({ baseUrl, token });
+	const build =
+		(baseUrl: string, token = "registry-token") =>
+		() =>
+			new CompassModelRegistry({ baseUrl, token });
 	expect(build("")).toThrow("Compass baseUrl must not be empty");
 	expect(build("compass.example")).toThrow("Compass baseUrl must be an absolute URL");
 	expect(build("http://compass.example")).toThrow("Compass baseUrl must use https unless it is a loopback address");
