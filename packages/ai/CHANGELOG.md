@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.9.2-rigel.2] - 2026-10-18
+
 ### Added
 
 - Added `CompassOwnerPool` with single-flight per-owner storage, request-stream leases, and idle eviction pinned by pending credential writes.

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.9.2-rigel.2] - 2026-10-18
+
+### Changed
+
+- Settings saves now preserve comments and key order in `config.yml`, and the values and styles of untouched nodes. Whitespace can normalize when another value changes. A config `yaml` cannot edit safely (duplicate keys, anchors) rejects the save with an actionable error instead of being rewritten.
+
+### Fixed
+
+- Fixed releasing a headless browser tab reporting its page closed while Chromium still listed it: closing a page target now waits until Chromium has removed it, and a page still listed after 2 seconds counts as not closed, so the shared-browser cleanup retries it.
+
 ## [18.9.2-rigel.1] - 2026-10-15
 
 ### Added
@@ -14,13 +24,8 @@
 - Added `--session-id <id>` to open a local session by exact ID or create one with that ID; a launch fails if another live omp process holds the ID.
 - Added the `web/litellm` search engine, which uses a LiteLLM API key and configured search tools instead of separate search-provider credentials.
 
-### Changed
-
-- Settings saves now preserve comments and key order in `config.yml`, and the values and styles of untouched nodes. Whitespace can normalize when another value changes. A config `yaml` cannot edit safely (duplicate keys, anchors) rejects the save with an actionable error instead of being rewritten.
-
 ### Fixed
 
-- Fixed releasing a headless browser tab reporting its page closed while Chromium still listed it: closing a page target now waits until Chromium has removed it, and a page still listed after 2 seconds counts as not closed, so the shared-browser cleanup retries it.
 - Fixed browser downloads landing in another tab's downloads folder, or not being found, when tabs of one browser OMP launched set different folders: every tab of that browser now stages downloads in one private folder and moves each into its own requested folder (under the download's ID when its name is unusable or taken by a folder). A download that cannot be moved now fails with an error that says where the file was left. Connected and relay browsers are unchanged.
 - Fixed a cancelled or timed-out `browser` open killing the shared headless browser after it had launched, which made later tabs fail with `Failed to connect` or `Connection ended`.
 - Fixed `RpcClient.stop()` occasionally waiting forever because the agent process was never signaled.
