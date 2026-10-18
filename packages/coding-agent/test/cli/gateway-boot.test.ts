@@ -3,7 +3,6 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { GATEWAY_MODEL_KINDS } from "../../src/cli/auth-gateway-cli";
-import { CLAUDE_TRACE_DEBUG_CERT } from "../../src/cli/claude-trace-cli";
 import { buildGatewayCatalog, getGatewayBootConfig, readTokenFile, runGatewayBoot } from "../../src/cli/gateway-boot";
 
 type GatewayReady = { kind: "read"; value: Uint8Array | undefined; done: boolean } | { kind: "exit"; code: number };
@@ -76,11 +75,31 @@ async function startGateway(
 	return child;
 }
 
-function startFakeCompass(tls?: { cert: string; key: string }): Bun.Server<undefined> {
+type FakeCompassOptions = {
+	tls?: { cert: string; key: string };
+	stableModel?: { provider: string; modelId: string };
+	registryUnavailable?: boolean;
+};
+
+const LISTED_STABLE_NAME = "stable-anthropic-chat";
+const FIRST_KNOWN_STABLE_NAME = "first-known-anthropic-chat";
+
+function startFakeCompass(options: FakeCompassOptions = {}): Bun.Server<undefined> {
+	const entries =
+		options.stableModel === undefined
+			? {}
+			: {
+					[LISTED_STABLE_NAME]: {
+						candidates: [options.stableModel],
+					},
+					[FIRST_KNOWN_STABLE_NAME]: {
+						candidates: [{ provider: "missing", modelId: "gone" }, options.stableModel],
+					},
+				};
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
-		...(tls === undefined ? {} : { tls }),
+		...(options.tls === undefined ? {} : { tls: options.tls }),
 		async fetch(request) {
 			const url = new URL(request.url);
 			const body: unknown = await request.json();
@@ -90,6 +109,16 @@ function startFakeCompass(tls?: { cert: string; key: string }): Bun.Server<undef
 				request.headers.get("content-type") !== "application/json"
 			) {
 				return Response.json({ code: "unauthenticated", message: "unauthenticated" }, { status: 401 });
+			}
+			if (
+				url.pathname === "/compass.v1.GatewayRegistry/GetGatewayModelRegistryVersion" ||
+				url.pathname === "/compass.v1.GatewayRegistry/GetGatewayModelRegistry"
+			) {
+				if (options.registryUnavailable) {
+					return Response.json({ code: "unavailable", message: "registry unavailable" }, { status: 503 });
+				}
+				if (url.pathname.endsWith("GetGatewayModelRegistryVersion")) return Response.json({ version: "1" });
+				return Response.json({ version: "1", registry: { entries } });
 			}
 			if (url.pathname === "/compass.v1.GatewayAuth/VerifyAgentToken") {
 				if (typeof body !== "object" || body === null || !("token" in body) || typeof body.token !== "string") {
@@ -279,7 +308,7 @@ describe("Compass gateway boot", () => {
 		using dir = TempDir.createSync("@omp-gateway-boot-");
 		const serviceFile = dir.join("service-token");
 		await Bun.write(serviceFile, SERVICE_TOKEN);
-		const compass = startFakeCompass({ cert: TEST_CERT, key: TEST_KEY });
+		const compass = startFakeCompass({ tls: { cert: TEST_CERT, key: TEST_KEY } });
 		const gatewayBind = reserveBind();
 		const env = {
 			COMPASS_SERVER_URL: `https://127.0.0.1:${compass.port}`,
@@ -341,6 +370,93 @@ describe("Compass gateway boot", () => {
 		}
 	});
 
+	test("serves stable names from the caller's model registry", async () => {
+		using dir = TempDir.createSync("@omp-gateway-boot-");
+		const serviceFile = dir.join("service-token");
+		await Bun.write(serviceFile, SERVICE_TOKEN);
+		const model = Array.from(buildGatewayCatalog().listModels()).find(
+			candidate => candidate.provider === "anthropic" && modelKind(candidate) === "chat",
+		);
+		if (!model) throw new Error("expected a bundled Anthropic chat model");
+		const compass = startFakeCompass({ stableModel: { provider: model.provider, modelId: model.id } });
+		const gatewayBind = reserveBind();
+		const child = await startGateway(
+			{
+				COMPASS_SERVER_URL: compass.url.toString(),
+				COMPASS_SERVICE_TOKEN_FILE: serviceFile,
+				COMPASS_GATEWAY_BIND: gatewayBind.bind,
+			},
+			gatewayBind.url,
+		);
+		try {
+			const listed = await fetch(`${gatewayBind.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ model: LISTED_STABLE_NAME, messages: [{ role: "user", content: "hi" }] }),
+			});
+			expect(listed.status).toBe(401);
+
+			const firstKnown = await fetch(`${gatewayBind.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ model: FIRST_KNOWN_STABLE_NAME, messages: [{ role: "user", content: "hi" }] }),
+			});
+			expect(firstKnown.status).toBe(401);
+
+			const listing = await fetch(`${gatewayBind.url}/v1/models`, {
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}` },
+			});
+			expect(listing.status).toBe(200);
+			const listedModels = await listing.text();
+			expect(listedModels).toContain(LISTED_STABLE_NAME);
+			expect(listedModels).not.toContain(FIRST_KNOWN_STABLE_NAME);
+
+			const bare = await fetch(`${gatewayBind.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ model: "unregistered-model-id", messages: [{ role: "user", content: "hi" }] }),
+			});
+			expect(bare.status).toBe(404);
+		} finally {
+			child.kill("SIGTERM");
+			await child.exited;
+		}
+	});
+
+	test("keeps provider-qualified models available when the registry is unavailable", async () => {
+		using dir = TempDir.createSync("@omp-gateway-boot-");
+		const serviceFile = dir.join("service-token");
+		await Bun.write(serviceFile, SERVICE_TOKEN);
+		const compass = startFakeCompass({ registryUnavailable: true });
+		const gatewayBind = reserveBind();
+		const child = await startGateway(
+			{
+				COMPASS_SERVER_URL: compass.url.toString(),
+				COMPASS_SERVICE_TOKEN_FILE: serviceFile,
+				COMPASS_GATEWAY_BIND: gatewayBind.bind,
+			},
+			gatewayBind.url,
+		);
+		try {
+			const model = Array.from(buildGatewayCatalog().listModels()).find(
+				candidate => candidate.provider === "anthropic" && modelKind(candidate) === "chat",
+			);
+			if (!model) throw new Error("expected a bundled Anthropic chat model");
+			const qualified = await fetch(`${gatewayBind.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${GOOD_AGENT_TOKEN}`, "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: `${model.provider}/${model.id}`,
+					messages: [{ role: "user", content: "hi" }],
+				}),
+			});
+			expect(qualified.status).toBe(401);
+			expect((await fetch(`${gatewayBind.url}/healthz`)).status).toBe(200);
+		} finally {
+			child.kill("SIGTERM");
+			await child.exited;
+		}
+	});
 	test("serves Compass-backed authorization, model listing, and owner credential lookup", async () => {
 		using dir = TempDir.createSync("@omp-gateway-boot-");
 		const serviceFile = dir.join("service-token");

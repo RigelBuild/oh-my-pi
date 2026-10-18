@@ -5,6 +5,7 @@
 ### Added
 
 - Added a Compass-backed gateway boot that validates mounted tokens, verifies agents, and loads credentials per owner.
+- Added stable-name model resolution in the Compass gateway using each caller owner's credential pool.
 
 ## [18.9.2-rigel.2] - 2026-10-18
 

@@ -1,9 +1,15 @@
 import * as fs from "node:fs/promises";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { AuthCredentialStore, Model } from "@oh-my-pi/pi-ai";
-import { presentedBearer, startAuthGateway, withEnrollToken } from "@oh-my-pi/pi-ai/auth-gateway";
-import type { AuthGatewayAuthorizer } from "@oh-my-pi/pi-ai/auth-gateway";
 import {
+	createStableNameResolver,
+	presentedBearer,
+	startAuthGateway,
+	withEnrollToken,
+} from "@oh-my-pi/pi-ai/auth-gateway";
+import type { AgentCaller, AuthGatewayAuthorizer } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	CompassModelRegistry,
 	CompassOwnerPool,
 	createCompassAgentVerifier,
 	normalizeCompassBaseUrl,
@@ -148,20 +154,28 @@ export async function runGatewayBoot(env: Readonly<Record<string, string | undef
 	if (enrollToken !== undefined) authorize = withEnrollToken(enrollToken, authorize);
 	const placeholder = createPlaceholderStorage();
 	const catalog = buildGatewayCatalog();
+	const resolveStorage = (caller: AgentCaller) => {
+		if (!caller.ownerUserId) throw new Error("Compass caller has no owner user id");
+		return pool.get(caller.ownerUserId);
+	};
+	const resolver = createStableNameResolver({
+		registry: new CompassModelRegistry({ baseUrl: config.serverUrl, token: serviceToken, fetch: compassFetch }),
+		resolveStorage,
+		lookupModel: (provider, modelId) => catalog.resolveModel(`${provider}/${modelId}`),
+		fallback: modelId => catalog.resolveModel(modelId),
+	});
 	const handle = startAuthGateway({
 		bind: config.bind,
 		authorize,
 		storage: placeholder,
-		resolveStorage: caller => {
-			if (!caller.ownerUserId) throw new Error("Compass caller has no owner user id");
-			return pool.get(caller.ownerUserId);
-		},
+		resolveStorage,
 		routeScope: (req, run) => {
 			const token = presentedBearer(req);
 			const leased = () => pool.withRequestLease(run);
 			return token ? runWithAgentToken(token, leased) : leased();
 		},
-		resolveModel: catalog.resolveModel,
+		resolveModel: resolver.resolveModel,
+		listAliases: resolver.listAliases,
 		listModels: catalog.listModels,
 		version: VERSION,
 	});
