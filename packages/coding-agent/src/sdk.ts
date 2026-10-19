@@ -2137,12 +2137,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// If still no model, try settings default.
 	// Skip settings fallback when an explicit model was requested.
+	let earlyDefaultModel: Model | undefined;
 	if (!hasExplicitModel && !model && defaultRoleSpec.model) {
 		const settingsDefaultModel = defaultRoleSpec.model;
 		logger.time("resolveSettingsDefaultModel", () => {
 			// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
 			// so re-validating auth here just repeats the expensive lookup path.
 			model = settingsDefaultModel;
+			earlyDefaultModel = settingsDefaultModel;
 		});
 	}
 	// The early role resolution ran before extension providers registered. Under
@@ -3351,9 +3353,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// a stray `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issues #3569, #6162)
 
-			// Whether `model` holds a value THIS resolver adopted, and so may be
-			// withdrawn when discovery refreshes the catalog behind it.
-			let adoptedDefaultRoleModel = false;
+			// Whether `model` holds a default-role value (the early settings default or
+			// one this resolver adopted), and so may be withdrawn by a discovery refresh.
+			let adoptedDefaultRoleModel = model !== undefined && model === earlyDefaultModel;
 			const tryResolveDefaultRole = async (): Promise<boolean> => {
 				if (hasExplicitModel) return false;
 				// Re-resolve the allowed set: extension factories and discovery

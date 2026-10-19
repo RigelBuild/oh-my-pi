@@ -1590,6 +1590,77 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		).rejects.toThrow("Could not restore model runtime-provider/router:low");
 		expect(modelRegistry.find("vend", "going-away")).toBeUndefined();
 	});
+
+	test("drops an early settings default that is withdrawn before the UI-mode retry", async () => {
+		// The early settings default is a default-role value too. If extension load
+		// withdraws it before the first retry, a UI session must not start on it.
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, `early-withdrawn-${Bun.nanoseconds()}.yml`);
+		const providerEntry = (models: { id: string; name: string }[]) => ({
+			providers: {
+				vend: { baseUrl: "https://vend.example.invalid/v1", api: "openai-completions", auth: "none", models },
+			},
+		});
+		await Bun.write(
+			modelsPath,
+			JSON.stringify(
+				providerEntry([
+					{ id: "going-away", name: "Going Away" },
+					{ id: "fallback", name: "Fallback" },
+				]),
+			),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath);
+		expect(modelRegistry.find("vend", "going-away")).toBeDefined();
+
+		// The discoverable earlier candidate keeps the retry live; the reload runs
+		// during extension load, after the early default took `vend/going-away`.
+		const withdrawingExtension: ExtensionFactory = async pi => {
+			pi.registerProvider("ahead-provider", {
+				baseUrl: "https://ahead.example.com/v1",
+				apiKey: "AHEAD_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => [],
+			});
+			await Bun.write(modelsPath, JSON.stringify(providerEntry([{ id: "fallback", name: "Fallback" }])));
+			await modelRegistry.refresh("offline");
+		};
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "ahead-provider/never-there,vend/going-away");
+		const sessionFile = await writeBakedSession("vend");
+		const sessionManager = await SessionManager.open(sessionFile, path.join(tempDir, "startup-early-withdrawn"));
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			extensions: [withdrawingExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			reapplyConfig: true,
+			hasUI: true,
+		});
+		try {
+			expect(modelRegistry.find("vend", "going-away")).toBeUndefined();
+			expect(session.model?.id).toBe("fallback");
+		} finally {
+			await session.dispose();
+		}
+	});
 	test("reparses a saved suffix when a late default flips adoption false->true", async () => {
 		// Late extension resolution can invalidate an earlier suffix split.
 		const authStorage = createInMemoryAuthStorage();
