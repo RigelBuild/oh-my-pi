@@ -282,10 +282,10 @@ function restoreCachedModelHeaders<TApi extends Api>(
 	return { models: restored, unresolvedModelIds };
 }
 
-/** Static slice and cache identity that cached rows are compared against. */
+/** Immutable static slice and cache identity that cached rows are compared against; lookups are memoized by identity. */
 export interface ModelManagerStaticCatalog<TApi extends Api = Api> {
-	models: Model<TApi>[];
-	fingerprint: string;
+	readonly models: readonly Model<TApi>[];
+	readonly fingerprint: string;
 }
 
 /** Materialize the static slice and its cache fingerprint exactly as `resolveProviderModels` does. */
