@@ -115,3 +115,31 @@ export const embeddedAddon = {
 	overrides[path.join(dir, "embedded-addon.js")] = manifest;
 	return overrides;
 }
+
+/**
+ * Bundler plugin serving {@link embeddedAddonFiles}. Bun labels `files`
+ * overrides with their absolute path in unminified bundles; plugin-loaded
+ * modules get the same cwd-relative label as files on disk.
+ */
+export async function embeddedAddonPlugin(options: EmbedOptions): Promise<Bun.BunPlugin> {
+	const files = await embeddedAddonFiles(options);
+	const exactPath = new RegExp(`^(?:${Object.keys(files).map(escapeRegExp).join("|")})$`);
+	return {
+		name: "pi-natives:embedded-addon",
+		setup(build) {
+			// The frames exist only in memory, so resolve the manifest's relative imports here.
+			build.onResolve({ filter: /\.node\.zst$/ }, args => {
+				const resolved = path.resolve(path.dirname(args.importer), args.path);
+				return resolved in files ? { path: resolved } : undefined;
+			});
+			build.onLoad({ filter: exactPath }, args => ({
+				contents: files[args.path]!,
+				loader: args.path.endsWith(".zst") ? "file" : "js",
+			}));
+		},
+	};
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { embeddedAddonFiles } from "../scripts/embed-native";
+import { embeddedAddonFiles, embeddedAddonPlugin } from "../scripts/embed-native";
 import { type EmbeddedAddon, extractEmbeddedAddons } from "../native/loader-state.js";
 
 describe("native addon embedding", () => {
@@ -80,6 +80,33 @@ describe("native addon embedding", () => {
 				path.join(cacheDir, "pi_natives.win32-arm64.node"),
 			]);
 			expect(await Bun.file(path.join(cacheDir, "pi_natives.win32-arm64.node")).text()).toBe(addon);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the native directory path out of whitespace-preserving bundles", async () => {
+		const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-embed-")));
+		const nativeDir = path.join(root, "native");
+		try {
+			await Bun.write(path.join(nativeDir, "pi_natives.win32-arm64.node"), "binary__piNativesV18_1_1\0");
+			await Bun.write(path.join(nativeDir, "embedded-addon.js"), "export const embeddedAddon = null;\n");
+			const entry = path.join(root, "entry.ts");
+			await Bun.write(entry, 'export { embeddedAddon } from "./native/embedded-addon.js";\n');
+			const result = await Bun.build({
+				entrypoints: [entry],
+				outdir: path.join(root, "out"),
+				root,
+				target: "bun",
+				minify: { whitespace: false },
+				plugins: [await embeddedAddonPlugin({ platform: "win32", arch: "arm64", nativeDir, version: "18.1.1" })],
+				throw: false,
+			});
+			expect(result.success, result.logs.map(log => log.message).join("\n")).toBe(true);
+			const bundle = await result.outputs.find(output => output.kind === "entry-point")!.text();
+			expect(bundle).toContain('platformTag: "win32-arm64"');
+			// Bun labels each module with a path comment; in-memory overrides get the absolute one.
+			expect(bundle).not.toContain(`// ${nativeDir}`);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}

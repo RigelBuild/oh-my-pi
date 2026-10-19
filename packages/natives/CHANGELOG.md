@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compiled binaries no longer embed the build checkout's native addon directory path.
+
 ## [18.9.2] - 2026-10-11
 
 ### Fixed

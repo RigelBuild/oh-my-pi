@@ -1,7 +1,7 @@
 // Deep import: the pi-utils barrel loads the host native addon, which is
 // absent on cross-compiling release runners.
 import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
-import { embeddedAddonFiles, type NativeEmbedTarget } from "../../natives/scripts/embed-native";
+import { embeddedAddonPlugin, type NativeEmbedTarget } from "../../natives/scripts/embed-native";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
@@ -48,7 +48,6 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,
 			external: [...COMPILED_EXTERNAL_DEPENDENCIES],
-			files: options.native ? await embeddedAddonFiles(options.native) : {},
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
@@ -66,7 +65,11 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,
 			},
-			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
+			plugins: [
+				createJsonParsePlugin(),
+				await createLegacyPiVirtualModulePlugin(),
+				...(options.native ? [await embeddedAddonPlugin(options.native)] : []),
+			],
 			compile: {
 				// Bun's process-wide fetch User-Agent default. Any explicit
 				// provider fingerprint (Anthropic/Codex OAuth) still wins.

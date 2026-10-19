@@ -275,7 +275,7 @@ Runtime x64 candidate order also includes the unsuffixed default filename after 
 
 ## Embed lifecycle (`embed-native.ts`)
 
-`compileCodingAgent` (`packages/coding-agent/scripts/compile-binary.ts`) calls `embeddedAddonFiles()` for the binary's target and hands the result to `Bun.build({ files })`. Nothing under `native/` is written; the checked-in `embedded-addon.js` stays the null stub.
+`compileCodingAgent` (`packages/coding-agent/scripts/compile-binary.ts`) passes `embeddedAddonPlugin()` for the binary's target to `Bun.build`. The plugin serves the in-memory frames and manifest from `embeddedAddonFiles()`. It does not use `Bun.build({ files })`, because Bun labels those overrides with their absolute checkout path in the bundle. Nothing under `native/` is written; the checked-in `embedded-addon.js` stays the null stub.
 
 1. **Init**: the platform tag comes from the compile target (`CROSS_TARGET` for local builds, the release matrix entry for release builds, else the host).
 2. **Candidate set**:
