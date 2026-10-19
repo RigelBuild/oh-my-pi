@@ -17,24 +17,45 @@ const runnerPath = path.resolve(import.meta.dir, "../../../src/eval/py/runner.py
 const repoRoot = path.resolve(import.meta.dir, "../../../../..");
 const encoder = new TextEncoder();
 
+function bashQuote(value: string): string {
+	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function shellQuote(value: string): string {
 	// `!cmd` runs through cmd.exe on Windows (shell=True) and a POSIX shell
 	// elsewhere; quote for the shell that will actually parse the command.
 	if (process.platform === "win32") {
 		return `"${value.replaceAll('"', '""')}"`;
 	}
-	return `'${value.replaceAll("'", `'"'"'`)}'`;
+	return bashQuote(value);
 }
 
-async function runCell(code: string, environment: NodeJS.ProcessEnv = process.env): Promise<RunnerFrame[]> {
-	const [frames] = await runCells([code], environment);
+async function runCell(
+	code: string,
+	environment: NodeJS.ProcessEnv = process.env,
+	interpreter: string | null = pythonPath,
+): Promise<RunnerFrame[]> {
+	const [frames] = await runCells([code], environment, interpreter);
 	return frames;
 }
 
-/** Runs each cell on one runner, sending the next request only after the previous cell's done frame. */
-async function runCells(codes: string[], environment: NodeJS.ProcessEnv = process.env): Promise<RunnerFrame[][]> {
+/** The interpreter binary itself, so a PATH-dependent shim (pyenv, asdf) still starts with PATH cleared. */
+function resolveInterpreterBinary(): string {
 	if (!pythonPath) throw new Error("Python is required for runner shell tests");
-	const proc = Bun.spawn([pythonPath, "-u", runnerPath], {
+	const proc = Bun.spawnSync([pythonPath, "-c", "import sys; print(sys.executable)"]);
+	const executable = proc.stdout.toString().trim();
+	if (proc.exitCode !== 0 || !executable) throw new Error(`Could not resolve the ${pythonPath} executable`);
+	return executable;
+}
+
+/** Runs each cell on one runner, sending the next request only after the previous cell's done frame. */
+async function runCells(
+	codes: string[],
+	environment: NodeJS.ProcessEnv = process.env,
+	interpreter: string | null = pythonPath,
+): Promise<RunnerFrame[][]> {
+	if (!interpreter) throw new Error("Python is required for runner shell tests");
+	const proc = Bun.spawn([interpreter, "-u", runnerPath], {
 		cwd: repoRoot,
 		stdin: "pipe",
 		stdout: "pipe",
@@ -109,7 +130,11 @@ describeMissingBash("Python runner Bash lookup", () => {
 	it("reports a missing Bash executable without running another shell", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-absent-"));
 		try {
-			const frames = await runCell("%%bash\necho should-not-run", { ...process.env, PATH: dir });
+			const frames = await runCell(
+				"%%bash\necho should-not-run",
+				{ ...process.env, PATH: dir },
+				resolveInterpreterBinary(),
+			);
 			expect(frames.find(frame => frame.type === "error")?.evalue).toBe("%%bash requires bash on PATH");
 			expect(frames.find(frame => frame.type === "done")?.status).toBe("error");
 			expect(frames.filter(frame => frame.type === "stdout")).toEqual([]);
@@ -230,10 +255,24 @@ describe("Python runner shell output streaming", () => {
 			"sys.stdout.write('second')",
 			"sys.stdout.flush()",
 		].join(";");
-		const frames = await runCell(`%%bash\n${shellQuote(pythonPath ?? "python3")} -c ${shellQuote(child)}`);
+		// `%%bash` cells are parsed by Bash on every platform, so cmd-style quoting would leave `$`/backticks live.
+		const frames = await runCell(`%%bash\n${bashQuote(pythonPath ?? "python3")} -c ${bashQuote(child)}`);
 		const stdout = frames.filter(frame => frame.type === "stdout").map(frame => frame.data);
 
 		expect(stdout[0]).toBe("first");
 		expect(stdout.join("")).toBe("firstsecond");
+	});
+
+	it("runs a %%bash executable whose path contains Bash metacharacters", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-meta-$HOME-`x`-"));
+		const interpreter = path.join(dir, path.basename(resolveInterpreterBinary()));
+		try {
+			await fs.symlink(resolveInterpreterBinary(), interpreter);
+			const frames = await runCell(`%%bash\n${bashQuote(interpreter)} -c ${bashQuote("print('meta-ok')")}`);
+			expect(frames.filter(frame => frame.type === "stdout").map(frame => frame.data)).toEqual(["meta-ok\n"]);
+			expect(frames.at(-1)?.status).toBe("ok");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 });
