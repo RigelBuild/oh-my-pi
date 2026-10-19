@@ -76,6 +76,23 @@ describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () =>
 		expect(output).not.toContain(path.join(import.meta.dir, "..", "..", "src", "build"));
 	});
 
+	it("keeps caller externals bare for registry imports", async () => {
+		using tempDir = TempDir.createSync("@omp-legacy-pi-external-");
+		const entry = path.join(tempDir.path(), "entry.ts");
+		await Bun.write(entry, 'export { BUNDLED_PI_MODULE_LOADERS } from "omp-legacy-pi-modules";\n');
+		const result = await Bun.build({
+			entrypoints: [entry],
+			target: "bun",
+			plugins: [await createLegacyPiVirtualModulePlugin()],
+			external: ["@oh-my-pi/pi-ai", "@oh-my-pi/pi-ai/*"],
+			throw: false,
+		});
+		expect(result.success, result.logs.map(log => log.message).join("\n")).toBe(true);
+		const output = await result.outputs[0]!.text();
+		expect(output).toContain('import("@oh-my-pi/pi-ai/oauth/anthropic")');
+		expect(output).not.toMatch(/import\("[^"]*[\\/]ai[\\/]src[\\/]registry[\\/]oauth[\\/]anthropic\.ts"\)/);
+	}, 60_000);
+
 	it("does not evaluate unrelated host modules while loading the registry", async () => {
 		using tempDir = TempDir.createSync("@omp-legacy-pi-loaders-");
 		const alphaPath = path.join(tempDir.path(), "alpha.ts");

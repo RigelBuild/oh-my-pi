@@ -205,21 +205,32 @@ export function __renderLegacyPiVirtualModule(entries: readonly BundledPiEntry[]
  * evaluating unrelated host modules during extension bootstrap.
  */
 export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin> {
-	// Resolve against the SDK so the virtual module can keep a synthetic name;
-	// an absolute name would embed this checkout path in unminified binaries.
-	const entries = (await collectBundledPiEntries()).map(entry => ({
-		...entry,
-		importSpecifier: Bun.resolveSync(entry.importSpecifier, import.meta.dir),
-	}));
-	const source = __renderLegacyPiVirtualModule(entries);
+	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries());
+	const virtualPath = `${LEGACY_PI_MODULES_SPECIFIER}.virtual.ts`;
 	return {
 		name: "omp:legacy-pi-modules",
 		setup(build) {
+			const external = build.config.external ?? [];
 			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({
-				path: `${LEGACY_PI_MODULES_SPECIFIER}.virtual.ts`,
+				path: virtualPath,
 				namespace: VIRTUAL_NAMESPACE,
 			}));
+			// A synthetic name keeps this checkout path out of unminified bundles, so
+			// the registry's own imports resolve from the SDK here; caller externals stay bare.
+			build.onResolve({ filter: /.*/ }, args => {
+				if (args.importer !== virtualPath) return undefined;
+				if (isExternal(args.path, external)) return { path: args.path, external: true };
+				return { path: Bun.resolveSync(args.path, import.meta.dir) };
+			});
 			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));
 		},
 	};
+}
+
+function isExternal(specifier: string, external: readonly string[]): boolean {
+	return external.some(pattern => {
+		if (pattern === specifier || specifier.startsWith(`${pattern}/`)) return true;
+		const star = pattern.indexOf("*");
+		return star >= 0 && specifier.startsWith(pattern.slice(0, star)) && specifier.endsWith(pattern.slice(star + 1));
+	});
 }
