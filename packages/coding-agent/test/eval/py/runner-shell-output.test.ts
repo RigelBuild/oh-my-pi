@@ -21,6 +21,12 @@ function bashQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+/** Git Bash resolves `/c/...`, not `C:\...`, as a command path. */
+function toBashPath(value: string): string {
+	if (process.platform !== "win32") return value;
+	return value.replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replaceAll("\\", "/");
+}
+
 function shellQuote(value: string): string {
 	// `!cmd` runs through cmd.exe on Windows (shell=True) and a POSIX shell
 	// elsewhere; quote for the shell that will actually parse the command.
@@ -256,7 +262,7 @@ describe("Python runner shell output streaming", () => {
 			"sys.stdout.flush()",
 		].join(";");
 		// `%%bash` cells are parsed by Bash on every platform, so cmd-style quoting would leave `$`/backticks live.
-		const frames = await runCell(`%%bash\n${bashQuote(pythonPath ?? "python3")} -c ${bashQuote(child)}`);
+		const frames = await runCell(`%%bash\n${bashQuote(toBashPath(pythonPath ?? "python3"))} -c ${bashQuote(child)}`);
 		const stdout = frames.filter(frame => frame.type === "stdout").map(frame => frame.data);
 
 		expect(stdout[0]).toBe("first");
@@ -264,11 +270,12 @@ describe("Python runner shell output streaming", () => {
 	});
 
 	it("runs a %%bash executable whose path contains Bash metacharacters", async () => {
+		// A shell script, not a linked interpreter: Windows needs no symlink privilege and no Python DLLs beside it.
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-meta-$HOME-`x`-"));
-		const interpreter = path.join(dir, path.basename(resolveInterpreterBinary()));
+		const script = path.join(dir, "say-meta");
 		try {
-			await fs.symlink(resolveInterpreterBinary(), interpreter);
-			const frames = await runCell(`%%bash\n${bashQuote(interpreter)} -c ${bashQuote("print('meta-ok')")}`);
+			await fs.writeFile(script, "#!/bin/sh\necho meta-ok\n", { mode: 0o755 });
+			const frames = await runCell(`%%bash\n${bashQuote(toBashPath(script))}`);
 			expect(frames.filter(frame => frame.type === "stdout").map(frame => frame.data)).toEqual(["meta-ok\n"]);
 			expect(frames.at(-1)?.status).toBe("ok");
 		} finally {
