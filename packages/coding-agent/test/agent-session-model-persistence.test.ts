@@ -932,6 +932,8 @@ describe("AgentSession model persistence", () => {
 			thinkingLevel: Effort.Low,
 		});
 		expect(thinkingResult.session.configuredThinkingLevel()).toBe(Effort.Low);
+		await thinkingResult.session.dispose();
+		session = undefined;
 
 		const tierResult = await createStartupResumeSession(tierFile, settings, {
 			reapplyConfig: true,
