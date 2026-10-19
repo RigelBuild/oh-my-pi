@@ -205,12 +205,18 @@ export function __renderLegacyPiVirtualModule(entries: readonly BundledPiEntry[]
  * evaluating unrelated host modules during extension bootstrap.
  */
 export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin> {
-	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries());
+	// Resolve against the SDK so the virtual module can keep a synthetic name;
+	// an absolute name would embed this checkout path in unminified binaries.
+	const entries = (await collectBundledPiEntries()).map(entry => ({
+		...entry,
+		importSpecifier: Bun.resolveSync(entry.importSpecifier, import.meta.dir),
+	}));
+	const source = __renderLegacyPiVirtualModule(entries);
 	return {
 		name: "omp:legacy-pi-modules",
 		setup(build) {
 			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({
-				path: path.join(import.meta.dir, `${LEGACY_PI_MODULES_SPECIFIER}.virtual.ts`),
+				path: `${LEGACY_PI_MODULES_SPECIFIER}.virtual.ts`,
 				namespace: VIRTUAL_NAMESPACE,
 			}));
 			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));

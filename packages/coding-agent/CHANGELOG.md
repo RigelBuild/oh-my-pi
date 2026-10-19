@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The legacy Pi build plugin no longer embeds the SDK install path in compiled binaries built without whitespace minification. Builds are now byte-stable across checkout locations.
+
 ## [18.9.2-rigel.2] - 2026-10-18
 
 ### Changed

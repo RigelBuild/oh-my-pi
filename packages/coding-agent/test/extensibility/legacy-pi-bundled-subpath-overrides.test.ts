@@ -42,31 +42,38 @@ describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () =>
 	it("resolves virtual imports from the SDK package when the build runs elsewhere", async () => {
 		using tempDir = TempDir.createSync("@omp-legacy-pi-build-");
 		const entry = path.join(tempDir.path(), "entry.ts");
-		await Bun.write(entry, 'import "omp-legacy-pi-modules";\n');
-		const plugin = await createLegacyPiVirtualModulePlugin();
-		const paths: string[] = [];
-		const probe: Bun.BunPlugin = {
-			name: "capture-virtual-importer",
-			setup(build) {
-				build.onResolve({ filter: /^@oh-my-pi\/pi-ai\/oauth\/anthropic$/ }, args => {
-					paths.push(args.importer);
-					return { path: args.path, external: true };
-				});
-			},
-		};
+		const script = path.join(tempDir.path(), "build.ts");
+		const pluginModule = path.join(import.meta.dir, "..", "..", "src", "build", "legacy-pi-virtual-module.ts");
+		await Bun.write(entry, 'export { BUNDLED_PI_MODULE_LOADERS } from "omp-legacy-pi-modules";\n');
+		await Bun.write(
+			script,
+			[
+				`import { createLegacyPiVirtualModulePlugin } from ${JSON.stringify(pluginModule)};`,
+				`const result = await Bun.build({ entrypoints: [${JSON.stringify(entry)}], target: "bun", plugins: [await createLegacyPiVirtualModulePlugin()], external: ["@oh-my-pi/pi-natives"], throw: false });`,
+				"if (!result.success) { console.error(result.logs.map(log => log.message).join('\\n')); process.exit(1); }",
+			].join("\n"),
+		);
+		// Bun resolves bare imports from a relative importer against the process cwd.
+		const build = Bun.spawnSync([process.execPath, script], { cwd: tempDir.path(), stderr: "pipe" });
+		expect(build.exitCode, build.stderr.toString()).toBe(0);
+	}, 60_000);
+
+	it("does not embed the SDK checkout path when whitespace is preserved", async () => {
+		using tempDir = TempDir.createSync("@omp-legacy-pi-name-");
+		const entry = path.join(tempDir.path(), "entry.ts");
+		await Bun.write(entry, 'export { BUNDLED_PI_MODULE_LOADERS } from "omp-legacy-pi-modules";\n');
 		const result = await Bun.build({
 			entrypoints: [entry],
 			target: "bun",
-			plugins: [plugin, probe],
-			external: bundledEntries
-				.map(entry => entry.importSpecifier)
-				.filter(specifier => specifier !== "@oh-my-pi/pi-ai/oauth/anthropic"),
+			minify: { whitespace: false, syntax: true, identifiers: false },
+			plugins: [await createLegacyPiVirtualModulePlugin()],
+			external: ["*"],
 			throw: false,
 		});
 		expect(result.success, result.logs.map(log => log.message).join("\n")).toBe(true);
-		expect(paths).toHaveLength(1);
-		expect(path.isAbsolute(paths[0]!)).toBe(true);
-		expect(paths[0]!.startsWith(path.join(import.meta.dir, "..", "..", "src", "build"))).toBe(true);
+		const output = await result.outputs[0]!.text();
+		expect(output).toContain("BUNDLED_PI_MODULE_LOADERS");
+		expect(output).not.toContain(path.join(import.meta.dir, "..", "..", "src", "build"));
 	});
 
 	it("does not evaluate unrelated host modules while loading the registry", async () => {
