@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -169,6 +170,123 @@ describe("assessModelCache and assessModelCacheVerdict parity with resolveProvid
 						"X-Key": "configured",
 					});
 				}
+			} finally {
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		});
+	}
+});
+
+describe("cached header restoration through resolveProviderModels", () => {
+	interface HeaderCase {
+		name: string;
+		options: Partial<ModelManagerOptions<"openai-completions">>;
+		/** Static slice the reader restores from; the writer sees `writerStatic`. */
+		staticModels: Model<"openai-completions">[];
+		writerStatic?: Model<"openai-completions">[];
+		writerFallback?: Record<string, string>;
+		cached: Model<"openai-completions">[];
+		fingerprint: "current" | "stale";
+		legacyMarkers?: boolean;
+		expectFetch: boolean;
+		/** Headers on the returned row after an offline read; null when the row must be dropped. */
+		expectHeaders: Record<string, Record<string, string> | null>;
+	}
+	const fallbackHeaders = { "X-Provider": "constant" };
+	const base = buildModel(spec("base", { "X-Key": "static" }));
+	const variant = buildModel({ ...spec("base-1m", { "X-Key": "static" }), requestModelId: "base" });
+	const noStatic = buildModel(spec("no-static", fallbackHeaders));
+	const unresolved = buildModel(spec("unresolved", { "X-Key": "live-only" }));
+
+	const cases: HeaderCase[] = [
+		{
+			name: "provider fallback restores a row with no static source",
+			options: { restorableHeaderFallback: fallbackHeaders },
+			staticModels: [],
+			writerFallback: fallbackHeaders,
+			cached: [noStatic],
+			fingerprint: "current",
+			expectFetch: false,
+			expectHeaders: { "no-static": fallbackHeaders },
+		},
+		{
+			name: "legacy marker recovers a variant through requestModelId",
+			options: {},
+			staticModels: [base],
+			writerStatic: [],
+			cached: [variant],
+			fingerprint: "current",
+			legacyMarkers: true,
+			expectFetch: false,
+			expectHeaders: { "base-1m": { "X-Key": "static" } },
+		},
+		{
+			name: "an empty restoreCachedHeaders patch leaves the row unresolved",
+			options: { restoreCachedHeaders: () => ({}) },
+			staticModels: [],
+			cached: [unresolved],
+			fingerprint: "current",
+			expectFetch: true,
+			expectHeaders: { unresolved: null },
+		},
+		{
+			name: "an unresolved row with a stale fingerprint and a migration id",
+			options: { dropCachedModelIdsOnStaticMismatch: ["migrated"] },
+			staticModels: [],
+			cached: [plain, migrated, unresolved],
+			fingerprint: "stale",
+			expectFetch: true,
+			expectHeaders: { unresolved: null, migrated: null },
+		},
+	];
+
+	for (const testCase of cases) {
+		it(testCase.name, async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-header-restore-"));
+			const dbPath = path.join(tempDir, "models.db");
+			let fetches = 0;
+			const options: ModelManagerOptions<"openai-completions"> = {
+				providerId: PROVIDER,
+				staticModels: testCase.staticModels,
+				cacheDbPath: dbPath,
+				cacheTtlMs: TTL_MS,
+				now: () => WRITTEN_AT,
+				fetchDynamicModels: async () => {
+					fetches++;
+					return null;
+				},
+				...testCase.options,
+			};
+			try {
+				const staticCatalog = resolveModelManagerStaticCatalog(options);
+				const fingerprint = testCase.fingerprint === "current" ? staticCatalog.fingerprint : "stale-fingerprint";
+				writeModelCache(
+					PROVIDER,
+					WRITTEN_AT,
+					testCase.cached,
+					true,
+					fingerprint,
+					dbPath,
+					testCase.writerStatic ?? testCase.staticModels,
+					testCase.writerFallback,
+				);
+				if (testCase.legacyMarkers) {
+					const db = new Database(dbPath);
+					db.run("UPDATE model_cache SET header_restore_version = 0 WHERE provider_id = ?", [PROVIDER]);
+					db.close();
+				}
+				const cache = readModelCache<"openai-completions">(PROVIDER, TTL_MS, () => WRITTEN_AT, dbPath);
+				const verdict = assessModelCacheVerdict(options, staticCatalog, cache, WRITTEN_AT);
+				expect(modelCacheNeedsFetch(verdict, "online-if-uncached")).toBe(testCase.expectFetch);
+
+				const offline = await resolveProviderModels(options, "offline");
+				for (const [id, headers] of Object.entries(testCase.expectHeaders)) {
+					const row = offline.models.find(model => model.id === id);
+					if (headers === null) expect(row).toBeUndefined();
+					else expect(row?.headers).toEqual(headers);
+				}
+				await resolveProviderModels(options, "online-if-uncached");
+				expect(fetches > 0).toBe(testCase.expectFetch);
 			} finally {
 				await fs.rm(tempDir, { recursive: true, force: true });
 			}

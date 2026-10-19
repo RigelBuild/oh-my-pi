@@ -187,18 +187,43 @@ interface CachedHeaderRestorePolicy<TApi extends Api> {
 	restoreCachedHeaders: ModelManagerOptions<TApi>["restoreCachedHeaders"];
 }
 
+// Parsed cache rows and probe static slices are reused by identity and never mutated,
+// so their derived lookups are built once rather than on every refresh-eligibility check.
+const idSetCache = new WeakMap<readonly string[], ReadonlySet<string>>();
+const staticByIdCache = new WeakMap<readonly Model<Api>[], ReadonlyMap<string, Model<Api>>>();
+const EMPTY_IDS: ReadonlySet<string> = new Set();
+
+function idSet(ids: readonly string[] | undefined): ReadonlySet<string> {
+	if (!ids || ids.length === 0) return EMPTY_IDS;
+	let set = idSetCache.get(ids);
+	if (!set) {
+		set = new Set(ids);
+		idSetCache.set(ids, set);
+	}
+	return set;
+}
+
+function staticModelsById<TApi extends Api>(staticModels: readonly Model<TApi>[]): ReadonlyMap<string, Model<TApi>> {
+	let byId = staticByIdCache.get(staticModels);
+	if (!byId) {
+		byId = new Map(staticModels.map(model => [model.id, model]));
+		staticByIdCache.set(staticModels, byId);
+	}
+	return byId as ReadonlyMap<string, Model<TApi>>;
+}
+
 function cachedHeaderRestorePolicy<TApi extends Api, TModelsDevPayload>(
 	cache: CacheEntry<TApi> | null,
 	staticModels: readonly Model<TApi>[],
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
 ): CachedHeaderRestorePolicy<TApi> | undefined {
-	const headerOmittedModelIds = cache?.headerOmittedModelIds ?? [];
-	if (headerOmittedModelIds.length === 0) return undefined;
+	const headerOmittedModelIds = cache?.headerOmittedModelIds;
+	if (!headerOmittedModelIds || headerOmittedModelIds.length === 0) return undefined;
 	return {
-		omittedIds: new Set(headerOmittedModelIds),
-		unrestorableIds: new Set(cache?.unrestorableHeaderModelIds ?? []),
-		staticById: new Map(staticModels.map(model => [model.id, model])),
-		legacyHeaderRestoreMarkers: cache?.legacyHeaderRestoreMarkers ?? false,
+		omittedIds: idSet(headerOmittedModelIds),
+		unrestorableIds: idSet(cache.unrestorableHeaderModelIds),
+		staticById: staticModelsById(staticModels),
+		legacyHeaderRestoreMarkers: cache.legacyHeaderRestoreMarkers ?? false,
 		restorableHeaderFallback: options.restorableHeaderFallback,
 		restoreCachedHeaders: options.restoreCachedHeaders,
 	};
