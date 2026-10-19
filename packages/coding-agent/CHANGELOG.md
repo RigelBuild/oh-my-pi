@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `--reapply-config` starting an interactive session on a default model that extension load or discovery had just removed from the catalog; startup now falls back as it does for any unavailable default.
+
 ## [18.9.2-rigel.2] - 2026-10-18
 
 ### Changed
