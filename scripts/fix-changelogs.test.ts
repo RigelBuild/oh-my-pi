@@ -11,6 +11,23 @@ import {
 	splitArchiveFooter,
 } from "./fix-changelogs";
 
+// runChangelogFixer runs git with the ambient env, so a hook's GIT_DIR would aim
+// these temp-repo tests at the caller's repo. This clears it process-wide; safe
+// while no other file in this `bun test` process relies on these variables.
+for (const key of [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_CEILING_DIRECTORIES",
+	"GIT_NAMESPACE",
+	"GIT_PREFIX",
+]) {
+	delete process.env[key];
+}
+
 describe("collectPromotableAddedItemLines", () => {
 	it("keeps new changelog item additions while ignoring moves and edits", () => {
 		const diff = [
