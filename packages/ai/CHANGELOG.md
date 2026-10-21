@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AuthStorage` option `claudeResetBanking` ranks Claude accounts that hold a spare reset clearing the weekly limit ahead of siblings and exempts them from the reserve guard, so they drain first.
+- Auth-gateway `onUsageLimit` hook runs before an account is marked reached; returning `true` resends the request on the same credential.
+
 ## [18.9.2-rigel.2] - 2026-10-18
 
 ### Added

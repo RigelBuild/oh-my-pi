@@ -99,6 +99,7 @@ export async function handleSpeech(
 				resolvedKey => {
 					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
 				},
+				bootOpts.onUsageLimit,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,

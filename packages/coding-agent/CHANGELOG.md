@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `auth-gateway serve` redeems a banked Claude reset without a prompt when `claudeResets.autoRedeem` is `yes` and an account's weekly (`anthropic:7d`) limit is exhausted, on a usage-limit 429 or a 5-minute sweep, and then retries the request on the same account.
+
 ## [18.9.2-rigel.2] - 2026-10-18
 
 ### Changed

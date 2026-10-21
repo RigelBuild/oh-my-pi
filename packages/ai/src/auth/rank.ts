@@ -39,6 +39,8 @@ export type UsageRankingResult<T extends AuthCredential> = UsageCandidate<T> & {
 /** Candidate with all account-policy and usage ranking metrics. */
 export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blocked: boolean;
+	/** A live, eligible Claude reset can restore the account after its 7d limit blocks. */
+	resetBanked: boolean;
 	blockedUntil?: number;
 	inReserve: boolean;
 	reserveMeasured?: boolean;
@@ -107,6 +109,8 @@ function compareUsageRankedCandidatePriority(
 	const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	if (leftHot !== rightHot) return leftHot ? 1 : -1;
+	// A banked grant replenishes the weekly quota; banked accounts keep the existing drain order.
+	if (left.resetBanked !== right.resetBanked) return left.resetBanked ? -1 : 1;
 	// Usage-backed candidates outrank unmeasured ones: required-drain
 	// scores are only comparable between measured windows, and the
 	// clockless headroom fallback (0..1) must not let an account whose

@@ -25,7 +25,16 @@ import {
 	completeSimple,
 	type Model,
 	type OAuthRequestIdentity,
+	type AuthGatewayRouteOptions,
+	resolveUsedFraction,
+	type UsageReport,
+	type ResetCreditRedeemOutcome,
 } from "@oh-my-pi/pi-ai";
+import {
+	type ClaudeResetAction,
+	planClaudeResetRedemptions,
+	claudeResetStatusesFromReports,
+} from "../session/claude-auto-reset";
 import {
 	AuthBrokerClient,
 	loadAuthBrokerAccountPool,
@@ -41,6 +50,8 @@ import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { REDEEM_RETRY_DEFER_MS, resetPlanSettings } from "../session/codex-auto-reset";
+import { cfgClaudeResets } from "../session/settings";
 import {
 	type AuthBrokerClientConfig,
 	loadEffectiveAuthAccountPolicyConfig,
@@ -156,6 +167,9 @@ const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
  */
 const CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
 
+/** Proactively check exhausted weekly Claude limits in gateway usage reports. */
+const GATEWAY_CLAUDE_RESET_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
 /**
  * Catalog kinds the gateway has a route for: chat (`/v1/chat/completions`,
  * `/v1/messages`, `/v1/responses`, `/v1/pi/stream`), judge (`/v1/systemone`),
@@ -267,6 +281,144 @@ export function createSerializedRebuilder(run: (force: boolean) => Promise<void>
 	return rebuild;
 }
 
+export interface GatewayClaudeResetCoordinator {
+	attemptedKeys: Set<string>;
+	deferredUntilByKey: Map<string, number>;
+	lastAttemptAtByAccount: Map<string, number>;
+	inFlightByCredential: Map<number, Promise<boolean>>;
+}
+
+function hasUsableExhaustedClaudeWeeklyReset(report: UsageReport | null | undefined): boolean {
+	const weekly = report?.limits.find(limit => limit.id === "anthropic:7d");
+	const exhausted = weekly?.status === "exhausted" || (weekly ? (resolveUsedFraction(weekly) ?? 0) >= 0.999 : false);
+	const credits = report?.resetCredits;
+	return (
+		exhausted &&
+		credits?.eligible === true &&
+		(credits.redeemableCount ?? credits.availableCount) >= 1 &&
+		credits.credits?.some(credit => credit.usable === true && credit.clears?.includes("anthropic:7d")) === true
+	);
+}
+
+export function createGatewayClaudeResetHook(args: {
+	storage: AuthStorage;
+	settings: Settings;
+	coordinator: GatewayClaudeResetCoordinator;
+}): NonNullable<Parameters<typeof startAuthGateway>[0]["onUsageLimit"]> {
+	return async ({ provider, credentialId, modelId, signal }) => {
+		const cfg = cfgClaudeResets.get(args.settings);
+		if (cfg.autoRedeem !== "yes" || provider !== "anthropic") return false;
+		const current = args.coordinator.inFlightByCredential.get(credentialId);
+		if (current) return current;
+		const attempt = (async () => {
+			const credential = args.storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
+			if (credential?.type !== "oauth") return false;
+			let report: UsageReport | null;
+			try {
+				report = await args.storage.usage.report(provider, credential, {
+					timeoutMs: 10_000,
+					signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+				});
+			} catch (error) {
+				logger.info("auth-gateway Claude usage check failed", { credentialId, error: String(error) });
+				return false;
+			}
+			if (!hasUsableExhaustedClaudeWeeklyReset(report)) return false;
+			let actions: ClaudeResetAction[] = [];
+			try {
+				const statuses = await args.storage.resets.list({
+					provider: "anthropic",
+					signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+				});
+				const plan = planClaudeResetRedemptions({
+					nowMs: Date.now(),
+					trigger: "blocked",
+					provider,
+					modelId,
+					settings: resetPlanSettings(cfg),
+					reports: statuses.flatMap(status => (status.report ? [status.report] : [])),
+					statuses,
+					permitsCredential: id => id === credentialId,
+					attemptedKeys: args.coordinator.attemptedKeys,
+					deferredUntilByKey: args.coordinator.deferredUntilByKey,
+					lastAttemptAtByAccount: args.coordinator.lastAttemptAtByAccount,
+				});
+				actions = plan.actions.filter(
+					action => action.target.credentialId === credentialId && action.blockedWindows?.includes("anthropic:7d"),
+				);
+			} catch (error) {
+				logger.info("auth-gateway Claude reset planning failed", { credentialId, error: String(error) });
+				return false;
+			}
+			for (const action of actions) {
+				if (args.coordinator.attemptedKeys.has(action.attemptKey)) continue;
+				const previousAttemptAt = args.coordinator.lastAttemptAtByAccount.get(action.accountKey);
+				args.coordinator.attemptedKeys.add(action.attemptKey);
+				args.coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
+				let outcome: ResetCreditRedeemOutcome;
+				try {
+					outcome = await args.storage.resets.redeem({
+						target: action.target,
+						signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+					});
+				} catch {
+					args.coordinator.attemptedKeys.delete(action.attemptKey);
+					args.coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
+					if (previousAttemptAt === undefined) args.coordinator.lastAttemptAtByAccount.delete(action.accountKey);
+					else args.coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
+					logger.info("auth-gateway Claude reset redeem failed", {
+						credentialId,
+						creditId: action.target.creditId,
+					});
+					return false;
+				}
+				if (!outcome.ok && outcome.code !== "already_redeemed" && outcome.code !== "no_credit") {
+					args.coordinator.attemptedKeys.delete(action.attemptKey);
+					args.coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
+					if (previousAttemptAt === undefined) args.coordinator.lastAttemptAtByAccount.delete(action.accountKey);
+					else args.coordinator.lastAttemptAtByAccount.set(action.accountKey, previousAttemptAt);
+				}
+				logger.info("auth-gateway Claude reset redeem outcome", {
+					credentialId,
+					creditId: action.target.creditId,
+					code: outcome.code,
+					ok: outcome.ok,
+				});
+				return outcome.ok;
+			}
+			return false;
+		})();
+		args.coordinator.inFlightByCredential.set(credentialId, attempt);
+		try {
+			return await attempt;
+		} finally {
+			if (args.coordinator.inFlightByCredential.get(credentialId) === attempt) {
+				args.coordinator.inFlightByCredential.delete(credentialId);
+			}
+		}
+	};
+}
+
+export async function runGatewayClaudeResetSweep(args: {
+	storage: AuthStorage;
+	hook: NonNullable<AuthGatewayRouteOptions["onUsageLimit"]>;
+	signal: AbortSignal;
+}): Promise<void> {
+	const reports =
+		(await args.storage.usage.reports({ signal: AbortSignal.any([args.signal, AbortSignal.timeout(10_000)]) })) ?? [];
+	const statuses = claudeResetStatusesFromReports(args.storage.oauth.accounts("anthropic"), reports);
+	args.signal.throwIfAborted();
+	for (const status of statuses) {
+		args.signal.throwIfAborted();
+		if (!hasUsableExhaustedClaudeWeeklyReset(status.report)) continue;
+		await args.hook({
+			provider: "anthropic",
+			credentialId: status.credentialId,
+			modelId: "",
+			signal: AbortSignal.any([args.signal, AbortSignal.timeout(30_000)]),
+		});
+	}
+}
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
@@ -283,6 +435,13 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const accountPool = await loadAuthBrokerAccountPool();
 	const settings = await resolveEffectiveSettings();
 	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
+	const claudeResetConfig = cfgClaudeResets.get(settings);
+	const resetCoordinator: GatewayClaudeResetCoordinator = {
+		attemptedKeys: new Set(),
+		deferredUntilByKey: new Map(),
+		lastAttemptAtByAccount: new Map(),
+		inFlightByCredential: new Map(),
+	};
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);
 	const store = new RemoteAuthCredentialStore({
@@ -298,6 +457,9 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		sourceLabel: `broker ${brokerConfig.url}`,
 		accountPolicies,
 		defaultReservePct,
+		...(claudeResetConfig.autoRedeem === "yes"
+			? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits } }
+			: {}),
 	});
 	await storage.credentials.reload();
 
@@ -333,6 +495,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	});
 	await rebuildCatalog();
 
+	const claudeResetHook = createGatewayClaudeResetHook({ storage, settings, coordinator: resetCoordinator });
 	const handle = startAuthGateway({
 		storage,
 		bind,
@@ -342,6 +505,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		resolveModel: (id: string) => resolveGatewayModel(id, modelById, routable),
 		listModels: () => modelById.values(),
 		excludeProviders: new Set(cfgDisabledProviders.get(settings)),
+		onUsageLimit: claudeResetHook,
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
@@ -383,10 +547,32 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		})();
 	}, CREDENTIAL_SYNC_INTERVAL_MS);
 	credentialSync.unref();
+	const resetSweepAbort = new AbortController();
+	let resetSweepInFlight = false;
+	const resetSweep = setInterval(() => {
+		if (resetSweepInFlight) return;
+		resetSweepInFlight = true;
+		void runGatewayClaudeResetSweep({
+			storage,
+			hook: claudeResetHook,
+			signal: resetSweepAbort.signal,
+		})
+			.catch(error => {
+				logger.warn("auth-gateway Claude reset sweep failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => {
+				resetSweepInFlight = false;
+			});
+	}, GATEWAY_CLAUDE_RESET_SWEEP_INTERVAL_MS);
+	resetSweep.unref();
 
 	registerGatewayShutdown(handle, flags.drainMs, () => {
 		clearInterval(catalogRefresh);
+		clearInterval(resetSweep);
 		clearInterval(credentialSync);
+		resetSweepAbort.abort();
 		storage.close();
 	});
 	// postmortem exits the process once the shutdown cleanup finishes.
