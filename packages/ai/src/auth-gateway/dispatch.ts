@@ -8,7 +8,7 @@
  * broker-backed rotation policy and the same usage ledger.
  */
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import { markAfterSiblingWait, type ApiKeyResolver, type ResolvedApiKey } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
@@ -96,6 +96,13 @@ export function gatewayUsageOutcome(stopReason: string): GatewayUsageOutcome {
 export interface AuthGatewayRouteOptions {
 	/** Source of credentials: broker-backed for `serve`, the CLI's own for `stdio`. */
 	storage: AuthStorage;
+	/** Try an account-local recovery before recording a usage-limit block. */
+	onUsageLimit?: (ctx: {
+		provider: string;
+		credentialId: number;
+		modelId: string;
+		signal: AbortSignal;
+	}) => Promise<boolean>;
 	/** May repeat for the same requestId (video polls); dedupe on it. */
 	onUsage?: (event: GatewayUsageEvent) => void | Promise<void>;
 	/**
@@ -233,14 +240,38 @@ async function refreshGatewayApiKeyAfterAuthError(
 	sessionId: string,
 	provider: string,
 	oldKey: string,
+	credentialId: number | undefined,
 	error: unknown,
 	signal: AbortSignal,
 	format: string,
 	peer: string,
+	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
 ): Promise<ResolvedApiKey | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+		if (credentialId !== undefined && onUsageLimit) {
+			try {
+				if (await onUsageLimit({ provider, credentialId, modelId: model.id, signal })) {
+					const restored = await storage.keys.getWithCredential(
+						provider,
+						sessionId,
+						modelKeyOptions(model, signal),
+					);
+					if (!restored) return undefined;
+					const retry = markAfterSiblingWait(restored);
+					if (typeof retry === "string") return { apiKey: retry, afterSiblingWait: true };
+					return retry ?? undefined;
+				}
+			} catch (error) {
+				logger.warn("auth-gateway usage-limit recovery failed", {
+					format,
+					provider,
+					peer,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 		const retryAfterMs = extractProviderRetryHint(provider, message);
 		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
@@ -302,8 +333,10 @@ export function buildGatewayApiKeyResolver(
 	format: string,
 	peer: string,
 	onResolvedKey?: (apiKey: string) => void,
+	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
+	const credentialIdsByBearer = new Map<string, number | undefined>([[initialKey.apiKey, initialKey.credentialId]]);
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
@@ -317,7 +350,10 @@ export function buildGatewayApiKeyResolver(
 				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			});
 			lastKey = refreshed?.apiKey ?? lastKey;
-			if (refreshed) onResolvedKey?.(refreshed.apiKey);
+			if (refreshed) {
+				credentialIdsByBearer.set(refreshed.apiKey, refreshed.credentialId);
+				onResolvedKey?.(refreshed.apiKey);
+			}
 			return refreshed;
 		}
 		const next = await refreshGatewayApiKeyAfterAuthError(
@@ -326,13 +362,18 @@ export function buildGatewayApiKeyResolver(
 			sessionId,
 			model.provider,
 			previousKey ?? lastKey,
+			credentialIdsByBearer.get(previousKey ?? lastKey),
 			error,
 			sig,
 			format,
 			peer,
+			onUsageLimit,
 		);
 		lastKey = next?.apiKey ?? lastKey;
-		if (next) onResolvedKey?.(next.apiKey);
+		if (next) {
+			credentialIdsByBearer.set(next.apiKey, next.credentialId);
+			onResolvedKey?.(next.apiKey);
+		}
 		return next;
 	};
 }

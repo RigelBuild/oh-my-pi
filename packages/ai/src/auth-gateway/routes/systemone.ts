@@ -94,6 +94,7 @@ export async function handleSystemOne(
 			resolvedKey => {
 				account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
 			},
+			bootOpts.onUsageLimit,
 		),
 		fetch: bootOpts.fetch,
 	});

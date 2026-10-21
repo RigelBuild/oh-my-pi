@@ -89,6 +89,7 @@ export interface CredentialSelectorDeps {
 	usage: UsageService;
 	refresher: OAuthRefresher;
 	strategies: RankingStrategyResolver;
+	claudeResetBanking?: { keepCredits: number };
 }
 
 /** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
@@ -323,6 +324,7 @@ export class CredentialSelector {
 			const usageMeasured = primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
 			ranked.push({
+				resetBanked: false,
 				selection,
 				usage,
 				usageChecked,
@@ -399,6 +401,7 @@ export class CredentialSelector {
 		options?: AuthApiKeyOptions;
 		strategy?: CredentialRankingStrategy;
 		defaultReservePct?: number;
+		claudeResetBanking?: { keepCredits: number };
 		rankingContext: CredentialRankingContext;
 		blockScope?: string;
 		/** Scopes a block may live under for this request; reads honour all of them. */
@@ -519,13 +522,32 @@ export class CredentialSelector {
 				reservePct === undefined || !Number.isFinite(reservePct)
 					? undefined
 					: Math.max(0, Math.min(1, reservePct / 100));
+			const resetCredits = usage?.resetCredits;
+			const cooldownUntilMs =
+				resetCredits?.cooldownUntil === undefined ? undefined : Date.parse(resetCredits.cooldownUntil);
+			const selectedResetCredit = resetCredits?.credits?.find(credit => credit.id === resetCredits.nextCreditId);
+			const expiresAtMs =
+				selectedResetCredit?.expiresAt === undefined ? undefined : Date.parse(selectedResetCredit.expiresAt);
+			const resetBanked =
+				args.provider === "anthropic" &&
+				args.claudeResetBanking !== undefined &&
+				resetCredits?.eligible === true &&
+				resetCredits.availableCount - args.claudeResetBanking.keepCredits >= 1 &&
+				(cooldownUntilMs === undefined || (Number.isFinite(cooldownUntilMs) && cooldownUntilMs <= nowMs)) &&
+				typeof resetCredits.nextCreditId === "string" &&
+				(resetCredits.redeemableCount ?? resetCredits.availableCount) >= 1 &&
+				selectedResetCredit?.usable === true &&
+				selectedResetCredit.clears?.includes("anthropic:7d") === true &&
+				(expiresAtMs === undefined || (Number.isFinite(expiresAtMs) && expiresAtMs > nowMs));
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
 				blocked,
 				blockedUntil,
+				resetBanked,
 				inReserve:
+					!resetBanked &&
 					reserveFraction !== undefined &&
 					remainingFraction !== undefined &&
 					isWithinUsageReserve(remainingFraction, reserveFraction),
@@ -694,6 +716,7 @@ export class CredentialSelector {
 					options,
 					strategy,
 					defaultReservePct: policyReserveEnabled ? this.#deps.policies.defaultReservePct : undefined,
+					claudeResetBanking: this.#deps.claudeResetBanking,
 					rankingContext,
 					blockScope,
 					blockScopes,

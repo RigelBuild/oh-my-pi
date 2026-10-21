@@ -4053,6 +4053,26 @@ function createClaudeUsageReport(args: {
 		metadata: { accountId: args.accountId },
 	};
 }
+function addClaudeWeeklyReset(report: UsageReport): UsageReport {
+	return {
+		...report,
+		resetCredits: {
+			availableCount: 1,
+			redeemableCount: 1,
+			eligible: true,
+			nextCreditId: "cedar-reset",
+			credits: [
+				{
+					id: "cedar-reset",
+					program: "cedar_ember",
+					usable: true,
+					clears: ["anthropic:7d"],
+					expiresAt: "2099-01-01T00:00:00.000Z",
+				},
+			],
+		},
+	};
+}
 
 describe("AuthStorage claude oauth ranking", () => {
 	let store: AuthCredentialStore | null = null;
@@ -4067,6 +4087,24 @@ describe("AuthStorage claude oauth ranking", () => {
 			return usageByAccount.get(accountId) ?? null;
 		},
 	};
+	function configureClaudeResetBanking(keepCredits = 0, defaultReservePct?: number): void {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? usageProvider : undefined),
+			claudeResetBanking: { keepCredits },
+			...(defaultReservePct === undefined
+				? {}
+				: {
+						accountPolicies: [
+							{
+								provider: "anthropic",
+								account: { accountId: "acct-banked-reserve" },
+								reservePct: defaultReservePct,
+							},
+						],
+					}),
+		});
+	}
 
 	beforeEach(async () => {
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
@@ -4254,6 +4292,7 @@ describe("AuthStorage claude oauth ranking", () => {
 				secondary: { usedFraction: 0.9, resetInMs: 30 * 60 * 1000 },
 			}),
 		);
+
 		usageByAccount.set(
 			"acct-cool",
 			createClaudeUsageReport({
@@ -4506,5 +4545,175 @@ describe("AuthStorage claude oauth ranking", () => {
 		// so the pin must win the tie rather than churn to the sibling.
 		clockOffset = HOUR_MS + 1;
 		expect(await storage.keys.get("anthropic", "claude-idle-tie")).toBe(first);
+	});
+	test("prioritizes an account with a banked weekly reset over a cooler sibling", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		configureClaudeResetBanking();
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-banked", "banked@example.com") },
+			{ type: "oauth", ...createCredential("acct-cool", "cool@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-banked",
+			addClaudeWeeklyReset(
+				createClaudeUsageReport({
+					accountId: "acct-banked",
+					primary: { usedFraction: 0.3, resetInMs: 4 * HOUR_MS },
+					secondary: { usedFraction: 0.6, resetInMs: 5 * 24 * HOUR_MS },
+				}),
+			),
+		);
+		usageByAccount.set(
+			"acct-cool",
+			createClaudeUsageReport({
+				accountId: "acct-cool",
+				primary: { usedFraction: 0.1, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-banked-reset", 100);
+		expectExclusivePreference(counts, "api-acct-banked", "api-acct-cool");
+	});
+
+	test("does not reprioritize a banked reset account without opting in", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-unopted", "unopted@example.com") },
+			{ type: "oauth", ...createCredential("acct-cool-unopted", "cool@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-unopted",
+			addClaudeWeeklyReset(
+				createClaudeUsageReport({
+					accountId: "acct-unopted",
+					primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+					secondary: { usedFraction: 0.95, resetInMs: 5 * 24 * HOUR_MS },
+				}),
+			),
+		);
+		usageByAccount.set(
+			"acct-cool-unopted",
+			createClaudeUsageReport({
+				accountId: "acct-cool-unopted",
+				primary: { usedFraction: 0.1, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-banked-unopted", 100);
+		expectExclusivePreference(counts, "api-acct-cool-unopted", "api-acct-unopted");
+	});
+
+	test("keeps the configured banked reset reserve ahead of spending the last reset", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		configureClaudeResetBanking(1);
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-kept", "kept@example.com") },
+			{ type: "oauth", ...createCredential("acct-cool-kept", "cool@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-kept",
+			addClaudeWeeklyReset(
+				createClaudeUsageReport({
+					accountId: "acct-kept",
+					primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+					secondary: { usedFraction: 0.95, resetInMs: 5 * 24 * HOUR_MS },
+				}),
+			),
+		);
+		usageByAccount.set(
+			"acct-cool-kept",
+			createClaudeUsageReport({
+				accountId: "acct-cool-kept",
+				primary: { usedFraction: 0.1, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-banked-kept", 100);
+		expectExclusivePreference(counts, "api-acct-cool-kept", "api-acct-kept");
+	});
+	test("does not reprioritize an account whose banked reset has expired", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		configureClaudeResetBanking();
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-expired", "expired@example.com") },
+			{ type: "oauth", ...createCredential("acct-cool-expired", "cool@example.com") },
+		]);
+		const expired = addClaudeWeeklyReset(
+			createClaudeUsageReport({
+				accountId: "acct-expired",
+				primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.6, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		if (!expired.resetCredits?.credits?.[0]) throw new Error("expected reset credit fixture");
+		expired.resetCredits.credits[0].expiresAt = "2000-01-01T00:00:00.000Z";
+		usageByAccount.set("acct-expired", expired);
+		usageByAccount.set(
+			"acct-cool-expired",
+			createClaudeUsageReport({
+				accountId: "acct-cool-expired",
+				primary: { usedFraction: 0.1, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-banked-expired", 100);
+		expectExclusivePreference(counts, "api-acct-cool-expired", "api-acct-expired");
+	});
+	test("keeps a banked reset account ahead of a sibling inside the reserve", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		configureClaudeResetBanking(0, 10);
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-banked-reserve", "banked@example.com") },
+			{ type: "oauth", ...createCredential("acct-no-reset", "no-reset@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-banked-reserve",
+			addClaudeWeeklyReset(
+				createClaudeUsageReport({
+					accountId: "acct-banked-reserve",
+					primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+					secondary: { usedFraction: 0.95, resetInMs: 5 * 24 * HOUR_MS },
+				}),
+			),
+		);
+		usageByAccount.set(
+			"acct-no-reset",
+			createClaudeUsageReport({
+				accountId: "acct-no-reset",
+				primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-banked-reserve", 100);
+		expectExclusivePreference(counts, "api-acct-banked-reserve", "api-acct-no-reset");
+	});
+
+	test("keeps the hot-5h guard ahead of a banked weekly reset", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		configureClaudeResetBanking();
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-banked-hot", "banked@example.com") },
+			{ type: "oauth", ...createCredential("acct-cool-no-reset", "cool@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-banked-hot",
+			addClaudeWeeklyReset(
+				createClaudeUsageReport({
+					accountId: "acct-banked-hot",
+					primary: { usedFraction: 0.9, resetInMs: 3 * HOUR_MS },
+					secondary: { usedFraction: 0.5, resetInMs: 5 * 24 * HOUR_MS },
+				}),
+			),
+		);
+		usageByAccount.set(
+			"acct-cool-no-reset",
+			createClaudeUsageReport({
+				accountId: "acct-cool-no-reset",
+				primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		const counts = await countApiKeySelections(authStorage, "anthropic", "claude-banked-hot-guard", 100);
+		expectExclusivePreference(counts, "api-acct-cool-no-reset", "api-acct-banked-hot");
 	});
 });

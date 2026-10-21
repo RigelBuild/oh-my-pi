@@ -84,6 +84,7 @@ export async function handleTranscriptions(
 				resolvedKey => {
 					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
 				},
+				bootOpts.onUsageLimit,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,

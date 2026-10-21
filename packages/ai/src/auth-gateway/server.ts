@@ -379,6 +379,7 @@ async function prepareFormatAttempt(
 			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
 			lease.updateAccount(account);
 		},
+		bootOpts.onUsageLimit,
 	);
 	return { ok: true, streamOpts, lease, account: () => account };
 }
@@ -443,6 +444,7 @@ async function preparePiNativeAttempt(
 			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
 			lease.updateAccount(account);
 		},
+		bootOpts.onUsageLimit,
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;

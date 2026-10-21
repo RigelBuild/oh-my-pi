@@ -335,6 +335,7 @@ export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	accountPolicies?: AuthAccountPolicies;
+	claudeResetBanking?: { keepCredits: number };
 	/** Global reserve fallback for accounts without a matching reservePct policy. */
 	defaultReservePct?: number;
 	usageFetch?: typeof fetch;
@@ -1212,6 +1213,12 @@ export interface SessionsApi {
 
 /** Usage reporting, observation, and provider configuration. */
 export interface UsageApi {
+	/** Fetch one stored credential's cached or upstream usage report. */
+	report(
+		provider: Provider,
+		credential: AuthCredential,
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<UsageReport | null>;
 	/** Fetch aggregate usage reports for configured providers. */
 	reports(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
