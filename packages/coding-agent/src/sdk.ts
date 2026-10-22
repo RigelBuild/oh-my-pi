@@ -2655,7 +2655,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
-				mcpManager.startPeriodicToolRefresh(cfgMcpToolRefreshIntervalMs.get(settings));
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -2708,7 +2707,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					authStorage,
 				});
 				mcpManager = mcpResult.manager;
-				mcpManager.startPeriodicToolRefresh(cfgMcpToolRefreshIntervalMs.get(settings));
 				toolSession.mcpManager = mcpManager;
 
 				if (cfgMcpNotifications.get(settings)) {
@@ -5072,7 +5070,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return out;
 					}
 				: undefined,
-			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
+			disconnectOwnedMcpManager: ownedMcpManager
+				? () => {
+						ownedMcpManager.stopPeriodicToolRefresh();
+						return ownedMcpManager.disconnectAll();
+					}
+				: undefined,
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,
@@ -5099,6 +5102,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
+		// Armed only once the session owns the manager, so its dispose stops the timer.
+		ownedMcpManager?.startPeriodicToolRefresh(cfgMcpToolRefreshIntervalMs.get(settings));
 		credentialNoticeSession = session;
 		// Hashline snapshots are session-scoped: /new and switchSession fire the
 		// change callbacks, so clear the tool-side store there — stale tags would

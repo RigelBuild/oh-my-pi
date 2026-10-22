@@ -66,33 +66,65 @@ describe("MCPManager tool refresh scheduling", () => {
 		}
 	});
 
-	it("periodically refreshes tools and stops after disconnectAll", async () => {
+	it("keeps refreshing across a reload and stops only on stopPeriodicToolRefresh", async () => {
 		vi.useFakeTimers();
 		const manager = new MCPManager(process.cwd());
 		const listTools = vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
-		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(fakeConnection("alpha"));
+		vi.spyOn(mcpClient, "connectToServer").mockImplementation(async () => fakeConnection("alpha"));
 
-		const initialToolsLoaded = Promise.withResolvers<void>();
-		manager.setOnToolsChanged(() => initialToolsLoaded.resolve());
+		let toolsChanged = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(() => toolsChanged.resolve());
 		try {
 			await manager.connectServers({ alpha: CONFIG }, {}, undefined, 0);
-			await initialToolsLoaded.promise;
-			listTools.mockClear();
-			const refreshCompleted = Promise.withResolvers<void>();
-			manager.setOnToolsChanged(() => refreshCompleted.resolve());
-			const refreshAllTools = vi.spyOn(manager, "refreshAllTools");
+			await toolsChanged.promise;
 			manager.startPeriodicToolRefresh(25);
+			listTools.mockClear();
 
+			toolsChanged = Promise.withResolvers<void>();
 			vi.advanceTimersByTime(24);
 			expect(listTools).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(1);
 			expect(listTools).toHaveBeenCalledTimes(1);
-			await refreshCompleted.promise;
+			await toolsChanged.promise;
 
+			// `/mcp reload` is disconnectAll + reconnect on the same manager.
 			await manager.disconnectAll();
-			refreshAllTools.mockClear();
+			toolsChanged = Promise.withResolvers<void>();
+			await manager.connectServers({ alpha: CONFIG }, {}, undefined, 0);
+			await toolsChanged.promise;
+			listTools.mockClear();
+			toolsChanged = Promise.withResolvers<void>();
+			vi.advanceTimersByTime(25);
+			expect(listTools).toHaveBeenCalledTimes(1);
+			await toolsChanged.promise;
+
+			manager.stopPeriodicToolRefresh();
+			listTools.mockClear();
 			vi.advanceTimersByTime(100);
-			expect(refreshAllTools).not.toHaveBeenCalled();
+			expect(listTools).not.toHaveBeenCalled();
+		} finally {
+			manager.stopPeriodicToolRefresh();
+			await manager.disconnectAll();
+		}
+	});
+
+	it("keeps a server's tools when a refresh fails", async () => {
+		const manager = new MCPManager(process.cwd());
+		const listTools = vi
+			.spyOn(mcpClient, "listTools")
+			.mockResolvedValue([{ name: "get_issue", inputSchema: { type: "object" } }]);
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(fakeConnection("alpha"));
+		const loaded = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(() => loaded.resolve());
+		try {
+			await manager.connectServers({ alpha: CONFIG }, {}, undefined, 0);
+			await loaded.promise;
+			const before = manager.getTools().map(tool => tool.name);
+			expect(before).toHaveLength(1);
+
+			listTools.mockRejectedValueOnce(new Error("Temporary failure in name resolution"));
+			await manager.refreshAllTools();
+			expect(manager.getTools().map(tool => tool.name)).toEqual(before);
 		} finally {
 			await manager.disconnectAll();
 		}

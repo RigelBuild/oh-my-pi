@@ -1407,8 +1407,6 @@ export class MCPManager {
 	 * Disconnect from all servers.
 	 */
 	async disconnectAll(): Promise<void> {
-		clearInterval(this.#periodicToolRefresh);
-		this.#periodicToolRefresh = undefined;
 		// Invalidate any in-flight reconnection attempts that outlive this call.
 		// They captured the old epoch; after increment they'll detect staleness.
 		// A scheduled retry that fired during the teardown below would sample
@@ -1832,10 +1830,13 @@ export class MCPManager {
 		await Promise.allSettled(promises);
 	}
 
-	/** Start or replace periodic tool-list refreshes. A non-positive interval disables the timer. */
+	/**
+	 * Start or replace periodic tool-list refreshes. A non-positive interval disables the timer.
+	 * `disconnectAll` keeps it running, so a `/mcp reload` stays covered; the owner calls
+	 * {@link stopPeriodicToolRefresh} on dispose.
+	 */
 	startPeriodicToolRefresh(intervalMs: number): void {
-		clearInterval(this.#periodicToolRefresh);
-		this.#periodicToolRefresh = undefined;
+		this.stopPeriodicToolRefresh();
 		if (!(intervalMs > 0)) return;
 
 		this.#periodicToolRefresh = setInterval(() => {
@@ -1844,6 +1845,12 @@ export class MCPManager {
 			});
 		}, intervalMs);
 		this.#periodicToolRefresh.unref();
+	}
+
+	/** Stop periodic tool-list refreshes. */
+	stopPeriodicToolRefresh(): void {
+		clearInterval(this.#periodicToolRefresh);
+		this.#periodicToolRefresh = undefined;
 	}
 
 	/** Request a best-effort refresh, limited to one request per 30 seconds. */
