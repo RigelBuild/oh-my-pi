@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added periodic MCP tool-list refreshes, configurable with `mcp.toolRefreshIntervalMs` (default 10 minutes; 0 disables), plus throttled refresh requests when an `mcp__` tool name is missing.
 - `auth-gateway serve` redeems a banked Claude reset without a prompt when `claudeResets.autoRedeem` is `yes` and an account's weekly (`anthropic:7d`) limit is exhausted, on a usage-limit 429 or a 5-minute sweep, and then retries the request on the same account.
 
 ## [18.9.2-rigel.2] - 2026-10-18

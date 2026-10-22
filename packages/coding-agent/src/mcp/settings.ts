@@ -30,6 +30,18 @@ export const cfgMcpStartupTimeoutMs = register({
 	},
 });
 
+export const cfgMcpToolRefreshIntervalMs = register({
+	id: "mcp.toolRefreshIntervalMs",
+	type: "number",
+	default: 600_000,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "MCP Tool Refresh Interval",
+		description: "Refresh MCP tool lists periodically to recover from partial server listings; 0 disables refreshing",
+	},
+});
+
 export const cfgMcpRenderMarkdownResults = register({
 	id: "mcp.renderMarkdownResults",
 	type: "boolean",

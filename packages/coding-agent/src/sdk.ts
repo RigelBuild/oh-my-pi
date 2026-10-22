@@ -394,6 +394,7 @@ import {
 	cfgMcpNotificationDebounceMs,
 	cfgMcpNotifications,
 	cfgMcpStartupTimeoutMs,
+	cfgMcpToolRefreshIntervalMs,
 } from "./mcp/settings";
 import { cfgPlanEnabled } from "./plan-mode/settings";
 import { cfgSecretsEnabled } from "./secrets/settings";
@@ -2654,6 +2655,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				mcpManager.startPeriodicToolRefresh(cfgMcpToolRefreshIntervalMs.get(settings));
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -2706,6 +2708,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					authStorage,
 				});
 				mcpManager = mcpResult.manager;
+				mcpManager.startPeriodicToolRefresh(cfgMcpToolRefreshIntervalMs.get(settings));
 				toolSession.mcpManager = mcpManager;
 
 				if (cfgMcpNotifications.get(settings)) {
@@ -4826,7 +4829,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Recovery only fires on turns without tool calls and appends a new one,
 			// so streamed calls (and their speculation sessions) are never rewritten.
 			transformAssistantMessagePreservesToolCalls: true,
-			resolveFallbackTool: resolveDeviceTool,
+			resolveFallbackTool: (name, advertised) => {
+				const deviceTool = resolveDeviceTool(name, advertised);
+				// A missed mcp__ name usually means this session's server list is stale.
+				if (!deviceTool && name.startsWith("mcp__")) mcpManager?.requestToolRefresh();
+				return deviceTool;
+			},
 			suggestFallbackToolNames: suggestDeviceToolNames,
 			intentTracing: cfgToolsIntentTracing.get(settings),
 			pruneToolDescriptions: resolveInlineToolDescriptors(),
