@@ -4830,7 +4830,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			resolveFallbackTool: (name, advertised) => {
 				const deviceTool = resolveDeviceTool(name, advertised);
 				// A missed mcp__ name usually means this session's server list is stale.
-				if (!deviceTool && name.startsWith("mcp__")) mcpManager?.requestToolRefresh();
+				if (!deviceTool && stripXdUrlPrefix(name).startsWith("mcp__")) mcpManager?.requestToolRefresh();
 				return deviceTool;
 			},
 			suggestFallbackToolNames: suggestDeviceToolNames,

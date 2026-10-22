@@ -4,7 +4,7 @@
 
 ### Added
 
-- MCP tool lists re-list every `mcp.toolRefreshIntervalMs` (default 10 minutes; 0 disables), including after `/mcp reload`. A call to a missing `mcp__` tool, top-level or via `xd://`, requests a re-list, throttled to one per 30 seconds. This recovers a session whose list came back partial during a server-side upstream outage.
+- MCP tool lists re-list every `mcp.toolRefreshIntervalMs` (default 10 minutes; 0 disables), including after `/mcp reload`. A call to a missing `mcp__` tool, top-level or via `xd://`, requests a re-list, throttled to one per 30 seconds. This recovers a session whose list came back partial during a server-side upstream outage. ACP sessions, whose MCP servers the client supplies, are not covered.
 - `auth-gateway serve` redeems a banked Claude reset without a prompt when `claudeResets.autoRedeem` is `yes` and an account's weekly (`anthropic:7d`) limit is exhausted, on a usage-limit 429 or a 5-minute sweep, and then retries the request on the same account.
 
 ## [18.9.2-rigel.2] - 2026-10-18
