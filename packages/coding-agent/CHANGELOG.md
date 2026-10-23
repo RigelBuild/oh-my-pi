@@ -10,6 +10,7 @@
 ### Fixed
 
 - `omp auth-broker migrate --from-local` uploads every distinct API key for a provider, skipping only keys the broker already holds, so several Anthropic Console keys can be pooled.
+- Agent definitions with `tools: "*"` or a wildcard in a tool list now retain unrestricted tool access instead of parsing `*` as a literal tool.
 
 ## [18.9.2-rigel.2] - 2026-10-18
 

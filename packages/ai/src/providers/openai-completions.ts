@@ -1728,13 +1728,14 @@ const streamOpenAICompletionsOnce = (
 				output.stopReason = "toolUse";
 			}
 
-			if (
-				policy.stream.emptyLengthFinishIsContextError &&
-				output.stopReason === "length" &&
-				!hasVisibleAssistantContent(output)
-			) {
-				output.stopReason = "error";
-				output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;
+			if (output.stopReason === "length" && !hasVisibleAssistantContent(output)) {
+				if (policy.stream.emptyLengthFinishIsContextError) {
+					output.stopReason = "error";
+					output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;
+				} else if (sawUsagePayload && output.usage.output === 0) {
+					output.stopReason = "error";
+					output.errorMessage = ZERO_TOKEN_LENGTH_FINISH_MESSAGE;
+				}
 			}
 			const localAbortReason = abortTracker.getLocalAbortReason();
 			if (localAbortReason) {
@@ -2879,6 +2880,9 @@ function convertTools(
 
 const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
 	"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.";
+
+const ZERO_TOKEN_LENGTH_FINISH_MESSAGE =
+	'Provider ended the response with finish_reason "length" before producing any output tokens; the request was likely rejected (often an oversized tool list or prompt).';
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;

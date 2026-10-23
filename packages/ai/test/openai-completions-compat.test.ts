@@ -1128,6 +1128,66 @@ describe("openai-completions compatibility", () => {
 		expect(result.usage.input).toBe(8191);
 		expect(result.usage.output).toBe(1);
 	});
+	it("surfaces empty zero-token length finishes as provider rejections", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "custom" as Model["provider"],
+			baseUrl: "https://gateway.example/v1",
+		} as ModelSpec<"openai-completions">);
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-zero-token-length",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+				usage: { prompt_tokens: 100, completion_tokens: 0, total_tokens: 100 },
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe(
+			'Provider ended the response with finish_reason "length" before producing any output tokens; the request was likely rejected (often an oversized tool list or prompt).',
+		);
+		expect(result.usage.output).toBe(0);
+	});
+
+	it("keeps length finishes when there is visible content or output usage", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "custom" as Model["provider"],
+			baseUrl: "https://gateway.example/v1",
+		} as ModelSpec<"openai-completions">);
+		for (const [content, completionTokens] of [
+			["partial", 0],
+			["", 1],
+		] as const) {
+			const fetchMock = createMockFetch([
+				{
+					id: "chatcmpl-length-with-output",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: model.id,
+					choices: [{ index: 0, delta: { content }, finish_reason: "length" }],
+					usage: { prompt_tokens: 100, completion_tokens: completionTokens, total_tokens: 100 + completionTokens },
+				},
+				"[DONE]",
+			]);
+			const result = await streamOpenAICompletions(model, baseContext(), {
+				apiKey: "test-key",
+				fetch: fetchMock,
+			}).result();
+			expect(result.stopReason).toBe("length");
+		}
+	});
 	it("preserves empty non-Ollama length completions for recovery", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,
