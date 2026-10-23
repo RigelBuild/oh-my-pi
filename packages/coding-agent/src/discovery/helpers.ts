@@ -330,7 +330,10 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 
 	let tools =
 		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);
-	if (tools) tools = normalizeToolNames(tools);
+	if (tools) {
+		tools = normalizeToolNames(tools);
+		if (tools.includes("*")) tools = undefined;
+	}
 
 	// Subagents with explicit tool lists always need yield
 	if (tools && !tools.includes("yield")) {

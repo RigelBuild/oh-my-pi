@@ -89,6 +89,16 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
 	});
 
+	test("treats wildcard tool declarations as unrestricted", () => {
+		expect(parseAgentFields({ name: "scout", description: "desc", tools: "*" })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "scout", description: "desc", tools: ["*"] })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "scout", description: "desc", tools: "read, *" })?.tools).toBeUndefined();
+	});
+
+	test("infers spawns from task in a real tool list", () => {
+		expect(parseAgentFields({ name: "scout", description: "desc", tools: ["task", "read"] })?.spawns).toBe("*");
+	});
+
 	test("maps legacy search alias to grep and keeps find canonical", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
