@@ -1732,7 +1732,8 @@ const streamOpenAICompletionsOnce = (
 				if (policy.stream.emptyLengthFinishIsContextError) {
 					output.stopReason = "error";
 					output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;
-				} else if (sawUsagePayload && output.usage.output === 0) {
+				} else if (sawUsagePayload && output.usage.output === 0 && isFarBelowContextWindow(output.usage, model)) {
+					// A full window also ends empty on `length`; leave that to compaction recovery.
 					output.stopReason = "error";
 					output.errorMessage = ZERO_TOKEN_LENGTH_FINISH_MESSAGE;
 				}
@@ -2883,6 +2884,13 @@ const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
 
 const ZERO_TOKEN_LENGTH_FINISH_MESSAGE =
 	'Provider ended the response with finish_reason "length" before producing any output tokens; the request was likely rejected (often an oversized tool list or prompt).';
+
+/** True when reported input used under half of a known context window, so the window cannot explain an empty `length`. */
+function isFarBelowContextWindow(usage: AssistantMessage["usage"], model: Model<"openai-completions">): boolean {
+	const window = model.contextWindow;
+	if (window == null || window <= 0) return false;
+	return usage.input + usage.cacheRead + usage.cacheWrite < window / 2;
+}
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;

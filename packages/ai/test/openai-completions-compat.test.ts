@@ -1159,16 +1159,19 @@ describe("openai-completions compatibility", () => {
 		expect(result.usage.output).toBe(0);
 	});
 
-	it("keeps length finishes when there is visible content or output usage", async () => {
+	it("keeps length finishes when there is visible content, output usage, or a near-full window", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,
 			api: "openai-completions",
 			provider: "custom" as Model["provider"],
 			baseUrl: "https://gateway.example/v1",
 		} as ModelSpec<"openai-completions">);
-		for (const [content, completionTokens] of [
-			["partial", 0],
-			["", 1],
+		const fullWindowPrompt = (model.contextWindow ?? 0) - 1;
+		for (const [content, promptTokens, completionTokens] of [
+			["partial", 100, 0],
+			["", 100, 1],
+			// A prompt that fills the window ends empty too; compaction recovery owns that case.
+			["", fullWindowPrompt, 0],
 		] as const) {
 			const fetchMock = createMockFetch([
 				{
@@ -1177,7 +1180,11 @@ describe("openai-completions compatibility", () => {
 					created: 0,
 					model: model.id,
 					choices: [{ index: 0, delta: { content }, finish_reason: "length" }],
-					usage: { prompt_tokens: 100, completion_tokens: completionTokens, total_tokens: 100 + completionTokens },
+					usage: {
+						prompt_tokens: promptTokens,
+						completion_tokens: completionTokens,
+						total_tokens: promptTokens + completionTokens,
+					},
 				},
 				"[DONE]",
 			]);
