@@ -75,6 +75,8 @@ export type TryOAuthOptions = {
 	blockScopes?: readonly string[];
 	/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 	allowFallback?: boolean;
+	/** When false, re-resolution after a definitive failure also skips blocked-candidate passes. */
+	allowBlockedFallback?: boolean;
 	/** Receives a non-definitive refresh failure that left this credential unusable; the caller filters for retryable ones. */
 	onTransientRefreshFailure?: (error: unknown) => void;
 };
@@ -392,6 +394,45 @@ export class CredentialSelector {
 		return candidates[0]?.selection ?? fallback;
 	}
 
+	/** True when a matching API key is unblocked under this request's block scopes. */
+	async hasUnblockedApiKey(
+		provider: string,
+		options: AuthApiKeyOptions | undefined,
+		filter?: (credential: ApiKeyCredential) => boolean,
+	): Promise<boolean> {
+		await this.#deps.pool.adoptExternalChanges();
+		const providerKey = providerTypeKey(provider, "api_key");
+		const { strategy, blockScopes } = this.requestBlockRouting(provider, options?.modelId);
+		const scopes = strategy ? blockScopes : undefined;
+		return this.#deps.pool
+			.credentials(provider)
+			.some(
+				(credential, index) =>
+					credential.type === "api_key" &&
+					(filter?.(credential) ?? true) &&
+					!this.#deps.blocks.isBlocked(provider, providerKey, index, scopes),
+			);
+	}
+
+	/** {@link hasUnblockedApiKey} for dry runs: no store adoption or block pruning. */
+	hasUnblockedApiKeyPeek(
+		provider: string,
+		modelId: string | undefined,
+		filter?: (credential: ApiKeyCredential) => boolean,
+	): boolean {
+		const providerKey = providerTypeKey(provider, "api_key");
+		const { strategy, blockScopes } = this.requestBlockRouting(provider, modelId);
+		const scopes = strategy ? blockScopes : undefined;
+		return this.#deps.pool
+			.credentials(provider)
+			.some(
+				(credential, index) =>
+					credential.type === "api_key" &&
+					(filter?.(credential) ?? true) &&
+					!this.#deps.blocks.isBlockedPeek(provider, providerKey, index, scopes),
+			);
+	}
+
 	async #rankOAuthSelections(args: {
 		providerKey: string;
 		provider: string;
@@ -583,6 +624,9 @@ export class CredentialSelector {
 	 *    skip it and try every account once; the server is the final arbiter
 	 *    of model access.
 	 *
+	 * `allowBlockedFallback: false` drops passes 2 and 3, for callers that hold
+	 * another unblocked credential to serve instead.
+	 *
 	 * Returns both the API key bytes for outbound requests AND the refreshed
 	 * {@link OAuthCredential} so callers needing identity metadata (account id,
 	 * project id, etc.) do not have to dereference the snapshot themselves.
@@ -591,6 +635,7 @@ export class CredentialSelector {
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
+		resolutionOptions?: { allowBlockedFallback?: boolean },
 	): Promise<OAuthResolutionResult | undefined> {
 		await this.#deps.pool.adoptExternalChanges();
 		const stored = this.#deps.pool
@@ -956,12 +1001,19 @@ export class CredentialSelector {
 			allowBlocked: boolean;
 			enforcePlanRequirement: boolean;
 			enforceAccounts: boolean;
-		}> = [
-			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
-			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
-		];
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		}> = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
+		if (resolutionOptions?.allowBlockedFallback !== false) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
+			if (enforcePlanRequirement)
+				passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+			if (enforceAccounts)
+				passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		} else {
+			if (enforcePlanRequirement)
+				passes.push({ allowBlocked: false, enforcePlanRequirement: false, enforceAccounts });
+			if (enforceAccounts)
+				passes.push({ allowBlocked: false, enforcePlanRequirement: false, enforceAccounts: false });
+		}
 		// Blocked candidates rank earliest-unblock first, which would route a
 		// blocked explicit pin to an equally blocked sibling. Once the strict
 		// pass finds no unblocked account, the user's pin goes first.
@@ -987,6 +1039,7 @@ export class CredentialSelector {
 					blockScope,
 					blockScopes,
 					onTransientRefreshFailure: recordTransientRefreshFailure,
+					allowBlockedFallback: resolutionOptions?.allowBlockedFallback,
 				});
 				if (resolved) return resolved;
 			}
@@ -1217,12 +1270,18 @@ export class CredentialSelector {
 					errorMsg,
 				);
 				if (outcome === "peer-rotated") {
-					if (allowFallback) return this.resolveOAuth(provider, sessionId, options);
+					if (allowFallback)
+						return this.resolveOAuth(provider, sessionId, options, {
+							allowBlockedFallback: usageOptions.allowBlockedFallback,
+						});
 					return undefined;
 				}
 				if (outcome === "cas-lost") return undefined;
 				if (this.#deps.pool.credentials(provider).some(credential => credential.type === "oauth")) {
-					if (allowFallback) return this.resolveOAuth(provider, sessionId, options);
+					if (allowFallback)
+						return this.resolveOAuth(provider, sessionId, options, {
+							allowBlockedFallback: usageOptions.allowBlockedFallback,
+						});
 				}
 			} else {
 				usageOptions.onTransientRefreshFailure?.(error);

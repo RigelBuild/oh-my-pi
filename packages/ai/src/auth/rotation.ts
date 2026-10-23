@@ -213,6 +213,16 @@ export class RateLimits implements LimitsApi {
 				};
 			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
 		}
+		if (credentialType === "oauth" && this.#hasUnblockedStoredApiKey(provider, sessionId, routing)) {
+			// The cascade serves a stored key once every OAuth login is blocked, so this request can rotate now.
+			return {
+				switched: true,
+				switchedToApiKey: true,
+				blockedUntilMs: mergedBlockedUntil,
+				priorBlockedUntilMs,
+				priorBlockedUntilTimed,
+			};
+		}
 		return {
 			switched: false,
 			retryAtMs,
@@ -220,6 +230,25 @@ export class RateLimits implements LimitsApi {
 			priorBlockedUntilMs,
 			priorBlockedUntilTimed,
 		};
+	}
+
+	/** Mirrors `CredentialSelector.hasUnblockedApiKey` with the cascade's non-login filter. */
+	#hasUnblockedStoredApiKey(
+		provider: string,
+		sessionId: string | undefined,
+		routing: CredentialBlockRouting,
+	): boolean {
+		const providerKey = providerTypeKey(provider, "api_key");
+		const scopes = routing.strategy ? routing.siblingBlockScopes : undefined;
+		return this.#deps.pool
+			.credentials(provider)
+			.some(
+				(credential, index) =>
+					credential.type === "api_key" &&
+					credential.source !== "login" &&
+					this.#deps.affinity.allows(provider, sessionId, credential) &&
+					!this.#deps.blocks.isBlocked(provider, providerKey, index, scopes),
+			);
 	}
 
 	/**

@@ -327,6 +327,7 @@ type RetryPolicyOptions = {
 
 type UsageLimitOutcome = {
 	switchedCredential: boolean;
+	switchedToApiKey: boolean;
 	retryAfterMs: number;
 	retryAtMs: number | undefined;
 	blockedUntilMs: number | undefined;
@@ -796,6 +797,7 @@ export class TurnRecovery {
 				);
 				return {
 					switchedCredential: outcome.switched,
+					switchedToApiKey: outcome.switchedToApiKey === true,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
 					blockedUntilMs: outcome.blockedUntilMs,
@@ -2570,7 +2572,9 @@ export class TurnRecovery {
 		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
 			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
 			let restored = false;
-			if (!rotated) {
+			// A banked free reset beats spending prepaid Console credit.
+			const tryRedeem = !rotated || recordedUsageLimitOutcome.switchedToApiKey;
+			if (tryRedeem) {
 				const resetAbortController = new AbortController();
 				this.#retryAbortController?.abort();
 				this.#retryAbortController = resetAbortController;
@@ -2584,7 +2588,8 @@ export class TurnRecovery {
 							restored = true;
 							break;
 						}
-						if (result.retryAfterMs === undefined || attempt >= maxRetries) break;
+						// With a usable stored key, one redeem attempt; never wait on pacing.
+						if (rotated || result.retryAfterMs === undefined || attempt >= maxRetries) break;
 						// Only retry the safe eligibility read, never the reset mutation or
 						// model request. Respect provider pacing within the configured wait cap.
 						const readDelayMs = Math.max(

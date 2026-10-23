@@ -12,7 +12,7 @@ import { markAfterSiblingWait, type ApiKeyResolver, type ResolvedApiKey } from "
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
-import { isUsageLimitOutcome } from "../error/rate-limit";
+import { calculateRateLimitBackoffMs, isAnthropicCreditBalanceTooLow, isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { extractProviderRetryHint } from "../utils/retry-after";
@@ -272,10 +272,14 @@ async function refreshGatewayApiKeyAfterAuthError(
 				});
 			}
 		}
-		const retryAfterMs = extractProviderRetryHint(provider, message);
+		const hintMs = extractProviderRetryHint(provider, message);
+		// A drained prepaid balance has no reset; don't re-probe the paid key every minute.
+		const retryAfterMs =
+			hintMs ??
+			(isAnthropicCreditBalanceTooLow(message) ? calculateRateLimitBackoffMs("QUOTA_EXHAUSTED") : undefined);
 		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
-			providerTimed: retryAfterMs !== undefined,
+			providerTimed: hintMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,

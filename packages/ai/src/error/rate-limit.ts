@@ -24,6 +24,13 @@ const SERVER_ERROR_BACKOFF_MS = 20 * 1000; // 20s
 const ACCOUNT_RATE_LIMIT_PATTERN =
 	/\baccount(?:'s)?\b[^\n]{0,80}\brate.?limit\b|\brate.?limit\b[^\n]{0,80}\baccount\b/i;
 const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
+// Keep this exact phrase bounded so unrelated low-balance errors do not rotate credentials.
+const ANTHROPIC_CREDIT_BALANCE_TOO_LOW_PATTERN = /\bcredit balance is too low\b/i;
+
+/** Anthropic prepaid Console credit exhausted: refills only by purchase, so no reset time exists. */
+export function isAnthropicCreditBalanceTooLow(errorMessage: string): boolean {
+	return ANTHROPIC_CREDIT_BALANCE_TOO_LOW_PATTERN.test(errorMessage);
+}
 // Prepaid-credit exhaustion phrased around the credit balance rather than a
 // quota: Anthropic "This request would exceed your available credits given
 // your current in-flight requests" (402), OpenRouter "Insufficient credits",
@@ -267,6 +274,9 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 	if (ANTHROPIC_CREDITS_REQUIRED_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
 	}
+	if (ANTHROPIC_CREDIT_BALANCE_TOO_LOW_PATTERN.test(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
 
 	if (PREPAID_BALANCE_EXHAUSTED_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
@@ -447,6 +457,7 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 		USAGE_LIMIT_PATTERN.test(errorMessage) ||
 		ANTHROPIC_CREDITS_REQUIRED_PATTERN.test(errorMessage) ||
 		PREPAID_BALANCE_EXHAUSTED_PATTERN.test(errorMessage) ||
+		ANTHROPIC_CREDIT_BALANCE_TOO_LOW_PATTERN.test(errorMessage) ||
 		CREDITS_EXHAUSTED_PATTERN.test(errorMessage) ||
 		(CN_QUOTA_EXHAUSTED_PATTERN.test(errorMessage) && !CN_TRANSIENT_CAP_PATTERN.test(errorMessage)) ||
 		SPEND_LIMIT_PATTERN.test(errorMessage) ||

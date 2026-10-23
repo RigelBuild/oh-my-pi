@@ -646,6 +646,24 @@ describe("isUsageLimitOutcome", () => {
 		).toBe(true);
 	});
 
+	it("rotates on Anthropic prepaid-credit exhaustion from an HTTP 400", () => {
+		const message =
+			'400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}';
+		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
+		expect(matchesUsageLimitText(message)).toBe(true);
+		expect(isUsageLimit(new ProviderHttpError(message, 400))).toBe(true);
+		expect(isUsageLimitOutcome(400, message)).toBe(true);
+		const classified = classify(new ProviderHttpError(message, 400));
+		expect(is(classified, Flag.UsageLimit)).toBe(true);
+		expect(is(classified, Flag.AuthFailed)).toBe(false);
+		expect(is(classify(message), Flag.AuthFailed)).toBe(false);
+
+		const unrelated = "400 invalid_request_error: messages: field required";
+		expect(parseRateLimitReason(unrelated)).not.toBe("QUOTA_EXHAUSTED");
+		expect(matchesUsageLimitText(unrelated)).toBe(false);
+		expect(isUsageLimitOutcome(400, unrelated)).toBe(false);
+	});
+
 	it("rotates only account-scoped cap 403s and statusless trailers", () => {
 		const devinTrailer =
 			"Devin stream error permission_denied: Reached overall message rate limit. Please try again later. Your limit will reset in 13 minutes.";
