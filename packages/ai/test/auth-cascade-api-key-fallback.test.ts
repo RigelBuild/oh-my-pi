@@ -86,6 +86,23 @@ describe("OAuth fallback to stored API keys", () => {
 		expect(await storage.keys.get(PROVIDER, "session")).toBe("access-available");
 	});
 
+	test("tries unblocked OAuth outside preferred accounts before spending a stored API key", async () => {
+		if (!store || !storage) throw new Error("test setup failed");
+		await storage.credentials.set(PROVIDER, [
+			oauthCredential("preferred"),
+			oauthCredential("available"),
+			{ type: "api_key", key: "stored-key" },
+		]);
+		const preferred = store
+			.listAuthCredentials(PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "account-preferred");
+		if (!preferred) throw new Error("preferred credential missing");
+		await block(`${PROVIDER}:oauth`, [preferred.id]);
+		expect(await storage.keys.get(PROVIDER, "session", { accountIds: ["account-preferred"] })).toBe(
+			"access-available",
+		);
+	});
+
 	test("returns blocked OAuth as a last resort when no stored API key exists", async () => {
 		if (!store || !storage) throw new Error("test setup failed");
 		await storage.credentials.set(PROVIDER, [oauthCredential("blocked")]);

@@ -1008,6 +1008,11 @@ export class CredentialSelector {
 				passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
 			if (enforceAccounts)
 				passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		} else {
+			if (enforcePlanRequirement)
+				passes.push({ allowBlocked: false, enforcePlanRequirement: false, enforceAccounts });
+			if (enforceAccounts)
+				passes.push({ allowBlocked: false, enforcePlanRequirement: false, enforceAccounts: false });
 		}
 		// Blocked candidates rank earliest-unblock first, which would route a
 		// blocked explicit pin to an equally blocked sibling. Once the strict
