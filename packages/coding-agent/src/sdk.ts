@@ -394,6 +394,7 @@ import {
 	cfgMcpNotificationDebounceMs,
 	cfgMcpNotifications,
 	cfgMcpStartupTimeoutMs,
+	cfgMcpToolRefreshIntervalMs,
 } from "./mcp/settings";
 import { cfgPlanEnabled } from "./plan-mode/settings";
 import { cfgSecretsEnabled } from "./secrets/settings";
@@ -4826,7 +4827,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Recovery only fires on turns without tool calls and appends a new one,
 			// so streamed calls (and their speculation sessions) are never rewritten.
 			transformAssistantMessagePreservesToolCalls: true,
-			resolveFallbackTool: resolveDeviceTool,
+			resolveFallbackTool: (name, advertised) => {
+				const deviceTool = resolveDeviceTool(name, advertised);
+				// A missed mcp__ name usually means this session's server list is stale.
+				if (!deviceTool && stripXdUrlPrefix(name).startsWith("mcp__")) mcpManager?.requestToolRefresh();
+				return deviceTool;
+			},
 			suggestFallbackToolNames: suggestDeviceToolNames,
 			intentTracing: cfgToolsIntentTracing.get(settings),
 			pruneToolDescriptions: resolveInlineToolDescriptors(),
@@ -5064,7 +5070,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return out;
 					}
 				: undefined,
-			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
+			disconnectOwnedMcpManager: ownedMcpManager
+				? () => {
+						ownedMcpManager.stopPeriodicToolRefresh();
+						return ownedMcpManager.disconnectAll();
+					}
+				: undefined,
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,
@@ -5091,6 +5102,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
+		// Armed only once the session owns the manager, so its dispose stops the timer.
+		ownedMcpManager?.startPeriodicToolRefresh(cfgMcpToolRefreshIntervalMs.get(settings));
 		credentialNoticeSession = session;
 		// Hashline snapshots are session-scoped: /new and switchSession fire the
 		// change callbacks, so clear the tool-side store there — stale tags would

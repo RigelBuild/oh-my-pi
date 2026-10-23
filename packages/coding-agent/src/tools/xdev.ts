@@ -237,6 +237,8 @@ export interface XdevState {
 	readonly resolve?: (name: string) => Tool | undefined;
 	/** Optional execution-only decorator, such as the ACP permission gate. */
 	decorateExecution?(tool: Tool): Tool;
+	/** Called when a device name does not resolve. */
+	onMiss?(name: string): void;
 }
 
 /** Full-doc character budget for system-prompt mounted-device sections. */
@@ -416,6 +418,7 @@ function shouldInlineXdevTool(
 function resolveRequiredXdevTool(state: XdevState, name: string): Tool {
 	const inst = resolveXdevTool(state, name);
 	if (!inst) {
+		state.onMiss?.(name);
 		throw new ToolError(
 			`No such tool: ${XD_URL_PREFIX}${name}. Mounted devices: ${[...state.mountedNames].join(", ")}. Active top-level tools are also dispatchable via ${XD_URL_PREFIX}<tool>.`,
 		);

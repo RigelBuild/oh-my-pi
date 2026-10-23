@@ -110,6 +110,7 @@ function createMcpStartupFailure(serverName: string, error: string, source?: Sou
  */
 const RECONNECT_BURST_WINDOW_MS = 30_000;
 const RECONNECT_BURST_LIMIT = 5;
+const TOOL_REFRESH_REQUEST_WINDOW_MS = 30_000;
 
 /**
  * How {@link MCPManager} paces reconnects after a transport is lost.
@@ -350,12 +351,17 @@ export class MCPManager {
 	 * attempt is pending.
 	 */
 	#lostRemoteServers = new Map<string, { timer: NodeJS.Timeout | undefined; delayMs: number }>();
+	/** Timer that periodically refreshes connected servers' tool lists. */
+	#periodicToolRefresh: NodeJS.Timeout | undefined;
+	/** Timestamp of the last on-demand refresh request. */
+	#lastToolRefreshRequestAt: number | undefined;
 
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
 		private loadConfigs: MCPConfigLoader = loadAllMCPConfigs,
 		private reconnectPolicy: MCPReconnectPolicy = DEFAULT_RECONNECT_POLICY,
+		private readonly now: () => number = Date.now,
 	) {}
 
 	/**
@@ -1812,11 +1818,54 @@ export class MCPManager {
 	}
 
 	/**
-	 * Refresh tools from all servers.
+	 * Refresh tools from all servers. Individual failures are logged and do not
+	 * prevent other connected servers from refreshing.
 	 */
 	async refreshAllTools(): Promise<void> {
-		const promises = Array.from(this.#connections.keys()).map(name => this.refreshServerTools(name));
+		const promises = Array.from(this.#connections.keys(), name =>
+			this.refreshServerTools(name).catch(error => {
+				logger.debug("MCP tool refresh failed", { path: `mcp:${name}`, error });
+			}),
+		);
 		await Promise.allSettled(promises);
+	}
+
+	/**
+	 * Start or replace periodic tool-list refreshes. A non-positive interval disables the timer.
+	 * `disconnectAll` keeps it running, so a `/mcp reload` stays covered; the owner calls
+	 * {@link stopPeriodicToolRefresh} on dispose.
+	 */
+	startPeriodicToolRefresh(intervalMs: number): void {
+		this.stopPeriodicToolRefresh();
+		if (!(intervalMs > 0)) return;
+
+		this.#periodicToolRefresh = setInterval(() => {
+			void this.refreshAllTools().catch(error => {
+				logger.debug("Periodic MCP tool refresh failed", { error });
+			});
+		}, intervalMs);
+		this.#periodicToolRefresh.unref();
+	}
+
+	/** Stop periodic tool-list refreshes. */
+	stopPeriodicToolRefresh(): void {
+		clearInterval(this.#periodicToolRefresh);
+		this.#periodicToolRefresh = undefined;
+	}
+
+	/** Request a best-effort refresh, limited to one request per 30 seconds. */
+	requestToolRefresh(): void {
+		const now = this.now();
+		if (
+			this.#lastToolRefreshRequestAt !== undefined &&
+			now < this.#lastToolRefreshRequestAt + TOOL_REFRESH_REQUEST_WINDOW_MS
+		) {
+			return;
+		}
+		this.#lastToolRefreshRequestAt = now;
+		void this.refreshAllTools().catch(error => {
+			logger.debug("Requested MCP tool refresh failed", { error });
+		});
 	}
 
 	/**

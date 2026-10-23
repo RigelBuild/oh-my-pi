@@ -819,6 +819,10 @@ export function createXdevState(
 		// Card rendering reads the same predicate as execution: mounted devices
 		// plus active top-level tools, which the `write` transport also accepts.
 		resolve: name => resolveXdevTool(state, name),
+		// A missed mcp__ device usually means this session's MCP tool list is stale.
+		onMiss: name => {
+			if (name.startsWith("mcp__")) session.mcpManager?.requestToolRefresh();
+		},
 	};
 	return state;
 }

@@ -756,6 +756,33 @@ describe("xd:// and top-level calls share the canonical tool map", () => {
 		}
 	});
 
+	it("requests an MCP tool refresh when an mcp__ device misses", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-mcp-miss-"));
+		try {
+			let refreshRequests = 0;
+			const session = xdevSession(tempDir);
+			session.mcpManager = { requestToolRefresh: () => refreshRequests++ } as unknown as ToolSession["mcpManager"];
+			const tools = await createTools(session);
+			const write = tools.find(entry => entry.name === "write")!;
+			const read = tools.find(entry => entry.name === "read")!;
+
+			await write.execute("write-xdev-other-miss", { path: "xd://no_such_tool", content: "{}" });
+			expect(refreshRequests).toBe(0);
+
+			const missed = await write.execute("write-xdev-mcp-miss", {
+				path: "xd://mcp__litellm_linear_get_issue",
+				content: "{}",
+			});
+			expect(missed.isError).toBe(true);
+			expect(refreshRequests).toBe(1);
+
+			await read.execute("read-xdev-mcp-miss", { path: "xd://mcp__litellm_linear_get_issue" }).catch(() => {});
+			expect(refreshRequests).toBe(2);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("resolves bare and case-insensitive xd:// direct device names (#10342)", () => {
 		const githubDevice = {
 			name: "github",
