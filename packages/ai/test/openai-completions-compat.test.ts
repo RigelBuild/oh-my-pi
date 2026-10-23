@@ -1195,6 +1195,31 @@ describe("openai-completions compatibility", () => {
 			expect(result.stopReason).toBe("length");
 		}
 	});
+	it("preserves empty length recovery when completion token usage is missing or malformed", async () => {
+		const model = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://gateway.example/v1",
+		} as ModelSpec<"openai-completions">);
+		for (const usage of [{ prompt_tokens: 100 }, { prompt_tokens: 100, completion_tokens: "0" }]) {
+			const result = await streamOpenAICompletions(model, baseContext(), {
+				apiKey: "test-key",
+				fetch: createMockFetch([
+					{
+						id: "missing-usage",
+						object: "chat.completion.chunk",
+						created: 0,
+						model: model.id,
+						choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+						usage,
+					},
+					"[DONE]",
+				]),
+			}).result();
+			expect(result.stopReason).toBe("length");
+		}
+	});
 	it("preserves empty non-Ollama length completions for recovery", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,

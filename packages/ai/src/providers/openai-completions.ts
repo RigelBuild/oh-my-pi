@@ -1313,6 +1313,7 @@ const streamOpenAICompletionsOnce = (
 			// no-choice terminal path may break while those details are pending.
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
+			let reportedZeroCompletionTokens = false;
 			let awaitTrailingUsageDetails = false;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(
@@ -1323,6 +1324,7 @@ const streamOpenAICompletionsOnce = (
 					parseFireworksCachedPromptTokens(responseHeaders),
 				);
 				sawUsagePayload = true;
+				reportedZeroCompletionTokens = "completion_tokens" in rawUsage && rawUsage.completion_tokens === 0;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};
 			const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
@@ -1732,7 +1734,11 @@ const streamOpenAICompletionsOnce = (
 				if (policy.stream.emptyLengthFinishIsContextError) {
 					output.stopReason = "error";
 					output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;
-				} else if (sawUsagePayload && output.usage.output === 0 && isFarBelowContextWindow(output.usage, model)) {
+				} else if (
+					reportedZeroCompletionTokens &&
+					output.usage.output === 0 &&
+					isFarBelowContextWindow(output.usage, model)
+				) {
 					// A full window also ends empty on `length`; leave that to compaction recovery.
 					output.stopReason = "error";
 					output.errorMessage = ZERO_TOKEN_LENGTH_FINISH_MESSAGE;
