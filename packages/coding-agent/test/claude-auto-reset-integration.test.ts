@@ -144,6 +144,7 @@ describe("Claude saved-reset trigger integration", () => {
 		maxDelayMs?: number;
 		quota?: { restored: boolean };
 		autoRedeem?: "unset" | "yes" | "no";
+		salvageHorizonHours?: number;
 		clearResetCredentialBlocks?: boolean;
 		restoreWeeklyUsage?: boolean;
 		useStoredCredentials?: boolean;
