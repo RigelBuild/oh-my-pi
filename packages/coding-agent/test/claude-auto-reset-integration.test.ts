@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
+	AuthCredential,
 	ResetCreditAccountStatus,
 	ResetCreditTarget,
 	SessionRestrictionLease,
@@ -143,7 +144,9 @@ describe("Claude saved-reset trigger integration", () => {
 		maxDelayMs?: number;
 		quota?: { restored: boolean };
 		autoRedeem?: "unset" | "yes" | "no";
-		salvageHorizonHours?: number;
+		clearResetCredentialBlocks?: boolean;
+		restoreWeeklyUsage?: boolean;
+		useStoredCredentials?: boolean;
 		keepCredits?: number;
 		/** Answers the auto-redeem consent prompt; without it the session has no prompt UI. */
 		consent?: () => Promise<string | undefined>;
@@ -155,18 +158,30 @@ describe("Claude saved-reset trigger integration", () => {
 		targets: ResetCreditTarget[];
 		modelCalls: () => number;
 		listCalls: () => number;
+		resolvedApiKeys: string[];
 	} {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({
-			accountId: ACCOUNT_ID,
-			email: EMAIL,
-			orgId: ORG_ID,
-		});
-		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
-			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
-		]);
+		const resolvedApiKeys: string[] = [];
+		if (options.useStoredCredentials) authStorage.keys.removeRuntime("anthropic");
+		else {
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			vi.spyOn(authStorage.oauth, "identity").mockReturnValue({
+				accountId: ACCOUNT_ID,
+				email: EMAIL,
+				orgId: ORG_ID,
+			});
+			vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
+				{
+					position: 0,
+					credentialId: CREDENTIAL_ID,
+					accountId: ACCOUNT_ID,
+					email: EMAIL,
+					orgId: ORG_ID,
+					active: true,
+				},
+			]);
+		}
 		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.report && [options.report]);
 		let listAttempts = 0;
 		vi.spyOn(authStorage.resets, "list").mockImplementation(async request => {
@@ -183,6 +198,13 @@ describe("Claude saved-reset trigger integration", () => {
 		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
 			targets.push(request.target);
 			quota.restored = true;
+			if (options.clearResetCredentialBlocks && options.status.credentialId !== undefined) {
+				authStorage.blocks.deleteAll(options.status.credentialId);
+			}
+			if (options.restoreWeeklyUsage) {
+				const weeklyLimit = options.report?.limits.find(limit => limit.id === "anthropic:7d");
+				if (weeklyLimit?.amount) weeklyLimit.amount.usedFraction = 0;
+			}
 			return {
 				ok: true,
 				code: "reset",
@@ -198,7 +220,21 @@ describe("Claude saved-reset trigger integration", () => {
 		const mock = createMockModel();
 		let calls = 0;
 		const agent = new Agent({
-			getApiKey: () => "test-key",
+			getApiKey: requestedModel => {
+				if (!options.useStoredCredentials) return "test-key";
+				const resolver = modelRegistry.resolver(requestedModel, agent.sessionId);
+				return async context => {
+					const resolved = await resolver(context);
+					const apiKey =
+						typeof resolved === "string"
+							? resolved
+							: resolved && "apiKey" in resolved
+								? resolved.apiKey
+								: undefined;
+					if (apiKey) resolvedApiKeys.push(apiKey);
+					return resolved;
+				};
+			},
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, streamOptions) => {
 				calls++;
@@ -257,7 +293,7 @@ describe("Claude saved-reset trigger integration", () => {
 			extensionRunner,
 		});
 		sessions.push(session);
-		return { session, coordinator, targets, modelCalls: () => calls, listCalls: () => listAttempts };
+		return { session, coordinator, targets, modelCalls: () => calls, listCalls: () => listAttempts, resolvedApiKeys };
 	}
 
 	/**
@@ -414,6 +450,58 @@ describe("Claude saved-reset trigger integration", () => {
 					),
 			);
 		expect(recovered).toBe(true);
+	});
+
+	it("redeems a banked reset before retrying with OAuth when an unblocked stored API key exists", async () => {
+		const oauthAccess = "claude-oauth-access-token";
+		const storedApiKey = "sk-ant-api03-test";
+		const credentials: AuthCredential[] = [
+			{
+				type: "oauth",
+				access: oauthAccess,
+				refresh: "claude-oauth-refresh-token",
+				expires: Date.now() + HOUR,
+				accountId: ACCOUNT_ID,
+				email: EMAIL,
+				orgId: ORG_ID,
+			},
+			{ type: "api_key", key: storedApiKey },
+		];
+		await authStorage.credentials.set("anthropic", credentials);
+		const oauthEntry = authStorage.credentials.list("anthropic").find(entry => entry.credential.type === "oauth");
+		if (!oauthEntry) throw new Error("Expected stored Claude OAuth credential");
+		const status = { ...claudeStatus(true), credentialId: oauthEntry.id };
+		const { session, targets, modelCalls, resolvedApiKeys } = buildSession({
+			autoRedeem: "yes",
+			report: claudeReport(1),
+			status,
+			streamErrorFirst: true,
+			useStoredCredentials: true,
+			clearResetCredentialBlocks: true,
+			restoreWeeklyUsage: true,
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("redeem the banked reset before spending Console credit");
+			await session.waitForIdle();
+		} finally {
+			await authStorage.credentials.remove("anthropic");
+		}
+
+		expect(targets).toEqual([
+			{
+				provider: "anthropic",
+				credentialId: oauthEntry.id,
+				creditId: "cedar-grant-1",
+				accountId: ACCOUNT_ID,
+				email: EMAIL,
+				orgId: ORG_ID,
+			},
+		]);
+		expect(modelCalls()).toBe(2);
+		expect(resolvedApiKeys).toEqual([oauthAccess, oauthAccess]);
+		expect(resolvedApiKeys).not.toContain(storedApiKey);
 	});
 
 	it("continues the task using live reset evidence when broker usage polling is unavailable", async () => {

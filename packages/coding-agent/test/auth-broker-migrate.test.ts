@@ -10,7 +10,7 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 
 const TEAM_ORG = "org-team-1111";
 
-async function runMigrateCapturingStdout(): Promise<string> {
+async function runMigrateCapturingStdout(options: { includeEnv?: boolean } = {}): Promise<string> {
 	const originalWrite = process.stdout.write.bind(process.stdout);
 	let captured = "";
 	process.stdout.write = ((chunk: string | Uint8Array): boolean => {
@@ -20,7 +20,7 @@ async function runMigrateCapturingStdout(): Promise<string> {
 	try {
 		await runAuthBrokerCommand({
 			action: "migrate",
-			flags: { fromLocal: true, includeOauth: true },
+			flags: { fromLocal: true, includeOauth: true, includeEnv: options.includeEnv },
 		});
 	} finally {
 		process.stdout.write = originalWrite;
@@ -119,6 +119,120 @@ describe("auth-broker migrate", () => {
 		const persisted = brokerStore!.getOAuth("anthropic");
 		expect(persisted?.refresh).toBe("refresh-rotated");
 		expect(brokerStore!.listAuthCredentials("anthropic")).toHaveLength(1);
+	});
+
+	test("uploads distinct local API keys for the same provider", async () => {
+		const keys = ["sk-ant-api03-local-credential-0001", "sk-ant-api03-local-credential-0002"];
+		const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			for (const key of keys) await localStore.upsertAuthCredential("anthropic", { type: "api_key", key });
+		} finally {
+			localStore.close();
+		}
+
+		const output = await runMigrateCapturingStdout();
+		expect(output.match(/uploaded \[local-sqlite\] anthropic/g)).toHaveLength(2);
+		expect(output).toContain("…0001");
+		expect(output).toContain("…0002");
+		for (const key of keys) expect(output).not.toContain(key);
+		const brokerKeys = brokerStore!
+			.listAuthCredentials("anthropic")
+			.map(row => (row.credential.type === "api_key" ? row.credential.key : undefined))
+			.filter((key): key is string => key !== undefined);
+		expect(brokerKeys).toEqual(expect.arrayContaining(keys));
+		expect(brokerKeys).toHaveLength(2);
+	});
+
+	test("skips only the exact API key already on the broker", async () => {
+		const existingKey = "sk-ant-api03-broker-credential-0001";
+		const newKey = "sk-ant-api03-local-credential-0002";
+		await brokerStore!.upsertAuthCredential("anthropic", { type: "api_key", key: existingKey });
+		await brokerStorage!.credentials.reload();
+		const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			await localStore.upsertAuthCredential("anthropic", { type: "api_key", key: existingKey });
+			await localStore.upsertAuthCredential("anthropic", { type: "api_key", key: newKey });
+		} finally {
+			localStore.close();
+		}
+
+		const output = await runMigrateCapturingStdout();
+		expect(output).toContain("already on broker");
+		expect(output.match(/uploaded \[local-sqlite\] anthropic/g)).toHaveLength(1);
+		expect(brokerStore!.listAuthCredentials("anthropic")).toHaveLength(2);
+	});
+
+	test("env keys deduplicate against the exact local key already planned", async () => {
+		const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+		const brokerKey = "sk-ant-api03-broker-credential-0001";
+		const plannedKey = "sk-ant-api03-local-credential-0002";
+		try {
+			process.env.ANTHROPIC_API_KEY = plannedKey;
+			await brokerStore!.upsertAuthCredential("anthropic", { type: "api_key", key: brokerKey });
+			await brokerStorage!.credentials.reload();
+			const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+			try {
+				await localStore.upsertAuthCredential("anthropic", { type: "api_key", key: plannedKey });
+			} finally {
+				localStore.close();
+			}
+
+			const output = await runMigrateCapturingStdout({ includeEnv: true });
+			expect(output).toContain("already planned");
+			expect(output.match(/uploaded \[local-sqlite\] anthropic/g)).toHaveLength(1);
+			expect(brokerStore!.listAuthCredentials("anthropic")).toHaveLength(2);
+			expect(
+				brokerStore!
+					.listAuthCredentials("anthropic")
+					.some(row => row.credential.type === "api_key" && row.credential.key === plannedKey),
+			).toBe(true);
+		} finally {
+			if (originalAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+		}
+	});
+
+	test("uploads an env key when the broker has a different API key", async () => {
+		const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+		const brokerKey = "sk-ant-api03-broker-credential-0001";
+		const envKey = "sk-ant-api03-env-credential-0002";
+		try {
+			process.env.ANTHROPIC_API_KEY = envKey;
+			await brokerStore!.upsertAuthCredential("anthropic", { type: "api_key", key: brokerKey });
+			await brokerStorage!.credentials.reload();
+
+			const output = await runMigrateCapturingStdout({ includeEnv: true });
+			expect(output).toContain("uploaded [env] anthropic");
+			expect(output).toContain("…0002");
+			expect(output).not.toContain(envKey);
+			const anthropicKeys = brokerStore!
+				.listAuthCredentials("anthropic")
+				.map(row => (row.credential.type === "api_key" ? row.credential.key : undefined))
+				.filter((key): key is string => key !== undefined);
+			expect(anthropicKeys).toEqual(expect.arrayContaining([brokerKey, envKey]));
+			expect(anthropicKeys).toHaveLength(2);
+		} finally {
+			if (originalAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+		}
+	});
+
+	test("skips an env key that exactly matches a broker API key", async () => {
+		const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+		const brokerKey = "sk-ant-api03-shared-credential-0001";
+		try {
+			process.env.ANTHROPIC_API_KEY = brokerKey;
+			await brokerStore!.upsertAuthCredential("anthropic", { type: "api_key", key: brokerKey });
+			await brokerStorage!.credentials.reload();
+
+			const output = await runMigrateCapturingStdout({ includeEnv: true });
+			expect(output).toContain("skip [env] anthropic (api key …0001): already on broker");
+			expect(output).not.toContain("uploaded [env] anthropic");
+			expect(brokerStore!.listAuthCredentials("anthropic")).toHaveLength(1);
+		} finally {
+			if (originalAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+		}
 	});
 
 	test.each([

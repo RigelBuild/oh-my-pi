@@ -1256,17 +1256,17 @@ interface MigrateSkip {
 }
 
 function credentialIdentity(provider: string, credential: AuthCredential): string {
-	if (credential.type === "api_key") return "(api key)";
+	if (credential.type === "api_key") {
+		const suffix = credential.key.length > 4 ? credential.key.slice(-4) : "****";
+		return `(api key …${suffix})`;
+	}
 	const base = credential.email ?? credential.accountId ?? credential.projectId ?? `<${provider} oauth>`;
 	return credential.orgId ? `${base} (${credential.orgName ?? credential.orgId})` : base;
 }
 
 /**
  * Whether the broker already holds this credential, so re-runs are idempotent.
- * An OAuth row is held when uploading it would replace a broker row (the store's
- * own identity match), so no upload overwrites the broker's newer refresh token,
- * or when a broker row is the same account stored under another identity key, so
- * no upload duplicates it. API keys collapse to a single one per provider.
+ * OAuth uses replacement/account identity; API keys require exact key equality.
  */
 function brokerAlreadyHas(
 	existing: readonly AuthCredentialSnapshotEntry[],
@@ -1275,7 +1275,9 @@ function brokerAlreadyHas(
 ): boolean {
 	return existing.some(entry => {
 		if (entry.provider !== provider) return false;
-		if (credential.type === "api_key") return entry.credential.type === "api_key";
+		if (credential.type === "api_key") {
+			return entry.credential.type === "api_key" && entry.credential.key === credential.key;
+		}
 		return (
 			entry.credential.type === "oauth" &&
 			(matchesReplacementCredential(provider, entry.credential, entry.identityKey, credential) ||
@@ -1308,7 +1310,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 	// 1. Local SQLite rows.
 	const localDbPath = getAgentDbPath();
 	const localStore = await SqliteAuthCredentialStore.open(localDbPath);
-	const plannedApiKeyProviders = new Set<string>();
+	const plannedApiKeys = new Map<string, Set<string>>();
 	try {
 		for (const row of localStore.listAuthCredentials()) {
 			// Skip placeholder sentinels that pi-ai treats as "authenticated via
@@ -1319,7 +1321,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 				skipped.push({
 					source: "local-sqlite",
 					provider: row.provider,
-					identity: "(api key)",
+					identity: credentialIdentity(row.provider, row.credential),
 					reason: "placeholder sentinel '<authenticated>' is not a real key",
 				});
 				continue;
@@ -1343,16 +1345,20 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 				});
 				continue;
 			}
-			if (row.credential.type === "api_key" && plannedApiKeyProviders.has(row.provider)) {
-				skipped.push({
-					source: "local-sqlite",
-					provider: row.provider,
-					identity,
-					reason: "another local api_key for this provider already planned",
-				});
-				continue;
+			if (row.credential.type === "api_key") {
+				const keys = plannedApiKeys.get(row.provider);
+				if (keys?.has(row.credential.key)) {
+					skipped.push({
+						source: "local-sqlite",
+						provider: row.provider,
+						identity,
+						reason: "identical API key already planned",
+					});
+					continue;
+				}
+				if (keys) keys.add(row.credential.key);
+				else plannedApiKeys.set(row.provider, new Set([row.credential.key]));
 			}
-			if (row.credential.type === "api_key") plannedApiKeyProviders.add(row.provider);
 			plan.push({ source: "local-sqlite", provider: row.provider, credential: row.credential, identity });
 		}
 	} finally {
@@ -1370,22 +1376,24 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 				skipped.push({
 					source: "env",
 					provider,
-					identity: "(api key)",
-					reason: "already on broker (provider has an api_key)",
+					identity: credentialIdentity(provider, credential),
+					reason: "already on broker",
 				});
 				continue;
 			}
-			// Also skip if local SQLite already produced an entry for this provider in this batch.
-			if (plan.some(p => p.provider === provider && p.credential.type === "api_key")) {
+			const keys = plannedApiKeys.get(provider);
+			if (keys?.has(envValue)) {
 				skipped.push({
 					source: "env",
 					provider,
-					identity: "(api key)",
-					reason: "local SQLite already supplied an api_key for this provider",
+					identity: credentialIdentity(provider, credential),
+					reason: "identical API key already planned",
 				});
 				continue;
 			}
-			plan.push({ source: "env", provider, credential, identity: "(api key)" });
+			if (keys) keys.add(envValue);
+			else plannedApiKeys.set(provider, new Set([envValue]));
+			plan.push({ source: "env", provider, credential, identity: credentialIdentity(provider, credential) });
 		}
 	}
 

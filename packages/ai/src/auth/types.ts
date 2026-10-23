@@ -437,6 +437,8 @@ export type AuthStorageOptions = {
  */
 export interface UsageLimitMarkResult {
 	switched: boolean;
+	/** The switch goes to a stored API key, not an OAuth sibling; a free reset should be tried first. */
+	switchedToApiKey?: boolean;
 	retryAtMs?: number;
 	blockedUntilMs?: number;
 	/** This mark call's initial deadline, before report correction and merging. */

@@ -7,6 +7,11 @@
 - `AuthStorage` option `claudeResetBanking` ranks Claude accounts that hold a spare reset clearing the weekly limit ahead of siblings and exempts them from the reserve guard, so they drain first.
 - Auth-gateway `onUsageLimit` hook runs before an account is marked reached; returning `true` resends the request on the same credential.
 
+### Fixed
+
+- A stored non-login API key now serves a request when every OAuth credential for the provider is blocked, instead of the selector returning a blocked OAuth account; with no unblocked key, blocked OAuth stays the last resort. The request that blocks the last OAuth account retries on the key at once, and `keys.hasUsable` reports the provider usable.
+- Anthropic "credit balance is too low" is a quota exhaustion: the credential is blocked for 30 minutes and rotated, not invalidated as an auth failure.
+
 ## [18.9.2-rigel.2] - 2026-10-18
 
 ### Added

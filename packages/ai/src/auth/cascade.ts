@@ -325,7 +325,9 @@ export class KeyCascade implements KeysApi {
 			modelId,
 			credential => credential.type === "oauth" && oauthCanRefreshOrUse(credential, nowMs),
 		);
-		if (oauth !== "absent") return oauth === "usable";
+		if (oauth === "usable") return true;
+		// `get` passes over blocked OAuth only to a stored key that is itself unblocked.
+		if (oauth === "blocked") return selector.hasUnblockedApiKeyPeek(provider, modelId, c => c.source !== "login");
 		const loginApiKey = selector.availability(
 			provider,
 			"api_key",
@@ -425,8 +427,14 @@ export class KeyCascade implements KeysApi {
 		// rethrown only when none can, so callers retry instead of reporting a missing key.
 		let oauthResolved: OAuthResolutionResult | undefined;
 		let oauthRefreshFailure: AIError.OAuthRefreshUnavailableError | undefined;
+		// Keep blocked OAuth as a last resort only when no unblocked stored key can serve.
+		const hasUnblockedStoredApiKey =
+			!restricted &&
+			(await this.#deps.selector.hasUnblockedApiKey(provider, options, credential => credential.source !== "login"));
 		try {
-			oauthResolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options);
+			oauthResolved = await this.#deps.selector.resolveOAuth(provider, sessionId, options, {
+				allowBlockedFallback: !hasUnblockedStoredApiKey,
+			});
 		} catch (error) {
 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
 			oauthRefreshFailure = error;
