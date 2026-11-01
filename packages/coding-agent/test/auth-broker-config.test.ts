@@ -215,7 +215,7 @@ describe("parseSubscriptionsConfig", () => {
 	it("resolves accounts and plans from a valid config", () => {
 		const raw = JSON.stringify({
 			accounts: {
-				"acct-1": { provider: "anthropic", plan: "max", renewsAt: "2026-08-26" },
+				"acct-1": { provider: "anthropic", plan: "max", startedAt: "2026-08-26" },
 			},
 			plans: {
 				"anthropic:max": { capacityWeight: 2, monthlyPriceUsd: 200 },
@@ -285,10 +285,10 @@ describe("parseSubscriptionsConfig", () => {
 
 	it("rejects a misspelled account key instead of silently omitting the series", () => {
 		const raw = JSON.stringify({
-			accounts: { "acct-1": { provider: "anthropic", plan: "max", renewAt: "2026-10-01" } },
+			accounts: { "acct-1": { provider: "anthropic", plan: "max", startAt: "2026-10-01" } },
 		});
 
-		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/unknown key\(s\) "renewAt"/);
+		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/unknown key\(s\) "startAt"/);
 	});
 
 	it("rejects an unknown root key", () => {
@@ -300,11 +300,11 @@ describe("parseSubscriptionsConfig", () => {
 	it("rejects an unknown key inside a nested org entry", () => {
 		const raw = JSON.stringify({
 			accounts: {
-				"acct-1": { provider: "anthropic", orgs: { "org-a": { plan: "max", renewsAtt: "2026-10-01" } } },
+				"acct-1": { provider: "anthropic", orgs: { "org-a": { plan: "max", startAt: "2026-10-01" } } },
 			},
 		});
 
-		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/unknown key\(s\) "renewsAtt"/);
+		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/unknown key\(s\) "startAt"/);
 	});
 
 	it("rejects an unknown key inside a plans entry", () => {
@@ -315,10 +315,20 @@ describe("parseSubscriptionsConfig", () => {
 		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/unknown key\(s\) "monthlyPrice"/);
 	});
 
-	it("pins renewsAt to UTC-midnight epoch seconds (no TZ drift)", () => {
-		const raw = JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-08-26" } } });
+	it("converts account startedAt to UTC-midnight epoch seconds", () => {
+		const raw = JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-08-26" } } });
 		const lookup = parseSubscriptionsConfig(raw, FILE);
 		expect(lookup.lookup("p", "a", "")?.renewsAtSeconds).toBe(1787702400);
+	});
+
+	it("rejects the legacy renewsAt key at account scope", () => {
+		const raw = JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-08-26" } } });
+		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/unknown key\(s\) "renewsAt"/);
+	});
+
+	it("rejects the legacy renewsAt key in nested org scope", () => {
+		const raw = JSON.stringify({ accounts: { a: { provider: "p", orgs: { team: { renewsAt: "2026-08-26" } } } } });
+		expect(() => parseSubscriptionsConfig(raw, FILE)).toThrow(/unknown key\(s\) "renewsAt"/);
 	});
 
 	it("accepts empty/absent maps without throwing", () => {
@@ -328,9 +338,30 @@ describe("parseSubscriptionsConfig", () => {
 	});
 
 	it("parses an entry that omits plan entirely (renewal-only / provider-derived)", () => {
-		const raw = JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-08-26" } } });
+		const raw = JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-08-26" } } });
 		const lookup = parseSubscriptionsConfig(raw, FILE);
 		expect(lookup.lookup("p", "a", "")).toEqual({ plan: undefined, renewsAtSeconds: 1787702400 });
+	});
+
+	it("parses startedAt for an org-scoped nested provider", () => {
+		const raw = JSON.stringify({
+			accounts: {
+				"acct-1": {
+					provider: "anthropic",
+					orgs: { "org-a": { plan: "max", startedAt: "2026-08-26" } },
+				},
+			},
+		});
+		const lookup = parseSubscriptionsConfig(raw, FILE);
+		expect(lookup.lookup("anthropic", "acct-1", "org-a")).toEqual({
+			plan: "max",
+			renewsAtSeconds: 1787702400,
+		});
+	});
+
+	it("keeps renewal anchor undefined when startedAt is omitted", () => {
+		const lookup = parseSubscriptionsConfig(JSON.stringify({ accounts: { a: { provider: "p", plan: "pro" } } }), FILE);
+		expect(lookup.lookup("p", "a", "")).toEqual({ plan: "pro", renewsAtSeconds: undefined });
 	});
 
 	it("scopes account entries by org and falls back to an org-less entry", () => {
@@ -351,8 +382,7 @@ describe("parseSubscriptionsConfig", () => {
 		// An org-less config entry resolves for any org of that account.
 		expect(lookup.lookup("anthropic", "acct-2", "org-x")).toEqual({ plan: "pro", renewsAtSeconds: undefined });
 		expect(lookup.lookup("anthropic", "acct-2", "")).toEqual({ plan: "pro", renewsAtSeconds: undefined });
-		// An org-scoped entry does not answer a mismatched org unless a bare
-		// fallback exists.
+		// An org-scoped entry does not answer a mismatched org unless a bare fallback exists.
 		expect(lookup.lookup("anthropic", "acct-1", "org-personal")).toBeUndefined();
 	});
 
@@ -367,9 +397,9 @@ describe("parseSubscriptionsConfig", () => {
 					provider: "anthropic",
 					org: "org-team",
 					plan: "team",
-					renewsAt: "2026-08-26",
+					startedAt: "2026-08-26",
 					orgs: {
-						"org-personal": { plan: "max", renewsAt: "2026-09-15" },
+						"org-personal": { plan: "max", startedAt: "2026-09-15" },
 					},
 				},
 			},
@@ -408,20 +438,20 @@ describe("parseSubscriptionsConfig", () => {
 			JSON.stringify({ accounts: { a: { provider: "p", orgs: { x: { plan: 1 } } } } }),
 		],
 		["plan not a string", JSON.stringify({ accounts: { a: { provider: "p", plan: 1 } } })],
-		["renewsAt not a string", JSON.stringify({ accounts: { a: { provider: "p", renewsAt: 1 } } })],
+		["startedAt not a string", JSON.stringify({ accounts: { a: { provider: "p", startedAt: 1 } } })],
 		[
-			"renewsAt wrong format (single digits)",
-			JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-8-6" } } }),
+			"startedAt wrong format (single digits)",
+			JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-8-6" } } }),
 		],
 		[
-			"renewsAt wrong format (slashes)",
-			JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "08/26/2026" } } }),
+			"startedAt wrong format (slashes)",
+			JSON.stringify({ accounts: { a: { provider: "p", startedAt: "08/26/2026" } } }),
 		],
 		[
-			"renewsAt wrong format (datetime)",
-			JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-08-26T00:00:00" } } }),
+			"startedAt wrong format (datetime)",
+			JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-08-26T00:00:00" } } }),
 		],
-		["renewsAt unparseable", JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-13-99" } } })],
+		["startedAt unparseable", JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-13-99" } } })],
 		["plan key with no colon", JSON.stringify({ plans: { max: { capacityWeight: 1, monthlyPriceUsd: 1 } } })],
 		["plan key leading colon", JSON.stringify({ plans: { ":max": { capacityWeight: 1, monthlyPriceUsd: 1 } } })],
 		[
@@ -443,16 +473,16 @@ describe("parseSubscriptionsConfig", () => {
 		["plans map is an array", JSON.stringify({ plans: [] })],
 		["plans map is a number", JSON.stringify({ plans: 3 })],
 		[
-			"renewsAt normalized-invalid (2026-02-29)",
-			JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-02-29" } } }),
+			"startedAt normalized-invalid (2026-02-29)",
+			JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-02-29" } } }),
 		],
 		[
-			"renewsAt normalized-invalid (2026-02-31)",
-			JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-02-31" } } }),
+			"startedAt normalized-invalid (2026-02-31)",
+			JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-02-31" } } }),
 		],
 		[
-			"renewsAt normalized-invalid (2026-13-01)",
-			JSON.stringify({ accounts: { a: { provider: "p", renewsAt: "2026-13-01" } } }),
+			"startedAt normalized-invalid (2026-13-01)",
+			JSON.stringify({ accounts: { a: { provider: "p", startedAt: "2026-13-01" } } }),
 		],
 		[
 			"plan keys collapse to one canonical identity",
@@ -532,7 +562,7 @@ describe("loadSubscriptionsConfig", () => {
 		await Bun.write(
 			file,
 			JSON.stringify({
-				accounts: { "acct-1": { provider: "anthropic", plan: "max", renewsAt: "2026-08-26" } },
+				accounts: { "acct-1": { provider: "anthropic", plan: "max", startedAt: "2026-08-26" } },
 				plans: { "anthropic:max": { capacityWeight: 2, monthlyPriceUsd: 200 } },
 			}),
 		);
@@ -609,7 +639,7 @@ describe("loadSubscriptionsConfig", () => {
 describe("parseSubscriptionsConfig provider-id casing", () => {
 	it("canonicalizes a mis-cased account provider so it joins the report series", () => {
 		const raw = JSON.stringify({
-			accounts: { "acct-1": { provider: "Anthropic", plan: "max", renewsAt: "2026-08-26" } },
+			accounts: { "acct-1": { provider: "Anthropic", plan: "max", startedAt: "2026-08-26" } },
 		});
 
 		const config = parseSubscriptionsConfig(raw, FILE);
@@ -679,9 +709,9 @@ describe("parseSubscriptionsConfig cross-provider account ids", () => {
 				monalisa: {
 					provider: "anthropic",
 					plan: "max",
-					renewsAt: "2026-08-26",
+					startedAt: "2026-08-26",
 					providers: {
-						"openai-codex": { plan: "pro", renewsAt: "2026-09-15" },
+						"openai-codex": { plan: "pro", startedAt: "2026-09-15" },
 					},
 				},
 			},
