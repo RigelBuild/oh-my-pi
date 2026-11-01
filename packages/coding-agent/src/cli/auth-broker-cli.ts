@@ -299,22 +299,22 @@ export function resolveEnableMetricsFlag(
 /**
  * On-disk JSON shape for the subscription config. `accounts` is keyed by the
  * opaque provider accountId (`accountLabelOf`); `plans` by
- * `"<provider>:<canonical-plan>"`. `renewsAt` is an ISO `YYYY-MM-DD` date the
- * loader converts to unix seconds before it reaches the renderer.
+ * `"<provider>:<canonical-plan>"`. `startedAt` is an ISO `YYYY-MM-DD` monthly
+ * billing anchor, converted from UTC midnight to unix seconds for the renderer.
  *
  * One account label can hold subscriptions in several organizations, and in
  * several providers. The account-level `provider`/`org` describe one scope (the
  * org-less fallback when `org` is absent); the optional `orgs` map carries the
  * remaining org scopes of that provider, and the optional `providers` map
  * carries the other providers that hand out the same account label, each with
- * its own `org`/`plan`/`renewsAt`/`orgs`. A single JSON property per account
+ * its own `org`/`plan`/`startedAt`/`orgs`. A single JSON property per account
  * label cannot represent the same label twice, so the extra scopes nest rather
  * than repeat as duplicate top-level keys.
  */
 interface SubscriptionsConfigFile {
 	accounts?: Record<
 		string,
-		{ provider?: unknown; org?: unknown; plan?: unknown; renewsAt?: unknown; orgs?: unknown; providers?: unknown }
+		{ provider?: unknown; org?: unknown; plan?: unknown; startedAt?: unknown; orgs?: unknown; providers?: unknown }
 	>;
 	plans?: Record<string, { capacityWeight?: unknown; monthlyPriceUsd?: unknown }>;
 }
@@ -322,8 +322,8 @@ interface SubscriptionsConfigFile {
 /**
  * Read + parse the subscription-config file into a {@link SubscriptionLookup}.
  * Fails loudly (throws) on a parse error or malformed shape so the broker never
- * silently emits partial series. Converts each account's `renewsAt` ISO date to
- * unix seconds. Returns `undefined` when no path is configured (env or flag).
+ * silently emits partial series. A present `startedAt` ISO date becomes the
+ * UTC-midnight unix-seconds anchor consumed by the renderer; absence stays absent.
  *
  * `metricsEnabled` short-circuits the read entirely, mirroring how
  * {@link resolveServeMetrics} returns before touching the scrape token when the
@@ -366,16 +366,11 @@ function parseUtcDate(value: string): number | undefined {
 }
 
 /**
- * Validate + normalize the `plan`/`renewsAt` pair shared by an account-level
- * entry and each nested `orgs` entry. `label` names the offending entry in the
- * fail-loudly error (`account foo` or `account foo org bar`). Converts a
- * `YYYY-MM-DD` `renewsAt` to unix seconds; throws on any malformed field.
- */
-/**
  * Reject keys the loader does not understand. The per-field checks below only
- * validate keys they know, so a misspelling (`renewAt` for `renewsAt`, `plans`
- * nested under an account) would be silently ignored and the corresponding
- * series quietly omitted — the opposite of this loader's fail-loudly contract.
+ * validate keys they know, so a misspelling (`startAt` for `startedAt`), the
+ * legacy `renewsAt` spelling, or `plans` nested under an account would be
+ * silently ignored and the corresponding series quietly omitted — the opposite
+ * of this loader's fail-loudly contract.
  */
 function rejectUnknownKeys(entry: object, allowed: readonly string[], file: string, label: string): void {
 	const unknown = Object.keys(entry).filter(key => !allowed.includes(key));
@@ -386,8 +381,15 @@ function rejectUnknownKeys(entry: object, allowed: readonly string[], file: stri
 	}
 }
 
+/**
+ * Validate + normalize the `plan`/`startedAt` pair shared by an account-level
+ * entry and each nested `orgs` entry. `label` names the offending entry in the
+ * fail-loudly error (`account foo` or `account foo org bar`). Converts a
+ * `YYYY-MM-DD` `startedAt` to a UTC-midnight monthly billing anchor in unix
+ * seconds; throws on any malformed field.
+ */
 function parsePlanRenewal(
-	entry: { plan?: unknown; renewsAt?: unknown },
+	entry: { plan?: unknown; startedAt?: unknown },
 	file: string,
 	label: string,
 ): { plan?: string; renewsAtSeconds?: number } {
@@ -404,13 +406,13 @@ function parsePlanRenewal(
 		}
 	}
 	let renewsAtSeconds: number | undefined;
-	if (entry.renewsAt !== undefined) {
-		if (typeof entry.renewsAt !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(entry.renewsAt)) {
-			throw new Error(`subscription config ${file}: ${label} "renewsAt" must be a YYYY-MM-DD string`);
+	if (entry.startedAt !== undefined) {
+		if (typeof entry.startedAt !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(entry.startedAt)) {
+			throw new Error(`subscription config ${file}: ${label} "startedAt" must be a YYYY-MM-DD string`);
 		}
-		const ms = parseUtcDate(entry.renewsAt);
+		const ms = parseUtcDate(entry.startedAt);
 		if (ms === undefined) {
-			throw new Error(`subscription config ${file}: ${label} "renewsAt" is not a valid date: ${entry.renewsAt}`);
+			throw new Error(`subscription config ${file}: ${label} "startedAt" is not a valid date: ${entry.startedAt}`);
 		}
 		renewsAtSeconds = ms / 1000;
 	}
@@ -431,7 +433,7 @@ function insertProviderScopes(
 	accounts: Map<string, { plan?: string; renewsAtSeconds?: number }>,
 	provider: string,
 	accountKey: string,
-	entry: { org?: unknown; plan?: unknown; renewsAt?: unknown; orgs?: unknown },
+	entry: { org?: unknown; plan?: unknown; startedAt?: unknown; orgs?: unknown },
 	file: string,
 	label: string,
 ): void {
@@ -475,7 +477,7 @@ function insertProviderScopes(
 		if (!isPlainObject(orgEntry)) {
 			throw new Error(`subscription config ${file}: ${label} org ${orgKey} must be an object`);
 		}
-		rejectUnknownKeys(orgEntry, ["plan", "renewsAt"], file, `${label} org ${orgKey}`);
+		rejectUnknownKeys(orgEntry, ["plan", "startedAt"], file, `${label} org ${orgKey}`);
 		// An `orgs` key whose canonical (trimmed) scope is empty — the literal
 		// empty string "" or whitespace-only like "   " — canonicalizes to the
 		// empty scope, which, absent a bare entry, the lookup treats as the
@@ -500,8 +502,8 @@ function insertProviderScopes(
  * Parse raw subscription-config JSON into a {@link SubscriptionLookup}. Pure and
  * synchronous (no I/O): `file` is used only in error messages. Fails loudly
  * (throws) on a parse error or malformed shape so the broker never silently
- * emits partial series. Converts each account's `renewsAt` ISO date to unix
- * seconds.
+ * emits partial series. Converts each account's `startedAt` UTC date to the
+ * `renewsAtSeconds` monthly billing anchor consumed by the renderer.
  */
 export function parseSubscriptionsConfig(raw: string, file: string): SubscriptionLookup {
 	let root: unknown;
@@ -542,7 +544,7 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 		}
 		rejectUnknownKeys(
 			entry,
-			["provider", "org", "plan", "renewsAt", "orgs", "providers"],
+			["provider", "org", "plan", "startedAt", "orgs", "providers"],
 			file,
 			`account ${account}`,
 		);
@@ -590,7 +592,7 @@ export function parseSubscriptionsConfig(raw: string, file: string): Subscriptio
 			// No `provider` and no further `providers`: the key already names the
 			// provider, and a nested map would give one account label two spellings
 			// of the same identity.
-			rejectUnknownKeys(providerEntry, ["org", "plan", "renewsAt", "orgs"], file, label);
+			rejectUnknownKeys(providerEntry, ["org", "plan", "startedAt", "orgs"], file, label);
 			// The key IS the provider id, so one that canonicalizes away entirely
 			// would key every scope under the empty provider — a composite key no
 			// usage report can produce.
