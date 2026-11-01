@@ -4,7 +4,11 @@ import type {
 	ClientUsageIdentity,
 	ClientUsageReport,
 	ClientUsageSummary,
+	CredentialUsageTotal,
+	ObservedAttemptOutcome,
+	ObservedLimitObservation,
 	ObservedUsageEntry,
+	StoredLimitObservation,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 	UsageReport,
@@ -146,10 +150,22 @@ export interface UsageLedgerStore {
 	 * the originating client, not the gateway host).
 	 */
 	recordObservedUsage(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void;
-	/** Broker host: persist one client's observed-usage report. */
+	/** Client hook: forward zero-usage settled attempts with exact credential identity. */
+	recordObservedOutcomes(outcomes: ObservedAttemptOutcome[], client?: ClientUsageIdentity): void;
+	/** Client hook: forward rate-limit/error-status observations for exact credential rows. */
+	recordObservedLimits(observations: ObservedLimitObservation[], client?: ClientUsageIdentity): void;
+	/**
+	 * Broker host: persist one client's observed-usage report. Client history and
+	 * credential lifetime totals commit in one transaction; rows naming a deleted,
+	 * disabled, or other-provider credential count as unattributed.
+	 */
 	recordClientUsage(report: ClientUsageReport): void;
 	/** Broker host: aggregate recorded per-client usage since a timestamp. */
 	getClientUsageSummary(sinceMs: number): ClientUsageSummary;
+	/** Broker host: monotonic lifetime totals per credential row; never pruned. */
+	listCredentialUsageTotals(): CredentialUsageTotal[];
+	/** Broker host: newest limit/error-status observation per credential row and model class. */
+	listLimitObservations(): StoredLimitObservation[];
 }
 
 /** Broker-delegated OAuth refresh and usage-report operations. */

@@ -6,8 +6,13 @@ import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { resolveUsedFraction } from "../usage";
 import type {
+	ClientUsageIdentity,
 	ClientUsageReport,
 	ClientUsageSummary,
+	CredentialUsageTotal,
+	ObservedAttemptOutcome,
+	ObservedLimitObservation,
+	StoredLimitObservation,
 	CredentialRankingContext,
 	UsageCredential,
 	UsageFetchParams,
@@ -472,6 +477,8 @@ export class UsageService implements UsageApi {
 						cacheReadTokens: entry.usage.cacheRead,
 						cacheWriteTokens: entry.usage.cacheWrite,
 						costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
+						...(entry.credentialId !== undefined && { credentialId: entry.credentialId }),
+						...(entry.outcome !== undefined && { outcome: entry.outcome }),
 					},
 				],
 				entry.client,
@@ -481,6 +488,28 @@ export class UsageService implements UsageApi {
 				provider: entry.provider,
 				error: String(error),
 			});
+		}
+	}
+
+	/** Forward one zero-usage settled attempt; a no-op when the store has no hook. */
+	observeOutcome(outcome: ObservedAttemptOutcome, client?: ClientUsageIdentity): void {
+		const record = this.#deps.store.recordObservedOutcomes;
+		if (!record) return;
+		try {
+			record.call(this.#deps.store, [outcome], client);
+		} catch (error) {
+			this.logger?.debug("observed outcome record failed", { provider: outcome.provider, error: String(error) });
+		}
+	}
+
+	/** Forward limit/error-status observations; a no-op when the store has no hook. */
+	observeLimits(observations: ObservedLimitObservation[], client?: ClientUsageIdentity): void {
+		const record = this.#deps.store.recordObservedLimits;
+		if (!record || observations.length === 0) return;
+		try {
+			record.call(this.#deps.store, observations, client);
+		} catch (error) {
+			this.logger?.debug("observed limits record failed", { error: String(error) });
 		}
 	}
 
@@ -495,6 +524,16 @@ export class UsageService implements UsageApi {
 	/** Broker host: aggregate recorded per-client usage since `sinceMs`. */
 	clientSummary(sinceMs: number): ClientUsageSummary {
 		return this.#deps.store.getClientUsageSummary?.(sinceMs) ?? { clients: [] };
+	}
+
+	/** Broker host: lifetime per-credential totals. */
+	credentialTotals(): CredentialUsageTotal[] {
+		return this.#deps.store.listCredentialUsageTotals?.() ?? [];
+	}
+
+	/** Broker host: newest stored limit observation per credential row and limit id. */
+	limitObservations(): StoredLimitObservation[] {
+		return this.#deps.store.listLimitObservations?.() ?? [];
 	}
 
 	/** Merge rate-limit headers into the latest account report. */

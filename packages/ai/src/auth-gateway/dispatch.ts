@@ -7,14 +7,16 @@
  * Everything credential-shaped lives here so each route drives the same
  * broker-backed rotation policy and the same usage ledger.
  */
+import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import { markAfterSiblingWait, type ApiKeyResolver, type ResolvedApiKey } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
 import { calculateRateLimitBackoffMs, isAnthropicCreditBalanceTooLow, isUsageLimitOutcome } from "../error/rate-limit";
-import type { Api, FetchImpl, Model, Usage } from "../types";
-import type { ClientUsageIdentity } from "../usage";
+import type { Api, FetchImpl, Model, StreamOptions, Usage } from "../types";
+import type { ClientUsageIdentity, ObservedLimitError } from "../usage";
+import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
 import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AgentCaller, AuthGatewayServerOptions, CallerIdentity } from "./types";
 
@@ -85,6 +87,8 @@ export interface GatewayUsageEvent {
 	client: ClientUsageIdentity;
 	/** Identity of the credential that served the call, when the route knows it. */
 	account?: string;
+	/** Stored row of the credential that served the call, when known exactly. */
+	credentialId?: number;
 }
 
 /** Map an assistant stop reason to the usage outcome. */
@@ -130,6 +134,11 @@ export interface AuthGatewayRouteOptions {
 	fetch?: FetchImpl;
 	/** Chat routes retry an eligible pre-output failure on the next candidate, if any; unset keeps one attempt. */
 	candidateFailover?: CandidateFailoverOptions;
+	/**
+	 * Exact Anthropic model id → documented rate-limit table row (e.g. `opus-5.5`).
+	 * API-key responses for listed models report their rate-limit headers; at most three rows.
+	 */
+	apiKeyLimitModelClasses?: Readonly<Record<string, string>>;
 }
 
 /** The HTTP server's options: the routes' plus its listener and inbound auth. */
@@ -250,6 +259,13 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+		if (credentialId !== undefined) {
+			// Status evidence for the exact row that failed, never a numeric balance.
+			const limitError: ObservedLimitError = isAnthropicCreditBalanceTooLow(message)
+				? "credit_exhausted"
+				: "rate_limited";
+			storage.usage.observeLimits([{ at: Date.now(), provider, credentialId, limits: [], error: limitError }]);
+		}
 		if (credentialId !== undefined && onUsageLimit) {
 			try {
 				if (await onUsageLimit({ provider, credentialId, modelId: model.id, signal })) {
@@ -336,7 +352,7 @@ export function buildGatewayApiKeyResolver(
 	requestSignal: AbortSignal,
 	format: string,
 	peer: string,
-	onResolvedKey?: (apiKey: string) => void,
+	onResolvedKey?: (apiKey: string, credentialId: number | undefined) => void,
 	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
@@ -356,7 +372,7 @@ export function buildGatewayApiKeyResolver(
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) {
 				credentialIdsByBearer.set(refreshed.apiKey, refreshed.credentialId);
-				onResolvedKey?.(refreshed.apiKey);
+				onResolvedKey?.(refreshed.apiKey, refreshed.credentialId);
 			}
 			return refreshed;
 		}
@@ -376,7 +392,7 @@ export function buildGatewayApiKeyResolver(
 		lastKey = next?.apiKey ?? lastKey;
 		if (next) {
 			credentialIdsByBearer.set(next.apiKey, next.credentialId);
-			onResolvedKey?.(next.apiKey);
+			onResolvedKey?.(next.apiKey, next.credentialId);
 		}
 		return next;
 	};
@@ -394,21 +410,62 @@ export function hasGatewayUsage(usage: Usage): boolean {
 	);
 }
 
+/** Reject a model-class map naming more distinct rate-limit rows than the series budget allows. */
+export function assertApiKeyLimitModelClasses(classes: Readonly<Record<string, string>> | undefined): void {
+	const rows = new Set(Object.values(classes ?? {}));
+	if (rows.size > 3) {
+		throw new Error(`apiKeyLimitModelClasses names ${rows.size} distinct rows; at most 3 are allowed`);
+	}
+}
+
+/** Whether a stored row is a paid Anthropic Console key (setup tokens stored as keys are OAuth). */
+function isConsoleApiKeyRow(storage: AuthStorage, provider: string, credentialId: number): boolean {
+	const credential = storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
+	return credential?.type === "api_key" && !isAnthropicOAuthToken(credential.key);
+}
+
+/**
+ * `onResponse` for one attempt's stream options: reports a mapped Anthropic
+ * model's API-key rate-limit headers against the row bound to the response.
+ * `undefined` when the model is not mapped, so unmapped models report nothing.
+ */
+export function gatewayApiKeyLimitObserver(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+): StreamOptions["onResponse"] {
+	const classes = bootOpts.apiKeyLimitModelClasses;
+	const modelClass =
+		model.provider === "anthropic" && classes && Object.hasOwn(classes, model.id) ? classes[model.id] : undefined;
+	if (!modelClass) return undefined;
+	return response => {
+		const credentialId = response.credentialId;
+		if (credentialId === undefined || !isConsoleApiKeyRow(bootOpts.storage, model.provider, credentialId)) return;
+		const limits = parseAnthropicApiKeyRateLimitHeaders(response.headers, modelClass);
+		if (limits.length === 0) return;
+		bootOpts.storage.usage.observeLimits([
+			{ at: Date.now(), provider: model.provider, credentialId, modelClass, limits },
+		]);
+	};
+}
+
 /**
  * Attribute one settled upstream request to the originating client via the
  * broker's observed-usage channel (`AuthStorage.usage.observe`, batched
  * by the remote store). Error/aborted turns still record — the provider
- * billed whatever tokens the partial turn consumed; zero-usage results
- * (pre-flight failures) are skipped. `at` defaults to now.
+ * billed whatever tokens the partial turn consumed. A zero-usage result
+ * counts only as an attempt outcome for its known credential row; without
+ * one (e.g. a failure before credential selection) it is skipped. `at`
+ * defaults to now.
  */
 export function recordGatewayUsage(
 	bootOpts: AuthGatewayRouteOptions,
 	model: Model<Api>,
 	client: ClientUsageIdentity,
 	usage: Usage,
-	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string },
+	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string; credentialId?: number },
 ): void {
 	const at = options.at ?? Date.now();
+	const credentialId = options.credentialId;
 	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0 || usage.cost.total > 0) {
 		bootOpts.storage.usage.observe({
 			provider: model.provider,
@@ -417,7 +474,14 @@ export function recordGatewayUsage(
 			usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
 			costUsd: usage.cost.total,
 			client,
+			...(credentialId !== undefined && { credentialId }),
+			outcome: options.outcome,
 		});
+	} else if (credentialId !== undefined) {
+		bootOpts.storage.usage.observeOutcome(
+			{ at, provider: model.provider, model: model.id, credentialId, outcome: options.outcome, requests: 1 },
+			client,
+		);
 	}
 	if (!hasGatewayUsage(usage)) return;
 	emitGatewayUsage(bootOpts, {
@@ -429,6 +493,7 @@ export function recordGatewayUsage(
 		at,
 		client,
 		...(options.account !== undefined && { account: options.account }),
+		...(credentialId !== undefined && { credentialId }),
 	});
 }
 

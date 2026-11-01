@@ -52,9 +52,11 @@ import {
 	type AuthGatewayBootOptions,
 	type AuthGatewayRouteOptions,
 	ModelResolverUnavailableError,
+	assertApiKeyLimitModelClasses,
 	buildGatewayApiKeyResolver,
 	type CandidateFailoverOptions,
 	type FailoverContext,
+	gatewayApiKeyLimitObserver,
 	gatewayUsageOutcome,
 	resolveGatewayModel,
 	mirrorRequestAbort,
@@ -351,6 +353,8 @@ async function prepareFormatAttempt(
 
 	const streamOpts = buildStreamOptions(parsed, model.api, signal);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model);
+	if (limitObserver) streamOpts.onResponse = limitObserver;
 	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
 	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
 	// map is non-serializable, so no client can supply it and every turn would
@@ -432,6 +436,8 @@ async function preparePiNativeAttempt(
 		providerSessionState: lease.states,
 	};
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model);
+	if (limitObserver) streamOpts.onResponse = limitObserver;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts.storage,
 		model,
@@ -878,6 +884,7 @@ async function runFailoverLoop(
 						outcome: gatewayUsageOutcome(message.stopReason),
 						at: message.timestamp || undefined,
 						account: account(),
+						credentialId: message.credentialId,
 					});
 					if (message.stopReason !== "error" && message.stopReason !== "aborted") {
 						return { kind: "answered", model: answering, message };
@@ -903,6 +910,7 @@ async function runFailoverLoop(
 							outcome: gatewayUsageOutcome(message.stopReason),
 							at: message.timestamp || undefined,
 							account: account(),
+							credentialId: message.credentialId,
 						}),
 					)
 					.catch(() => {})
@@ -1108,6 +1116,7 @@ async function handleFormatEndpoint(
 				outcome: gatewayUsageOutcome(message.stopReason),
 				at: message.timestamp || undefined,
 				account: account(),
+				credentialId: message.credentialId,
 			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
@@ -1169,6 +1178,7 @@ async function handleFormatEndpoint(
 					outcome: gatewayUsageOutcome(message.stopReason),
 					at: message.timestamp || undefined,
 					account: account(),
+					credentialId: message.credentialId,
 				}),
 			)
 			.catch(() => {})
@@ -1343,6 +1353,7 @@ async function handlePiNative(
 				outcome: gatewayUsageOutcome(message.stopReason),
 				at: message.timestamp || undefined,
 				account: account(),
+				credentialId: message.credentialId,
 			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
@@ -1400,6 +1411,7 @@ async function handlePiNative(
 					outcome: gatewayUsageOutcome(message.stopReason),
 					at: message.timestamp || undefined,
 					account: account(),
+					credentialId: message.credentialId,
 				}),
 			)
 			.catch(() => {})
@@ -1569,6 +1581,7 @@ export interface AuthGatewayRouter {
  * two routers in one process never share (or tear down) each other's.
  */
 export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
+	assertApiKeyLimitModelClasses(opts.apiKeyLimitModelClasses);
 	const sessionStates = new AuthGatewaySessionStateStore();
 	const route = async (req: Request, peer: string, caller: AgentCaller): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;

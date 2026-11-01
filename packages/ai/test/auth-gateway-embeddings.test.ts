@@ -204,6 +204,26 @@ describe("auth-gateway POST /v1/embeddings", () => {
 		expect(harness.events[0]?.account).toBe(`key:${Bun.hash("key-two").toString(36)}`);
 	});
 
+	it("attributes rotated usage to the stored row of the key that served the embedding", async () => {
+		harness = await boot({ apiKeys: ["key-one", "key-two"] });
+		const ids = new Map(
+			harness.storage.credentials
+				.list("openai")
+				.flatMap(row => (row.credential.type === "api_key" ? [[row.credential.key, row.id] as const] : [])),
+		);
+		const observed: Array<{ credentialId?: number }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "rotate key" }),
+		});
+		expect(response.status).toBe(200);
+		expect(ids.get("key-two")).toBeNumber();
+		expect(harness.events[0]?.credentialId).toBe(ids.get("key-two"));
+		expect(observed).toEqual([expect.objectContaining({ credentialId: ids.get("key-two") })]);
+	});
+
 	it("passes OpenRouter base64 embeddings and provider-reported cost through", async () => {
 		harness = await boot();
 		const response = await fetch(`${harness.url}/v1/embeddings`, {

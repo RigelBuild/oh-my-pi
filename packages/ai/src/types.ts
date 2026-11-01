@@ -413,6 +413,8 @@ export interface ProviderResponseMetadata {
 	status: number;
 	headers: Record<string, string>;
 	requestId?: string | null;
+	/** Stored credential row of the attempt that received this response, when known. */
+	credentialId?: number;
 	metadata?: Record<string, unknown>;
 }
 

@@ -24,7 +24,14 @@ import {
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
-import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
+import type {
+	ClientUsageIdentity,
+	ClientUsageReport,
+	ObservedAttemptOutcome,
+	ObservedLimitObservation,
+	ObservedUsageEntry,
+	UsageReport,
+} from "../usage";
 import { raceSignal } from "../auth/abort";
 import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
 import { compareCredentialBlockSnapshots } from "./protocol";
@@ -51,6 +58,16 @@ function isCredentialInAccountPool(
 	const identities = accountPool?.get(entry.provider);
 	if (identities === undefined) return true;
 	return entry.identityKey !== null && identities.has(entry.identityKey);
+}
+
+/** This process's own usage-reporting identity, used when no caller identity is given. */
+function defaultUsageIdentity(): ClientUsageIdentity {
+	return { installId: getInstallId(), hostname: os.hostname(), app: getAppName() };
+}
+
+/** Grouping key for one reporting client: one broker report per (install, app). */
+function observedClientKey(client: ClientUsageIdentity): string {
+	return `${client.installId}\u0000${client.app ?? ""}`;
 }
 
 /**
@@ -314,8 +331,21 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#streamingActive = false;
 	/** Latched once the broker has answered 404 — never try the stream again. */
 	#streamingUnsupported = false;
-	/** Pending observed usage keyed by `installId\u0000app\u0000provider\u0000model`, merged until flush. */
+	/**
+	 * Pending observed usage keyed by
+	 * `installId\u0000app\u0000provider\u0000model\u0000credentialId\u0000outcome`, merged until
+	 * flush. Absent credential identity keys as `-`, never colliding with a stored row id.
+	 */
 	#observedUsage = new Map<string, { client: ClientUsageIdentity; entry: ObservedUsageEntry }>();
+	/** Pending zero-usage attempt outcomes, keyed like {@link #observedUsage} with a required row id. */
+	#observedOutcomes = new Map<string, { client: ClientUsageIdentity; outcome: ObservedAttemptOutcome }>();
+	/** Pending limit observations keyed by `installId\u0000app\u0000credentialId\u0000modelClass\u0000kind`; newest wins. */
+	#observedLimits = new Map<string, { client: ClientUsageIdentity; observation: ObservedLimitObservation }>();
+	/**
+	 * Failed reports kept verbatim with their batch id, one per client. The broker
+	 * may have committed a failed send, so a retry must resend the same payload and id.
+	 */
+	#observedRetries = new Map<string, ClientUsageReport>();
 	#observedUsageTimer: Timer | undefined;
 	readonly #observedUsageFlushMs: number;
 	/** Latched once the broker answered 404 — old broker, never report again. */
@@ -1475,9 +1505,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	recordObservedUsage(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void {
 		if (this.#closed || this.#observedUsageUnsupported) return;
-		const identity = client ?? { installId: getInstallId(), hostname: os.hostname(), app: getAppName() };
+		const identity = client ?? defaultUsageIdentity();
 		for (const entry of entries) {
-			const key = `${identity.installId}\u0000${identity.app ?? ""}\u0000${entry.provider}\u0000${entry.model}`;
+			const key = `${observedClientKey(identity)}\u0000${entry.provider}\u0000${entry.model}\u0000${entry.credentialId ?? "-"}\u0000${entry.outcome ?? "ok"}`;
 			const pending = this.#observedUsage.get(key);
 			if (pending) {
 				pending.entry.at = Math.max(pending.entry.at, entry.at);
@@ -1491,7 +1521,55 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				this.#observedUsage.set(key, { client: identity, entry: { ...entry } });
 			}
 		}
-		if (this.#observedUsage.size > 0 && this.#observedUsageTimer === undefined) {
+		this.#scheduleObservedUsageFlush();
+	}
+
+	/**
+	 * Fold zero-usage settled attempts into the pending report. They travel in the
+	 * report's `outcomes` list so the broker counts them per credential without
+	 * touching client request history.
+	 */
+	recordObservedOutcomes(outcomes: ObservedAttemptOutcome[], client?: ClientUsageIdentity): void {
+		if (this.#closed || this.#observedUsageUnsupported) return;
+		const identity = client ?? defaultUsageIdentity();
+		for (const outcome of outcomes) {
+			const key = `${observedClientKey(identity)}\u0000${outcome.provider}\u0000${outcome.model}\u0000${outcome.credentialId}\u0000${outcome.outcome}`;
+			const pending = this.#observedOutcomes.get(key);
+			if (pending) {
+				pending.outcome.at = Math.max(pending.outcome.at, outcome.at);
+				pending.outcome.requests += outcome.requests;
+			} else {
+				this.#observedOutcomes.set(key, { client: identity, outcome: { ...outcome } });
+			}
+		}
+		this.#scheduleObservedUsageFlush();
+	}
+
+	/**
+	 * Buffer rate-limit/error-status observations for exact credential rows. Only
+	 * the newest observation per (row, model class, kind) is kept; an older one
+	 * (e.g. a failed batch merged back) never replaces a newer one.
+	 */
+	recordObservedLimits(observations: ObservedLimitObservation[], client?: ClientUsageIdentity): void {
+		if (this.#closed || this.#observedUsageUnsupported) return;
+		const identity = client ?? defaultUsageIdentity();
+		for (const observation of observations) {
+			const kind = observation.error ?? "limits";
+			const key = `${observedClientKey(identity)}\u0000${observation.credentialId}\u0000${observation.modelClass ?? ""}\u0000${kind}`;
+			const pending = this.#observedLimits.get(key);
+			if (pending && pending.observation.at > observation.at) continue;
+			this.#observedLimits.set(key, { client: identity, observation });
+		}
+		this.#scheduleObservedUsageFlush();
+	}
+
+	#scheduleObservedUsageFlush(): void {
+		const pending =
+			this.#observedUsage.size > 0 ||
+			this.#observedOutcomes.size > 0 ||
+			this.#observedLimits.size > 0 ||
+			this.#observedRetries.size > 0;
+		if (pending && this.#observedUsageTimer === undefined) {
 			this.#observedUsageTimer = setTimeout(() => {
 				this.#observedUsageTimer = undefined;
 				void this.#flushObservedUsage();
@@ -1523,41 +1601,97 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	async #sendObservedUsage(): Promise<void> {
-		if (this.#observedUsage.size === 0 || this.#observedUsageUnsupported) return;
-		const batch = [...this.#observedUsage.values()];
+		const pending =
+			this.#observedUsage.size > 0 ||
+			this.#observedOutcomes.size > 0 ||
+			this.#observedLimits.size > 0 ||
+			this.#observedRetries.size > 0;
+		if (!pending || this.#observedUsageUnsupported) return;
+		const retries = [...this.#observedRetries];
+		const usage = [...this.#observedUsage.values()];
+		const outcomes = [...this.#observedOutcomes.values()];
+		const limits = [...this.#observedLimits.values()];
+		this.#observedRetries.clear();
 		this.#observedUsage.clear();
+		this.#observedOutcomes.clear();
+		this.#observedLimits.clear();
 		// One report per distinct client identity — usually one (this install),
 		// plus one per attributed gateway caller when running inside the gateway.
-		const groups = new Map<string, { client: ClientUsageIdentity; entries: ObservedUsageEntry[] }>();
-		for (const { client, entry } of batch) {
-			const key = `${client.installId}\u0000${client.app ?? ""}`;
-			const group = groups.get(key);
-			if (group) group.entries.push(entry);
-			else groups.set(key, { client, entries: [entry] });
-		}
-		for (const { client, entries } of groups.values()) {
-			try {
-				await this.#client.reportClientUsage({
-					installId: client.installId,
-					hostname: client.hostname,
-					app: client.app,
-					entries,
-				});
-			} catch (error) {
-				const status = error instanceof AuthBrokerError ? error.status : undefined;
-				if (status === 400 || status === 404 || status === 501) {
-					// Broker predates the endpoint or its request schema (or the store
-					// can't persist) — stop trying for the life of this process.
-					this.#observedUsageUnsupported = true;
-					logger.debug("auth-broker does not accept observed usage; reporting disabled", { status });
-					return;
-				}
-				logger.debug("auth-broker observed usage flush failed; retrying next flush", { error: String(error) });
-				// Merge the failed group back under the (possibly refilled) buffer so
-				// nothing is lost; bounded because entries are keyed per
-				// (identity, provider, model).
-				if (!this.#closed) this.recordObservedUsage(entries, client);
+		const groups = new Map<
+			string,
+			{
+				client: ClientUsageIdentity;
+				entries: ObservedUsageEntry[];
+				outcomes: ObservedAttemptOutcome[];
+				limits: ObservedLimitObservation[];
 			}
+		>();
+		const groupFor = (client: ClientUsageIdentity) => {
+			const key = observedClientKey(client);
+			let group = groups.get(key);
+			if (!group) {
+				group = { client, entries: [], outcomes: [], limits: [] };
+				groups.set(key, group);
+			}
+			return group;
+		};
+		for (const { client, entry } of usage) groupFor(client).entries.push(entry);
+		for (const { client, outcome } of outcomes) groupFor(client).outcomes.push(outcome);
+		for (const { client, observation } of limits) groupFor(client).limits.push(observation);
+		// Retries go first and unchanged; a client whose retry fails again sends
+		// nothing new this flush, so at most one retry per client is ever held.
+		const blocked = new Set<string>();
+		for (const [key, report] of retries) {
+			const result = await this.#postObservedReport(key, report);
+			if (result === "unsupported") return;
+			if (result === "retry") blocked.add(key);
+		}
+		for (const [key, group] of groups) {
+			const { client } = group;
+			if (blocked.has(key)) {
+				if (!this.#closed) {
+					this.recordObservedUsage(group.entries, client);
+					this.recordObservedOutcomes(group.outcomes, client);
+					this.recordObservedLimits(group.limits, client);
+				}
+				continue;
+			}
+			// The optional lists ride only when present, so a usage-only report
+			// keeps the pre-identity wire shape apart from the batch id.
+			const result = await this.#postObservedReport(key, {
+				installId: client.installId,
+				hostname: client.hostname,
+				app: client.app,
+				entries: group.entries,
+				...(group.outcomes.length > 0 && { outcomes: group.outcomes }),
+				...(group.limits.length > 0 && { limits: group.limits }),
+				batchId: crypto.randomUUID(),
+			});
+			if (result === "unsupported") return;
+		}
+	}
+
+	/** Send one report; on a transient failure keep it verbatim for the next flush. */
+	async #postObservedReport(key: string, report: ClientUsageReport): Promise<"sent" | "retry" | "unsupported"> {
+		try {
+			await this.#client.reportClientUsage(report);
+			return "sent";
+		} catch (error) {
+			const status = error instanceof AuthBrokerError ? error.status : undefined;
+			if (status === 400 || status === 404 || status === 501) {
+				// Broker predates the endpoint or its request schema (or the store
+				// can't persist) — stop trying for the life of this process.
+				this.#observedUsageUnsupported = true;
+				this.#observedRetries.clear();
+				logger.debug("auth-broker does not accept observed usage; reporting disabled", { status });
+				return "unsupported";
+			}
+			logger.debug("auth-broker observed usage flush failed; retrying next flush", { error: String(error) });
+			if (!this.#closed) {
+				this.#observedRetries.set(key, report);
+				this.#scheduleObservedUsageFlush();
+			}
+			return "retry";
 		}
 	}
 

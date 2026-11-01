@@ -300,6 +300,9 @@ export const usageHistoryResponseSchema: FluentType<UsageHistoryResponse> = type
 	entries: usageHistoryEntrySchema.array(),
 });
 
+const observedUsageOutcomeSchema = type("'ok' | 'error' | 'aborted'");
+const credentialIdSchema = type("0 < number.integer <= 9007199254740991");
+
 const observedUsageEntrySchema = type({
 	at: "number",
 	provider: "string",
@@ -310,15 +313,42 @@ const observedUsageEntrySchema = type({
 	cacheReadTokens: "number",
 	cacheWriteTokens: "number",
 	costUsd: "number",
+	"credentialId?": credentialIdSchema,
+	"outcome?": observedUsageOutcomeSchema,
 });
 
-/** Broker `POST /v1/usage/observed` request — one client's batched observed usage. */
+const observedAttemptOutcomeSchema = type({
+	at: "number",
+	provider: "string",
+	model: "string",
+	credentialId: credentialIdSchema,
+	outcome: observedUsageOutcomeSchema,
+	requests: "number.integer > 0",
+});
+
+const observedLimitObservationSchema = type({
+	at: "number",
+	provider: "string",
+	credentialId: credentialIdSchema,
+	"modelClass?": "string",
+	limits: usageLimitSchema.array(),
+	"error?": "'credit_exhausted' | 'rate_limited'",
+});
+
+/**
+ * Broker `POST /v1/usage/observed` request — one client's batched observed usage.
+ * `outcomes` and `limits` are optional so pre-identity gateways keep validating;
+ * the strict envelope means the broker must upgrade before any gateway sends them.
+ */
 export const clientUsageReportRequestSchema: FluentType<ClientUsageReportRequest> = type({
 	"+": "reject",
 	installId: "string",
 	"hostname?": "string",
 	"app?": "string",
 	entries: observedUsageEntrySchema.array(),
+	"outcomes?": observedAttemptOutcomeSchema.array(),
+	"limits?": observedLimitObservationSchema.array(),
+	"batchId?": "string.uuid",
 });
 
 export const clientUsageReportResponseSchema: FluentType<ClientUsageReportResponse> = type({

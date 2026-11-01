@@ -63,6 +63,7 @@ import type {
 	FetchImpl,
 	Model,
 	OptionsForApi,
+	ProviderResponseMetadata,
 	SimpleStreamOptions,
 	StreamOptions,
 	ThinkingBudgets,
@@ -1304,7 +1305,19 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				const callerOnResponse = requestOptions.onResponse;
+				const attemptOptions = {
+					...requestOptions,
+					apiKey,
+					credentialId,
+					oauthIdentity,
+					// Bind headers to this attempt's row; a later rotation must never relabel them.
+					...(callerOnResponse &&
+						credentialId !== undefined && {
+							onResponse: (response: ProviderResponseMetadata, responseModel?: Model<Api>, responseSignal?: AbortSignal) =>
+								callerOnResponse({ ...response, credentialId }, responseModel, responseSignal),
+						}),
+				};
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {

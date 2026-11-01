@@ -60,6 +60,7 @@ export async function handleEmbeddings(
 		return embeddings.formatError(apiKey.status, apiKey.type, apiKey.message);
 	}
 	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let credentialId = apiKey.credentialId;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -81,15 +82,16 @@ export async function handleEmbeddings(
 				controller.signal,
 				"embeddings",
 				peer,
-				resolvedKey => {
+				(resolvedKey, resolvedCredentialId) => {
 					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account, credentialId });
 		return json(
 			200,
 			embeddings.encodeResponse(result, parsed.modelId),

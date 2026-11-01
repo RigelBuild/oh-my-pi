@@ -159,6 +159,7 @@ async function handleImages(
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let credentialId = apiKey.credentialId;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -180,8 +181,9 @@ async function handleImages(
 				controller.signal,
 				"images",
 				peer,
-				resolvedKey => {
+				(resolvedKey, resolvedCredentialId) => {
 					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
 			),
@@ -189,7 +191,7 @@ async function handleImages(
 			signal: controller.signal,
 		});
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account, credentialId });
 		return json(
 			200,
 			imagesServer.encodeResponse(result, parsed.modelId),
