@@ -486,3 +486,29 @@ export function isAccountScopedCapText(message: string): boolean {
 export function isConcurrencyCapExclusion(status: number | undefined, message: string | undefined): boolean {
 	return message !== undefined && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && status !== 402;
 }
+
+// The provider's own throttle error type (Anthropic/OpenAI `rate_limit_error`, OpenAI `rate_limit_exceeded`).
+const PROVIDER_THROTTLE_TYPE_PATTERN = /\brate_limit_(?:error|exceeded)\b/;
+
+/**
+ * The status a usage-limit failure records on its credential row, or `undefined`
+ * for every other quota or billing class (spend caps, subscription windows,
+ * entitlement walls). `credit_exhausted` needs recognized prepaid-credit
+ * depletion wording; `rate_limited` needs a real throttle (HTTP 429 or the
+ * provider's rate-limit error type) that is not a quota exhaustion.
+ */
+export function observedLimitErrorStatus(
+	status: number | undefined,
+	message: string,
+): "credit_exhausted" | "rate_limited" | undefined {
+	if (
+		ANTHROPIC_CREDIT_BALANCE_TOO_LOW_PATTERN.test(message) ||
+		CREDITS_EXHAUSTED_PATTERN.test(message) ||
+		PREPAID_BALANCE_EXHAUSTED_PATTERN.test(message) ||
+		INSUFFICIENT_BALANCE_PATTERN.test(message)
+	) {
+		return "credit_exhausted";
+	}
+	if (status !== 429 && !PROVIDER_THROTTLE_TYPE_PATTERN.test(message)) return undefined;
+	return parseRateLimitReason(message) === "QUOTA_EXHAUSTED" ? undefined : "rate_limited";
+}

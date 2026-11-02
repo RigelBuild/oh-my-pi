@@ -22,6 +22,7 @@ import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
+import { emptyUsage } from "./images/shared";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
@@ -1129,6 +1130,8 @@ type AuthRetryFailure = {
 	error: unknown;
 	bufferedEvents: AssistantMessageEvent[];
 	terminalEvent?: Extract<AssistantMessageEvent, { type: "error" }>;
+	/** Stored row the failed attempt used, when known. */
+	credentialId?: number;
 };
 
 function extractStatusFromAssistantError(message: AssistantMessage): number | undefined {
@@ -1314,8 +1317,11 @@ function streamSimpleRequest<TApi extends Api>(
 					// Bind headers to this attempt's row; a later rotation must never relabel them.
 					...(callerOnResponse &&
 						credentialId !== undefined && {
-							onResponse: (response: ProviderResponseMetadata, responseModel?: Model<Api>, responseSignal?: AbortSignal) =>
-								callerOnResponse({ ...response, credentialId }, responseModel, responseSignal),
+							onResponse: (
+								response: ProviderResponseMetadata,
+								responseModel?: Model<Api>,
+								responseSignal?: AbortSignal,
+							) => callerOnResponse({ ...response, credentialId }, responseModel, responseSignal),
 						}),
 				};
 				const inner = streamSimpleRequest(model, context, attemptOptions);
@@ -1343,6 +1349,7 @@ function streamSimpleRequest<TApi extends Api>(
 							error: contextualizeAuthRetryError(model, createAssistantAuthError(event.error)),
 							bufferedEvents,
 							terminalEvent: event,
+							credentialId,
 						};
 					}
 					flushBuffered();
@@ -1366,18 +1373,38 @@ function streamSimpleRequest<TApi extends Api>(
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
-					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
+					return { error: contextualizeAuthRetryError(model, error), bufferedEvents, credentialId };
 				}
 				flushBuffered();
+				reportDropped({ error, bufferedEvents, credentialId });
 				outer.fail(error);
 			}
 			return undefined;
+		};
+		// The settled result carries only the last attempt; every other credential-bound
+		// attempt reports its own outcome here, once.
+		const reportDropped = (failure: AuthRetryFailure): void => {
+			const onDropped = requestOptions.onDroppedAttempt;
+			if (!onDropped || failure.credentialId === undefined) return;
+			const message = failure.terminalEvent?.error;
+			const outcome = signal?.aborted || message?.stopReason === "aborted" ? "aborted" : "error";
+			try {
+				onDropped({
+					credentialId: failure.credentialId,
+					outcome,
+					usage: message?.usage ?? emptyUsage(),
+					error: failure.error,
+				});
+			} catch {
+				// Usage accounting must never change the request's own outcome.
+			}
 		};
 		const emitFailure = (failure: AuthRetryFailure): void => {
 			emitBufferedEvents(outer, failure.bufferedEvents);
 			if (failure.terminalEvent) {
 				outer.push(failure.terminalEvent);
 			} else {
+				reportDropped(failure);
 				outer.fail(failure.error);
 			}
 		};
@@ -1431,6 +1458,8 @@ function streamSimpleRequest<TApi extends Api>(
 					},
 				);
 				if (nextKey === undefined) break;
+				// This failure is abandoned for the next attempt, so the result never carries it.
+				reportDropped(failure);
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;

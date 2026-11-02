@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { observedLimitErrorStatus } from "@oh-my-pi/pi-ai/error/rate-limit";
 import { parseAnthropicApiKeyRateLimitHeaders } from "@oh-my-pi/pi-ai/usage/anthropic-api";
 
 describe("Anthropic Console API-key rate-limit headers", () => {
@@ -41,6 +42,36 @@ describe("Anthropic Console API-key rate-limit headers", () => {
 	});
 
 	it("does not observe an unmapped model", () => {
-		expect(parseAnthropicApiKeyRateLimitHeaders({ "anthropic-ratelimit-requests-limit": "1" }, undefined)).toEqual([]);
+		expect(parseAnthropicApiKeyRateLimitHeaders({ "anthropic-ratelimit-requests-limit": "1" }, undefined)).toEqual(
+			[],
+		);
+	});
+});
+
+describe("observed credential error status", () => {
+	it("records rate_limited only for a real throttle", () => {
+		expect(observedLimitErrorStatus(429, "Too many requests, please slow down")).toBe("rate_limited");
+		expect(
+			observedLimitErrorStatus(
+				undefined,
+				'{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}',
+			),
+		).toBe("rate_limited");
+	});
+
+	it("records credit_exhausted for recognized credit depletion", () => {
+		expect(observedLimitErrorStatus(400, "Your credit balance is too low to access the Anthropic API.")).toBe(
+			"credit_exhausted",
+		);
+		expect(observedLimitErrorStatus(402, "Insufficient credits for this request")).toBe("credit_exhausted");
+		expect(observedLimitErrorStatus(429, "Your prepaid balance is used up: Add funds")).toBe("credit_exhausted");
+	});
+
+	it("records no status for other quota and billing classes", () => {
+		expect(observedLimitErrorStatus(400, "You have reached your monthly spend limit")).toBeUndefined();
+		expect(observedLimitErrorStatus(429, "You have reached your monthly spend limit")).toBeUndefined();
+		expect(observedLimitErrorStatus(429, "Your subscription plan quota is exhausted")).toBeUndefined();
+		expect(observedLimitErrorStatus(403, "Usage credits are required for this model")).toBeUndefined();
+		expect(observedLimitErrorStatus(402, "Payment required")).toBeUndefined();
 	});
 });

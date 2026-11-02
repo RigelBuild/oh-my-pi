@@ -7,6 +7,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayAttemptOutcomes,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
@@ -171,6 +172,7 @@ async function handleImages(
 		peer,
 	});
 
+	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await generateImage(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
@@ -186,6 +188,7 @@ async function handleImages(
 					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
+				outcomes.onAttemptFailed,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
@@ -198,6 +201,7 @@ async function handleImages(
 			gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }),
 		);
 	} catch (error) {
+		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway image generation failed", { format: "images", error: classified.message, peer });

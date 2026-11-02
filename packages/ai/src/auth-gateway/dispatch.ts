@@ -13,9 +13,15 @@ import { markAfterSiblingWait, type ApiKeyResolver, type ResolvedApiKey } from "
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
-import { calculateRateLimitBackoffMs, isAnthropicCreditBalanceTooLow, isUsageLimitOutcome } from "../error/rate-limit";
+import {
+	calculateRateLimitBackoffMs,
+	isAnthropicCreditBalanceTooLow,
+	isUsageLimitOutcome,
+	observedLimitErrorStatus,
+} from "../error/rate-limit";
+import { emptyUsage } from "../images/shared";
 import type { Api, FetchImpl, Model, StreamOptions, Usage } from "../types";
-import type { ClientUsageIdentity, ObservedLimitError } from "../usage";
+import type { ClientUsageIdentity } from "../usage";
 import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
 import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AgentCaller, AuthGatewayServerOptions, CallerIdentity } from "./types";
@@ -259,11 +265,10 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
-		if (credentialId !== undefined) {
-			// Status evidence for the exact row that failed, never a numeric balance.
-			const limitError: ObservedLimitError = isAnthropicCreditBalanceTooLow(message)
-				? "credit_exhausted"
-				: "rate_limited";
+		// Status evidence for the exact row that failed, never a numeric balance; quota
+		// and billing classes that are neither a throttle nor credit depletion record none.
+		const limitError = credentialId === undefined ? undefined : observedLimitErrorStatus(status, message);
+		if (credentialId !== undefined && limitError) {
 			storage.usage.observeLimits([{ at: Date.now(), provider, credentialId, limits: [], error: limitError }]);
 		}
 		if (credentialId !== undefined && onUsageLimit) {
@@ -342,7 +347,9 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  * credential that actually failed; a retry context's `previousKey` wins, since
  * concurrent operations sharing one resolver (split judgment chunks) each know
  * the bearer they sent. `onResolvedKey` observes every rotation so the route
- * can re-key its account lease or usage attribution.
+ * can re-key its account lease or usage attribution. `onAttemptFailed` observes
+ * every retry step with the row of the bearer whose attempt just failed; one
+ * failure can drive two steps (refresh, then rotate), so callers dedupe on the error.
  */
 export function buildGatewayApiKeyResolver(
 	storage: AuthStorage,
@@ -354,6 +361,7 @@ export function buildGatewayApiKeyResolver(
 	peer: string,
 	onResolvedKey?: (apiKey: string, credentialId: number | undefined) => void,
 	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
+	onAttemptFailed?: (credentialId: number | undefined, error: unknown) => void,
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
 	const credentialIdsByBearer = new Map<string, number | undefined>([[initialKey.apiKey, initialKey.credentialId]]);
@@ -363,6 +371,7 @@ export function buildGatewayApiKeyResolver(
 			lastKey = initialKey.apiKey;
 			return initialKey;
 		}
+		onAttemptFailed?.(credentialIdsByBearer.get(previousKey ?? lastKey), error);
 		if (!lastChance) {
 			const refreshed = await storage.keys.getWithCredential(model.provider, sessionId, {
 				...modelKeyOptions(model, sig),
@@ -495,6 +504,66 @@ export function recordGatewayUsage(
 		...(options.account !== undefined && { account: options.account }),
 		...(credentialId !== undefined && { credentialId }),
 	});
+}
+
+/**
+ * The `onDroppedAttempt` hook for one gateway request: records every settled attempt the
+ * stream's result does not carry (abandoned for a rotation, or ended by a thrown error)
+ * against its own credential row. Each gets a distinct `requestId` so `onUsage` consumers
+ * never fold it into the answer. No `account` label: the request's account tracker has
+ * already moved to the rotated key when the hook fires, and the row id is exact.
+ */
+export function gatewayDroppedAttemptRecorder(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	requestId: string,
+): NonNullable<StreamOptions["onDroppedAttempt"]> {
+	let dropped = 0;
+	return attempt => {
+		dropped++;
+		recordGatewayUsage(bootOpts, model, client, attempt.usage, {
+			requestId: `${requestId}:d${dropped}`,
+			outcome: attempt.outcome,
+			credentialId: attempt.credentialId,
+		});
+	};
+}
+
+/**
+ * Per-request outcome recorder for the non-chat routes (embeddings, images,
+ * rerank, speech, transcriptions). Their providers retry through `withAuth`, so
+ * the route sees only the final result: `onAttemptFailed` (pass it to
+ * {@link buildGatewayApiKeyResolver}) records each abandoned attempt against the
+ * row that served it, once per error, and `recordFinal` records the request's
+ * terminal failure unless that same error was already recorded as abandoned.
+ * Failures carry no usage, so they count only as attempt outcomes.
+ */
+export function gatewayAttemptOutcomes(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	requestId: string,
+): {
+	onAttemptFailed: (credentialId: number | undefined, error: unknown) => void;
+	recordFinal: (credentialId: number | undefined, error: unknown, outcome: "error" | "aborted") => void;
+} {
+	let recordedError: unknown;
+	let recorded = 0;
+	const record = (credentialId: number | undefined, error: unknown, outcome: "error" | "aborted"): void => {
+		if (recorded > 0 && error === recordedError) return;
+		recordedError = error;
+		recorded++;
+		recordGatewayUsage(bootOpts, model, client, emptyUsage(), {
+			requestId: `${requestId}:d${recorded}`,
+			outcome,
+			credentialId,
+		});
+	};
+	return {
+		onAttemptFailed: (credentialId, error) => record(credentialId, error, "error"),
+		recordFinal: record,
+	};
 }
 
 /** Call the boot hook; synchronous throws and asynchronous rejections are logged. */

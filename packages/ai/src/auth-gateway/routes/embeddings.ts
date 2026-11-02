@@ -6,6 +6,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayAttemptOutcomes,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
@@ -71,7 +72,7 @@ export async function handleEmbeddings(
 		stream: false,
 		peer,
 	});
-
+	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await embed(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
@@ -87,6 +88,7 @@ export async function handleEmbeddings(
 					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
+				outcomes.onAttemptFailed,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
@@ -98,6 +100,7 @@ export async function handleEmbeddings(
 			gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }),
 		);
 	} catch (error) {
+		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway embeddings failed", {

@@ -61,6 +61,14 @@ export interface UsageHistoryResponse {
 /** POST /v1/usage/observed request body — one client's batched observed usage. */
 export type ClientUsageReportRequest = ClientUsageReport;
 
+/**
+ * Caps on a report's `outcomes` and `limits` lists. The broker rejects an
+ * oversize report with 400, so a reporter carries any excess to its next report.
+ * A reporter sends one limit observation per (row, model class, limit id or error).
+ */
+export const MAX_OBSERVED_OUTCOMES = 1024;
+export const MAX_OBSERVED_LIMIT_OBSERVATIONS = 1024;
+
 /** POST /v1/usage/observed response body. */
 export interface ClientUsageReportResponse {
 	ok: boolean;

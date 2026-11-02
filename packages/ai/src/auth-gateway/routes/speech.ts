@@ -6,6 +6,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayAttemptOutcomes,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
@@ -87,6 +88,7 @@ export async function handleSpeech(
 		peer,
 	});
 
+	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await synthesizeSpeech(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
@@ -102,6 +104,7 @@ export async function handleSpeech(
 					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
+				outcomes.onAttemptFailed,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
@@ -116,6 +119,7 @@ export async function handleSpeech(
 		for (const name in responseHeaders) response.headers.set(name, responseHeaders[name]);
 		return response;
 	} catch (error) {
+		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway speech failed", { format: "speech", error: classified.message, peer });

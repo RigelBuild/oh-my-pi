@@ -224,6 +224,49 @@ describe("auth-gateway POST /v1/embeddings", () => {
 		expect(observed).toEqual([expect.objectContaining({ credentialId: ids.get("key-two") })]);
 	});
 
+	it("records the rotated-away attempt's failure against its own row, once", async () => {
+		harness = await boot({ apiKeys: ["key-one", "key-two"] });
+		const ids = new Map(
+			harness.storage.credentials
+				.list("openai")
+				.flatMap(row => (row.credential.type === "api_key" ? [[row.credential.key, row.id] as const] : [])),
+		);
+		const observed: Array<{ credentialId?: number; outcome?: string }> = [];
+		const outcomes: Array<{ credentialId: number; outcome: string; requests: number }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observeOutcome").mockImplementation(outcome => outcomes.push(outcome));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "rotate key" }),
+		});
+		expect(response.status).toBe(200);
+		// key-one's 401 drives both the refresh and the rotate step but counts once.
+		expect(outcomes).toEqual([
+			expect.objectContaining({ credentialId: ids.get("key-one"), outcome: "error", requests: 1 }),
+		]);
+		expect(observed).toEqual([expect.objectContaining({ credentialId: ids.get("key-two"), outcome: "ok" })]);
+		expect(harness.events).toHaveLength(1);
+	});
+
+	it("records a final non-chat failure as a zero-usage outcome, not a usage entry", async () => {
+		harness = await boot({ apiKeys: ["key-one"] });
+		const [row] = harness.storage.credentials.list("openai");
+		const observed: unknown[] = [];
+		const outcomes: Array<{ credentialId: number; outcome: string; requests: number }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observeOutcome").mockImplementation(outcome => outcomes.push(outcome));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "always fails" }),
+		});
+		expect(response.status).toBe(401);
+		expect(outcomes).toEqual([expect.objectContaining({ credentialId: row?.id, outcome: "error", requests: 1 })]);
+		expect(observed).toHaveLength(0);
+		expect(harness.events).toHaveLength(0);
+	});
+
 	it("passes OpenRouter base64 embeddings and provider-reported cost through", async () => {
 		harness = await boot();
 		const response = await fetch(`${harness.url}/v1/embeddings`, {

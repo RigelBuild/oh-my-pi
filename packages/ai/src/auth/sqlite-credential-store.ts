@@ -69,6 +69,12 @@ const CLIENT_USAGE_BUCKET_MS = 5 * 60_000;
  */
 const OBSERVED_BATCH_RETENTION_MS = 24 * 60 * 60_000;
 
+/**
+ * Model classes whose limit observations are retained per credential; matches the
+ * gateway's three-row series budget (`assertApiKeyLimitModelClasses`).
+ */
+const MAX_LIMIT_MODEL_CLASSES = 3;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SqliteAuthCredentialStore
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2061,6 +2067,17 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				);
 			}
 		}
+		// Bound retained rows: keep at most MAX_LIMIT_MODEL_CLASSES model classes per
+		// credential; a newly observed class evicts the least recently observed one.
+		const pruneClasses = this.#db.query(
+			`DELETE FROM credential_limit_observations WHERE credential_id = ?1 AND model_class NOT IN (
+				SELECT model_class FROM credential_limit_observations WHERE credential_id = ?1
+				GROUP BY model_class ORDER BY MAX(observed_at) DESC, model_class LIMIT ?2
+			)`,
+		);
+		const touched = new Set<number>();
+		for (const observation of report.limits ?? []) touched.add(observation.credentialId);
+		for (const credentialId of touched) pruneClasses.run(credentialId, MAX_LIMIT_MODEL_CLASSES);
 	}
 
 	/**

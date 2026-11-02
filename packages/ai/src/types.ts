@@ -418,6 +418,18 @@ export interface ProviderResponseMetadata {
 	metadata?: Record<string, unknown>;
 }
 
+/** A settled credential-bound attempt whose outcome never reaches the stream's result. */
+export interface DroppedAttempt {
+	/** Stored credential row that served the attempt. */
+	credentialId: number;
+	/** `aborted` when the caller's signal ended it; otherwise `error`. */
+	outcome: "error" | "aborted";
+	/** Usage the attempt reported before it failed; zero when it reported none. */
+	usage: Usage;
+	/** The failure that ended the attempt. */
+	error: unknown;
+}
+
 export interface RawSseEvent {
 	event: string | null;
 	data: string;
@@ -504,6 +516,13 @@ export interface StreamOptions {
 	credentialId?: number;
 	/** @internal Non-secret identity of the bearer serving this attempt; never persisted in history. */
 	oauthIdentity?: OAuthRequestIdentity;
+	/**
+	 * @internal Receives each settled credential-bound attempt whose outcome the
+	 * returned stream's result will not carry: an attempt the auth-retry driver
+	 * abandons to rotate or refresh, and an attempt that ends the stream with a
+	 * thrown error. Fires at most once per attempt.
+	 */
+	onDroppedAttempt?: (attempt: DroppedAttempt) => void;
 	cacheRetention?: CacheRetention;
 	/**
 	 * Anthropic preserved-thinking behavior when a signed block no longer matches

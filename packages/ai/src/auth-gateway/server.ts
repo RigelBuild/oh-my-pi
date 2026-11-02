@@ -57,6 +57,7 @@ import {
 	type CandidateFailoverOptions,
 	type FailoverContext,
 	gatewayApiKeyLimitObserver,
+	gatewayDroppedAttemptRecorder,
 	gatewayUsageOutcome,
 	resolveGatewayModel,
 	mirrorRequestAbort,
@@ -832,6 +833,12 @@ async function runFailoverLoop(
 				follower ? Date.now() + Math.max(0, (deadlineAt - Date.now()) / 2) : undefined,
 			);
 			const answering = model;
+			streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
+				request.bootOpts,
+				answering,
+				request.client,
+				`${requestId}:a${attempt}`,
+			);
 			const knownFollower = async (): Promise<Model<Api> | undefined> => follower;
 			logger.info("auth-gateway request", {
 				requestId,
@@ -1096,6 +1103,7 @@ async function handleFormatEndpoint(
 	}
 	if (!start.ok) return route.module.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account } = start;
+	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(bootOpts, model, client, requestId);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -1333,6 +1341,7 @@ async function handlePiNative(
 	}
 	if (!start.ok) return piNative.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account } = start;
+	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(bootOpts, model, client, requestId);
 
 	logger.info("auth-gateway request", {
 		requestId,
