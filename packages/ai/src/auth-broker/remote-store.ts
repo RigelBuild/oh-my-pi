@@ -1515,8 +1515,8 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	/**
 	 * Fold locally observed request usage into the pending report and schedule
-	 * a flush. Each flush sends one `POST /v1/usage/observed` per client identity
-	 * (more when a group exceeds the report caps), plus a final flush when the
+	 * a flush. Each flush first resends queued retries, then one `POST /v1/usage/observed`
+	 * per client identity (more when a group exceeds the report caps), plus a final flush when the
 	 * process exits; on a transient failure the report is retried, ahead of newer
 	 * data for that client, on the next flush. A 404 (pre-endpoint broker) disables
 	 * reporting for the life of this store.

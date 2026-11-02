@@ -83,8 +83,8 @@ export type GatewayUsageOutcome = "ok" | "error" | "aborted";
 export interface GatewayUsageEvent {
 	/**
 	 * Gateway-generated id for the inbound request; the answer carries it bare.
-	 * Other settled attempts append a suffix (`:aN` failover, `:dN` rotated away,
-	 * `:tN` re-sampled thinking loop) so each is distinct. Video reuses its stable
+	 * Other settled attempts append a suffix (`:aN` failover, `:dN` an attempt that
+	 * failed or was rotated away, `:tN` re-sampled thinking loop) so each is distinct. Video reuses its stable
 	 * job id on every completed poll; dedupe on this id.
 	 */
 	requestId: string;

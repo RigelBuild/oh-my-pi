@@ -783,7 +783,7 @@ describe("broker credential lifetime totals", () => {
 		for (let index = 0; index < count; index += 1) {
 			remote.recordObservedUsage([usageEntry({ model: model(index), credentialId: keyId })], identity);
 			// The limits list adds the bytes that push the at-cap lists past 1 MiB.
-			const modelClass = `c${index.toString(36)}`.padEnd(32, "x");
+			const modelClass = `c${String(index).padStart(4, "0")}`;
 			remote.recordObservedLimits(
 				[
 					{
@@ -818,6 +818,12 @@ describe("broker credential lifetime totals", () => {
 			expect(Buffer.byteLength(JSON.stringify(report))).toBeLessThanOrEqual(MAX_OBSERVED_REPORT_BYTES);
 		}
 		expect(new Set(sent.map(report => report.batchId)).size).toBe(sent.length);
+		const expected = Array.from({ length: count }, (_, index) => model(index)).sort();
+		expect(sent.flatMap(report => report.entries.map(entry => entry.model)).sort()).toEqual(expected);
+		expect(sent.flatMap(report => report.outcomes?.map(outcome => outcome.model) ?? []).sort()).toEqual(expected);
+		expect(
+			sent.flatMap(report => report.limits?.map(observation => observation.modelClass ?? "") ?? []).sort(),
+		).toEqual(Array.from({ length: count }, (_, index) => `c${String(index).padStart(4, "0")}`).sort());
 		expect(clientRequests("i-bytes")).toBe(count);
 		expect(total("requests:ok")).toBe(count);
 		expect(total("requests:error")).toBe(count);
