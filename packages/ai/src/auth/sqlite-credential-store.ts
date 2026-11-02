@@ -1966,13 +1966,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		for (const entry of report.entries) {
 			// Merge into the newest row of the same (install, provider, model)
 			// bucket so 10s client flushes don't accrete one row apiece forever.
-			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
+			// A client clock ahead of the broker never dates usage past its receipt.
+			const at = Math.min(entry.at, now);
+			const bucketFloor = at - CLIENT_USAGE_BUCKET_MS;
 			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
 				id: number;
 			} | null;
 			if (existing) {
 				merge.run(
-					entry.at,
+					at,
 					entry.requests,
 					entry.inputTokens,
 					entry.outputTokens,
@@ -1984,7 +1986,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				continue;
 			}
 			insert.run(
-				entry.at,
+				at,
 				report.installId,
 				app,
 				entry.provider,

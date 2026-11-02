@@ -290,6 +290,23 @@ describe("auth-gateway credential attribution", () => {
 		}
 	});
 
+	it("rejects a model-class row the broker would refuse in a limit id", async () => {
+		const storage = await AuthStorage.create(":memory:");
+		try {
+			for (const row of ["Opus-5.5", "opus 5", "-opus", "o".repeat(33)]) {
+				expect(() =>
+					createAuthGatewayRouter({
+						storage,
+						resolveModel: () => undefined,
+						apiKeyLimitModelClasses: { "claude-opus-5-5": row },
+					}),
+				).toThrow(/must match/);
+			}
+		} finally {
+			storage.close();
+		}
+	});
+
 	it("records credit exhaustion on the exact row that returned it", async () => {
 		harness = await boot({
 			provider: "anthropic",

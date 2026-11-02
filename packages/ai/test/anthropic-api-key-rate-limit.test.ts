@@ -59,6 +59,16 @@ describe("observed credential error status", () => {
 		).toBe("rate_limited");
 	});
 
+	it("records no throttle for a 429 whose body names a usage limit", () => {
+		expect(
+			observedLimitErrorStatus(
+				429,
+				'{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}',
+			),
+		).toBeUndefined();
+		expect(observedLimitErrorStatus(429, '{"error":{"code":"usage_limit_exceeded","message":"x"}}')).toBeUndefined();
+	});
+
 	it("records credit_exhausted for recognized credit depletion", () => {
 		expect(observedLimitErrorStatus(400, "Your credit balance is too low to access the Anthropic API.")).toBe(
 			"credit_exhausted",

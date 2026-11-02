@@ -75,6 +75,9 @@ export const MAX_OBSERVED_USAGE_ENTRIES = 1024;
 /** Maximum UTF-8 request body accepted by POST /v1/usage/observed. */
 export const MAX_OBSERVED_REPORT_BYTES = 1024 * 1024;
 
+/** A configured API-key model-class row label, as the broker accepts it in a limit id. */
+export const OBSERVED_MODEL_CLASS_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+
 /** POST /v1/usage/observed response body. */
 export interface ClientUsageReportResponse {
 	ok: boolean;

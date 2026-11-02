@@ -10,6 +10,7 @@
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import { markAfterSiblingWait, type ApiKeyResolver, type ResolvedApiKey } from "../auth-retry";
+import { OBSERVED_MODEL_CLASS_PATTERN } from "../auth-broker/types";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
@@ -81,8 +82,10 @@ export type GatewayUsageOutcome = "ok" | "error" | "aborted";
 /** One settled upstream call, reported to {@link AuthGatewayRouteOptions.onUsage}. */
 export interface GatewayUsageEvent {
 	/**
-	 * The `x-request-id` of a successful response (error envelopes omit the header).
-	 * Video reuses its stable job id on every completed poll; dedupe on this id.
+	 * Gateway-generated id for the inbound request; the answer carries it bare.
+	 * Other settled attempts append a suffix (`:aN` failover, `:dN` rotated away,
+	 * `:tN` re-sampled thinking loop) so each is distinct. Video reuses its stable
+	 * job id on every completed poll; dedupe on this id.
 	 */
 	requestId: string;
 	provider: string;
@@ -142,7 +145,8 @@ export interface AuthGatewayRouteOptions {
 	candidateFailover?: CandidateFailoverOptions;
 	/**
 	 * Exact Anthropic model id → documented rate-limit table row (e.g. `opus-5.5`).
-	 * API-key responses for listed models report their rate-limit headers; at most three rows.
+	 * API-key responses for listed models report their rate-limit headers; at most three rows,
+	 * each a lowercase label matching {@link OBSERVED_MODEL_CLASS_PATTERN}.
 	 */
 	apiKeyLimitModelClasses?: Readonly<Record<string, string>>;
 }
@@ -416,6 +420,13 @@ export function hasGatewayUsage(usage: Usage): boolean {
 /** Reject a model-class map naming more distinct rate-limit rows than the series budget allows. */
 export function assertApiKeyLimitModelClasses(classes: Readonly<Record<string, string>> | undefined): void {
 	const rows = new Set(Object.values(classes ?? {}));
+	for (const row of rows) {
+		if (!OBSERVED_MODEL_CLASS_PATTERN.test(row)) {
+			throw new Error(
+				`apiKeyLimitModelClasses row ${JSON.stringify(row)} must match ${OBSERVED_MODEL_CLASS_PATTERN.source}`,
+			);
+		}
+	}
 	if (rows.size > 3) {
 		throw new Error(`apiKeyLimitModelClasses names ${rows.size} distinct rows; at most 3 are allowed`);
 	}

@@ -49,7 +49,12 @@ import type {
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
-import { MAX_OBSERVED_LIMIT_OBSERVATIONS, MAX_OBSERVED_OUTCOMES, MAX_OBSERVED_USAGE_ENTRIES } from "./types";
+import {
+	MAX_OBSERVED_LIMIT_OBSERVATIONS,
+	MAX_OBSERVED_OUTCOMES,
+	MAX_OBSERVED_USAGE_ENTRIES,
+	OBSERVED_MODEL_CLASS_PATTERN,
+} from "./types";
 
 // ─── Credential payloads ─────────────────────────────────────────────────────
 
@@ -344,7 +349,7 @@ const observedLimitAmountSchema = type({
 /** Window ids `parseAnthropicApiKeyRateLimitHeaders` emits; the only limit ids the broker persists. */
 const OBSERVED_LIMIT_WINDOWS = ["requests", "input-tokens", "output-tokens"] as const;
 /** A configured model-class row label; also the `<row>` segment of `anthropic:api:<row>:<window>`. */
-const observedModelClassSchema = type(/^[a-z0-9][a-z0-9._-]{0,31}$/);
+const observedModelClassSchema = type(OBSERVED_MODEL_CLASS_PATTERN);
 const observedLimitWindowSchema = type("'requests' | 'input-tokens' | 'output-tokens'");
 
 /** One parsed API-key window: a closed shape with bounded strings, no free-form notes. */

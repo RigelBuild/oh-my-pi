@@ -510,5 +510,6 @@ export function observedLimitErrorStatus(
 		return "credit_exhausted";
 	}
 	if (status !== 429 && !PROVIDER_THROTTLE_TYPE_PATTERN.test(message)) return undefined;
+	if (matchesUsageLimitText(message)) return undefined;
 	return parseRateLimitReason(message) === "QUOTA_EXHAUSTED" ? undefined : "rate_limited";
 }

@@ -754,6 +754,156 @@ describe("broker credential lifetime totals", () => {
 		expect(report?.limits).toHaveLength(MAX_OBSERVED_LIMIT_OBSERVATIONS);
 	});
 
+	test("a group whose serialized body exceeds the byte cap is split and every item lands once", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
+		const real = client.reportClientUsage.bind(client);
+		const sent: ClientUsageReport[] = [];
+		const failures: unknown[] = [];
+		const count = MAX_OBSERVED_USAGE_ENTRIES;
+		const done = Promise.withResolvers<void>();
+		vi.spyOn(client, "reportClientUsage").mockImplementation(async (report, signal) => {
+			sent.push(structuredClone(report));
+			try {
+				return await real(report, signal);
+			} catch (error) {
+				failures.push(error);
+				throw error;
+			} finally {
+				if (
+					sent.reduce((sum, batch) => sum + batch.entries.length, 0) >= count &&
+					sent.reduce((sum, batch) => sum + (batch.outcomes?.length ?? 0), 0) >= count
+				)
+					done.resolve();
+			}
+		});
+		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 20 });
+		const identity = { installId: "i-bytes", app: "omp" };
+		// Every list is under its count cap and every field under its length cap, yet the body exceeds 1 MiB.
+		const model = (index: number) => `${index}-`.padEnd(256, "m");
+		for (let index = 0; index < count; index += 1) {
+			remote.recordObservedUsage([usageEntry({ model: model(index), credentialId: keyId })], identity);
+			// The limits list adds the bytes that push the at-cap lists past 1 MiB.
+			const modelClass = `c${index.toString(36)}`.padEnd(32, "x");
+			remote.recordObservedLimits(
+				[
+					{
+						at: Date.now(),
+						provider: "anthropic",
+						credentialId: keyId,
+						modelClass,
+						limits: [requestLimit(1, modelClass)],
+					},
+				],
+				identity,
+			);
+			remote.recordObservedOutcomes(
+				[
+					{
+						at: Date.now(),
+						provider: "anthropic",
+						model: model(index),
+						credentialId: keyId,
+						outcome: "error",
+						requests: 1,
+					},
+				],
+				identity,
+			);
+		}
+		await done.promise;
+		expect(failures).toEqual([]);
+		// Both lists sit exactly at the count caps, so only the byte cap splits them.
+		expect(sent.length).toBeGreaterThan(1);
+		for (const report of sent) {
+			expect(Buffer.byteLength(JSON.stringify(report))).toBeLessThanOrEqual(MAX_OBSERVED_REPORT_BYTES);
+		}
+		expect(new Set(sent.map(report => report.batchId)).size).toBe(sent.length);
+		expect(clientRequests("i-bytes")).toBe(count);
+		expect(total("requests:ok")).toBe(count);
+		expect(total("requests:error")).toBe(count);
+	});
+
+	test("a 413 is not retried, so newer data for that client still lands", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
+		const real = client.reportClientUsage.bind(client);
+		const sent: ClientUsageReport[] = [];
+		const second = Promise.withResolvers<void>();
+		vi.spyOn(client, "reportClientUsage").mockImplementation(async (report, signal) => {
+			sent.push(structuredClone(report));
+			if (sent.length === 1) {
+				throw new AuthBrokerError("Auth broker request failed: 413 Payload Too Large", { status: 413 });
+			}
+			const ack = await real(report, signal);
+			second.resolve();
+			return ack;
+		});
+		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 20 });
+		const identity = { installId: "i-413", app: "omp" };
+		remote.recordObservedUsage([usageEntry({ model: "first" })], identity);
+		await Bun.sleep(100);
+		remote.recordObservedUsage([usageEntry({ model: "second" })], identity);
+		await second.promise;
+		expect(sent.map(report => report.entries.map(entry => entry.model))).toEqual([["first"], ["second"]]);
+		expect(sent[1]?.batchId).not.toBe(sent[0]?.batchId);
+	});
+
+	test("a retry of an earlier failed report is posted before a later flush's newer limit", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
+		const real = client.reportClientUsage.bind(client);
+		const order: number[] = [];
+		const firstSent = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const settled = Promise.withResolvers<void>();
+		let calls = 0;
+		vi.spyOn(client, "reportClientUsage").mockImplementation(async (report, signal) => {
+			calls += 1;
+			const remaining = report.limits?.[0]?.limits[0]?.amount.remaining ?? -1;
+			order.push(remaining);
+			if (calls === 1) {
+				firstSent.resolve();
+				await releaseFirst.promise;
+				throw new Error("connection reset");
+			}
+			const ack = await real(report, signal);
+			if (order.length >= 3) settled.resolve();
+			return ack;
+		});
+		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 20 });
+		const identity = { installId: "i-order", app: "omp" };
+		const observe = (remaining: number) =>
+			remote!.recordObservedLimits(
+				[
+					{
+						at: Date.now(),
+						provider: "anthropic",
+						credentialId: keyId,
+						modelClass: "opus-5.5",
+						limits: [requestLimit(remaining)],
+					},
+				],
+				identity,
+			);
+		observe(10);
+		await firstSent.promise;
+		// The newer observation is flushed while the older report is still in flight.
+		observe(3);
+		await Bun.sleep(60);
+		releaseFirst.resolve();
+		await settled.promise;
+		expect(order).toEqual([10, 10, 3]);
+		const stored = storage!.usage.limitObservations().find(observation => observation.credentialId === keyId);
+		expect(stored?.limits[0]?.amount.remaining).toBe(3);
+	});
+
+	test("a client clock ahead of the broker never dates usage past receipt", async () => {
+		const future = Date.now() + 365 * 24 * 60 * 60 * 1000;
+		expect(await post({ installId: "i-future", entries: [usageEntry({ at: future })] })).toBe(200);
+		expect(
+			storage!.usage.clientSummary(future - 1000).clients.find(c => c.installId === "i-future")?.providers,
+		).toEqual([]);
+		expect(clientRequests("i-future")).toBe(1);
+	});
+
 	test("the report request is bounded by bytes and rejects unbounded identity and numeric fields", async () => {
 		const tooLarge = await fetch(`${handle!.url}/v1/usage/observed`, {
 			method: "POST",
