@@ -1,10 +1,16 @@
+import {
+	MAX_OBSERVED_LIMIT_OBSERVATIONS,
+	MAX_OBSERVED_OUTCOMES,
+	MAX_OBSERVED_REPORT_BYTES,
+	MAX_OBSERVED_USAGE_ENTRIES,
+} from "@oh-my-pi/pi-ai/auth-broker/types";
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
 import {
 	AuthBrokerClient,
 	AuthBrokerError,
@@ -12,7 +18,12 @@ import {
 	RemoteAuthCredentialStore,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import type { ClientUsageReport, ObservedUsageEntry, UsageLimit } from "@oh-my-pi/pi-ai/usage";
+import type {
+	ClientUsageReport,
+	ObservedLimitObservation,
+	ObservedUsageEntry,
+	UsageLimit,
+} from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const TOKEN = "totals-bearer";
@@ -326,15 +337,16 @@ describe("broker credential lifetime totals", () => {
 		expect(storage!.usage.credentialTotals()).toEqual([]);
 	});
 
-	test("the latest limit observation wins and survives a reopen", async () => {
-		const at = Date.now();
-		const observe = (observedAt: number, remaining: number) =>
+	test("limit observations use broker receipt ordering and survive a reopen", async () => {
+		let receiptTime = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => receiptTime++);
+		const observe = (at: number, remaining: number) =>
 			post({
 				installId: "i-limits",
 				entries: [],
 				limits: [
 					{
-						at: observedAt,
+						at,
 						provider: "anthropic",
 						credentialId: keyId,
 						modelClass: "opus-5.5",
@@ -342,43 +354,34 @@ describe("broker credential lifetime totals", () => {
 					},
 				],
 			});
-		expect(await observe(at, 20)).toBe(200);
-		expect(await observe(at + 1_000, 12)).toBe(200);
-		// A late-arriving older observation must not replace the newer one.
-		expect(await observe(at + 500, 30)).toBe(200);
+		const clientAt = receiptTime;
+		expect(await observe(clientAt, 20)).toBe(200);
+		expect(await observe(clientAt + 1_000, 12)).toBe(200);
+		expect(await observe(clientAt + 500, 30)).toBe(200);
 		expect(
 			await post({
 				installId: "i-limits",
 				entries: [],
 				limits: [
-					{ at: at + 2_000, provider: "anthropic", credentialId: keyId, limits: [], error: "credit_exhausted" },
+					{
+						at: Number.MAX_SAFE_INTEGER,
+						provider: "anthropic",
+						credentialId: keyId,
+						limits: [],
+						error: "credit_exhausted",
+					},
 				],
 			}),
 		).toBe(200);
-
 		await stopBroker();
 		await startBroker();
-		expect(storage!.usage.limitObservations()).toEqual([
-			{
-				at: at + 1_000,
-				provider: "anthropic",
-				credentialId: keyId,
-				modelClass: "opus-5.5",
-				limits: [requestLimit(12)],
-				credentialType: "api_key",
-			},
-			{
-				at: at + 2_000,
-				provider: "anthropic",
-				credentialId: keyId,
-				limits: [],
-				error: "credit_exhausted",
-				credentialType: "api_key",
-			},
-		]);
+		const stored = storage!.usage.limitObservations();
+		expect(stored.find(observation => observation.modelClass === "opus-5.5")?.limits[0]?.amount.remaining).toBe(30);
+		expect(stored.find(observation => observation.error)?.error).toBe("credit_exhausted");
+		expect(stored.every(observation => observation.at < Number.MAX_SAFE_INTEGER)).toBe(true);
 	});
 
-	test("an old broker's 400 falls back to legacy-shaped reports for the process lifetime", async () => {
+	test("an old broker's unknown identity fields trigger legacy fallback", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
 		const real = client.reportClientUsage.bind(client);
 		const sent: unknown[] = [];
@@ -388,7 +391,12 @@ describe("broker credential lifetime totals", () => {
 			sent.push(structuredClone(report));
 			const valid = legacyReportSchema(report);
 			if (valid instanceof type.errors) {
-				throw new AuthBrokerError(`invalid request: ${valid.summary}`, { status: 400 });
+				const field = valid.summary.match(/(batchId|credentialId|outcome|limits) must be removed/)?.[1];
+				if (field)
+					throw new AuthBrokerError("Auth broker request failed: 400 Bad Request", {
+						status: 400,
+						body: JSON.stringify({ error: valid.summary }),
+					});
 			}
 			accepted.push(report);
 			const ack = await real(report, signal);
@@ -415,37 +423,72 @@ describe("broker credential lifetime totals", () => {
 		flushes = Promise.withResolvers<void>();
 		remote.recordObservedUsage([usageEntry({ credentialId: keyId })], identity);
 		await flushes.promise;
-		// One rejected new-shape send, then only legacy sends: reporting never stops.
 		expect(sent).toHaveLength(3);
 		expect(accepted).toHaveLength(2);
 		expect(clientRequests("i-old-broker")).toBe(2);
 		expect(storage!.usage.credentialTotals()).toEqual([]);
 	});
 
+	test("a current-broker schema 400 does not latch legacy reporting", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
+		const real = client.reportClientUsage.bind(client);
+		const sent: ClientUsageReport[] = [];
+		const rejected = Promise.withResolvers<void>();
+		const laterAccepted = Promise.withResolvers<void>();
+		vi.spyOn(client, "reportClientUsage").mockImplementation(async (report, signal) => {
+			sent.push(structuredClone(report));
+			try {
+				const response = await real(report, signal);
+				laterAccepted.resolve();
+				return response;
+			} catch (error) {
+				if (sent.length === 1) rejected.resolve();
+				throw error;
+			}
+		});
+		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 20 });
+		const identity = { installId: "i-schema-400", app: "omp" };
+		remote.recordObservedUsage([usageEntry({ provider: "p".repeat(129), credentialId: keyId })], identity);
+		await rejected.promise;
+		remote.recordObservedUsage([usageEntry({ credentialId: keyId })], identity);
+		await laterAccepted.promise;
+		expect(sent).toHaveLength(2);
+		expect(sent[0]?.entries[0]?.credentialId).toBe(keyId);
+		expect(sent[1]?.entries[0]?.credentialId).toBe(keyId);
+		expect(clientRequests("i-schema-400")).toBe(1);
+	});
+
 	test("a partial response keeps the other limit ids buffered in the same flush", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
 		const real = client.reportClientUsage.bind(client);
 		const flushed = Promise.withResolvers<void>();
+		let failure: unknown;
 		vi.spyOn(client, "reportClientUsage").mockImplementation(async (report, signal) => {
-			const ack = await real(report, signal);
-			flushed.resolve();
-			return ack;
+			try {
+				const ack = await real(report, signal);
+				flushed.resolve();
+				return ack;
+			} catch (error) {
+				failure = error;
+				flushed.resolve();
+				throw error;
+			}
 		});
 		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 50 });
 		const at = Date.now();
 		const row = { provider: "anthropic", credentialId: keyId, modelClass: "opus-5.5" };
 		remote.recordObservedLimits([
-			{ ...row, at, limits: [requestLimit(40), requestLimit(900, "opus-5.5", "input-tokens")] },
+			{ ...row, at, limits: [requestLimit(40), requestLimit(10, "opus-5.5", "input-tokens")] },
 		]);
-		// A newer requests-only response (the input-token headers were malformed).
 		remote.recordObservedLimits([{ ...row, at: at + 10, limits: [requestLimit(39)] }]);
 		remote.recordObservedLimits([{ ...row, at: at + 20, limits: [], error: "rate_limited" }]);
 		await flushed.promise;
+		expect(failure).toBeUndefined();
 		const stored = storage!.usage.limitObservations();
-		expect(stored.map(observation => [observation.limits[0]?.id ?? observation.error, observation.at])).toEqual([
-			["anthropic:api:opus-5.5:input-tokens", at],
-			["anthropic:api:opus-5.5:requests", at + 10],
-			["rate_limited", at + 20],
+		expect(stored.map(observation => observation.limits[0]?.id ?? observation.error)).toEqual([
+			"anthropic:api:opus-5.5:input-tokens",
+			"anthropic:api:opus-5.5:requests",
+			"rate_limited",
 		]);
 	});
 
@@ -518,30 +561,270 @@ describe("broker credential lifetime totals", () => {
 		expect(storage!.usage.limitObservations()).toHaveLength(1);
 	});
 
-	test("a fourth model class evicts the least recently observed class's rows", async () => {
-		const at = Date.now();
-		const observe = (modelClass: string, observedAt: number) =>
+	test("a fourth model class evicts the least recently received class's rows", async () => {
+		let receiptTime = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => receiptTime++);
+		const observe = (modelClass: string, remaining: number) =>
 			post({
 				installId: "i-classes",
 				entries: [],
 				limits: [
 					{
-						at: observedAt,
+						at: Date.now(),
 						provider: "anthropic",
 						credentialId: keyId,
 						modelClass,
-						limits: [requestLimit(1, modelClass), requestLimit(1, modelClass, "input-tokens")],
+						limits: [requestLimit(remaining, modelClass), requestLimit(remaining, modelClass, "input-tokens")],
 					},
 				],
 			});
-		expect(await observe("row-a", at)).toBe(200);
-		expect(await observe("row-b", at + 1)).toBe(200);
-		expect(await observe("row-c", at + 2)).toBe(200);
-		// row-a observed again: row-b is now the least recently observed.
-		expect(await observe("row-a", at + 3)).toBe(200);
-		expect(await observe("row-d", at + 4)).toBe(200);
+		expect(await observe("row-a", 10)).toBe(200);
+		expect(await observe("row-b", 20)).toBe(200);
+		expect(await observe("row-c", 30)).toBe(200);
+		expect(await observe("row-a", 11)).toBe(200);
+		expect(await observe("row-d", 40)).toBe(200);
 		const classes = new Set(storage!.usage.limitObservations().map(observation => observation.modelClass));
 		expect([...classes].sort()).toEqual(["row-a", "row-c", "row-d"]);
 		expect(storage!.usage.limitObservations()).toHaveLength(6);
+	});
+	test("limit freshness uses broker receipt time instead of client timestamps", async () => {
+		const farFuture = Number.MAX_SAFE_INTEGER;
+		const observe = (at: number) =>
+			post({
+				installId: "i-clock",
+				entries: [],
+				limits: [{ at, provider: "anthropic", credentialId: keyId, limits: [], error: "credit_exhausted" }],
+			});
+		expect(await observe(farFuture)).toBe(200);
+		expect(await observe(Date.now())).toBe(200);
+		const [status] = storage!.usage.limitObservations();
+		expect(status?.error).toBe("credit_exhausted");
+		expect(status?.at).toBeLessThan(farFuture);
+	});
+
+	test("row-wide error status does not consume a model-class eviction slot", async () => {
+		const observeClass = (modelClass: string) =>
+			post({
+				installId: "i-row-wide",
+				entries: [],
+				limits: [
+					{
+						at: Date.now(),
+						provider: "anthropic",
+						credentialId: keyId,
+						modelClass,
+						limits: [requestLimit(10, modelClass)],
+					},
+				],
+			});
+		expect(await observeClass("row-a")).toBe(200);
+		expect(await observeClass("row-b")).toBe(200);
+		expect(await observeClass("row-c")).toBe(200);
+		expect(
+			await post({
+				installId: "i-row-wide",
+				entries: [],
+				limits: [{ at: Date.now(), provider: "anthropic", credentialId: keyId, limits: [], error: "rate_limited" }],
+			}),
+		).toBe(200);
+		const stored = storage!.usage.limitObservations();
+		expect(new Set(stored.map(observation => observation.modelClass))).toEqual(
+			new Set(["row-a", "row-b", "row-c", undefined]),
+		);
+		expect(stored.find(observation => observation.error)?.error).toBe("rate_limited");
+	});
+
+	test("the observed reporter carries bounded entry, outcome and limit overflow exactly once", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
+		const real = client.reportClientUsage.bind(client);
+		const sent: ClientUsageReport[] = [];
+		const flushed = Promise.withResolvers<void>();
+		let inFlight = 0;
+		let maxInFlight = 0;
+		vi.spyOn(client, "reportClientUsage").mockImplementation(async (report, signal) => {
+			inFlight += 1;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			sent.push(structuredClone(report));
+			try {
+				const response = await real(report, signal);
+				if (
+					sent.reduce((sum, batch) => sum + batch.entries.length, 0) === MAX_OBSERVED_USAGE_ENTRIES + 1 &&
+					sent.reduce((sum, batch) => sum + (batch.outcomes?.length ?? 0), 0) === MAX_OBSERVED_OUTCOMES + 1 &&
+					sent.reduce((sum, batch) => sum + (batch.limits?.length ?? 0), 0) === MAX_OBSERVED_LIMIT_OBSERVATIONS + 1
+				)
+					flushed.resolve();
+				return response;
+			} finally {
+				inFlight -= 1;
+			}
+		});
+		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 20 });
+		const identity = { installId: "i-overflow", app: "omp" };
+		for (let index = 0; index < MAX_OBSERVED_USAGE_ENTRIES + 1; index += 1) {
+			remote.recordObservedUsage([usageEntry({ model: `entry-${index}` })], identity);
+		}
+		for (let index = 0; index < MAX_OBSERVED_OUTCOMES + 1; index += 1) {
+			remote.recordObservedOutcomes(
+				[
+					{
+						at: Date.now(),
+						provider: "anthropic",
+						model: `outcome-${index}`,
+						credentialId: keyId,
+						outcome: "error",
+						requests: 1,
+					},
+				],
+				identity,
+			);
+		}
+		for (let index = 0; index < MAX_OBSERVED_LIMIT_OBSERVATIONS + 1; index += 1) {
+			const modelClass = `row-${index.toString(36)}`;
+			const observation: ObservedLimitObservation = {
+				at: Date.now(),
+				provider: "anthropic",
+				credentialId: keyId,
+				modelClass,
+				limits: [requestLimit(10, modelClass)],
+			};
+			remote.recordObservedLimits([observation], identity);
+		}
+		await flushed.promise;
+		expect(sent).toHaveLength(4);
+		expect(
+			sent.map(report => [report.entries.length, report.outcomes?.length ?? 0, report.limits?.length ?? 0]),
+		).toEqual([
+			[MAX_OBSERVED_USAGE_ENTRIES, 0, 0],
+			[1, MAX_OBSERVED_OUTCOMES, 0],
+			[0, 1, MAX_OBSERVED_LIMIT_OBSERVATIONS],
+			[0, 0, 1],
+		]);
+		expect(sent.flatMap(report => report.entries.map(entry => entry.model)).sort()).toEqual(
+			Array.from({ length: MAX_OBSERVED_USAGE_ENTRIES + 1 }, (_, index) => `entry-${index}`).sort(),
+		);
+		expect(sent.flatMap(report => report.outcomes?.map(outcome => outcome.model) ?? []).sort()).toEqual(
+			Array.from({ length: MAX_OBSERVED_OUTCOMES + 1 }, (_, index) => `outcome-${index}`).sort(),
+		);
+		expect(
+			sent.flatMap(report => report.limits?.map(observation => observation.modelClass ?? "") ?? []).sort(),
+		).toEqual(
+			Array.from({ length: MAX_OBSERVED_LIMIT_OBSERVATIONS + 1 }, (_, index) => `row-${index.toString(36)}`).sort(),
+		);
+		expect(maxInFlight).toBe(1);
+		for (const report of sent) {
+			expect(report.entries.length).toBeLessThanOrEqual(MAX_OBSERVED_USAGE_ENTRIES);
+			expect(report.outcomes?.length ?? 0).toBeLessThanOrEqual(MAX_OBSERVED_OUTCOMES);
+			expect(report.limits?.length ?? 0).toBeLessThanOrEqual(MAX_OBSERVED_LIMIT_OBSERVATIONS);
+			expect(new TextEncoder().encode(JSON.stringify(report)).byteLength).toBeLessThanOrEqual(
+				MAX_OBSERVED_REPORT_BYTES,
+			);
+		}
+	});
+	test("the limit cap flushes a full limits-only batch", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token: TOKEN });
+		const real = client.reportClientUsage.bind(client);
+		const sent: ClientUsageReport[] = [];
+		const firstFlush = Promise.withResolvers<ClientUsageReport>();
+		vi.spyOn(client, "reportClientUsage").mockImplementation(async (report, signal) => {
+			const response = await real(report, signal);
+			firstFlush.resolve(structuredClone(report));
+			return response;
+		});
+		remote = new RemoteAuthCredentialStore({ client, streamSnapshots: false, observedUsageFlushMs: 60_000 });
+		const identity = { installId: "i-limit-overflow", app: "omp" };
+		for (let index = 0; index < MAX_OBSERVED_LIMIT_OBSERVATIONS + 1; index += 1) {
+			const modelClass = `row-${index.toString(36)}`;
+			remote.recordObservedLimits(
+				[
+					{
+						at: Date.now(),
+						provider: "anthropic",
+						credentialId: keyId,
+						modelClass,
+						limits: [requestLimit(10, modelClass)],
+					},
+				],
+				identity,
+			);
+		}
+		const report = await Promise.race([firstFlush.promise, Bun.sleep(1_000).then(() => undefined)]);
+		expect(report).toBeDefined();
+		expect(report?.entries).toHaveLength(0);
+		expect(report?.outcomes ?? []).toHaveLength(0);
+		expect(report?.limits).toHaveLength(MAX_OBSERVED_LIMIT_OBSERVATIONS);
+	});
+
+	test("the report request is bounded by bytes and rejects unbounded identity and numeric fields", async () => {
+		const tooLarge = await fetch(`${handle!.url}/v1/usage/observed`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+			body: " ".repeat(MAX_OBSERVED_REPORT_BYTES + 1),
+		});
+		expect(tooLarge.status).toBe(413);
+		const report = (overrides: Record<string, unknown>) =>
+			fetch(`${handle!.url}/v1/usage/observed`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ installId: "i-boundary", entries: [usageEntry()], ...overrides }),
+			}).then(response => response.status);
+		const tooManyEntries = await fetch(`${handle!.url}/v1/usage/observed`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+			body: JSON.stringify({
+				installId: "i-boundary",
+				entries: Array(MAX_OBSERVED_USAGE_ENTRIES + 1).fill(usageEntry()),
+			}),
+		});
+		expect(tooManyEntries.status).toBe(400);
+		expect(await report({ installId: "i".repeat(257) })).toBe(400);
+		expect(await report({ entries: [usageEntry({ provider: "p".repeat(129) })] })).toBe(400);
+		expect(await report({ hostname: "h".repeat(257) })).toBe(400);
+		expect(await report({ app: "a".repeat(129) })).toBe(400);
+		expect(await report({ entries: [usageEntry({ provider: "p".repeat(129) })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ inputTokens: 1_000_000_000_001 })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ outputTokens: 1_000_000_000_001 })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ cacheReadTokens: 1_000_000_000_001 })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ cacheWriteTokens: 1_000_000_000_001 })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ model: "m".repeat(257) })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ requests: 1_000_000_000_001 })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ costUsd: 1_000_000_001 })] })).toBe(400);
+		expect(await report({ entries: [usageEntry({ unexpected: "persist me" } as Partial<ObservedUsageEntry>)] })).toBe(
+			400,
+		);
+		expect(
+			await post({
+				installId: "i-boundary",
+				entries: [],
+				limits: [
+					{
+						at: Number.MAX_SAFE_INTEGER + 1,
+						provider: "anthropic",
+						credentialId: keyId,
+						modelClass: "opus-5.5",
+						limits: [requestLimit(10)],
+					},
+				],
+			}),
+		).toBe(400);
+		expect(
+			await post({
+				installId: "i-boundary",
+				entries: [],
+				limits: [
+					{
+						at: Date.now(),
+						provider: "anthropic",
+						credentialId: keyId,
+						modelClass: "opus-5.5",
+						limits: [
+							{
+								...requestLimit(10),
+								amount: { ...requestLimit(10).amount, injected: "not persisted" } as UsageLimit["amount"],
+							},
+						],
+					},
+				],
+			}),
+		).toBe(400);
 	});
 });

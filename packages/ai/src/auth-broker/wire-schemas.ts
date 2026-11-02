@@ -49,7 +49,7 @@ import type {
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
-import { MAX_OBSERVED_LIMIT_OBSERVATIONS, MAX_OBSERVED_OUTCOMES } from "./types";
+import { MAX_OBSERVED_LIMIT_OBSERVATIONS, MAX_OBSERVED_OUTCOMES, MAX_OBSERVED_USAGE_ENTRIES } from "./types";
 
 // ─── Credential payloads ─────────────────────────────────────────────────────
 
@@ -301,33 +301,46 @@ export const usageHistoryResponseSchema: FluentType<UsageHistoryResponse> = type
 	entries: usageHistoryEntrySchema.array(),
 });
 
+const safeEpochMsSchema = type("0 <= number.integer <= 9007199254740991");
+const boundedUsageNumberSchema = type("0 <= number <= 1000000000000");
+const boundedCostSchema = type("0 <= number <= 1000000000");
 const observedUsageOutcomeSchema = type("'ok' | 'error' | 'aborted'");
 const credentialIdSchema = type("0 < number.integer <= 9007199254740991");
 
 const observedUsageEntrySchema = type({
-	at: "number",
-	provider: "string",
-	model: "string",
-	requests: "number",
-	inputTokens: "number",
-	outputTokens: "number",
-	cacheReadTokens: "number",
-	cacheWriteTokens: "number",
-	costUsd: "number",
+	"+": "reject",
+	at: safeEpochMsSchema,
+	provider: "0 < string <= 128",
+	model: "0 < string <= 256",
+	requests: boundedUsageNumberSchema,
+	inputTokens: boundedUsageNumberSchema,
+	outputTokens: boundedUsageNumberSchema,
+	cacheReadTokens: boundedUsageNumberSchema,
+	cacheWriteTokens: boundedUsageNumberSchema,
+	costUsd: boundedCostSchema,
 	"credentialId?": credentialIdSchema,
 	"outcome?": observedUsageOutcomeSchema,
 });
 
 const observedAttemptOutcomeSchema = type({
 	"+": "reject",
-	at: "number",
-	provider: "0 < string <= 64",
+	at: safeEpochMsSchema,
+	provider: "0 < string <= 128",
 	model: "0 < string <= 256",
 	credentialId: credentialIdSchema,
 	outcome: observedUsageOutcomeSchema,
-	requests: "number.integer > 0",
+	requests: "0 < number.integer <= 1000000000000",
 });
 
+const observedLimitAmountSchema = type({
+	"+": "reject",
+	"used?": boundedUsageNumberSchema,
+	"limit?": boundedUsageNumberSchema,
+	"remaining?": boundedUsageNumberSchema,
+	"usedFraction?": "0 <= number <= 1",
+	"remainingFraction?": "0 <= number <= 1",
+	unit: "'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
+});
 /** Window ids `parseAnthropicApiKeyRateLimitHeaders` emits; the only limit ids the broker persists. */
 const OBSERVED_LIMIT_WINDOWS = ["requests", "input-tokens", "output-tokens"] as const;
 /** A configured model-class row label; also the `<row>` segment of `anthropic:api:<row>:<window>`. */
@@ -341,7 +354,7 @@ const observedLimitSchema = type({
 	label: "0 < string <= 64",
 	scope: type({
 		"+": "reject",
-		provider: "0 < string <= 64",
+		provider: "0 < string <= 128",
 		"modelId?": observedModelClassSchema,
 		"windowId?": observedLimitWindowSchema,
 	}),
@@ -352,14 +365,14 @@ const observedLimitSchema = type({
 		"durationMs?": "number",
 		"resetsAt?": "number",
 	}),
-	amount: usageAmountSchema,
+	amount: observedLimitAmountSchema,
 	"status?": "'ok' | 'warning' | 'exhausted' | 'unknown'",
 });
 
 const observedLimitObservationSchema = type({
 	"+": "reject",
-	at: "number",
-	provider: "0 < string <= 64",
+	at: safeEpochMsSchema,
+	provider: "0 < string <= 128",
 	credentialId: credentialIdSchema,
 	"modelClass?": observedModelClassSchema,
 	limits: observedLimitSchema.array().atMostLength(OBSERVED_LIMIT_WINDOWS.length),
@@ -383,10 +396,10 @@ const observedLimitObservationSchema = type({
  */
 export const clientUsageReportRequestSchema: FluentType<ClientUsageReportRequest> = type({
 	"+": "reject",
-	installId: "string",
-	"hostname?": "string",
-	"app?": "string",
-	entries: observedUsageEntrySchema.array(),
+	installId: "0 < string <= 256",
+	"hostname?": "0 < string <= 128",
+	"app?": "0 < string <= 128",
+	entries: observedUsageEntrySchema.array().atMostLength(MAX_OBSERVED_USAGE_ENTRIES),
 	"outcomes?": observedAttemptOutcomeSchema.array().atMostLength(MAX_OBSERVED_OUTCOMES),
 	"limits?": observedLimitObservationSchema.array().atMostLength(MAX_OBSERVED_LIMIT_OBSERVATIONS),
 	"batchId?": "string.uuid",

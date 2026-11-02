@@ -58,6 +58,8 @@ import {
 	type FailoverContext,
 	gatewayApiKeyLimitObserver,
 	gatewayDroppedAttemptRecorder,
+	gatewayThinkingLoopRecorder,
+	observeAttemptLimitStatus,
 	gatewayUsageOutcome,
 	resolveGatewayModel,
 	mirrorRequestAbort,
@@ -839,6 +841,12 @@ async function runFailoverLoop(
 				request.client,
 				`${requestId}:a${attempt}`,
 			);
+			const loop = gatewayThinkingLoopRecorder(
+				request.bootOpts,
+				answering,
+				request.client,
+				`${requestId}:a${attempt}`,
+			);
 			const knownFollower = async (): Promise<Model<Api> | undefined> => follower;
 			logger.info("auth-gateway request", {
 				requestId,
@@ -868,7 +876,7 @@ async function runFailoverLoop(
 			if (!route.stream) {
 				let attemptResult: Promise<AssistantMessage>;
 				try {
-					attemptResult = completeAttempt(answering, route.context, streamOpts, budget);
+					attemptResult = completeAttempt(answering, route.context, streamOpts, budget, loop.onAttempt);
 				} catch (error) {
 					const next = await setupThrew(error);
 					if (!("api" in next)) return next;
@@ -882,10 +890,12 @@ async function runFailoverLoop(
 				} catch (error) {
 					thrown = error;
 				} finally {
+					loop.settle(message);
 					lease.release();
 					unlink();
 				}
 				if (message) {
+					observeAttemptLimitStatus(request.bootOpts.storage, answering.provider, message.credentialId, message);
 					recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
 						requestId: attemptUsageId(requestId, attempt, message.stopReason),
 						outcome: gatewayUsageOutcome(message.stopReason),
@@ -911,15 +921,21 @@ async function runFailoverLoop(
 				openBody(answering);
 				void events
 					.result()
-					.then(message =>
+					.then(message => {
+						observeAttemptLimitStatus(
+							request.bootOpts.storage,
+							answering.provider,
+							message.credentialId,
+							message,
+						);
 						recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
 							requestId: attemptUsageId(requestId, attempt, message.stopReason),
 							outcome: gatewayUsageOutcome(message.stopReason),
 							at: message.timestamp || undefined,
 							account: account(),
 							credentialId: message.credentialId,
-						}),
-					)
+						});
+					})
 					.catch(() => {})
 					.finally(() => {
 						lease.release();
@@ -1118,7 +1134,14 @@ async function handleFormatEndpoint(
 	if (!parsed.stream) {
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
-			const message = await completeSimple(model, parsed.context, streamOpts);
+			const loop = gatewayThinkingLoopRecorder(bootOpts, model, client, requestId);
+			let message: AssistantMessage | undefined;
+			try {
+				message = await completeSimple(model, parsed.context, { ...streamOpts, onAttempt: loop.onAttempt });
+			} finally {
+				loop.settle(message);
+			}
+			observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 			recordGatewayUsage(bootOpts, model, client, message.usage, {
 				requestId,
 				outcome: gatewayUsageOutcome(message.stopReason),
@@ -1180,15 +1203,16 @@ async function handleFormatEndpoint(
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		void events
 			.result()
-			.then(message =>
+			.then(message => {
+				observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 				recordGatewayUsage(bootOpts, model, client, message.usage, {
 					requestId,
 					outcome: gatewayUsageOutcome(message.stopReason),
 					at: message.timestamp || undefined,
 					account: account(),
 					credentialId: message.credentialId,
-				}),
-			)
+				});
+			})
 			.catch(() => {})
 			.finally(() => lease.release());
 		streamOwnsLease = true;
@@ -1356,7 +1380,14 @@ async function handlePiNative(
 	if (!parsed.stream) {
 		try {
 			if (controller.signal.aborted) return aborted();
-			const message = await completeSimple(model, parsed.context, streamOpts);
+			const loop = gatewayThinkingLoopRecorder(bootOpts, model, client, requestId);
+			let message: AssistantMessage | undefined;
+			try {
+				message = await completeSimple(model, parsed.context, { ...streamOpts, onAttempt: loop.onAttempt });
+			} finally {
+				loop.settle(message);
+			}
+			observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 			recordGatewayUsage(bootOpts, model, client, message.usage, {
 				requestId,
 				outcome: gatewayUsageOutcome(message.stopReason),
@@ -1414,15 +1445,16 @@ async function handlePiNative(
 		if (controller.signal.aborted) return aborted();
 		void events
 			.result()
-			.then(message =>
+			.then(message => {
+				observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 				recordGatewayUsage(bootOpts, model, client, message.usage, {
 					requestId,
 					outcome: gatewayUsageOutcome(message.stopReason),
 					at: message.timestamp || undefined,
 					account: account(),
 					credentialId: message.credentialId,
-				}),
-			)
+				});
+			})
 			.catch(() => {})
 			.finally(() => lease.release());
 		streamOwnsLease = true;

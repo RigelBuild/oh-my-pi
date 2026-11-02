@@ -12,7 +12,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { create as createErrorId, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockHandler, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import type { Usage } from "@oh-my-pi/pi-ai/types";
 import type { ObservedAttemptOutcome, ObservedLimitObservation } from "@oh-my-pi/pi-ai/usage";
@@ -64,6 +64,7 @@ async function boot(options: {
 	keys?: readonly string[];
 	handler?: MockHandler;
 	apiKeyLimitModelClasses?: Record<string, string>;
+	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"];
 }): Promise<Harness> {
 	registerMockApi();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-credential-attribution-"));
@@ -118,6 +119,7 @@ async function boot(options: {
 			events.push(event);
 		},
 		...(options.apiKeyLimitModelClasses && { apiKeyLimitModelClasses: options.apiKeyLimitModelClasses }),
+		...(options.onUsageLimit && { onUsageLimit: options.onUsageLimit }),
 	});
 	return {
 		url: handle.url,
@@ -489,6 +491,104 @@ describe("auth-gateway credential attribution", () => {
 		const response = await chat(harness);
 		expect(response.status).toBe(200);
 		expect(harness.limits).toEqual([]);
+	});
+
+	it("records the status a single-row request ends on, from its final message", async () => {
+		harness = await boot({ provider: "mock", keys: ["key-one"] });
+		harness.model.push({
+			content: [],
+			usage: zeroUsage,
+			stopReason: "error",
+			errorMessage: "Your credit balance is too low to access the API.",
+		});
+		const response = await chat(harness);
+		expect(response.status).not.toBe(200);
+		expect(harness.limits).toEqual([
+			expect.objectContaining({ credentialId: harness.ids.get("key-one"), error: "credit_exhausted" }),
+		]);
+	});
+
+	it("records a transient throttle that the client sees on the row that returned it", async () => {
+		harness = await boot({
+			provider: "mock",
+			keys: ["key-one", "key-two"],
+			handler: failFirst(
+				new ProviderHttpError(
+					'{"type":"error","error":{"type":"rate_limit_error","message":"per-minute rate limit exceeded"}}',
+					429,
+				),
+				{ content: ["ok"], usage },
+			),
+		});
+		const response = await chat(harness);
+		// A transient throttle stays in provider backoff; it never rotates to a sibling.
+		expect(response.status).toBe(429);
+		expect(harness.limits).toEqual([
+			expect.objectContaining({ credentialId: harness.ids.get("key-one"), limits: [], error: "rate_limited" }),
+		]);
+	});
+
+	it("records no status for a quota-exhaustion error", async () => {
+		harness = await boot({
+			provider: "mock",
+			keys: ["key-one", "key-two"],
+			handler: failFirst(
+				new ProviderHttpError(
+					'{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}',
+					429,
+				),
+				{ content: ["ok"], usage },
+			),
+		});
+		const response = await chat(harness);
+		expect(response.status).toBe(200);
+		expect(harness.limits.filter(limit => limit.error !== undefined)).toEqual([]);
+	});
+
+	it("records each re-sampled thinking-loop result once, and the answer once", async () => {
+		harness = await boot({ provider: "mock", keys: ["key-one"] });
+		const stall = {
+			content: [],
+			usage,
+			stopReason: "error" as const,
+			errorMessage: "Thinking loop detected",
+			errorId: createErrorId(Flag.ThinkingLoop),
+		};
+		harness.model.push(stall);
+		harness.model.push({ content: ["ok"], usage });
+		const response = await chat(harness);
+		expect(response.status).toBe(200);
+		const row = harness.ids.get("key-one");
+		expect(harness.observed).toEqual([
+			expect.objectContaining({ credentialId: row, outcome: "error" }),
+			expect.objectContaining({ credentialId: row, outcome: "ok" }),
+		]);
+		expect(harness.events.map(event => event.requestId.endsWith(":t1"))).toEqual([true, false]);
+	});
+
+	it("keeps the exact row when an account-local reset restores it", async () => {
+		const restored: number[] = [];
+		harness = await boot({
+			provider: "mock",
+			keys: ["key-one", "key-two"],
+			handler: failFirst(new ProviderHttpError("Generic provider failure", 429, { code: "insufficient_quota" }), {
+				content: ["ok"],
+				usage,
+			}),
+			onUsageLimit: async ctx => {
+				restored.push(ctx.credentialId);
+				return true;
+			},
+		});
+		const response = await chat(harness);
+		expect(response.status).toBe(200);
+		const first = harness.ids.get("key-one");
+		if (first === undefined) throw new Error("expected key-one row");
+		expect(restored).toEqual([first]);
+		expect(harness.settled).toEqual([
+			[first, "error"],
+			[first, "ok"],
+		]);
 	});
 });
 

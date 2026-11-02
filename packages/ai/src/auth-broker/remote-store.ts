@@ -39,6 +39,7 @@ import {
 	type CredentialBlockSnapshot,
 	MAX_OBSERVED_LIMIT_OBSERVATIONS,
 	MAX_OBSERVED_OUTCOMES,
+	MAX_OBSERVED_USAGE_ENTRIES,
 	type RefresherSchedule,
 	type SnapshotEntry,
 	type SnapshotResponse,
@@ -366,10 +367,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #observedUsageFlushMs: number;
 	/** Latched once the broker answered 404 — old broker, never report again. */
 	#observedUsageUnsupported = false;
-	/**
-	 * Latched once the broker rejected the identity fields (credential ids,
-	 * outcomes, limits, batch id) with a 400: every later report uses the legacy shape.
-	 */
+	/** Latched only when the broker rejects newly added identity fields as unknown. */
 	#observedLegacyShape = false;
 	/** Tail of the serialized observed-usage sends; each flush waits for the one before it. */
 	#observedUsageFlush: Promise<void> = Promise.resolve();
@@ -1539,6 +1537,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				pending.entry.cacheWriteTokens += entry.cacheWriteTokens;
 				pending.entry.costUsd += entry.costUsd;
 			} else {
+				if (this.#observedUsage.size >= MAX_OBSERVED_USAGE_ENTRIES) this.#flushObservedUsage();
 				this.#observedUsage.set(key, { client: identity, entry: { ...entry } });
 			}
 		}
@@ -1560,6 +1559,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				pending.outcome.at = Math.max(pending.outcome.at, outcome.at);
 				pending.outcome.requests += outcome.requests;
 			} else {
+				if (this.#observedOutcomes.size >= MAX_OBSERVED_OUTCOMES) this.#flushObservedUsage();
 				this.#observedOutcomes.set(key, { client: identity, outcome: { ...outcome } });
 			}
 		}
@@ -1581,6 +1581,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			const key = `${observedClientKey(identity)}\u0000${observation.credentialId}\u0000${observation.modelClass ?? ""}\u0000${id}`;
 			const pending = this.#observedLimits.get(key);
 			if (pending && pending.observation.at > observation.at) return;
+			if (!pending && this.#observedLimits.size >= MAX_OBSERVED_LIMIT_OBSERVATIONS) this.#flushObservedUsage();
 			this.#observedLimits.set(key, { client: identity, observation });
 		};
 		for (const { limits, error, ...row } of observations) {
@@ -1618,22 +1619,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#flushObservedUsage(): Promise<void> {
-		// The tail never rejects, so one failed send cannot stall every later flush.
-		this.#observedUsageFlush = this.#observedUsageFlush
-			.then(() => this.#sendObservedUsage())
-			.catch(error => {
-				logger.debug("auth-broker observed usage flush failed", { error: String(error) });
-			});
-		return this.#observedUsageFlush;
-	}
-
-	async #sendObservedUsage(): Promise<void> {
 		const pending =
 			this.#observedUsage.size > 0 ||
 			this.#observedOutcomes.size > 0 ||
 			this.#observedLimits.size > 0 ||
 			this.#observedRetries.size > 0;
-		if (!pending || this.#observedUsageUnsupported) return;
+		if (!pending || this.#observedUsageUnsupported) return this.#observedUsageFlush;
 		const retries = [...this.#observedRetries];
 		const usage = [...this.#observedUsage.values()];
 		const outcomes = [...this.#observedOutcomes.values()];
@@ -1642,8 +1633,20 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#observedUsage.clear();
 		this.#observedOutcomes.clear();
 		this.#observedLimits.clear();
-		// One report per distinct client identity — usually one (this install),
-		// plus one per attributed gateway caller when running inside the gateway.
+		this.#observedUsageFlush = this.#observedUsageFlush
+			.then(() => this.#sendObservedUsage(retries, usage, outcomes, limits))
+			.catch(error => {
+				logger.debug("auth-broker observed usage flush failed", { error: String(error) });
+			});
+		return this.#observedUsageFlush;
+	}
+
+	async #sendObservedUsage(
+		retries: Array<[string, ClientUsageReport]>,
+		usage: Array<{ client: ClientUsageIdentity; entry: ObservedUsageEntry }>,
+		outcomes: Array<{ client: ClientUsageIdentity; outcome: ObservedAttemptOutcome }>,
+		limits: Array<{ client: ClientUsageIdentity; observation: ObservedLimitObservation }>,
+	): Promise<void> {
 		const groups = new Map<
 			string,
 			{
@@ -1665,8 +1668,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		for (const { client, entry } of usage) groupFor(client).entries.push(entry);
 		for (const { client, outcome } of outcomes) groupFor(client).outcomes.push(outcome);
 		for (const { client, observation } of limits) groupFor(client).limits.push(observation);
-		// Retries go first and unchanged; a client whose retry fails again sends
-		// nothing new this flush, so at most one retry per client is ever held.
 		const blocked = new Set<string>();
 		for (const [key, report] of retries) {
 			const result = await this.#postObservedReport(key, report);
@@ -1683,56 +1684,57 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				}
 				continue;
 			}
-			// One report per client per flush keeps at most one held retry per client;
-			// lists past the broker's caps carry over to the next flush instead.
-			const outcomes = group.outcomes.slice(0, MAX_OBSERVED_OUTCOMES);
-			const limits = group.limits.slice(0, MAX_OBSERVED_LIMIT_OBSERVATIONS);
-			if (!this.#closed) {
-				this.recordObservedOutcomes(group.outcomes.slice(MAX_OBSERVED_OUTCOMES), client);
-				this.recordObservedLimits(group.limits.slice(MAX_OBSERVED_LIMIT_OBSERVATIONS), client);
-			}
-			// The optional lists ride only when present, so a usage-only report
-			// keeps the pre-identity wire shape apart from the batch id.
-			const result = await this.#postObservedReport(key, {
+			const report: ClientUsageReport = {
 				installId: client.installId,
 				hostname: client.hostname,
 				app: client.app,
-				entries: group.entries,
-				...(outcomes.length > 0 && { outcomes }),
-				...(limits.length > 0 && { limits }),
+				entries: group.entries.slice(0, MAX_OBSERVED_USAGE_ENTRIES),
+				...(group.outcomes.length > 0 && { outcomes: group.outcomes.slice(0, MAX_OBSERVED_OUTCOMES) }),
+				...(group.limits.length > 0 && { limits: group.limits.slice(0, MAX_OBSERVED_LIMIT_OBSERVATIONS) }),
 				batchId: crypto.randomUUID(),
-			});
+			};
+			if (!this.#closed) {
+				this.recordObservedUsage(group.entries.slice(MAX_OBSERVED_USAGE_ENTRIES), client);
+				this.recordObservedOutcomes(group.outcomes.slice(MAX_OBSERVED_OUTCOMES), client);
+				this.recordObservedLimits(group.limits.slice(MAX_OBSERVED_LIMIT_OBSERVATIONS), client);
+			}
+			const result = await this.#postObservedReport(key, report);
 			if (result === "unsupported") return;
 		}
 	}
 
-	/**
-	 * Send one report; on a transient failure keep it verbatim for the next flush.
-	 * A 400 for a report carrying identity fields means the broker predates them:
-	 * resend it once in the legacy shape and keep sending that shape for the life
-	 * of this process, so an upgraded client never silences an old broker's history.
-	 */
-	async #postObservedReport(key: string, report: ClientUsageReport): Promise<"sent" | "retry" | "unsupported"> {
+	/** Legacy mode is latched only when the broker names a newly added field as unknown. */
+	async #postObservedReport(
+		key: string,
+		report: ClientUsageReport,
+	): Promise<"sent" | "retry" | "unsupported" | "rejected"> {
 		let body = this.#observedLegacyShape ? legacyClientUsageReport(report) : report;
 		try {
 			try {
 				await this.#client.reportClientUsage(body);
 			} catch (error) {
-				const rejected = error instanceof AuthBrokerError && error.status === 400;
-				if (!rejected || this.#observedLegacyShape) throw error;
+				const bodyText = error instanceof AuthBrokerError ? (error.body ?? "") : "";
+				const rejectsNewFields =
+					error instanceof AuthBrokerError &&
+					error.status === 400 &&
+					/\b(?:batchId|credentialId|outcome|limits) must be removed\b/.test(bodyText);
+				if (!rejectsNewFields || this.#observedLegacyShape) throw error;
 				this.#observedLegacyShape = true;
 				this.#observedOutcomes.clear();
 				this.#observedLimits.clear();
-				logger.debug("auth-broker rejected credential identity fields; sending legacy usage reports");
+				logger.debug("auth-broker may reject new identity fields as unknown; sending legacy usage reports");
 				body = legacyClientUsageReport(body);
 				await this.#client.reportClientUsage(body);
 			}
 			return "sent";
 		} catch (error) {
 			const status = error instanceof AuthBrokerError ? error.status : undefined;
-			if (status === 400 || status === 404 || status === 501) {
-				// Broker predates the endpoint or its request schema (or the store
-				// can't persist) — stop trying for the life of this process.
+			if (status === 400) {
+				logger.debug("auth-broker rejected an observed usage report; later reports remain enabled");
+				return "rejected";
+			}
+			if (status === 404 || status === 501) {
+				// Broker predates the endpoint or its request schema; stop trying for the life of this process.
 				this.#observedUsageUnsupported = true;
 				this.#observedRetries.clear();
 				logger.debug("auth-broker does not accept observed usage; reporting disabled", { status });

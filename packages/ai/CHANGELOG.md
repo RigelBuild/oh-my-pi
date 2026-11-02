@@ -13,6 +13,8 @@
 - Anthropic "credit balance is too low" is a quota exhaustion: the credential is blocked for 30 minutes and rotated, not invalidated as an auth failure.
 - OpenAI-compatible chat completions with `finish_reason: "length"`, no visible output, and zero reported completion tokens now surface a provider-rejection error instead of a truncation.
 
+- Auth-broker observed API-key usage now attributes bounded token, cost, outcome, and limit reports to the exact credential row, preserves retry data, and falls back to legacy reports only when new identity fields are rejected as unknown. Rate-limit status separates transient throttles and credit depletion from other quota classes.
+
 ## [18.9.2-rigel.2] - 2026-10-18
 
 ### Added

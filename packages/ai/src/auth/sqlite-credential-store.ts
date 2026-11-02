@@ -2049,7 +2049,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					modelClass,
 					credential.provider,
 					credential.credentialType,
-					observation.at,
+					Date.now(),
 					JSON.stringify(limit),
 					null,
 				);
@@ -2061,7 +2061,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					modelClass,
 					credential.provider,
 					credential.credentialType,
-					observation.at,
+					Date.now(),
 					null,
 					observation.error,
 				);
@@ -2070,8 +2070,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		// Bound retained rows: keep at most MAX_LIMIT_MODEL_CLASSES model classes per
 		// credential; a newly observed class evicts the least recently observed one.
 		const pruneClasses = this.#db.query(
-			`DELETE FROM credential_limit_observations WHERE credential_id = ?1 AND model_class NOT IN (
-				SELECT model_class FROM credential_limit_observations WHERE credential_id = ?1
+			`DELETE FROM credential_limit_observations WHERE credential_id = ?1 AND model_class <> '' AND model_class NOT IN (
+				SELECT model_class FROM credential_limit_observations WHERE credential_id = ?1 AND model_class <> ''
 				GROUP BY model_class ORDER BY MAX(observed_at) DESC, model_class LIMIT ?2
 			)`,
 		);

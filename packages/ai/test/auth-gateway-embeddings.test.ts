@@ -52,7 +52,8 @@ function embeddingModel(
 async function boot({
 	apiKeys,
 	trustProxyHeaders = false,
-}: { apiKeys?: readonly string[]; trustProxyHeaders?: boolean } = {}): Promise<Harness> {
+	firstKeyError = new ProviderHttpError("expired credential", 401),
+}: { apiKeys?: readonly string[]; trustProxyHeaders?: boolean; firstKeyError?: Error } = {}): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-embeddings-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	if (apiKeys) {
@@ -73,7 +74,7 @@ async function boot({
 	const fetchImpl: FetchImpl = async (input, init) => {
 		const authorization = new Headers(init?.headers).get("authorization");
 		attemptedKeys.push(authorization);
-		if (apiKeys && authorization === "Bearer key-one") throw new ProviderHttpError("expired credential", 401);
+		if (apiKeys && authorization === "Bearer key-one") throw firstKeyError;
 		const body: unknown = JSON.parse(String(init?.body));
 		upstream.push({ url: String(input), authorization, body });
 		if (body && typeof body === "object" && Reflect.get(body, "encoding_format") === "base64") {
@@ -247,6 +248,26 @@ describe("auth-gateway POST /v1/embeddings", () => {
 		]);
 		expect(observed).toEqual([expect.objectContaining({ credentialId: ids.get("key-two"), outcome: "ok" })]);
 		expect(harness.events).toHaveLength(1);
+	});
+
+	it("records credit exhaustion on the row that returned it when a non-chat route rotates", async () => {
+		harness = await boot({
+			apiKeys: ["key-one", "key-two"],
+			firstKeyError: new ProviderHttpError("Your credit balance is too low to access the API.", 400),
+		});
+		const first = harness.storage.credentials
+			.list("openai")
+			.find(row => row.credential.type === "api_key" && row.credential.key === "key-one")?.id;
+		const limits: Array<{ credentialId: number; error?: string }> = [];
+		vi.spyOn(harness.storage.usage, "observeLimits").mockImplementation(batch => limits.push(...batch));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "rotate key" }),
+		});
+		expect(response.status).toBe(200);
+		expect(first).toBeNumber();
+		expect(limits).toEqual([expect.objectContaining({ credentialId: first, error: "credit_exhausted" })]);
 	});
 
 	it("records a final non-chat failure as a zero-usage outcome, not a usage entry", async () => {

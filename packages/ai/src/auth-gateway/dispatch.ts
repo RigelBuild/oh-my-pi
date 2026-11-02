@@ -20,7 +20,7 @@ import {
 	observedLimitErrorStatus,
 } from "../error/rate-limit";
 import { emptyUsage } from "../images/shared";
-import type { Api, FetchImpl, Model, StreamOptions, Usage } from "../types";
+import type { Api, AssistantMessage, FetchImpl, Model, StreamOptions, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
 import { extractProviderRetryHint } from "../utils/retry-after";
@@ -265,12 +265,6 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
-		// Status evidence for the exact row that failed, never a numeric balance; quota
-		// and billing classes that are neither a throttle nor credit depletion record none.
-		const limitError = credentialId === undefined ? undefined : observedLimitErrorStatus(status, message);
-		if (credentialId !== undefined && limitError) {
-			storage.usage.observeLimits([{ at: Date.now(), provider, credentialId, limits: [], error: limitError }]);
-		}
 		if (credentialId !== undefined && onUsageLimit) {
 			try {
 				if (await onUsageLimit({ provider, credentialId, modelId: model.id, signal })) {
@@ -522,11 +516,69 @@ export function gatewayDroppedAttemptRecorder(
 	let dropped = 0;
 	return attempt => {
 		dropped++;
+		observeAttemptLimitStatus(bootOpts.storage, model.provider, attempt.credentialId, attempt.error);
 		recordGatewayUsage(bootOpts, model, client, attempt.usage, {
 			requestId: `${requestId}:d${dropped}`,
 			outcome: attempt.outcome,
 			credentialId: attempt.credentialId,
 		});
+	};
+}
+
+/**
+ * Record the throttle or credit-depletion status of one failed attempt on the row that
+ * served it. Other quota and billing classes record none.
+ */
+export function observeAttemptLimitStatus(
+	storage: AuthStorage,
+	provider: string,
+	credentialId: number | undefined,
+	failure: unknown,
+): void {
+	if (credentialId === undefined || failure === undefined) return;
+	const isMessage = typeof failure === "object" && failure !== null && "stopReason" in failure;
+	const status = isMessage ? (failure as AssistantMessage).errorStatus : extractHttpStatusFromError(failure);
+	const message = isMessage
+		? ((failure as AssistantMessage).errorClassificationMessage ?? (failure as AssistantMessage).errorMessage ?? "")
+		: failure instanceof Error
+			? failure.message
+			: String(failure);
+	const error = observedLimitErrorStatus(status, message);
+	if (error) storage.usage.observeLimits([{ at: Date.now(), provider, credentialId, limits: [], error }]);
+}
+
+/**
+ * Records every thinking-loop result a unary completion re-sampled past. The returned
+ * `onAttempt` holds each result until the next arrives, so the final one (recorded by the
+ * route) is never counted twice; `settle` records a held result the route never received.
+ */
+export function gatewayThinkingLoopRecorder(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	requestId: string,
+): { onAttempt: (message: AssistantMessage) => void; settle: (final: AssistantMessage | undefined) => void } {
+	let held: AssistantMessage | undefined;
+	let recorded = 0;
+	const record = (message: AssistantMessage): void => {
+		recorded++;
+		observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
+		recordGatewayUsage(bootOpts, model, client, message.usage, {
+			requestId: `${requestId}:t${recorded}`,
+			outcome: gatewayUsageOutcome(message.stopReason),
+			at: message.timestamp || undefined,
+			credentialId: message.credentialId,
+		});
+	};
+	return {
+		onAttempt: message => {
+			if (held) record(held);
+			held = message;
+		},
+		settle: final => {
+			if (held && held !== final) record(held);
+			held = undefined;
+		},
 	};
 }
 
@@ -554,6 +606,7 @@ export function gatewayAttemptOutcomes(
 		if (recorded > 0 && error === recordedError) return;
 		recordedError = error;
 		recorded++;
+		observeAttemptLimitStatus(bootOpts.storage, model.provider, credentialId, error);
 		recordGatewayUsage(bootOpts, model, client, emptyUsage(), {
 			requestId: `${requestId}:d${recorded}`,
 			outcome,
