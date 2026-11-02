@@ -360,7 +360,10 @@ describe("parseSubscriptionsConfig", () => {
 	});
 
 	it("keeps renewal anchor undefined when startedAt is omitted", () => {
-		const lookup = parseSubscriptionsConfig(JSON.stringify({ accounts: { a: { provider: "p", plan: "pro" } } }), FILE);
+		const lookup = parseSubscriptionsConfig(
+			JSON.stringify({ accounts: { a: { provider: "p", plan: "pro" } } }),
+			FILE,
+		);
 		expect(lookup.lookup("p", "a", "")).toEqual({ plan: "pro", renewsAtSeconds: undefined });
 	});
 
