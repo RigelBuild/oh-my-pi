@@ -4,13 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - Dockerfile.omp
-      - .github/workflows/omp-image.yml
-      - packages/**
-      - crates/**
-      - Cargo.lock
-      - bun.lock
+    # Dockerfile.omp copies the repository into its build context, so every
+    # source or configuration change can affect the compiled image.
 
 permissions:
   contents: read
@@ -22,13 +17,22 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-      - name: Build image without publishing
+      - name: Build image for smoke tests
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           file: Dockerfile.omp
           platforms: linux/amd64
           push: false
+          load: true
+          tags: omp:pr
+      - name: Smoke-test CLI and auth commands
+        run: |
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr --version
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-broker --help
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-broker serve --help
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-gateway --help
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-gateway serve --help
 
   publish:
     name: Publish linux/amd64 image
