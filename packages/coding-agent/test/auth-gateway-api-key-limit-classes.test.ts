@@ -34,6 +34,9 @@ describe("loadApiKeyLimitModelClasses", () => {
 		expect(await loadApiKeyLimitModelClasses(file)).toEqual(map);
 		process.env[env] = file;
 		expect(await loadApiKeyLimitModelClasses(undefined)).toEqual(map);
+		const flagFile = path.join(dir, "flag.json");
+		await Bun.write(flagFile, JSON.stringify({ "claude-sonnet-4-5": "sonnet-4" }));
+		expect(await loadApiKeyLimitModelClasses(flagFile)).toEqual({ "claude-sonnet-4-5": "sonnet-4" });
 	});
 
 	it("refuses a file that would boot the gateway half-configured", async () => {
