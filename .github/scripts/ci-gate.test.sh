@@ -25,5 +25,8 @@ expect "PR-skippable job skipped on a PR passes" 0 "$pr_skip" "rust_validate nat
 expect "same skip on push fails" 1 "$pr_skip" ""
 expect "other job skipped on a PR fails" 1 '{"check":{"result":"skipped"},"rust_validate":{"result":"success"}}' "rust_validate native_addons_cross"
 expect "PR-skippable job failing on a PR fails" 1 '{"check":{"result":"success"},"rust_validate":{"result":"failure"}}' "rust_validate native_addons_cross"
+cross_skip='{"check":{"result":"success"},"native_addons_cross":{"result":"skipped"}}'
+expect "release-only cross skipped on push passes" 0 "$cross_skip" "native_addons_cross"
+expect "rust_validate skipped on push fails" 1 "$pr_skip" "native_addons_cross"
 
 [ "$fails" -eq 0 ]
