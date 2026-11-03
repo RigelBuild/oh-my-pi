@@ -696,7 +696,7 @@ jobs:
            run: bun run ci:test:install-methods
 
    # The single required check on `rigel-release` PRs. Any non-success fails it, except
-   # the two jobs that skip on pull_request by design.
+   # the two jobs that skip on pull_request by design and the release-only cross build.
    ci:
       name: CI
       if: ${{ always() }}
