@@ -454,12 +454,13 @@ jobs:
               key: ${{ steps.cache.outputs.cache-key }}
 
    # The remaining targets (darwin, arm64, musl and win32 cross builds). Only
-   # release jobs consume them, so they build beside the TS fan-out instead of
-   # ahead of it: serially after the pair they held every test job back ~10
-   # min on native-changing rigel-release pushes. Non-PR only, like rust_validate.
+   # release jobs consume them, so they build on release runs only. Their Bazel
+   # cache (13 GiB) exceeds the 10 GiB GitHub cache limit, so a run is cold (~2 h).
    native_addons_cross:
       name: Build native addons (bazel, cross targets)
-      if: github.event_name != 'pull_request'
+      needs: [release_metadata]
+      if: needs.release_metadata.outputs.is-release == 'true'
+      timeout-minutes: 180
       runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4
@@ -710,7 +711,7 @@ jobs:
          - name: Require every validation job to pass
            env:
               RESULTS: ${{ toJSON(needs) }}
-              PR_SKIPPABLE: ${{ github.event_name == 'pull_request' && 'rust_validate native_addons_cross' || '' }}
+              PR_SKIPPABLE: ${{ github.event_name == 'pull_request' && 'rust_validate native_addons_cross' || 'native_addons_cross' }}
            run: .github/scripts/ci-gate.sh
 
    # Aggregates every validation job so publish-side release jobs gate on one
