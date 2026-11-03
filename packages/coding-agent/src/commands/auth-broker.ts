@@ -63,6 +63,10 @@ export default class AuthBroker extends Command {
 			description:
 				"Path to the JSON subscription-config file for `serve`; env OMP_AUTH_BROKER_SUBSCRIPTIONS, flag wins",
 		}),
+		"api-key-metrics-config": Flags.string({
+			description:
+				"Path to the JSON API-key metrics roster for `serve`; env OMP_AUTH_BROKER_API_KEY_METRICS, flag wins",
+		}),
 		"trust-proxy-headers": Flags.boolean({
 			description: "Trust forwarded peer IP headers from a reverse proxy (serve); off by default.",
 		}),
@@ -114,6 +118,7 @@ export default class AuthBroker extends Command {
 				includeOauth: flags["include-oauth"],
 				dryRun: flags["dry-run"],
 				subscriptionsConfig: flags["subscriptions-config"],
+				apiKeyMetricsConfig: flags["api-key-metrics-config"],
 				enableMetrics: flags["enable-metrics"],
 				noEnableMetrics: flags["no-enable-metrics"],
 				trustProxyHeaders: flags["trust-proxy-headers"],

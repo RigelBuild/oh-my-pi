@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { renderUsageMetrics } from "@oh-my-pi/pi-ai/auth-broker/prometheus-metrics";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -251,6 +252,11 @@ describe("auth-broker GET /metrics route", () => {
 		expect(body).toContain(
 			'llm_usage_reset_credits_available{provider="openai-codex",account="acct-1",org="",email=""} 2',
 		);
+	});
+	test("absent API-key metrics config preserves the exact legacy exposition", async () => {
+		const res = await fetch(`${handle!.url}/metrics`, { headers: { authorization: `Bearer ${SCRAPE}` } });
+		expect(res.status).toBe(200);
+		expect(await res.text()).toBe(renderUsageMetrics(sampleReports()));
 	});
 
 	// Normalizing at boot must make a padded configured token WORK, not merely

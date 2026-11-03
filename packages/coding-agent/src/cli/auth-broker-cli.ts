@@ -37,6 +37,8 @@ import {
 	canonicalizeProviderId,
 	DEFAULT_AUTH_BROKER_BIND,
 	type SubscriptionLookup,
+	type ApiKeyMetricsConfig,
+	validateApiKeyMetricsConfig,
 	UNIDENTIFIED_ACCOUNT,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
@@ -81,6 +83,8 @@ export interface AuthBrokerCommandArgs {
 		fromLocal?: boolean;
 		/** `serve`: path to the JSON subscription-config file. */
 		subscriptionsConfig?: string;
+		/** `serve`: path to the JSON bounded API-key metrics config file. */
+		apiKeyMetricsConfig?: string;
 		/**
 		 * `serve`: expose the scrape-scoped `GET /metrics` endpoint. Absent means
 		 * "not specified" so env and config can still enable it; the flag itself
@@ -135,6 +139,9 @@ function getMetricsTokenFilePath(): string {
 
 /** Env var honored by `serve` when `--subscriptions-config` is not passed (flag wins). */
 const SUBSCRIPTIONS_ENV = "OMP_AUTH_BROKER_SUBSCRIPTIONS";
+
+/** Env var honored by `serve` when `--api-key-metrics-config` is not passed. */
+const API_KEY_METRICS_ENV = "OMP_AUTH_BROKER_API_KEY_METRICS";
 
 /** Env var honored by `serve` when `--enable-metrics` is not passed (flag wins). */
 const METRICS_ENABLED_ENV = "OMP_AUTH_BROKER_METRICS";
@@ -342,6 +349,30 @@ export async function loadSubscriptionsConfig(
 	if (!file) return undefined;
 	const raw = await Bun.file(file).text();
 	return parseSubscriptionsConfig(raw, file);
+}
+
+/** Read and validate the non-secret API-key metrics roster only while metrics are enabled. */
+export async function loadApiKeyMetricsConfig(
+	pathArg: string | undefined,
+	metricsEnabled: boolean,
+): Promise<ApiKeyMetricsConfig | undefined> {
+	if (!metricsEnabled) return undefined;
+	const file = pathArg ?? process.env[API_KEY_METRICS_ENV];
+	if (!file) return undefined;
+	const raw = await Bun.file(file).text();
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`API-key metrics config ${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	const duplicate = findDuplicateJsonKey(raw);
+	if (duplicate !== undefined) {
+		throw new Error(`API-key metrics config ${file}: duplicate key ${JSON.stringify(duplicate)}`);
+	}
+	return validateApiKeyMetricsConfig(parsed, `API-key metrics config ${file}`);
 }
 
 /** A non-null, non-array plain JSON object. */
@@ -818,6 +849,14 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	// its only consumer, so a bad file must not block startup.
 	const subscriptions = await loadSubscriptionsConfig(flags.subscriptionsConfig, metrics.enabled);
 	if (subscriptions) logger.info("auth-broker subscription config loaded", { plans: subscriptions.plans.length });
+	const apiKeyMetrics = await loadApiKeyMetricsConfig(flags.apiKeyMetricsConfig, metrics.enabled);
+	if (apiKeyMetrics) {
+		logger.info("auth-broker API-key metrics config loaded", {
+			roster: apiKeyMetrics.roster.length,
+			providers: apiKeyMetrics.providers.length,
+			modelClasses: apiKeyMetrics.modelClasses.length,
+		});
+	}
 	const handle = startAuthBroker({
 		storage,
 		bind,
@@ -825,6 +864,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		metricsEnabled: metrics.enabled,
 		...(metrics.enabled ? { metricsTokens: [metrics.token] } : {}),
 		...(subscriptions ? { subscriptions } : {}),
+		...(apiKeyMetrics ? { apiKeyMetrics } : {}),
 		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
 	});

@@ -10,6 +10,7 @@
  * the server only checks a bearer token against an allow-list per request.
  */
 
+import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import { readBoundedRequestBody, RequestBodyTooLargeError } from "../auth-gateway/bounded-body";
@@ -17,6 +18,7 @@ import type { AuthCredentialSnapshotEntry, AuthStorage, StoredCredentialBlock } 
 import { isLoopbackHost, parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
 import { PROMETHEUS_CONTENT_TYPE, renderUsageMetrics, type SubscriptionLookup } from "./prometheus-metrics";
+import { renderApiKeyMetrics, type ApiKeyMetricsConfig } from "./api-key-metrics";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	ClientUsageReportRequest,
@@ -96,6 +98,8 @@ export interface AuthBrokerServerOptions {
 	 * byte-identical to before.
 	 */
 	subscriptions?: SubscriptionLookup;
+	/** Optional bounded upstream credential metrics; absent preserves legacy output. */
+	apiKeyMetrics?: ApiKeyMetricsConfig;
 	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
 	trustProxyHeaders?: boolean;
 	/** Broker version string surfaced on `/v1/healthz`. */
@@ -953,7 +957,25 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// capped by the TTL. `?? []` on last-good expiry renders an empty
 						// 200 exposition so the dashboard sees absent series, not a 5xx.
 						const reports = (await opts.storage.usage.reports({ signal: req.signal })) ?? [];
-						const body = renderUsageMetrics(reports, { subscriptions: opts.subscriptions });
+						const apiKeyMetrics = opts.apiKeyMetrics
+							? renderApiKeyMetrics(
+									opts.storage.usage.credentialTotals(),
+									opts.storage.usage.limitObservations(),
+									opts.apiKeyMetrics,
+									opts.storage.credentials.list().map(row => ({
+										credentialId: row.id,
+										provider: row.provider,
+										credentialType:
+											row.credential.type === "oauth" ||
+											(row.credential.type === "api_key" &&
+												row.provider === "anthropic" &&
+												isAnthropicOAuthToken(row.credential.key))
+												? "oauth"
+												: "api_key",
+									})),
+								)
+							: "";
+						const body = renderUsageMetrics(reports, { subscriptions: opts.subscriptions }) + apiKeyMetrics;
 						logger.info("auth-broker metrics served", { peer, reports: reports.length });
 						return new Response(body, { status: 200, headers: { "Content-Type": PROMETHEUS_CONTENT_TYPE } });
 					} catch (error) {
