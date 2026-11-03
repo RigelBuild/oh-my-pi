@@ -286,6 +286,19 @@ describe("broker credential lifetime totals", () => {
 		expect(await expectStoredClassMatches("i-cls-setup")).toBe("oauth");
 	});
 
+	test("an api_key row whose data cannot deserialize still counts as api_key", async () => {
+		const raw = new Database(dbPath);
+		try {
+			raw.run("UPDATE auth_credentials SET data = ? WHERE id = ?", ["{not json", keyId]);
+		} finally {
+			raw.close();
+		}
+		expect(await post({ installId: "i-malformed", entries: [usageEntry({ credentialId: keyId })] })).toBe(200);
+		const rows = storage!.usage.credentialTotals().filter(total => total.credentialId === keyId);
+		expect(rows.length).toBeGreaterThan(0);
+		expect(rows.every(total => total.credentialType === "api_key")).toBe(true);
+	});
+
 	test("outcomes count per credential without changing client request counts", async () => {
 		expect(await post({ installId: "i-out", entries: [usageEntry({ credentialId: keyId })] })).toBe(200);
 		expect(
