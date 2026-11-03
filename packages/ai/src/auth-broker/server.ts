@@ -10,7 +10,6 @@
  * the server only checks a bearer token against an allow-list per request.
  */
 
-import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import { readBoundedRequestBody, RequestBodyTooLargeError } from "../auth-gateway/bounded-body";
@@ -18,6 +17,7 @@ import type { AuthCredentialSnapshotEntry, AuthStorage, StoredCredentialBlock } 
 import { isLoopbackHost, parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
 import { PROMETHEUS_CONTENT_TYPE, renderUsageMetrics, type SubscriptionLookup } from "./prometheus-metrics";
+import { credentialAuthClassOf } from "../usage";
 import { type ApiKeyMetricsConfig, renderApiKeyMetrics, validateApiKeyMetricsConfig } from "./api-key-metrics";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
@@ -886,13 +886,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				opts.storage.credentials.list().map(row => ({
 					credentialId: row.id,
 					provider: row.provider,
-					credentialType:
-						row.credential.type === "oauth" ||
-						(row.credential.type === "api_key" &&
-							row.provider === "anthropic" &&
-							isAnthropicOAuthToken(row.credential.key))
-							? "oauth"
-							: "api_key",
+					credentialType: credentialAuthClassOf(row.credential),
 				})),
 			);
 		} catch (error) {
