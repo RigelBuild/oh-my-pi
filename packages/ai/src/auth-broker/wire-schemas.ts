@@ -49,6 +49,12 @@ import type {
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
+import {
+	MAX_OBSERVED_LIMIT_OBSERVATIONS,
+	MAX_OBSERVED_OUTCOMES,
+	MAX_OBSERVED_USAGE_ENTRIES,
+	OBSERVED_MODEL_CLASS_PATTERN,
+} from "./types";
 
 // ─── Credential payloads ─────────────────────────────────────────────────────
 
@@ -300,25 +306,108 @@ export const usageHistoryResponseSchema: FluentType<UsageHistoryResponse> = type
 	entries: usageHistoryEntrySchema.array(),
 });
 
+const safeEpochMsSchema = type("0 <= number.integer <= 9007199254740991");
+const boundedUsageNumberSchema = type("0 <= number <= 1000000000000");
+const boundedCostSchema = type("0 <= number <= 1000000000");
+const observedUsageOutcomeSchema = type("'ok' | 'error' | 'aborted'");
+const credentialIdSchema = type("0 < number.integer <= 9007199254740991");
+
 const observedUsageEntrySchema = type({
-	at: "number",
-	provider: "string",
-	model: "string",
-	requests: "number",
-	inputTokens: "number",
-	outputTokens: "number",
-	cacheReadTokens: "number",
-	cacheWriteTokens: "number",
-	costUsd: "number",
+	"+": "reject",
+	at: safeEpochMsSchema,
+	provider: "0 < string <= 128",
+	model: "0 < string <= 256",
+	requests: boundedUsageNumberSchema,
+	inputTokens: boundedUsageNumberSchema,
+	outputTokens: boundedUsageNumberSchema,
+	cacheReadTokens: boundedUsageNumberSchema,
+	cacheWriteTokens: boundedUsageNumberSchema,
+	costUsd: boundedCostSchema,
+	"credentialId?": credentialIdSchema,
+	"outcome?": observedUsageOutcomeSchema,
 });
 
-/** Broker `POST /v1/usage/observed` request — one client's batched observed usage. */
+const observedAttemptOutcomeSchema = type({
+	"+": "reject",
+	at: safeEpochMsSchema,
+	provider: "0 < string <= 128",
+	model: "0 < string <= 256",
+	credentialId: credentialIdSchema,
+	outcome: observedUsageOutcomeSchema,
+	requests: "0 < number.integer <= 1000000000000",
+});
+
+const observedLimitAmountSchema = type({
+	"+": "reject",
+	"used?": boundedUsageNumberSchema,
+	"limit?": boundedUsageNumberSchema,
+	"remaining?": boundedUsageNumberSchema,
+	"usedFraction?": "0 <= number <= 1",
+	"remainingFraction?": "0 <= number <= 1",
+	unit: "'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
+});
+/** Window ids `parseAnthropicApiKeyRateLimitHeaders` emits; the only limit ids the broker persists. */
+const OBSERVED_LIMIT_WINDOWS = ["requests", "input-tokens", "output-tokens"] as const;
+/** A configured model-class row label; also the `<row>` segment of `anthropic:api:<row>:<window>`. */
+const observedModelClassSchema = type(OBSERVED_MODEL_CLASS_PATTERN);
+const observedLimitWindowSchema = type("'requests' | 'input-tokens' | 'output-tokens'");
+
+/** One parsed API-key window: a closed shape with bounded strings, no free-form notes. */
+const observedLimitSchema = type({
+	"+": "reject",
+	id: "0 < string <= 64",
+	label: "0 < string <= 64",
+	scope: type({
+		"+": "reject",
+		provider: "0 < string <= 128",
+		"modelId?": observedModelClassSchema,
+		"windowId?": observedLimitWindowSchema,
+	}),
+	"window?": type({
+		"+": "reject",
+		id: observedLimitWindowSchema,
+		label: "0 < string <= 64",
+		"durationMs?": "number",
+		"resetsAt?": "number",
+	}),
+	amount: observedLimitAmountSchema,
+	"status?": "'ok' | 'warning' | 'exhausted' | 'unknown'",
+});
+
+const observedLimitObservationSchema = type({
+	"+": "reject",
+	at: safeEpochMsSchema,
+	provider: "0 < string <= 128",
+	credentialId: credentialIdSchema,
+	"modelClass?": observedModelClassSchema,
+	limits: observedLimitSchema.array().atMostLength(OBSERVED_LIMIT_WINDOWS.length),
+	"error?": "'credit_exhausted' | 'rate_limited'",
+}).narrow((observation, ctx) => {
+	// Every id must be one the parser emits for this row: `anthropic:api:<modelClass>:<window>`.
+	const allowed = OBSERVED_LIMIT_WINDOWS.map(window => `anthropic:api:${observation.modelClass}:${window}`);
+	for (const limit of observation.limits) {
+		if (observation.modelClass === undefined || !allowed.includes(limit.id)) {
+			return ctx.mustBe("a limit id of the form anthropic:api:<modelClass>:<requests|input-tokens|output-tokens>");
+		}
+	}
+	return true;
+});
+
+/**
+ * Broker `POST /v1/usage/observed` request — one client's batched observed usage.
+ * `outcomes` and `limits` are optional so pre-identity gateways keep validating;
+ * the strict envelope means an old broker rejects them, and the reporter then
+ * falls back to the legacy shape.
+ */
 export const clientUsageReportRequestSchema: FluentType<ClientUsageReportRequest> = type({
 	"+": "reject",
-	installId: "string",
-	"hostname?": "string",
-	"app?": "string",
-	entries: observedUsageEntrySchema.array(),
+	installId: "0 < string <= 256",
+	"hostname?": "0 < string <= 128",
+	"app?": "0 < string <= 128",
+	entries: observedUsageEntrySchema.array().atMostLength(MAX_OBSERVED_USAGE_ENTRIES),
+	"outcomes?": observedAttemptOutcomeSchema.array().atMostLength(MAX_OBSERVED_OUTCOMES),
+	"limits?": observedLimitObservationSchema.array().atMostLength(MAX_OBSERVED_LIMIT_OBSERVATIONS),
+	"batchId?": "string.uuid",
 });
 
 export const clientUsageReportResponseSchema: FluentType<ClientUsageReportResponse> = type({

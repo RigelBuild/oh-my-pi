@@ -6,6 +6,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayAttemptOutcomes,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
@@ -76,6 +77,7 @@ export async function handleSpeech(
 	if ("status" in apiKey) return speechWire.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let credentialId = apiKey.credentialId;
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "speech",
@@ -86,6 +88,7 @@ export async function handleSpeech(
 		peer,
 	});
 
+	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await synthesizeSpeech(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
@@ -96,15 +99,17 @@ export async function handleSpeech(
 				controller.signal,
 				"speech",
 				peer,
-				resolvedKey => {
+				(resolvedKey, resolvedCredentialId) => {
 					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
+				outcomes.onAttemptFailed,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account, credentialId });
 		const response = speechWire.encodeResponse(result, parsed.modelId);
 		const responseHeaders = gatewayResponseHeaders(model, {
 			requestId,
@@ -114,6 +119,7 @@ export async function handleSpeech(
 		for (const name in responseHeaders) response.headers.set(name, responseHeaders[name]);
 		return response;
 	} catch (error) {
+		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway speech failed", { format: "speech", error: classified.message, peer });

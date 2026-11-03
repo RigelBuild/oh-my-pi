@@ -243,6 +243,24 @@ describe("auth-gateway asynchronous video generation", () => {
 		expect(harness.events).toHaveLength(2);
 	});
 
+	it("records a completed poll without a credential row even when one is stored", async () => {
+		harness = await boot();
+		await harness.storage.credentials.set("openrouter", [{ type: "api_key", key: "openrouter-stored" }]);
+		const observed: Array<{ credentialId?: number }> = [];
+		const outcomes: unknown[] = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observeOutcome").mockImplementation(outcome => outcomes.push(outcome));
+		const submitted = await submit(harness);
+		const response = await fetch(`${harness.url}/v1/videos/${submitted.body.id as string}`, {
+			headers: { Authorization: "Bearer gw-token" },
+		});
+		expect(response.status).toBe(200);
+		expect(observed).toHaveLength(1);
+		expect(observed[0]).not.toHaveProperty("credentialId");
+		expect(outcomes).toEqual([]);
+		expect(harness.events[0]).not.toHaveProperty("credentialId");
+	});
+
 	it("streams content bytes and the upstream media type", async () => {
 		harness = await boot();
 		const submitted = await submit(harness);

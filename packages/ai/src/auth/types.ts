@@ -12,6 +12,11 @@ import type {
 	ClientUsageReport,
 	ClientUsageSummary,
 	CredentialRankingStrategy,
+	CredentialUsageTotal,
+	ObservedAttemptOutcome,
+	ObservedLimitObservation,
+	ObservedUsageOutcome,
+	StoredLimitObservation,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 	UsageLogger,
@@ -730,6 +735,10 @@ export type ObservedUsageInput = {
 	at?: number;
 	/** Attribution override; defaults to this process's install identity. */
 	client?: ClientUsageIdentity;
+	/** Stored credential row that served the request, when known exactly. */
+	credentialId?: number;
+	/** How the request settled; absent means `ok`. */
+	outcome?: ObservedUsageOutcome;
 };
 
 /** Mark a session credential blocked with caller and provider timing. */
@@ -1254,6 +1263,14 @@ export interface UsageApi {
 	recordClient(report: ClientUsageReport): boolean;
 	/** Aggregate client-observed usage since a timestamp. */
 	clientSummary(sinceMs: number): ClientUsageSummary;
+	/** Forward one zero-usage settled attempt with exact credential identity. */
+	observeOutcome(outcome: ObservedAttemptOutcome, client?: ClientUsageIdentity): void;
+	/** Forward rate-limit/error-status observations for exact credential rows. */
+	observeLimits(observations: ObservedLimitObservation[], client?: ClientUsageIdentity): void;
+	/** Broker host: lifetime per-credential totals; empty when the store has none. */
+	credentialTotals(): CredentialUsageTotal[];
+	/** Broker host: newest stored limit observation per credential row and limit id. */
+	limitObservations(): StoredLimitObservation[];
 	/**
 	 * The {@link UsageProvider} registered for `provider`, or undefined when the
 	 * provider has no usage endpoint at all. Lets callers tell "a credential we

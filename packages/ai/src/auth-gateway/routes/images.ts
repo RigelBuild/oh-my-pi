@@ -7,6 +7,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayAttemptOutcomes,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
@@ -159,6 +160,7 @@ async function handleImages(
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let credentialId = apiKey.credentialId;
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -170,6 +172,7 @@ async function handleImages(
 		peer,
 	});
 
+	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await generateImage(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
@@ -180,22 +183,25 @@ async function handleImages(
 				controller.signal,
 				"images",
 				peer,
-				resolvedKey => {
+				(resolvedKey, resolvedCredentialId) => {
 					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
+				outcomes.onAttemptFailed,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account, credentialId });
 		return json(
 			200,
 			imagesServer.encodeResponse(result, parsed.modelId),
 			gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }),
 		);
 	} catch (error) {
+		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway image generation failed", { format: "images", error: classified.message, peer });

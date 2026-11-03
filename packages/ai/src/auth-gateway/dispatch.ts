@@ -7,14 +7,23 @@
  * Everything credential-shaped lives here so each route drives the same
  * broker-backed rotation policy and the same usage ledger.
  */
+import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import { markAfterSiblingWait, type ApiKeyResolver, type ResolvedApiKey } from "../auth-retry";
+import { OBSERVED_MODEL_CLASS_PATTERN } from "../auth-broker/types";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
-import { calculateRateLimitBackoffMs, isAnthropicCreditBalanceTooLow, isUsageLimitOutcome } from "../error/rate-limit";
-import type { Api, FetchImpl, Model, Usage } from "../types";
+import {
+	calculateRateLimitBackoffMs,
+	isAnthropicCreditBalanceTooLow,
+	isUsageLimitOutcome,
+	observedLimitErrorStatus,
+} from "../error/rate-limit";
+import { emptyUsage } from "../images/shared";
+import type { Api, AssistantMessage, FetchImpl, Model, StreamOptions, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
+import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
 import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AgentCaller, AuthGatewayServerOptions, CallerIdentity } from "./types";
 
@@ -73,8 +82,10 @@ export type GatewayUsageOutcome = "ok" | "error" | "aborted";
 /** One settled upstream call, reported to {@link AuthGatewayRouteOptions.onUsage}. */
 export interface GatewayUsageEvent {
 	/**
-	 * The `x-request-id` of a successful response (error envelopes omit the header).
-	 * Video reuses its stable job id on every completed poll; dedupe on this id.
+	 * Gateway-generated id for the inbound request; the answer carries it bare.
+	 * Other settled attempts append a suffix (`:aN` failover, `:dN` an attempt that
+	 * failed or was rotated away, `:tN` re-sampled thinking loop) so each is distinct. Video reuses its stable
+	 * job id on every completed poll; dedupe on this id.
 	 */
 	requestId: string;
 	provider: string;
@@ -85,6 +96,8 @@ export interface GatewayUsageEvent {
 	client: ClientUsageIdentity;
 	/** Identity of the credential that served the call, when the route knows it. */
 	account?: string;
+	/** Stored row of the credential that served the call, when known exactly. */
+	credentialId?: number;
 }
 
 /** Map an assistant stop reason to the usage outcome. */
@@ -130,6 +143,12 @@ export interface AuthGatewayRouteOptions {
 	fetch?: FetchImpl;
 	/** Chat routes retry an eligible pre-output failure on the next candidate, if any; unset keeps one attempt. */
 	candidateFailover?: CandidateFailoverOptions;
+	/**
+	 * Exact Anthropic model id → documented rate-limit table row (e.g. `opus-5.5`).
+	 * API-key responses for listed models report their rate-limit headers; at most three rows,
+	 * each a lowercase label matching {@link OBSERVED_MODEL_CLASS_PATTERN}.
+	 */
+	apiKeyLimitModelClasses?: Readonly<Record<string, string>>;
 }
 
 /** The HTTP server's options: the routes' plus its listener and inbound auth. */
@@ -326,7 +345,9 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  * credential that actually failed; a retry context's `previousKey` wins, since
  * concurrent operations sharing one resolver (split judgment chunks) each know
  * the bearer they sent. `onResolvedKey` observes every rotation so the route
- * can re-key its account lease or usage attribution.
+ * can re-key its account lease or usage attribution. `onAttemptFailed` observes
+ * every retry step with the row of the bearer whose attempt just failed; one
+ * failure can drive two steps (refresh, then rotate), so callers dedupe on the error.
  */
 export function buildGatewayApiKeyResolver(
 	storage: AuthStorage,
@@ -336,8 +357,9 @@ export function buildGatewayApiKeyResolver(
 	requestSignal: AbortSignal,
 	format: string,
 	peer: string,
-	onResolvedKey?: (apiKey: string) => void,
+	onResolvedKey?: (apiKey: string, credentialId: number | undefined) => void,
 	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
+	onAttemptFailed?: (credentialId: number | undefined, error: unknown) => void,
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
 	const credentialIdsByBearer = new Map<string, number | undefined>([[initialKey.apiKey, initialKey.credentialId]]);
@@ -347,6 +369,7 @@ export function buildGatewayApiKeyResolver(
 			lastKey = initialKey.apiKey;
 			return initialKey;
 		}
+		onAttemptFailed?.(credentialIdsByBearer.get(previousKey ?? lastKey), error);
 		if (!lastChance) {
 			const refreshed = await storage.keys.getWithCredential(model.provider, sessionId, {
 				...modelKeyOptions(model, sig),
@@ -356,7 +379,7 @@ export function buildGatewayApiKeyResolver(
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) {
 				credentialIdsByBearer.set(refreshed.apiKey, refreshed.credentialId);
-				onResolvedKey?.(refreshed.apiKey);
+				onResolvedKey?.(refreshed.apiKey, refreshed.credentialId);
 			}
 			return refreshed;
 		}
@@ -376,7 +399,7 @@ export function buildGatewayApiKeyResolver(
 		lastKey = next?.apiKey ?? lastKey;
 		if (next) {
 			credentialIdsByBearer.set(next.apiKey, next.credentialId);
-			onResolvedKey?.(next.apiKey);
+			onResolvedKey?.(next.apiKey, next.credentialId);
 		}
 		return next;
 	};
@@ -394,21 +417,69 @@ export function hasGatewayUsage(usage: Usage): boolean {
 	);
 }
 
+/** Reject a model-class map naming more distinct rate-limit rows than the series budget allows. */
+export function assertApiKeyLimitModelClasses(classes: Readonly<Record<string, string>> | undefined): void {
+	const rows = new Set(Object.values(classes ?? {}));
+	for (const row of rows) {
+		if (!OBSERVED_MODEL_CLASS_PATTERN.test(row)) {
+			throw new Error(
+				`apiKeyLimitModelClasses row ${JSON.stringify(row)} must match ${OBSERVED_MODEL_CLASS_PATTERN.source}`,
+			);
+		}
+	}
+	if (rows.size > 3) {
+		throw new Error(`apiKeyLimitModelClasses names ${rows.size} distinct rows; at most 3 are allowed`);
+	}
+}
+
+/** Whether a stored row is a paid Anthropic Console key (setup tokens stored as keys are OAuth). */
+function isConsoleApiKeyRow(storage: AuthStorage, provider: string, credentialId: number): boolean {
+	const credential = storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
+	return credential?.type === "api_key" && !isAnthropicOAuthToken(credential.key);
+}
+
+/**
+ * `onResponse` for one attempt's stream options: reports a mapped Anthropic
+ * model's API-key rate-limit headers against the row bound to the response.
+ * `undefined` when the model is not mapped, so unmapped models report nothing.
+ */
+export function gatewayApiKeyLimitObserver(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+): StreamOptions["onResponse"] {
+	const classes = bootOpts.apiKeyLimitModelClasses;
+	const modelClass =
+		model.provider === "anthropic" && classes && Object.hasOwn(classes, model.id) ? classes[model.id] : undefined;
+	if (!modelClass) return undefined;
+	return response => {
+		const credentialId = response.credentialId;
+		if (credentialId === undefined || !isConsoleApiKeyRow(bootOpts.storage, model.provider, credentialId)) return;
+		const limits = parseAnthropicApiKeyRateLimitHeaders(response.headers, modelClass);
+		if (limits.length === 0) return;
+		bootOpts.storage.usage.observeLimits([
+			{ at: Date.now(), provider: model.provider, credentialId, modelClass, limits },
+		]);
+	};
+}
+
 /**
  * Attribute one settled upstream request to the originating client via the
  * broker's observed-usage channel (`AuthStorage.usage.observe`, batched
  * by the remote store). Error/aborted turns still record — the provider
- * billed whatever tokens the partial turn consumed; zero-usage results
- * (pre-flight failures) are skipped. `at` defaults to now.
+ * billed whatever tokens the partial turn consumed. A zero-usage result
+ * counts only as an attempt outcome for its known credential row; without
+ * one (e.g. a failure before credential selection) it is skipped. `at`
+ * defaults to now.
  */
 export function recordGatewayUsage(
 	bootOpts: AuthGatewayRouteOptions,
 	model: Model<Api>,
 	client: ClientUsageIdentity,
 	usage: Usage,
-	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string },
+	options: { requestId: string; outcome: GatewayUsageOutcome; at?: number; account?: string; credentialId?: number },
 ): void {
 	const at = options.at ?? Date.now();
+	const credentialId = options.credentialId;
 	if (usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0 || usage.cost.total > 0) {
 		bootOpts.storage.usage.observe({
 			provider: model.provider,
@@ -417,7 +488,14 @@ export function recordGatewayUsage(
 			usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite },
 			costUsd: usage.cost.total,
 			client,
+			...(credentialId !== undefined && { credentialId }),
+			outcome: options.outcome,
 		});
+	} else if (credentialId !== undefined) {
+		bootOpts.storage.usage.observeOutcome(
+			{ at, provider: model.provider, model: model.id, credentialId, outcome: options.outcome, requests: 1 },
+			client,
+		);
 	}
 	if (!hasGatewayUsage(usage)) return;
 	emitGatewayUsage(bootOpts, {
@@ -429,7 +507,127 @@ export function recordGatewayUsage(
 		at,
 		client,
 		...(options.account !== undefined && { account: options.account }),
+		...(credentialId !== undefined && { credentialId }),
 	});
+}
+
+/**
+ * The `onDroppedAttempt` hook for one gateway request: records every settled attempt the
+ * stream's result does not carry (abandoned for a rotation, or ended by a thrown error)
+ * against its own credential row. Each gets a distinct `requestId` so `onUsage` consumers
+ * never fold it into the answer. No `account` label: the request's account tracker has
+ * already moved to the rotated key when the hook fires, and the row id is exact.
+ */
+export function gatewayDroppedAttemptRecorder(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	requestId: string,
+): NonNullable<StreamOptions["onDroppedAttempt"]> {
+	let dropped = 0;
+	return attempt => {
+		dropped++;
+		observeAttemptLimitStatus(bootOpts.storage, model.provider, attempt.credentialId, attempt.error);
+		recordGatewayUsage(bootOpts, model, client, attempt.usage, {
+			requestId: `${requestId}:d${dropped}`,
+			outcome: attempt.outcome,
+			credentialId: attempt.credentialId,
+		});
+	};
+}
+
+/**
+ * Record the throttle or credit-depletion status of one failed attempt on the row that
+ * served it. Other quota and billing classes record none.
+ */
+export function observeAttemptLimitStatus(
+	storage: AuthStorage,
+	provider: string,
+	credentialId: number | undefined,
+	failure: unknown,
+): void {
+	if (credentialId === undefined || failure === undefined) return;
+	const isMessage = typeof failure === "object" && failure !== null && "stopReason" in failure;
+	const status = isMessage ? (failure as AssistantMessage).errorStatus : extractHttpStatusFromError(failure);
+	const message = isMessage
+		? ((failure as AssistantMessage).errorClassificationMessage ?? (failure as AssistantMessage).errorMessage ?? "")
+		: failure instanceof Error
+			? failure.message
+			: String(failure);
+	const error = observedLimitErrorStatus(status, message);
+	if (error) storage.usage.observeLimits([{ at: Date.now(), provider, credentialId, limits: [], error }]);
+}
+
+/**
+ * Records every thinking-loop result a unary completion re-sampled past. The returned
+ * `onAttempt` holds each result until the next arrives, so the final one (recorded by the
+ * route) is never counted twice; `settle` records a held result the route never received.
+ */
+export function gatewayThinkingLoopRecorder(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	requestId: string,
+): { onAttempt: (message: AssistantMessage) => void; settle: (final: AssistantMessage | undefined) => void } {
+	let held: AssistantMessage | undefined;
+	let recorded = 0;
+	const record = (message: AssistantMessage): void => {
+		recorded++;
+		observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
+		recordGatewayUsage(bootOpts, model, client, message.usage, {
+			requestId: `${requestId}:t${recorded}`,
+			outcome: gatewayUsageOutcome(message.stopReason),
+			at: message.timestamp || undefined,
+			credentialId: message.credentialId,
+		});
+	};
+	return {
+		onAttempt: message => {
+			if (held) record(held);
+			held = message;
+		},
+		settle: final => {
+			if (held && held !== final) record(held);
+			held = undefined;
+		},
+	};
+}
+
+/**
+ * Per-request outcome recorder for the non-chat routes (embeddings, images,
+ * rerank, speech, transcriptions). Their providers retry through `withAuth`, so
+ * the route sees only the final result: `onAttemptFailed` (pass it to
+ * {@link buildGatewayApiKeyResolver}) records each abandoned attempt against the
+ * row that served it, once per error, and `recordFinal` records the request's
+ * terminal failure unless that same error was already recorded as abandoned.
+ * Failures carry no usage, so they count only as attempt outcomes.
+ */
+export function gatewayAttemptOutcomes(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+	client: ClientUsageIdentity,
+	requestId: string,
+): {
+	onAttemptFailed: (credentialId: number | undefined, error: unknown) => void;
+	recordFinal: (credentialId: number | undefined, error: unknown, outcome: "error" | "aborted") => void;
+} {
+	let recordedError: unknown;
+	let recorded = 0;
+	const record = (credentialId: number | undefined, error: unknown, outcome: "error" | "aborted"): void => {
+		if (recorded > 0 && error === recordedError) return;
+		recordedError = error;
+		recorded++;
+		observeAttemptLimitStatus(bootOpts.storage, model.provider, credentialId, error);
+		recordGatewayUsage(bootOpts, model, client, emptyUsage(), {
+			requestId: `${requestId}:d${recorded}`,
+			outcome,
+			credentialId,
+		});
+	};
+	return {
+		onAttemptFailed: (credentialId, error) => record(credentialId, error, "error"),
+		recordFinal: record,
+	};
 }
 
 /** Call the boot hook; synchronous throws and asynchronous rejections are logged. */

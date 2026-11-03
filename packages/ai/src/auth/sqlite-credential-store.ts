@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import {
 	getAgentDbPath,
@@ -32,8 +33,13 @@ import type {
 	ClientProviderUsage,
 	ClientUsageReport,
 	ClientUsageSummary,
+	CredentialAuthClass,
+	CredentialUsageTotal,
+	ObservedLimitError,
+	StoredLimitObservation,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
+	UsageLimit,
 } from "../usage";
 
 // 5 min stale tolerance. Anthropic / OpenAI rate-limit /usage hard at the IP
@@ -56,6 +62,18 @@ const USAGE_HISTORY_BUCKET_MS = 60 * 60_000;
  * instead of one row per 10s flush.
  */
 const CLIENT_USAGE_BUCKET_MS = 5 * 60_000;
+
+/**
+ * How long a seen observed-usage batch id is remembered. Clients retry a failed
+ * flush within seconds, so a day covers any retry while bounding the table.
+ */
+const OBSERVED_BATCH_RETENTION_MS = 24 * 60 * 60_000;
+
+/**
+ * Model classes whose limit observations are retained per credential; matches the
+ * gateway's three-row series budget (`assertApiKeyLimitModelClasses`).
+ */
+const MAX_LIMIT_MODEL_CLASSES = 3;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SqliteAuthCredentialStore
@@ -96,6 +114,9 @@ type CredentialStateRow = {
 	identity_key: string | null;
 	disabled_cause: string | null;
 };
+
+/** A live credential row an observed-usage report may attribute counters to. */
+type AttributedCredential = { id: number; provider: string; credentialType: CredentialAuthClass };
 
 function storesSerializedCredential(row: CredentialStateRow, serialized: SerializedCredentialRecord): boolean {
 	return (
@@ -684,6 +705,30 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_series ON client_usage(install_id, provider, model, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
+			CREATE TABLE IF NOT EXISTS credential_usage_totals (
+				credential_id INTEGER NOT NULL,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				metric TEXT NOT NULL,
+				value REAL NOT NULL,
+				PRIMARY KEY (credential_id, provider, credential_type, metric)
+			) WITHOUT ROWID;
+			CREATE TABLE IF NOT EXISTS credential_limit_observations (
+				credential_id INTEGER NOT NULL,
+				limit_id TEXT NOT NULL,
+				model_class TEXT NOT NULL,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				observed_at INTEGER NOT NULL,
+				limit_json TEXT,
+				error TEXT,
+				PRIMARY KEY (credential_id, limit_id)
+			) WITHOUT ROWID;
+			CREATE TABLE IF NOT EXISTS observed_batches (
+				batch_id TEXT PRIMARY KEY,
+				received_at INTEGER NOT NULL
+			) WITHOUT ROWID;
+			CREATE INDEX IF NOT EXISTS idx_observed_batches_received ON observed_batches(received_at);
 		`);
 		this.#ensureClientUsageAppColumn();
 
@@ -1884,7 +1929,19 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	recordClientUsage(report: ClientUsageReport): void {
+		this.#db.transaction(() => this.#recordClientUsageInTransaction(report))();
+	}
+
+	#recordClientUsageInTransaction(report: ClientUsageReport): void {
 		const now = Date.now();
+		if (report.batchId !== undefined) {
+			// A retried batch whose first send committed must count nothing the second time.
+			this.#db.query("DELETE FROM observed_batches WHERE received_at < ?").run(now - OBSERVED_BATCH_RETENTION_MS);
+			const seen = this.#db
+				.query("INSERT OR IGNORE INTO observed_batches (batch_id, received_at) VALUES (?, ?)")
+				.run(report.batchId, now);
+			if (seen.changes === 0) return;
+		}
 		this.#db
 			.query(
 				`INSERT INTO clients (install_id, hostname, first_seen, last_seen) VALUES (?, ?, ?, ?)
@@ -1909,13 +1966,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		for (const entry of report.entries) {
 			// Merge into the newest row of the same (install, provider, model)
 			// bucket so 10s client flushes don't accrete one row apiece forever.
-			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
+			// A client clock ahead of the broker never dates usage past its receipt.
+			const at = Math.min(entry.at, now);
+			const bucketFloor = at - CLIENT_USAGE_BUCKET_MS;
 			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
 				id: number;
 			} | null;
 			if (existing) {
 				merge.run(
-					entry.at,
+					at,
 					entry.requests,
 					entry.inputTokens,
 					entry.outputTokens,
@@ -1927,7 +1986,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				continue;
 			}
 			insert.run(
-				entry.at,
+				at,
 				report.installId,
 				app,
 				entry.provider,
@@ -1940,6 +1999,152 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				entry.costUsd,
 			);
 		}
+		const credentials = new Map<number, AttributedCredential | null>();
+		const attribute = (credentialId: number | undefined, provider: string): AttributedCredential | null => {
+			if (credentialId === undefined) return null;
+			let resolved = credentials.get(credentialId);
+			if (resolved === undefined) {
+				resolved = this.#attributeCredential(credentialId);
+				credentials.set(credentialId, resolved);
+			}
+			return resolved?.provider === provider ? resolved : null;
+		};
+		const addTotal = this.#db.query(
+			`INSERT INTO credential_usage_totals (credential_id, provider, credential_type, metric, value) VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(credential_id, provider, credential_type, metric) DO UPDATE SET value = value + excluded.value`,
+		);
+		const add = (credential: AttributedCredential, metric: string, value: number) => {
+			if (value > 0) addTotal.run(credential.id, credential.provider, credential.credentialType, metric, value);
+		};
+		for (const entry of report.entries) {
+			const credential = attribute(entry.credentialId, entry.provider);
+			if (!credential) continue;
+			add(credential, "tokens:input", entry.inputTokens);
+			add(credential, "tokens:output", entry.outputTokens);
+			add(credential, "tokens:cache_read", entry.cacheReadTokens);
+			add(credential, "tokens:cache_write", entry.cacheWriteTokens);
+			add(credential, `requests:${entry.outcome ?? "ok"}`, entry.requests);
+			add(credential, "estimated_cost_usd", Number.isFinite(entry.costUsd) ? entry.costUsd : 0);
+		}
+		// Zero-usage attempts feed only the credential outcome counters, never client_usage.
+		for (const outcome of report.outcomes ?? []) {
+			const credential = attribute(outcome.credentialId, outcome.provider);
+			if (credential) add(credential, `requests:${outcome.outcome}`, outcome.requests);
+		}
+		// One row per (credential, limit id); an error status is its own `error:<kind>` row.
+		const upsertLimit = this.#db.query(
+			`INSERT INTO credential_limit_observations (credential_id, limit_id, model_class, provider, credential_type, observed_at, limit_json, error)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(credential_id, limit_id) DO UPDATE SET model_class = excluded.model_class, provider = excluded.provider,
+				credential_type = excluded.credential_type, observed_at = excluded.observed_at, limit_json = excluded.limit_json,
+				error = excluded.error
+			 WHERE excluded.observed_at >= credential_limit_observations.observed_at`,
+		);
+		for (const observation of report.limits ?? []) {
+			const credential = attribute(observation.credentialId, observation.provider);
+			if (!credential) continue;
+			const modelClass = observation.modelClass ?? "";
+			for (const limit of observation.limits) {
+				upsertLimit.run(
+					credential.id,
+					limit.id,
+					modelClass,
+					credential.provider,
+					credential.credentialType,
+					Date.now(),
+					JSON.stringify(limit),
+					null,
+				);
+			}
+			if (observation.error) {
+				upsertLimit.run(
+					credential.id,
+					`error:${observation.error}`,
+					modelClass,
+					credential.provider,
+					credential.credentialType,
+					Date.now(),
+					null,
+					observation.error,
+				);
+			}
+		}
+		// Bound retained rows: keep at most MAX_LIMIT_MODEL_CLASSES model classes per
+		// credential; a newly observed class evicts the least recently observed one.
+		const pruneClasses = this.#db.query(
+			`DELETE FROM credential_limit_observations WHERE credential_id = ?1 AND model_class <> '' AND model_class NOT IN (
+				SELECT model_class FROM credential_limit_observations WHERE credential_id = ?1 AND model_class <> ''
+				GROUP BY model_class ORDER BY MAX(observed_at) DESC, model_class LIMIT ?2
+			)`,
+		);
+		const touched = new Set<number>();
+		for (const observation of report.limits ?? []) touched.add(observation.credentialId);
+		for (const credentialId of touched) pruneClasses.run(credentialId, MAX_LIMIT_MODEL_CLASSES);
+	}
+
+	/**
+	 * Resolve a reported row id to its live provider and effective auth class.
+	 * Deleted or disabled rows return null so their usage stays unattributed.
+	 */
+	#attributeCredential(id: number): AttributedCredential | null {
+		const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
+		if (!row || row.disabled_cause !== null) return null;
+		let credentialType: CredentialAuthClass = row.credential_type === "api_key" ? "api_key" : "oauth";
+		if (credentialType === "api_key") {
+			// Setup tokens are stored as keys but are subscription OAuth, never paid Console traffic.
+			const key = deserializeCredential({ id, ...row });
+			if (key?.type === "api_key" && isAnthropicOAuthToken(key.key)) credentialType = "oauth";
+		}
+		return { id, provider: row.provider, credentialType };
+	}
+
+	listCredentialUsageTotals(): CredentialUsageTotal[] {
+		const rows = this.#db
+			.query(
+				`SELECT credential_id, provider, credential_type, metric, value FROM credential_usage_totals
+				 ORDER BY credential_id, credential_type, metric`,
+			)
+			.all() as Array<{
+			credential_id: number;
+			provider: string;
+			credential_type: CredentialAuthClass;
+			metric: string;
+			value: number;
+		}>;
+		return rows.map(row => ({
+			credentialId: row.credential_id,
+			provider: row.provider,
+			credentialType: row.credential_type,
+			metric: row.metric,
+			value: row.value,
+		}));
+	}
+
+	listLimitObservations(): StoredLimitObservation[] {
+		const rows = this.#db
+			.query(
+				`SELECT credential_id, model_class, provider, credential_type, observed_at, limit_json, error
+				 FROM credential_limit_observations ORDER BY credential_id, limit_id`,
+			)
+			.all() as Array<{
+			credential_id: number;
+			model_class: string;
+			provider: string;
+			credential_type: CredentialAuthClass;
+			observed_at: number;
+			limit_json: string | null;
+			error: ObservedLimitError | null;
+		}>;
+		return rows.map(row => ({
+			at: row.observed_at,
+			provider: row.provider,
+			credentialId: row.credential_id,
+			...(row.model_class !== "" && { modelClass: row.model_class }),
+			// SAFETY: limit_json is written only by recordClientUsage from a schema-validated UsageLimit.
+			limits: row.limit_json === null ? [] : [JSON.parse(row.limit_json) as UsageLimit],
+			...(row.error !== null && { error: row.error }),
+			credentialType: row.credential_type,
+		}));
 	}
 
 	getClientUsageSummary(sinceMs: number): ClientUsageSummary {

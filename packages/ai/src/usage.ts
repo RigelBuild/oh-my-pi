@@ -228,6 +228,9 @@ export interface UsageHistoryQuery {
 	sinceMs?: number;
 }
 
+/** How one settled upstream attempt ended. */
+export type ObservedUsageOutcome = "ok" | "error" | "aborted";
+
 /**
  * Aggregated request usage a client observed for one (provider, model) pair.
  * Clients fold every completed request into per-pair buckets and flush them to
@@ -247,6 +250,50 @@ export interface ObservedUsageEntry {
 	cacheWriteTokens: number;
 	/** Estimated USD cost of the folded requests (0 when unknown). */
 	costUsd: number;
+	/**
+	 * Stored credential row that served every folded request, when the reporter
+	 * knew it exactly. Absent means unattributed; buckets for different rows
+	 * (and for absent identity) never merge.
+	 */
+	credentialId?: number;
+	/** How the folded requests settled. Absent means `ok` (pre-identity reporters). */
+	outcome?: ObservedUsageOutcome;
+}
+
+/**
+ * Settled attempts that used no tokens (e.g. a provider error before output),
+ * attributed to the exact credential row that served them. They count toward
+ * the credential's outcome totals only, never toward client request history.
+ */
+export interface ObservedAttemptOutcome {
+	/** Epoch ms of the newest attempt folded into this bucket. */
+	at: number;
+	provider: Provider;
+	model: string;
+	credentialId: number;
+	outcome: ObservedUsageOutcome;
+	/** Attempts folded into this bucket. */
+	requests: number;
+}
+
+/** Error status observed on one credential row; status evidence, never a numeric balance. */
+export type ObservedLimitError = "credit_exhausted" | "rate_limited";
+
+/**
+ * Rate-limit state observed on one exact credential row's response, or an error
+ * status the provider returned for it. One observation per (row, model class);
+ * the newest observation wins.
+ */
+export interface ObservedLimitObservation {
+	/** Epoch ms the response was observed. */
+	at: number;
+	provider: Provider;
+	credentialId: number;
+	/** Configured model-class row label (e.g. `opus-5.5`); absent for row-wide status. */
+	modelClass?: string;
+	/** Normalized limits parsed from the response; empty for an error-only observation. */
+	limits: UsageLimit[];
+	error?: ObservedLimitError;
 }
 
 /** One client's observed-usage report, keyed by its stable install id. */
@@ -258,6 +305,36 @@ export interface ClientUsageReport {
 	/** Application label for the process that burned the tokens (e.g. `omp`, `robomp`). */
 	app?: string;
 	entries: ObservedUsageEntry[];
+	/** Zero-usage settled attempts with exact credential identity. */
+	outcomes?: ObservedAttemptOutcome[];
+	/** Rate-limit and error-status observations for exact credential rows. */
+	limits?: ObservedLimitObservation[];
+	/**
+	 * Per-flush UUID, reused when the same batch is retried. The broker counts a
+	 * batch id once; reports without one are counted every time they arrive.
+	 */
+	batchId?: string;
+}
+
+/** Effective authentication class of a credential row (setup tokens stored as keys count as OAuth). */
+export type CredentialAuthClass = "api_key" | "oauth";
+
+/** Lifetime counter for one credential row; values only ever increase. */
+export interface CredentialUsageTotal {
+	credentialId: number;
+	provider: string;
+	credentialType: CredentialAuthClass;
+	/**
+	 * `tokens:input|output|cache_read|cache_write`, `requests:ok|error|aborted`,
+	 * or `estimated_cost_usd`.
+	 */
+	metric: string;
+	value: number;
+}
+
+/** Newest stored limit/error observation for one credential row. */
+export interface StoredLimitObservation extends ObservedLimitObservation {
+	credentialType: CredentialAuthClass;
 }
 
 /**

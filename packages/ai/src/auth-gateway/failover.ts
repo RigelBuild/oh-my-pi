@@ -183,6 +183,7 @@ export function completeAttempt(
 	context: Context,
 	options: SimpleStreamOptions,
 	budget: AttemptBudget,
+	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
 	const sessionOptions = options.sessionId ? options : { ...options, sessionId: randomUUID() };
 	const dispatch = (): AssistantMessageEventStream => {
@@ -203,18 +204,22 @@ export function completeAttempt(
 		return relay;
 	};
 	let first: AssistantMessageEventStream | undefined = dispatch();
-	const result = resolveWithThinkingLoopRetries(sessionOptions.signal, () => {
-		if (first) {
-			const events = first;
-			first = undefined;
-			return events;
-		}
-		// Deltas before the loop error lifted the budget; a stalled redispatch must still reach the follower.
-		budget.rearm?.();
-		// A budget that expired during the retry wait aborted the attempt; starting the call would waste it.
-		sessionOptions.signal?.throwIfAborted();
-		return dispatch();
-	});
+	const result = resolveWithThinkingLoopRetries(
+		sessionOptions.signal,
+		() => {
+			if (first) {
+				const events = first;
+				first = undefined;
+				return events;
+			}
+			// Deltas before the loop error lifted the budget; a stalled redispatch must still reach the follower.
+			budget.rearm?.();
+			// A budget that expired during the retry wait aborted the attempt; starting the call would waste it.
+			sessionOptions.signal?.throwIfAborted();
+			return dispatch();
+		},
+		onAttempt,
+	);
 	return result.finally(() => budget.settle());
 }
 

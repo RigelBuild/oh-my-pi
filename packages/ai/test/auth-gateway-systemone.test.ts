@@ -211,6 +211,31 @@ describe("auth-gateway POST /v1/systemone", () => {
 		expect(recorded[0].usage).toMatchObject({ input: 20, output: 2 });
 	});
 
+	it("records split chunk usage without a credential row even when one is stored", async () => {
+		harness = await boot(init => {
+			const ids = Object.keys(JSON.parse(String(init?.body)).questions);
+			return Response.json({
+				model: "openjev-4b",
+				answers: Object.fromEntries(ids.map(id => [id, { type: "noul", noul: 0.5 }])),
+				usage: { input_tokens: 10, output_tokens: 1 },
+			});
+		});
+		await harness.storage.credentials.set("typesafe", [{ type: "api_key", key: "ts-stored" }]);
+		const recorded: Array<{ credentialId?: number }> = [];
+		const outcomes: unknown[] = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => recorded.push(entry));
+		vi.spyOn(harness.storage.usage, "observeOutcome").mockImplementation(outcome => outcomes.push(outcome));
+		const questions = Object.fromEntries(
+			Array.from({ length: 20 }, (_, i) => [`q${i}`, { type: "noul", instructions: `Question ${i}?` }]),
+		);
+		const response = await post(harness.url, "/v1/systemone", { model: "openjev-4b", state: "s", questions });
+		expect(response.status).toBe(200);
+		expect(harness.upstream).toHaveLength(2);
+		expect(recorded.length).toBeGreaterThan(0);
+		for (const entry of recorded) expect(entry).not.toHaveProperty("credentialId");
+		expect(outcomes).toEqual([]);
+	});
+
 	it("invalidates the bearer each chunk sent, not the one a sibling rotated to", async () => {
 		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
 		const storage = harness.storage;

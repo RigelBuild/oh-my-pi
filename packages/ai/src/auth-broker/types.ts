@@ -61,6 +61,23 @@ export interface UsageHistoryResponse {
 /** POST /v1/usage/observed request body — one client's batched observed usage. */
 export type ClientUsageReportRequest = ClientUsageReport;
 
+/**
+ * Caps on all lists in a report. The broker rejects an oversize report with
+ * 400, so the reporter carries excess observations to later reports. A
+ * reporter sends one limit observation per (row, model class, limit id or error).
+ */
+export const MAX_OBSERVED_OUTCOMES = 1024;
+export const MAX_OBSERVED_LIMIT_OBSERVATIONS = 1024;
+
+/** Maximum observed request-usage entries in a broker report. */
+export const MAX_OBSERVED_USAGE_ENTRIES = 1024;
+
+/** Maximum UTF-8 request body accepted by POST /v1/usage/observed. */
+export const MAX_OBSERVED_REPORT_BYTES = 1024 * 1024;
+
+/** A configured API-key model-class row label, as the broker accepts it in a limit id. */
+export const OBSERVED_MODEL_CLASS_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+
 /** POST /v1/usage/observed response body. */
 export interface ClientUsageReportResponse {
 	ok: boolean;

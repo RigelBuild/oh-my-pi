@@ -52,9 +52,14 @@ import {
 	type AuthGatewayBootOptions,
 	type AuthGatewayRouteOptions,
 	ModelResolverUnavailableError,
+	assertApiKeyLimitModelClasses,
 	buildGatewayApiKeyResolver,
 	type CandidateFailoverOptions,
 	type FailoverContext,
+	gatewayApiKeyLimitObserver,
+	gatewayDroppedAttemptRecorder,
+	gatewayThinkingLoopRecorder,
+	observeAttemptLimitStatus,
 	gatewayUsageOutcome,
 	resolveGatewayModel,
 	mirrorRequestAbort,
@@ -351,6 +356,8 @@ async function prepareFormatAttempt(
 
 	const streamOpts = buildStreamOptions(parsed, model.api, signal);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model);
+	if (limitObserver) streamOpts.onResponse = limitObserver;
 	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
 	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
 	// map is non-serializable, so no client can supply it and every turn would
@@ -432,6 +439,8 @@ async function preparePiNativeAttempt(
 		providerSessionState: lease.states,
 	};
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
+	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model);
+	if (limitObserver) streamOpts.onResponse = limitObserver;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts.storage,
 		model,
@@ -826,6 +835,18 @@ async function runFailoverLoop(
 				follower ? Date.now() + Math.max(0, (deadlineAt - Date.now()) / 2) : undefined,
 			);
 			const answering = model;
+			streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
+				request.bootOpts,
+				answering,
+				request.client,
+				`${requestId}:a${attempt}`,
+			);
+			const loop = gatewayThinkingLoopRecorder(
+				request.bootOpts,
+				answering,
+				request.client,
+				`${requestId}:a${attempt}`,
+			);
 			const knownFollower = async (): Promise<Model<Api> | undefined> => follower;
 			logger.info("auth-gateway request", {
 				requestId,
@@ -855,7 +876,7 @@ async function runFailoverLoop(
 			if (!route.stream) {
 				let attemptResult: Promise<AssistantMessage>;
 				try {
-					attemptResult = completeAttempt(answering, route.context, streamOpts, budget);
+					attemptResult = completeAttempt(answering, route.context, streamOpts, budget, loop.onAttempt);
 				} catch (error) {
 					const next = await setupThrew(error);
 					if (!("api" in next)) return next;
@@ -869,15 +890,18 @@ async function runFailoverLoop(
 				} catch (error) {
 					thrown = error;
 				} finally {
+					loop.settle(message);
 					lease.release();
 					unlink();
 				}
 				if (message) {
+					observeAttemptLimitStatus(request.bootOpts.storage, answering.provider, message.credentialId, message);
 					recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
 						requestId: attemptUsageId(requestId, attempt, message.stopReason),
 						outcome: gatewayUsageOutcome(message.stopReason),
 						at: message.timestamp || undefined,
 						account: account(),
+						credentialId: message.credentialId,
 					});
 					if (message.stopReason !== "error" && message.stopReason !== "aborted") {
 						return { kind: "answered", model: answering, message };
@@ -897,14 +921,21 @@ async function runFailoverLoop(
 				openBody(answering);
 				void events
 					.result()
-					.then(message =>
+					.then(message => {
+						observeAttemptLimitStatus(
+							request.bootOpts.storage,
+							answering.provider,
+							message.credentialId,
+							message,
+						);
 						recordGatewayUsage(request.bootOpts, answering, request.client, message.usage, {
 							requestId: attemptUsageId(requestId, attempt, message.stopReason),
 							outcome: gatewayUsageOutcome(message.stopReason),
 							at: message.timestamp || undefined,
 							account: account(),
-						}),
-					)
+							credentialId: message.credentialId,
+						});
+					})
 					.catch(() => {})
 					.finally(() => {
 						lease.release();
@@ -1088,6 +1119,7 @@ async function handleFormatEndpoint(
 	}
 	if (!start.ok) return route.module.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account } = start;
+	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(bootOpts, model, client, requestId);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -1102,12 +1134,20 @@ async function handleFormatEndpoint(
 	if (!parsed.stream) {
 		try {
 			if (controller.signal.aborted) return clientClosedResponse(route);
-			const message = await completeSimple(model, parsed.context, streamOpts);
+			const loop = gatewayThinkingLoopRecorder(bootOpts, model, client, requestId);
+			let message: AssistantMessage | undefined;
+			try {
+				message = await completeSimple(model, parsed.context, { ...streamOpts, onAttempt: loop.onAttempt });
+			} finally {
+				loop.settle(message);
+			}
+			observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 			recordGatewayUsage(bootOpts, model, client, message.usage, {
 				requestId,
 				outcome: gatewayUsageOutcome(message.stopReason),
 				at: message.timestamp || undefined,
 				account: account(),
+				credentialId: message.credentialId,
 			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
@@ -1163,14 +1203,16 @@ async function handleFormatEndpoint(
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		void events
 			.result()
-			.then(message =>
+			.then(message => {
+				observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 				recordGatewayUsage(bootOpts, model, client, message.usage, {
 					requestId,
 					outcome: gatewayUsageOutcome(message.stopReason),
 					at: message.timestamp || undefined,
 					account: account(),
-				}),
-			)
+					credentialId: message.credentialId,
+				});
+			})
 			.catch(() => {})
 			.finally(() => lease.release());
 		streamOwnsLease = true;
@@ -1323,6 +1365,7 @@ async function handlePiNative(
 	}
 	if (!start.ok) return piNative.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account } = start;
+	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(bootOpts, model, client, requestId);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -1337,12 +1380,20 @@ async function handlePiNative(
 	if (!parsed.stream) {
 		try {
 			if (controller.signal.aborted) return aborted();
-			const message = await completeSimple(model, parsed.context, streamOpts);
+			const loop = gatewayThinkingLoopRecorder(bootOpts, model, client, requestId);
+			let message: AssistantMessage | undefined;
+			try {
+				message = await completeSimple(model, parsed.context, { ...streamOpts, onAttempt: loop.onAttempt });
+			} finally {
+				loop.settle(message);
+			}
+			observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 			recordGatewayUsage(bootOpts, model, client, message.usage, {
 				requestId,
 				outcome: gatewayUsageOutcome(message.stopReason),
 				at: message.timestamp || undefined,
 				account: account(),
+				credentialId: message.credentialId,
 			});
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
@@ -1394,14 +1445,16 @@ async function handlePiNative(
 		if (controller.signal.aborted) return aborted();
 		void events
 			.result()
-			.then(message =>
+			.then(message => {
+				observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 				recordGatewayUsage(bootOpts, model, client, message.usage, {
 					requestId,
 					outcome: gatewayUsageOutcome(message.stopReason),
 					at: message.timestamp || undefined,
 					account: account(),
-				}),
-			)
+					credentialId: message.credentialId,
+				});
+			})
 			.catch(() => {})
 			.finally(() => lease.release());
 		streamOwnsLease = true;
@@ -1569,6 +1622,7 @@ export interface AuthGatewayRouter {
  * two routers in one process never share (or tear down) each other's.
  */
 export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
+	assertApiKeyLimitModelClasses(opts.apiKeyLimitModelClasses);
 	const sessionStates = new AuthGatewaySessionStateStore();
 	const route = async (req: Request, peer: string, caller: AgentCaller): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;

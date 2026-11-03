@@ -12,6 +12,7 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
+import { readBoundedRequestBody, RequestBodyTooLargeError } from "../auth-gateway/bounded-body";
 import type { AuthCredentialSnapshotEntry, AuthStorage, StoredCredentialBlock } from "../auth-storage";
 import { isLoopbackHost, parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
@@ -42,6 +43,7 @@ import {
 	DEFAULT_REFRESH_SKEW_MS,
 	DEFAULT_SERVER_IDLE_TIMEOUT_S,
 	DEFAULT_STREAM_KEEPALIVE_MS,
+	MAX_OBSERVED_REPORT_BYTES,
 } from "./types";
 import { compareCredentialBlockSnapshots, parseGenerationTag } from "./protocol";
 import {
@@ -185,12 +187,16 @@ function supportsCodexMeterBlockScopes(req: Request): boolean {
 async function parseBody<t>(
 	req: Request,
 	schema: Type<t>,
-	options: { allowEmpty?: boolean } = {},
+	options: { allowEmpty?: boolean; maxBytes?: number } = {},
 ): Promise<{ ok: true; data: typeof schema.infer } | { ok: false; response: Response }> {
 	let raw: string;
 	try {
-		raw = await req.text();
+		const bytes = await readBoundedRequestBody(req, options.maxBytes ?? MAX_OBSERVED_REPORT_BYTES);
+		raw = new TextDecoder().decode(bytes);
 	} catch (error) {
+		if (error instanceof RequestBodyTooLargeError) {
+			return { ok: false, response: json(413, { error: error.message }) };
+		}
 		return { ok: false, response: json(400, { error: `Invalid request body: ${String(error)}` }) };
 	}
 	if (raw.length === 0 && !options.allowEmpty) {
@@ -1006,7 +1012,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					return json(200, { generatedAt: Date.now(), entries });
 				}
 				if (req.method === "POST" && pathname === "/v1/usage/observed") {
-					const parsed = await parseBody(req, clientUsageReportRequestSchema);
+					const parsed = await parseBody(req, clientUsageReportRequestSchema, {
+						maxBytes: MAX_OBSERVED_REPORT_BYTES,
+					});
 					if (!parsed.ok) return parsed.response;
 					// Arktype's inferred union collides the `entries` field with
 					// Array.prototype.entries; the schema already validated the shape.

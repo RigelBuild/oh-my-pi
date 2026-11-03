@@ -6,6 +6,7 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayAttemptOutcomes,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
@@ -53,6 +54,7 @@ export async function handleRerank(
 	if ("status" in apiKey) return rerankWire.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let credentialId = apiKey.credentialId;
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "rerank",
@@ -63,6 +65,7 @@ export async function handleRerank(
 		peer,
 	});
 
+	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await rerank(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
@@ -73,15 +76,17 @@ export async function handleRerank(
 				controller.signal,
 				"rerank",
 				peer,
-				resolvedKey => {
+				(resolvedKey, resolvedCredentialId) => {
 					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+					credentialId = resolvedCredentialId;
 				},
 				bootOpts.onUsageLimit,
+				outcomes.onAttemptFailed,
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account, credentialId });
 		return json(
 			200,
 			rerankWire.encodeResponse(
@@ -93,6 +98,7 @@ export async function handleRerank(
 			gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }),
 		);
 	} catch (error) {
+		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway rerank failed", { format: "rerank", error: classified.message, peer });

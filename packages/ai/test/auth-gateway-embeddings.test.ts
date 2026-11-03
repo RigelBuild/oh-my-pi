@@ -52,7 +52,8 @@ function embeddingModel(
 async function boot({
 	apiKeys,
 	trustProxyHeaders = false,
-}: { apiKeys?: readonly string[]; trustProxyHeaders?: boolean } = {}): Promise<Harness> {
+	firstKeyError = new ProviderHttpError("expired credential", 401),
+}: { apiKeys?: readonly string[]; trustProxyHeaders?: boolean; firstKeyError?: Error } = {}): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-embeddings-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	if (apiKeys) {
@@ -73,7 +74,7 @@ async function boot({
 	const fetchImpl: FetchImpl = async (input, init) => {
 		const authorization = new Headers(init?.headers).get("authorization");
 		attemptedKeys.push(authorization);
-		if (apiKeys && authorization === "Bearer key-one") throw new ProviderHttpError("expired credential", 401);
+		if (apiKeys && authorization === "Bearer key-one") throw firstKeyError;
 		const body: unknown = JSON.parse(String(init?.body));
 		upstream.push({ url: String(input), authorization, body });
 		if (body && typeof body === "object" && Reflect.get(body, "encoding_format") === "base64") {
@@ -202,6 +203,89 @@ describe("auth-gateway POST /v1/embeddings", () => {
 		expect(response.status).toBe(200);
 		expect(harness.events).toHaveLength(1);
 		expect(harness.events[0]?.account).toBe(`key:${Bun.hash("key-two").toString(36)}`);
+	});
+
+	it("attributes rotated usage to the stored row of the key that served the embedding", async () => {
+		harness = await boot({ apiKeys: ["key-one", "key-two"] });
+		const ids = new Map(
+			harness.storage.credentials
+				.list("openai")
+				.flatMap(row => (row.credential.type === "api_key" ? [[row.credential.key, row.id] as const] : [])),
+		);
+		const observed: Array<{ credentialId?: number }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "rotate key" }),
+		});
+		expect(response.status).toBe(200);
+		expect(ids.get("key-two")).toBeNumber();
+		expect(harness.events[0]?.credentialId).toBe(ids.get("key-two"));
+		expect(observed).toEqual([expect.objectContaining({ credentialId: ids.get("key-two") })]);
+	});
+
+	it("records the rotated-away attempt's failure against its own row, once", async () => {
+		harness = await boot({ apiKeys: ["key-one", "key-two"] });
+		const ids = new Map(
+			harness.storage.credentials
+				.list("openai")
+				.flatMap(row => (row.credential.type === "api_key" ? [[row.credential.key, row.id] as const] : [])),
+		);
+		const observed: Array<{ credentialId?: number; outcome?: string }> = [];
+		const outcomes: Array<{ credentialId: number; outcome: string; requests: number }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observeOutcome").mockImplementation(outcome => outcomes.push(outcome));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "rotate key" }),
+		});
+		expect(response.status).toBe(200);
+		// key-one's 401 drives both the refresh and the rotate step but counts once.
+		expect(outcomes).toEqual([
+			expect.objectContaining({ credentialId: ids.get("key-one"), outcome: "error", requests: 1 }),
+		]);
+		expect(observed).toEqual([expect.objectContaining({ credentialId: ids.get("key-two"), outcome: "ok" })]);
+		expect(harness.events).toHaveLength(1);
+	});
+
+	it("records credit exhaustion on the row that returned it when a non-chat route rotates", async () => {
+		harness = await boot({
+			apiKeys: ["key-one", "key-two"],
+			firstKeyError: new ProviderHttpError("Your credit balance is too low to access the API.", 400),
+		});
+		const first = harness.storage.credentials
+			.list("openai")
+			.find(row => row.credential.type === "api_key" && row.credential.key === "key-one")?.id;
+		const limits: Array<{ credentialId: number; error?: string }> = [];
+		vi.spyOn(harness.storage.usage, "observeLimits").mockImplementation(batch => limits.push(...batch));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "rotate key" }),
+		});
+		expect(response.status).toBe(200);
+		expect(first).toBeNumber();
+		expect(limits).toEqual([expect.objectContaining({ credentialId: first, error: "credit_exhausted" })]);
+	});
+
+	it("records a final non-chat failure as a zero-usage outcome, not a usage entry", async () => {
+		harness = await boot({ apiKeys: ["key-one"] });
+		const [row] = harness.storage.credentials.list("openai");
+		const observed: unknown[] = [];
+		const outcomes: Array<{ credentialId: number; outcome: string; requests: number }> = [];
+		vi.spyOn(harness.storage.usage, "observe").mockImplementation(entry => observed.push(entry));
+		vi.spyOn(harness.storage.usage, "observeOutcome").mockImplementation(outcome => outcomes.push(outcome));
+		const response = await fetch(`${harness.url}/v1/embeddings`, {
+			method: "POST",
+			headers: HEADERS,
+			body: JSON.stringify({ model: "openai/text-embedding-3-small", input: "always fails" }),
+		});
+		expect(response.status).toBe(401);
+		expect(outcomes).toEqual([expect.objectContaining({ credentialId: row?.id, outcome: "error", requests: 1 })]);
+		expect(observed).toHaveLength(0);
+		expect(harness.events).toHaveLength(0);
 	});
 
 	it("passes OpenRouter base64 embeddings and provider-reported cost through", async () => {
