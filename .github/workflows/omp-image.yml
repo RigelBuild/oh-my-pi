@@ -33,6 +33,12 @@ jobs:
           docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-broker serve --help
           docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-gateway --help
           docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-gateway serve --help
+          mkdir -p "$RUNNER_TEMP/omp-home"
+          chmod 777 "$RUNNER_TEMP/omp-home"
+          docker run --rm --user nonroot:nonroot --mount "type=bind,source=$RUNNER_TEMP/omp-home,target=/tmp" --env HOME=/tmp omp:pr auth-broker token >/dev/null
+          docker run --rm --user nonroot:nonroot --mount "type=bind,source=$RUNNER_TEMP/omp-home,target=/tmp" --env HOME=/tmp omp:pr auth-gateway token >/dev/null
+          test -s "$RUNNER_TEMP/omp-home/.omp/auth-broker.token"
+          test -s "$RUNNER_TEMP/omp-home/.omp/auth-gateway.token"
 
   publish:
     name: Publish linux/amd64 image
