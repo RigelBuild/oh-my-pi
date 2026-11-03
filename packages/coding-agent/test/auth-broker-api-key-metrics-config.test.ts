@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -54,6 +54,7 @@ describe("API-key metrics config", () => {
 		expect(() => validateApiKeyMetricsConfig({ ...valid, providers: ["anthropic "] })).toThrow(
 			/surrounding whitespace/,
 		);
+		expect(() => validateApiKeyMetricsConfig({ ...valid, providers: ["other"] })).toThrow(/reserved/);
 	});
 });
 
@@ -62,10 +63,13 @@ describe("loadApiKeyMetricsConfig", () => {
 	const env = "OMP_AUTH_BROKER_API_KEY_METRICS";
 	let priorEnv: string | undefined;
 
+	beforeEach(() => {
+		priorEnv = process.env[env];
+	});
+
 	afterEach(async () => {
 		if (priorEnv === undefined) delete process.env[env];
 		else process.env[env] = priorEnv;
-		priorEnv = undefined;
 		for (const dir of tempDirs.splice(0)) await fs.rm(dir, { recursive: true, force: true });
 	});
 
@@ -79,7 +83,6 @@ describe("loadApiKeyMetricsConfig", () => {
 			providers: ["anthropic"],
 			modelClasses: ["opus-5.5"],
 		});
-		priorEnv = process.env[env];
 		process.env[env] = file;
 		expect(await loadApiKeyMetricsConfig(undefined, true)).toEqual({
 			roster: [7],

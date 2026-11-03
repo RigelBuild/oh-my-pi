@@ -47,7 +47,7 @@ The broker is the only writer of OAuth refresh tokens. Clients (including the ga
 ### CLI
 
 ```
-omp auth-broker serve [--bind=host:port] [--trust-proxy-headers] [--enable-metrics] [--no-enable-metrics] [--subscriptions-config=<file>]
+omp auth-broker serve [--bind=host:port] [--trust-proxy-headers] [--enable-metrics] [--no-enable-metrics] [--subscriptions-config=<file>] [--api-key-metrics-config=<file>]
 omp auth-broker token [--metrics] [--regenerate] [--json]
 omp auth-broker login     [<provider>] [--via=user@host] [--dry-run]
 omp auth-broker logout    [<provider>]
@@ -97,6 +97,8 @@ The scrape token comes from `OMP_AUTH_BROKER_METRICS_TOKEN` (literal value) or `
 The endpoint emits these Prometheus gauge families when they have samples: `llm_usage_limit_used_fraction`, `llm_usage_limit_used`, `llm_usage_limit_max`, `llm_usage_limit_remaining`, `llm_usage_limit_resets_at_seconds`, `llm_usage_limit_status`, `llm_usage_reset_credits_available`, `llm_usage_report_fetched_at_seconds`, `llm_subscription_info`, `llm_subscription_renews_at_seconds`, `llm_subscription_plan_capacity_weight`, and `llm_subscription_plan_price_usd`. A storage throw returns an empty `503`; null usage returns an empty `200` exposition.
 
 `--subscriptions-config=<file>` overrides `OMP_AUTH_BROKER_SUBSCRIPTIONS`. The JSON object may contain `accounts` and `plans`. `accounts` maps account labels to objects with required `provider` and optional `org`, `plan`, `renewsAt` (`YYYY-MM-DD`), `orgs` (org labels mapped to `plan`/`renewsAt`), or `providers` (provider IDs mapped to the same fields). `plans` maps `<provider>:<plan>` to numeric `capacityWeight` and `monthlyPriceUsd`. This file is read only when metrics are enabled; malformed JSON or fields prevent startup.
+
+`--api-key-metrics-config=<file>` overrides `OMP_AUTH_BROKER_API_KEY_METRICS` and adds upstream credential metrics. The JSON object is `{"roster": [<credential row id>, …], "providers": [<provider>, …], "modelClasses": [<label>, …]}` with at most 6 rows, 3 providers and 3 model classes; `other` is reserved, and `serve` refuses a config that breaks a bound. It adds counters `llm_gateway_tokens_total`, `llm_gateway_requests_total` and `llm_gateway_estimated_cost_usd_total` (`provider`, `account`, `credential_type`; non-roster rows sum into `account="unknown"`, other providers into `other`), Anthropic API-key gauges `llm_api_key_limit_*` and `llm_api_key_report_fetched_at_seconds` per configured model class, and `llm_api_key_credit_exhausted` with `llm_api_key_credit_observed_at_seconds`. Cost is a catalog estimate, not a bill; no family reports a remaining balance.
 
 Requests to `/v1` use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
 
@@ -328,6 +330,7 @@ Broker-backed credential storage is **off** unless `OMP_AUTH_BROKER_URL` (or `au
 | `OMP_AUTH_BROKER_METRICS_TOKEN`     | Literal scrape token for `/metrics`. Mutually exclusive with `OMP_AUTH_BROKER_METRICS_TOKEN_FILE`; an empty value is an error.                                           | Optional on the broker host; otherwise `serve` mints a token file.                                                        |
 | `OMP_AUTH_BROKER_METRICS_TOKEN_FILE` | Path to a file containing the `/metrics` scrape token. Mutually exclusive with `OMP_AUTH_BROKER_METRICS_TOKEN`; an empty value is an error.                            | Optional on the broker host; otherwise `serve` mints a token file.                                                        |
 | `OMP_AUTH_BROKER_SUBSCRIPTIONS`     | Path to the optional subscription JSON used to add plan and renewal metrics; `--subscriptions-config` takes precedence.                                                   | Optional when broker metrics are enabled.                                                                                 |
+| `OMP_AUTH_BROKER_API_KEY_METRICS`   | Path to the optional API-key metrics roster JSON; `--api-key-metrics-config` takes precedence. | Optional when broker metrics are enabled. |
 | `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes.                                                 | Optional in broker mode.                                                                                                  |
 | `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent).                                       | Optional in broker mode.                                                                                                  |
 | `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | JSON file mapping provider IDs to OAuth `identityKey` values visible to this trusted client. Parsed once; invalid files abort initialization. API keys are unaffected. | Optional in broker mode.                                                                                                  |

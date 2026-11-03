@@ -66,6 +66,8 @@ export function validateApiKeyMetricsConfig(value: unknown, source = "API-key me
 		}
 		if (entry !== entry.trim())
 			throw new Error(`${source}: providers[${index}] must not have surrounding whitespace`);
+		if (entry === "other")
+			throw new Error(`${source}: providers[${index}] "other" is reserved for the collapse bucket`);
 		parsedProviders.push(entry);
 	}
 	if (new Set(parsedProviders).size !== parsedProviders.length)
@@ -194,11 +196,17 @@ export function renderApiKeyMetrics(
 		family.samples.push(sample);
 	};
 
+	// A rostered row's counters take its current provider and class, so retained
+	// totals from an older provider/type spelling cannot add series past the bound.
+	const current = new Map(apiKeyCredentials.map(credential => [credential.credentialId, credential]));
 	for (const total of totals) {
-		const account = roster.has(total.credentialId) ? `credential:${total.credentialId}` : "unknown";
-		const provider = providers.has(total.provider) ? total.provider : "other";
-		const credentialType =
-			total.credentialType === "api_key" || total.credentialType === "oauth" ? total.credentialType : "unknown";
+		const rostered = roster.has(total.credentialId);
+		const row = rostered ? current.get(total.credentialId) : undefined;
+		const account = rostered ? `credential:${total.credentialId}` : "unknown";
+		const rawProvider = row?.provider ?? total.provider;
+		const provider = providers.has(rawProvider) ? rawProvider : "other";
+		const rawType = row?.credentialType ?? total.credentialType;
+		const credentialType = rawType === "api_key" || rawType === "oauth" ? rawType : "unknown";
 		const base: readonly Label[] = [
 			["provider", provider],
 			["account", account],
@@ -232,12 +240,10 @@ export function renderApiKeyMetrics(
 		const modelClass = observation.modelClass;
 		if (!modelClass || !modelClasses.has(modelClass)) continue;
 		const account = `credential:${observation.credentialId}`;
-		const reportKey = JSON.stringify([provider, account, modelClass]);
-		const priorFetchedAt = newestFetched.get(reportKey);
-		if (!priorFetchedAt || observation.at > priorFetchedAt.at)
-			newestFetched.set(reportKey, { provider, account, modelClass, at: observation.at });
+		let accepted = false;
 		for (const limit of observation.limits) {
 			if (!ALLOWED_LIMIT_WINDOWS.some(window => limit.id === `anthropic:api:${modelClass}:${window}`)) continue;
+			accepted = true;
 			const limitKey = JSON.stringify([observation.credentialId, provider, modelClass, limit.id]);
 			const prior = newestLimits.get(limitKey);
 			if (!prior || observation.at >= prior.at)
@@ -249,6 +255,12 @@ export function renderApiKeyMetrics(
 					limit,
 				});
 		}
+		// Freshness dates the numeric limits, so an error-only observation does not advance it.
+		if (!accepted) continue;
+		const reportKey = JSON.stringify([provider, account, modelClass]);
+		const priorFetchedAt = newestFetched.get(reportKey);
+		if (!priorFetchedAt || observation.at > priorFetchedAt.at)
+			newestFetched.set(reportKey, { provider, account, modelClass, at: observation.at });
 	}
 
 	for (const { credentialId, provider, modelClass, limit } of newestLimits.values()) {

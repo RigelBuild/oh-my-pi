@@ -59,8 +59,6 @@ describe("renderApiKeyMetrics", () => {
 			"# HELP llm_gateway_requests_total Settled upstream requests by credential and outcome.\n" +
 				"# TYPE llm_gateway_requests_total counter\n" +
 				'llm_gateway_requests_total{provider="anthropic",account="credential:4",credential_type="api_key",outcome="ok"} 2\n' +
-				"# HELP llm_api_key_report_fetched_at_seconds Unix time (seconds) of the newest observed API-key limit report.\n" +
-				'# TYPE llm_api_key_report_fetched_at_seconds gauge\nllm_api_key_report_fetched_at_seconds{provider="anthropic",account="credential:4",model_class="opus-5.5"} 1700000000\n' +
 				"# HELP llm_api_key_credit_exhausted Whether the newest API-key observation reports exhausted credit.\n" +
 				'# TYPE llm_api_key_credit_exhausted gauge\nllm_api_key_credit_exhausted{provider="anthropic",account="credential:4"} 0\n' +
 				"# HELP llm_api_key_credit_observed_at_seconds Unix time (seconds) of the newest observation behind llm_api_key_credit_exhausted.\n" +
@@ -176,5 +174,60 @@ describe("renderApiKeyMetrics", () => {
 		expect(output).not.toContain("opus-5.4");
 		expect(output).not.toContain('account="credential:99"');
 		expect(output).not.toContain('account="credential:6"');
+	});
+
+	test("keeps two configured model-class rows in separate limit and freshness series", () => {
+		const output = renderApiKeyMetrics(
+			[],
+			[
+				limit("opus-5.5", "anthropic:api:opus-5.5:requests", 20, 1_700_000_010_000),
+				limit("opus-4.x", "anthropic:api:opus-4.x:requests", 70, 1_700_000_020_000),
+			],
+			{ roster: [1], providers: ["anthropic"], modelClasses: ["opus-5.5", "opus-4.x"] },
+			[{ credentialId: 1, provider: "anthropic", credentialType: "api_key" }],
+		);
+		expect(output).toContain(
+			'llm_api_key_limit_used{provider="anthropic",account="credential:1",model_class="opus-5.5",limit_id="anthropic:api:opus-5.5:requests"} 20\n',
+		);
+		expect(output).toContain(
+			'llm_api_key_limit_used{provider="anthropic",account="credential:1",model_class="opus-4.x",limit_id="anthropic:api:opus-4.x:requests"} 70\n',
+		);
+		expect(output).toContain(
+			'llm_api_key_report_fetched_at_seconds{provider="anthropic",account="credential:1",model_class="opus-5.5"} 1700000010\n',
+		);
+		expect(output).toContain(
+			'llm_api_key_report_fetched_at_seconds{provider="anthropic",account="credential:1",model_class="opus-4.x"} 1700000020\n',
+		);
+	});
+
+	test("an error-only observation does not advance limit freshness", () => {
+		const output = renderApiKeyMetrics(
+			[],
+			[
+				limit("opus-5.5", "anthropic:api:opus-5.5:requests", 20, 1_700_000_010_000),
+				{ ...limit("opus-5.5", "x", 0, 1_700_000_090_000), limits: [], error: "rate_limited" },
+			],
+			config,
+			[{ credentialId: 1, provider: "anthropic", credentialType: "api_key" }],
+		);
+		expect(output).toContain(
+			'llm_api_key_report_fetched_at_seconds{provider="anthropic",account="credential:1",model_class="opus-5.5"} 1700000010\n',
+		);
+		expect(output).toContain(
+			'llm_api_key_credit_observed_at_seconds{provider="anthropic",account="credential:1"} 1700000090\n',
+		);
+	});
+
+	test("rostered counters take the row's current provider and class", () => {
+		const output = renderApiKeyMetrics(
+			[total(1, "anthropic", "api_key", "requests:ok", 2), total(1, "claude-legacy", "oauth", "requests:ok", 3)],
+			[],
+			config,
+			[{ credentialId: 1, provider: "anthropic", credentialType: "api_key" }],
+		);
+		expect(output).toContain(
+			'llm_gateway_requests_total{provider="anthropic",account="credential:1",credential_type="api_key",outcome="ok"} 5\n',
+		);
+		expect(output.match(/^llm_gateway_requests_total/gm)).toHaveLength(1);
 	});
 });

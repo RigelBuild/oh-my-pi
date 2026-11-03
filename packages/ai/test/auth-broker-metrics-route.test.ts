@@ -334,6 +334,43 @@ describe("auth-broker GET /metrics route", () => {
 		expect(res.status).toBe(503);
 		expect(await res.text()).toBe("");
 	});
+
+	test("an API-key metrics read failure keeps the legacy exposition at 200", async () => {
+		const readyStorage = storage!;
+		readyStorage.usage.credentialTotals = () => {
+			throw new Error("totals exploded");
+		};
+		const withKeys = startAuthBroker({
+			storage: readyStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [MASTER],
+			metricsTokens: [SCRAPE],
+			metricsEnabled: true,
+			disableRefresher: true,
+			apiKeyMetrics: { roster: [1], providers: ["anthropic"], modelClasses: ["opus-5.5"] },
+		});
+		try {
+			const res = await fetch(`${withKeys.url}/metrics`, { headers: { authorization: `Bearer ${SCRAPE}` } });
+			expect(res.status).toBe(200);
+			expect(await res.text()).toBe(renderUsageMetrics(sampleReports()));
+		} finally {
+			await withKeys.close();
+		}
+	});
+
+	test("startAuthBroker rejects an API-key metrics option past the roster bound", () => {
+		expect(() =>
+			startAuthBroker({
+				storage: storage!,
+				bind: "127.0.0.1:0",
+				bearerTokens: [MASTER],
+				metricsTokens: [SCRAPE],
+				metricsEnabled: true,
+				disableRefresher: true,
+				apiKeyMetrics: { roster: [1, 2, 3, 4, 5, 6, 7, 8], providers: ["anthropic"], modelClasses: ["opus-5.5"] },
+			}),
+		).toThrow(/at most 6/);
+	});
 });
 
 // Token validation is scoped to the route that consumes the tokens. With
