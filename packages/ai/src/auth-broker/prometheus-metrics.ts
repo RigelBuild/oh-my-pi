@@ -310,7 +310,7 @@ export function stableLabelId(id: string): string {
 }
 
 /** Numeric gauge value per usage status; absent AND `unknown` both map to -1. */
-const STATUS_VALUE: Record<UsageStatus, number> = {
+export const STATUS_VALUE: Record<UsageStatus, number> = {
 	ok: 0,
 	warning: 1,
 	exhausted: 2,
@@ -318,21 +318,21 @@ const STATUS_VALUE: Record<UsageStatus, number> = {
 };
 
 /** Format a numeric sample value; Go-parseable floats incl. the Inf/NaN forms. */
-function formatValue(value: number): string {
+export function formatValue(value: number): string {
 	if (Number.isNaN(value)) return "NaN";
 	if (value === Number.POSITIVE_INFINITY) return "+Inf";
 	if (value === Number.NEGATIVE_INFINITY) return "-Inf";
 	return String(value);
 }
 
-type Label = readonly [string, string];
+export type Label = readonly [string, string];
 
 /** Escape a label value for text exposition: backslash, quote, then newline. */
 function escapeLabelValue(value: string): string {
 	return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
-function renderLabels(labels: readonly Label[]): string {
+export function renderLabels(labels: readonly Label[]): string {
 	if (labels.length === 0) return "";
 	const inner = labels.map(([k, v]) => `${k}="${escapeLabelValue(v)}"`).join(",");
 	return `{${inner}}`;

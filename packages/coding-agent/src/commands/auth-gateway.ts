@@ -33,6 +33,10 @@ export default class AuthGateway extends Command {
 		"trust-proxy-headers": Flags.boolean({
 			description: "Trust forwarded peer IP headers from a reverse proxy (serve); off by default.",
 		}),
+		"api-key-limit-model-classes": Flags.string({
+			description:
+				"Path to JSON mapping exact Anthropic model ids to rate-limit rows for API-key limit reports (serve); env OMP_AUTH_GATEWAY_API_KEY_LIMIT_MODEL_CLASSES, flag wins",
+		}),
 		strict: Flags.boolean({
 			description:
 				"For `check`: additionally probe each credential against its provider's chat-completion endpoint. Slower; consumes a tiny amount of quota per credential.",
@@ -67,6 +71,7 @@ export default class AuthGateway extends Command {
 				regenerate: flags.regenerate,
 				noAuth: flags["no-auth"],
 				trustProxyHeaders: flags["trust-proxy-headers"],
+				apiKeyLimitModelClasses: flags["api-key-limit-model-classes"],
 				strict: flags.strict,
 			},
 		};

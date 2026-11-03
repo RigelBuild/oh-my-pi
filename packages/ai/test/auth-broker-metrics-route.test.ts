@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { renderUsageMetrics } from "@oh-my-pi/pi-ai/auth-broker/prometheus-metrics";
 import type { UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -252,6 +253,11 @@ describe("auth-broker GET /metrics route", () => {
 			'llm_usage_reset_credits_available{provider="openai-codex",account="acct-1",org="",email=""} 2',
 		);
 	});
+	test("absent API-key metrics config preserves the exact legacy exposition", async () => {
+		const res = await fetch(`${handle!.url}/metrics`, { headers: { authorization: `Bearer ${SCRAPE}` } });
+		expect(res.status).toBe(200);
+		expect(await res.text()).toBe(renderUsageMetrics(sampleReports()));
+	});
 
 	// Normalizing at boot must make a padded configured token WORK, not merely
 	// be rejected: a file-backed secret piped into an env var routinely arrives
@@ -327,6 +333,43 @@ describe("auth-broker GET /metrics route", () => {
 		const res = await fetch(`${handle!.url}/metrics`, { headers: { authorization: `Bearer ${SCRAPE}` } });
 		expect(res.status).toBe(503);
 		expect(await res.text()).toBe("");
+	});
+
+	test("an API-key metrics read failure keeps the legacy exposition at 200", async () => {
+		const readyStorage = storage!;
+		readyStorage.usage.credentialTotals = () => {
+			throw new Error("totals exploded");
+		};
+		const withKeys = startAuthBroker({
+			storage: readyStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [MASTER],
+			metricsTokens: [SCRAPE],
+			metricsEnabled: true,
+			disableRefresher: true,
+			apiKeyMetrics: { roster: [1], providers: ["anthropic"], modelClasses: ["opus-5.5"] },
+		});
+		try {
+			const res = await fetch(`${withKeys.url}/metrics`, { headers: { authorization: `Bearer ${SCRAPE}` } });
+			expect(res.status).toBe(200);
+			expect(await res.text()).toBe(renderUsageMetrics(sampleReports()));
+		} finally {
+			await withKeys.close();
+		}
+	});
+
+	test("startAuthBroker rejects an API-key metrics option past the roster bound", () => {
+		expect(() =>
+			startAuthBroker({
+				storage: storage!,
+				bind: "127.0.0.1:0",
+				bearerTokens: [MASTER],
+				metricsTokens: [SCRAPE],
+				metricsEnabled: true,
+				disableRefresher: true,
+				apiKeyMetrics: { roster: [1, 2, 3, 4, 5, 6, 7, 8], providers: ["anthropic"], modelClasses: ["opus-5.5"] },
+			}),
+		).toThrow(/at most 6/);
 	});
 });
 

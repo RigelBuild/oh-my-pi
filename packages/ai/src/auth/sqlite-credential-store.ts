@@ -9,7 +9,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
-import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import {
 	getAgentDbPath,
@@ -41,6 +40,7 @@ import type {
 	UsageHistoryQuery,
 	UsageLimit,
 } from "../usage";
+import { credentialAuthClassOf } from "../usage";
 
 // 5 min stale tolerance. Anthropic / OpenAI rate-limit /usage hard at the IP
 // level so we can't fetch all N credentials every cycle; with a long cache
@@ -2089,12 +2089,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#attributeCredential(id: number): AttributedCredential | null {
 		const row = this.#getCredentialStateStmt.get(id) as CredentialStateRow | null;
 		if (!row || row.disabled_cause !== null) return null;
-		let credentialType: CredentialAuthClass = row.credential_type === "api_key" ? "api_key" : "oauth";
-		if (credentialType === "api_key") {
-			// Setup tokens are stored as keys but are subscription OAuth, never paid Console traffic.
-			const key = deserializeCredential({ id, ...row });
-			if (key?.type === "api_key" && isAnthropicOAuthToken(key.key)) credentialType = "oauth";
-		}
+		// Setup tokens are stored as keys but are subscription OAuth, never paid Console traffic.
+		const key = row.credential_type === "api_key" ? deserializeCredential({ id, ...row }) : undefined;
+		const credentialType: CredentialAuthClass =
+			row.credential_type !== "api_key" ? "oauth" : key?.type === "api_key" ? credentialAuthClassOf(key) : "api_key";
 		return { id, provider: row.provider, credentialType };
 	}
 

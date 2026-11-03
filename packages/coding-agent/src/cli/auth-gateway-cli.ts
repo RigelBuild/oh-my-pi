@@ -41,7 +41,12 @@ import {
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { bearerTokenAuthorizer, DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	assertApiKeyLimitModelClasses,
+	bearerTokenAuthorizer,
+	DEFAULT_AUTH_GATEWAY_BIND,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
@@ -70,6 +75,8 @@ export interface AuthGatewayCommandArgs {
 		bind?: string;
 		regenerate?: boolean;
 		trustProxyHeaders?: boolean;
+		/** `serve`: path to JSON mapping exact Anthropic model ids to rate-limit rows. */
+		apiKeyLimitModelClasses?: string;
 		/**
 		 * Disable bearer-token auth on inbound requests. Useful when the gateway
 		 * is bound to loopback (the default `127.0.0.1:4000`) and you don't want
@@ -419,6 +426,37 @@ export async function runGatewayClaudeResetSweep(args: {
 		});
 	}
 }
+
+/** Env var honored by `serve` when `--api-key-limit-model-classes` is not passed (flag wins). */
+const API_KEY_LIMIT_MODEL_CLASSES_ENV = "OMP_AUTH_GATEWAY_API_KEY_LIMIT_MODEL_CLASSES";
+
+/** Read the model-id → rate-limit-row map; a bad file throws so serve never boots half-configured. */
+export async function loadApiKeyLimitModelClasses(
+	pathArg: string | undefined,
+): Promise<Record<string, string> | undefined> {
+	const file = pathArg ?? process.env[API_KEY_LIMIT_MODEL_CLASSES_ENV];
+	if (!file) return undefined;
+	const raw = await Bun.file(file).text();
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`API-key limit model classes ${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error(`API-key limit model classes ${file} must be a JSON object of model id → row`);
+	}
+	const classes: Record<string, string> = {};
+	for (const [modelId, row] of Object.entries(parsed)) {
+		if (typeof row !== "string")
+			throw new Error(`API-key limit model classes ${file}: ${modelId} must map to a string`);
+		classes[modelId] = row;
+	}
+	assertApiKeyLimitModelClasses(classes);
+	return classes;
+}
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
@@ -429,6 +467,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
 	const gatewayToken = flags.noAuth ? null : (flags.gatewayToken ?? (await ensureToken()));
 	if (!flags.noAuth && !gatewayToken) throw new Error("auth-gateway bearer token must not be empty");
+	const apiKeyLimitModelClasses = await loadApiKeyLimitModelClasses(flags.apiKeyLimitModelClasses);
 
 	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 	// in sdk.ts. The gateway never touches local SQLite.
@@ -506,6 +545,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		listModels: () => modelById.values(),
 		excludeProviders: new Set(cfgDisabledProviders.get(settings)),
 		onUsageLimit: claudeResetHook,
+		...(apiKeyLimitModelClasses ? { apiKeyLimitModelClasses } : {}),
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {

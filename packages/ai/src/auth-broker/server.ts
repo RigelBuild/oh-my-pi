@@ -17,6 +17,8 @@ import type { AuthCredentialSnapshotEntry, AuthStorage, StoredCredentialBlock } 
 import { isLoopbackHost, parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
 import { PROMETHEUS_CONTENT_TYPE, renderUsageMetrics, type SubscriptionLookup } from "./prometheus-metrics";
+import { credentialAuthClassOf } from "../usage";
+import { type ApiKeyMetricsConfig, renderApiKeyMetrics, validateApiKeyMetricsConfig } from "./api-key-metrics";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	ClientUsageReportRequest,
@@ -96,6 +98,8 @@ export interface AuthBrokerServerOptions {
 	 * byte-identical to before.
 	 */
 	subscriptions?: SubscriptionLookup;
+	/** Optional bounded upstream credential metrics; absent preserves legacy output. */
+	apiKeyMetrics?: ApiKeyMetricsConfig;
 	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
 	trustProxyHeaders?: boolean;
 	/** Broker version string surfaced on `/v1/healthz`. */
@@ -867,6 +871,30 @@ function serveSnapshotStream(
 
 /** Boot the broker. Caller owns lifecycle; `handle.close()` to stop. */
 export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServerHandle {
+	// Re-validate here so library callers get the same cardinality bounds as the CLI.
+	const apiKeyMetricsConfig = opts.apiKeyMetrics
+		? validateApiKeyMetricsConfig(opts.apiKeyMetrics, "apiKeyMetrics option")
+		: undefined;
+	// Additive section: a failure here drops only these families, never the legacy exposition.
+	const renderApiKeySection = (peer: string): string => {
+		if (!apiKeyMetricsConfig) return "";
+		try {
+			return renderApiKeyMetrics(
+				opts.storage.usage.credentialTotals(),
+				opts.storage.usage.limitObservations(),
+				apiKeyMetricsConfig,
+				opts.storage.credentials.list().map(row => ({
+					credentialId: row.id,
+					provider: row.provider,
+					credentialType: credentialAuthClassOf(row.credential),
+				})),
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logger.warn("auth-broker API-key metrics failed", { peer, error: message });
+			return "";
+		}
+	};
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_BROKER_BIND);
 	// Normalize both lists to the shape `isAuthorized` compares against BEFORE
 	// either set is built, so the overlap test below sees the same bytes the
@@ -953,7 +981,8 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// capped by the TTL. `?? []` on last-good expiry renders an empty
 						// 200 exposition so the dashboard sees absent series, not a 5xx.
 						const reports = (await opts.storage.usage.reports({ signal: req.signal })) ?? [];
-						const body = renderUsageMetrics(reports, { subscriptions: opts.subscriptions });
+						const body =
+							renderUsageMetrics(reports, { subscriptions: opts.subscriptions }) + renderApiKeySection(peer);
 						logger.info("auth-broker metrics served", { peer, reports: reports.length });
 						return new Response(body, { status: 200, headers: { "Content-Type": PROMETHEUS_CONTENT_TYPE } });
 					} catch (error) {

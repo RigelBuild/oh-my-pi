@@ -24,6 +24,7 @@ import type {
 	ObservedUsageEntry,
 	UsageLimit,
 } from "@oh-my-pi/pi-ai/usage";
+import { credentialAuthClassOf } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const TOKEN = "totals-bearer";
@@ -268,6 +269,34 @@ describe("broker credential lifetime totals", () => {
 		const rows = storage!.usage.credentialTotals().filter(row => row.credentialId === setup.id);
 		expect(rows.length).toBeGreaterThan(0);
 		expect(rows.every(row => row.credentialType === "oauth")).toBe(true);
+	});
+
+	test("the scrape-time classifier matches the class stored with the totals", async () => {
+		const expectStoredClassMatches = async (installId: string): Promise<string> => {
+			const [row] = store!.listAuthCredentials("anthropic");
+			if (!row) throw new Error("expected anthropic row");
+			expect(await post({ installId, entries: [usageEntry({ credentialId: row.id })] })).toBe(200);
+			const stored = storage!.usage.credentialTotals().find(total => total.credentialId === row.id);
+			const scraped = credentialAuthClassOf(row.credential);
+			expect(stored?.credentialType).toBe(scraped);
+			return scraped;
+		};
+		expect(await expectStoredClassMatches("i-cls-console")).toBe("api_key");
+		await store!.saveApiKey("anthropic", "sk-ant-oat01-setup-token");
+		expect(await expectStoredClassMatches("i-cls-setup")).toBe("oauth");
+	});
+
+	test("an api_key row whose data cannot deserialize still counts as api_key", async () => {
+		const raw = new Database(dbPath);
+		try {
+			raw.run("UPDATE auth_credentials SET data = ? WHERE id = ?", ["{not json", keyId]);
+		} finally {
+			raw.close();
+		}
+		expect(await post({ installId: "i-malformed", entries: [usageEntry({ credentialId: keyId })] })).toBe(200);
+		const rows = storage!.usage.credentialTotals().filter(total => total.credentialId === keyId);
+		expect(rows.length).toBeGreaterThan(0);
+		expect(rows.every(total => total.credentialType === "api_key")).toBe(true);
 	});
 
 	test("outcomes count per credential without changing client request counts", async () => {

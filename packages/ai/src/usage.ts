@@ -5,6 +5,7 @@
  * and shared quotas across providers.
  */
 import { type } from "@oh-my-pi/omptype";
+import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { FetchImpl, Provider } from "./types";
 export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
 
@@ -318,6 +319,12 @@ export interface ClientUsageReport {
 
 /** Effective authentication class of a credential row (setup tokens stored as keys count as OAuth). */
 export type CredentialAuthClass = "api_key" | "oauth";
+
+/** Classify a stored credential once, for both totals writes and the metrics roster. */
+export function credentialAuthClassOf(credential: { type: string; key?: string }): CredentialAuthClass {
+	if (credential.type !== "api_key") return "oauth";
+	return credential.key !== undefined && isAnthropicOAuthToken(credential.key) ? "oauth" : "api_key";
+}
 
 /** Lifetime counter for one credential row; values only ever increase. */
 export interface CredentialUsageTotal {
