@@ -786,7 +786,10 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 			]);
 
 			// With every OAuth account disabled, the kept api_key serves.
-			db.run("UPDATE auth_credentials SET disabled_cause = 'test' WHERE provider = ? AND credential_type = 'oauth'", ["unit-login-upgrade"]);
+			db.run(
+				"UPDATE auth_credentials SET disabled_cause = 'test' WHERE provider = ? AND credential_type = 'oauth'",
+				["unit-login-upgrade"],
+			);
 			await authStorage.credentials.reload();
 			expect(await authStorage.keys.get("unit-login-upgrade")).toBe("sk-legacy-key");
 		} finally {
