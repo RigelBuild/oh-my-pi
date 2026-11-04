@@ -1,8 +1,9 @@
 name: Publish OMP image
 
 on:
+  # Publish only from the gated rigel-release branch; main mirrors upstream.
   push:
-    branches: [main]
+    branches: [rigel-release]
   pull_request:
     # Dockerfile.omp copies the repository into its build context, so every
     # source or configuration change can affect the compiled image.
@@ -43,7 +44,7 @@ jobs:
 
   publish:
     name: Publish linux/amd64 image
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/rigel-release'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
