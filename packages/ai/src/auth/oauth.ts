@@ -103,9 +103,7 @@ export class OAuthAccounts implements OAuthApi {
 			...result,
 			authorizedAt: Date.now(),
 		};
-		// Use pool.upsertOAuth to upsert the new credential.
-		// Any legacy api_key rows from older versions will be cleaned up so they do not
-		// shadow the new OAuth row, while preserving other active OAuth credentials.
+		// Other OAuth accounts and stored API keys stay active; the cascade prefers OAuth while usable.
 		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
 		return {
 			type: "oauth",
