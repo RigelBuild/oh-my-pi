@@ -1,0 +1,76 @@
+name: Publish OMP image
+
+on:
+  # Publish only from the gated rigel-release branch; main mirrors upstream.
+  push:
+    branches: [rigel-release]
+  pull_request:
+    # Dockerfile.omp copies the repository into its build context, so every
+    # source or configuration change can affect the compiled image.
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build linux/amd64 image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build image for smoke tests
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.omp
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: omp:pr
+      - name: Smoke-test CLI and auth commands
+        run: |
+          # omp unpacks its native addon under HOME and loads it, so HOME must allow exec.
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr --version
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-broker --help
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-broker serve --help
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-gateway --help
+          docker run --rm --user nonroot:nonroot --tmpfs /tmp:rw,exec,nosuid,nodev,uid=65532,gid=65532,mode=0700 --env HOME=/tmp omp:pr auth-gateway serve --help
+          mkdir -p "$RUNNER_TEMP/omp-home"
+          chmod 777 "$RUNNER_TEMP/omp-home"
+          docker run --rm --user nonroot:nonroot --mount "type=bind,source=$RUNNER_TEMP/omp-home,target=/tmp" --env HOME=/tmp omp:pr auth-broker token >/dev/null
+          docker run --rm --user nonroot:nonroot --mount "type=bind,source=$RUNNER_TEMP/omp-home,target=/tmp" --env HOME=/tmp omp:pr auth-gateway token >/dev/null
+          test -s "$RUNNER_TEMP/omp-home/.omp/auth-broker.token"
+          test -s "$RUNNER_TEMP/omp-home/.omp/auth-gateway.token"
+
+  publish:
+    name: Publish linux/amd64 image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/rigel-release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        id: image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.omp
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/rigelbuild/omp:${{ github.sha }}
+      - name: Expose image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          echo "Image: ghcr.io/rigelbuild/omp@${IMAGE_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Digest: ${IMAGE_DIGEST}"

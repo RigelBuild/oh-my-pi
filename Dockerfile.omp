@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1.7-labs
+
+ARG BUN_VERSION=1.4.4
+ARG BAZELISK_VERSION=1.29.0
+
+FROM rust:1.86-slim-bookworm AS builder
+
+ARG BUN_VERSION
+ARG BAZELISK_VERSION
+ENV BUN_INSTALL=/opt/bun \
+    PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+    CARGO_TERM_COLOR=never
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl pkg-config libssl-dev unzip git \
+        clang libclang-dev cmake make ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
+    && /opt/bun/bin/bun --version
+
+RUN curl -fsSL -o /usr/local/bin/bazelisk \
+        "https://github.com/bazelbuild/bazelisk/releases/download/v${BAZELISK_VERSION}/bazelisk-linux-amd64" \
+    && chmod +x /usr/local/bin/bazelisk \
+    && ln -s /usr/local/bin/bazelisk /usr/local/bin/bazel
+
+WORKDIR /omp
+
+COPY rust-toolchain.toml /omp/
+RUN rustup show
+
+COPY --parents \
+    package.json bun.lock bunfig.toml \
+    patches/*.patch \
+    tsconfig.base.json tsconfig.json \
+    Cargo.toml Cargo.lock rust-toolchain.toml \
+    packages/*/package.json \
+    packages/tsconfig.workspace.json \
+    python/robomp/web/package.json \
+    crates/*/Cargo.toml \
+    /omp/
+
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile --ignore-scripts
+
+COPY . /omp/
+
+RUN --mount=type=cache,target=/root/.cache/bazel \
+    --mount=type=cache,target=/root/.cache/bazelisk \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    bun scripts/bazel-natives.ts linux-x64-baseline --dest packages/natives/native \
+    && bun scripts/bazel-natives.ts linux-x64-modern --dest packages/natives/native \
+    && bun --cwd=packages/coding-agent run build
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+
+COPY --from=builder /omp/packages/coding-agent/dist/omp /usr/local/bin/omp
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/omp"]
+CMD ["--help"]
