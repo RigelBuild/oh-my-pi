@@ -716,7 +716,7 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 		unregisterOAuthProviders("auth-storage-login-upgrade-test");
 	});
 
-	it("allows multiple OAuth accounts to coexist and replaces legacy api_key rows on OAuth login", async () => {
+	it("allows multiple OAuth accounts to coexist and keeps api_key rows as a fallback on OAuth login", async () => {
 		const db = new Database(":memory:");
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(db));
 
@@ -756,12 +756,11 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				onPrompt: async () => "",
 			});
 
-			// Legacy api_key should be gone/replaced, and first oauth account is active.
-			// getApiKey should now return the first OAuth access token (since the api_key is gone).
+			// The api_key stays active as a fallback, and OAuth wins while an account is usable.
 			expect(await authStorage.keys.get("unit-login-upgrade")).toBe("access-token-1");
 			const firstRows = readStoredIdentityRows(db, "unit-login-upgrade");
 			expect(firstRows).toEqual([
-				{ identity_key: null, disabled_cause: "replaced by oauth login" },
+				{ identity_key: null, disabled_cause: null },
 				{ identity_key: "email:user-1@example.com", disabled_cause: null },
 			]);
 
@@ -778,13 +777,18 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				onPrompt: async () => "",
 			});
 
-			// Both OAuth accounts should coexist! No accounts should be disabled
+			// Both OAuth accounts coexist, and nothing is disabled.
 			const secondRows = readStoredIdentityRows(db, "unit-login-upgrade");
 			expect(secondRows).toEqual([
-				{ identity_key: null, disabled_cause: "replaced by oauth login" },
+				{ identity_key: null, disabled_cause: null },
 				{ identity_key: "email:user-1@example.com", disabled_cause: null },
 				{ identity_key: "email:user-2@example.com", disabled_cause: null },
 			]);
+
+			// With every OAuth account disabled, the kept api_key serves.
+			db.run("UPDATE auth_credentials SET disabled_cause = 'test' WHERE provider = ? AND credential_type = 'oauth'", ["unit-login-upgrade"]);
+			await authStorage.credentials.reload();
+			expect(await authStorage.keys.get("unit-login-upgrade")).toBe("sk-legacy-key");
 		} finally {
 			authStorage.close();
 		}

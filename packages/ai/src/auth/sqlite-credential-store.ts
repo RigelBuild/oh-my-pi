@@ -1430,14 +1430,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				identityKey: resolveRowCredentialIdentityKey(providerName, row),
 			}));
 
-			if (item.type === "oauth") {
-				for (const row of existing) {
-					if (row.credential && row.credential.type === "api_key") {
-						this.#deleteStmt.run("replaced by oauth login", row.id);
-					}
-				}
-			}
-
 			let targetId: number | null = null;
 			for (const row of existing) {
 				if (!matchesReplacementCredential(providerName, row.credential, row.identityKey, item)) continue;
