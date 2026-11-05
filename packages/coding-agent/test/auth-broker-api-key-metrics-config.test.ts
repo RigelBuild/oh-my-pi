@@ -11,23 +11,20 @@ import { loadApiKeyMetricsConfig } from "@oh-my-pi/pi-coding-agent/cli/auth-brok
 
 const FILE = "api-key-metrics.json";
 const valid = {
-	roster: [1, 2, 3, 4, 5, 6],
+	maxRoster: 6,
 	providers: ["anthropic", "openai", "google"],
 	modelClasses: ["opus-5.5", "opus-4.x", "sonnet-4"],
 };
 describe("API-key metrics config", () => {
 	it("enforces the formula ceiling and accepts the maximum configured dimensions", () => {
-		expect(apiKeySeriesCeiling({ roster: 6, providers: 3, modelClasses: 3 })).toBe(498);
-		expect(() => apiKeySeriesCeiling({ roster: 20, providers: 20, modelClasses: 20 })).toThrow(
+		expect(apiKeySeriesCeiling({ maxRoster: 6, providers: 3, modelClasses: 3 })).toBe(498);
+		expect(() => apiKeySeriesCeiling({ maxRoster: 20, providers: 20, modelClasses: 20 })).toThrow(
 			new RegExp(`exceeds ${MAX_API_KEY_SERIES}`),
 		);
 		expect(validateApiKeyMetricsConfig(valid)).toEqual(valid);
 	});
 
 	it("rejects each configured dimension above its bound", () => {
-		expect(() => validateApiKeyMetricsConfig({ ...valid, roster: [1, 2, 3, 4, 5, 6, 7] })).toThrow(
-			/roster.*at most 6/,
-		);
 		expect(() => validateApiKeyMetricsConfig({ ...valid, providers: ["a", "b", "c", "d"] })).toThrow(
 			/providers.*at most 3/,
 		);
@@ -40,17 +37,16 @@ describe("API-key metrics config", () => {
 		expect(() => validateApiKeyMetricsConfig({ ...valid, modelClasses: ["Opus 5.5"] })).toThrow(
 			/modelClasses.*match/,
 		);
-		expect(() => validateApiKeyMetricsConfig({ ...valid, roster: [1, 1] })).toThrow(/roster.*duplicates/);
 		expect(() => validateApiKeyMetricsConfig({ ...valid, providers: ["anthropic", "anthropic"] })).toThrow(
 			/providers.*duplicates/,
 		);
 		expect(() => validateApiKeyMetricsConfig({ ...valid, modelClasses: ["opus-5.5", "opus-5.5"] })).toThrow(
 			/modelClasses.*duplicates/,
 		);
-		expect(() => validateApiKeyMetricsConfig({ roster: "1", providers: [], modelClasses: [] })).toThrow(
-			/roster.*array/,
-		);
-		expect(() => validateApiKeyMetricsConfig({ ...valid, extra: true })).toThrow(/unknown key/);
+		expect(() => validateApiKeyMetricsConfig({ ...valid, maxRoster: 0 })).toThrow(/maxRoster.*1 through 6/);
+		expect(() => validateApiKeyMetricsConfig({ ...valid, maxRoster: 7 })).toThrow(/maxRoster.*1 through 6/);
+		expect(() => validateApiKeyMetricsConfig({ ...valid, maxRoster: 2.5 })).toThrow(/maxRoster.*1 through 6/);
+		expect(() => validateApiKeyMetricsConfig({ ...valid, roster: [1] })).toThrow(/unknown key.*roster/);
 		expect(() => validateApiKeyMetricsConfig({ ...valid, providers: ["anthropic "] })).toThrow(
 			/surrounding whitespace/,
 		);
@@ -77,15 +73,15 @@ describe("loadApiKeyMetricsConfig", () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "authbroker-api-key-metrics-"));
 		tempDirs.push(dir);
 		const file = path.join(dir, FILE);
-		await Bun.write(file, JSON.stringify({ roster: [7], providers: ["anthropic"], modelClasses: ["opus-5.5"] }));
+		await Bun.write(file, JSON.stringify({ maxRoster: 6, providers: ["anthropic"], modelClasses: ["opus-5.5"] }));
 		expect(await loadApiKeyMetricsConfig(file, true)).toEqual({
-			roster: [7],
+			maxRoster: 6,
 			providers: ["anthropic"],
 			modelClasses: ["opus-5.5"],
 		});
 		process.env[env] = file;
 		expect(await loadApiKeyMetricsConfig(undefined, true)).toEqual({
-			roster: [7],
+			maxRoster: 6,
 			providers: ["anthropic"],
 			modelClasses: ["opus-5.5"],
 		});

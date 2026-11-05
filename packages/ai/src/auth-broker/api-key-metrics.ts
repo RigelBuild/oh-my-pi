@@ -6,13 +6,13 @@ import { OBSERVED_MODEL_CLASS_PATTERN } from "./types";
 export const MAX_API_KEY_SERIES = 600;
 
 export interface ApiKeyMetricsConfig {
-	readonly roster: readonly number[];
+	readonly maxRoster: number;
 	readonly providers: readonly string[];
 	readonly modelClasses: readonly string[];
 }
 
 export interface ApiKeyMetricsSizes {
-	readonly roster: number;
+	readonly maxRoster: number;
 	readonly providers: number;
 	readonly modelClasses: number;
 }
@@ -22,10 +22,10 @@ export interface ApiKeyMetricsSizes {
  * and per API-key row credit status plus its observation time.
  */
 export function apiKeySeriesCeiling(sizes: ApiKeyMetricsSizes): number {
-	const rosterCounterSeries = sizes.roster * 8;
+	const rosterCounterSeries = sizes.maxRoster * 8;
 	const collapsedCounterSeries = (sizes.providers + 1) * 24;
-	const creditStatusSeries = sizes.roster * 2;
-	const limitsAndFreshness = sizes.roster * sizes.modelClasses * 19;
+	const creditStatusSeries = sizes.maxRoster * 2;
+	const limitsAndFreshness = sizes.maxRoster * sizes.modelClasses * 19;
 	const ceiling = rosterCounterSeries + collapsedCounterSeries + creditStatusSeries + limitsAndFreshness;
 	if (ceiling > MAX_API_KEY_SERIES) {
 		throw new Error(`worst-case series ceiling ${ceiling} exceeds ${MAX_API_KEY_SERIES}`);
@@ -37,27 +37,22 @@ export function apiKeySeriesCeiling(sizes: ApiKeyMetricsSizes): number {
 export function validateApiKeyMetricsConfig(value: unknown, source = "API-key metrics config"): ApiKeyMetricsConfig {
 	if (!isPlainObject(value)) throw new Error(`${source} must be a JSON object`);
 	const root = value;
-	const unknown = Object.keys(root).filter(key => !["roster", "providers", "modelClasses"].includes(key));
+	const unknown = Object.keys(root).filter(key => !["maxRoster", "providers", "modelClasses"].includes(key));
 	if (unknown.length > 0) throw new Error(`${source} has unknown key(s): ${unknown.join(", ")}`);
-	if (!Array.isArray(root.roster)) throw new Error(`${source}: "roster" must be an array`);
+	if (
+		typeof root.maxRoster !== "number" ||
+		!Number.isSafeInteger(root.maxRoster) ||
+		root.maxRoster < 1 ||
+		root.maxRoster > 6
+	) {
+		throw new Error(`${source}: "maxRoster" must be an integer from 1 through 6`);
+	}
 	if (!Array.isArray(root.providers)) throw new Error(`${source}: "providers" must be an array`);
 	if (!Array.isArray(root.modelClasses)) throw new Error(`${source}: "modelClasses" must be an array`);
-	const roster = root.roster;
 	const providers = root.providers;
 	const modelClasses = root.modelClasses;
-	if (roster.length > 6) throw new Error(`${source}: roster must contain at most 6 credential rows`);
 	if (providers.length > 3) throw new Error(`${source}: providers must contain at most 3 names`);
 	if (modelClasses.length > 3) throw new Error(`${source}: modelClasses must contain at most 3 names`);
-
-	const parsedRoster: number[] = [];
-	for (const [index, entry] of roster.entries()) {
-		if (typeof entry !== "number" || !Number.isSafeInteger(entry) || entry <= 0) {
-			throw new Error(`${source}: roster[${index}] must be a positive safe integer`);
-		}
-		parsedRoster.push(entry);
-	}
-	if (new Set(parsedRoster).size !== parsedRoster.length)
-		throw new Error(`${source}: roster must not contain duplicates`);
 
 	const parsedProviders: string[] = [];
 	for (const [index, entry] of providers.entries()) {
@@ -84,11 +79,11 @@ export function validateApiKeyMetricsConfig(value: unknown, source = "API-key me
 		throw new Error(`${source}: modelClasses must not contain duplicates`);
 	}
 	apiKeySeriesCeiling({
-		roster: parsedRoster.length,
+		maxRoster: root.maxRoster,
 		providers: parsedProviders.length,
 		modelClasses: parsedModelClasses.length,
 	});
-	return { roster: parsedRoster, providers: parsedProviders, modelClasses: parsedModelClasses };
+	return { maxRoster: root.maxRoster, providers: parsedProviders, modelClasses: parsedModelClasses };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -146,11 +141,34 @@ export function renderApiKeyMetrics(
 	totals: readonly CredentialUsageTotal[],
 	observations: readonly StoredLimitObservation[],
 	config: ApiKeyMetricsConfig,
-	apiKeyCredentials: readonly { credentialId: number; provider: string; credentialType: "api_key" | "oauth" }[] = [],
+	apiKeyCredentials: readonly {
+		credentialId: number;
+		provider: string;
+		credentialType: "api_key" | "oauth";
+		enabled?: boolean;
+	}[] = [],
 ): string {
-	const roster = new Set(config.roster);
 	const providers = new Set(config.providers);
 	const modelClasses = new Set(config.modelClasses);
+	const selectedCredentials: (typeof apiKeyCredentials)[number][] = [];
+	for (const credential of apiKeyCredentials) {
+		if (
+			credential.enabled === false ||
+			credential.credentialType !== "api_key" ||
+			!providers.has(credential.provider)
+		)
+			continue;
+		let index = 0;
+		while (index < selectedCredentials.length) {
+			const selected = selectedCredentials[index];
+			if (!selected || selected.credentialId > credential.credentialId) break;
+			index += 1;
+		}
+		if (index >= config.maxRoster) continue;
+		selectedCredentials.splice(index, 0, credential);
+		if (selectedCredentials.length > config.maxRoster) selectedCredentials.pop();
+	}
+	const current = new Map(selectedCredentials.map(credential => [credential.credentialId, credential]));
 	const families: MetricFamily[] = [
 		...COUNTER_METRICS.map(metric => ({ ...metric, type: "counter" as const, samples: [] })),
 		...LIMIT_METRICS.map(metric => ({
@@ -198,11 +216,9 @@ export function renderApiKeyMetrics(
 
 	// A rostered row's counters take its current provider and class, so retained
 	// totals from an older provider/type spelling cannot add series past the bound.
-	const current = new Map(apiKeyCredentials.map(credential => [credential.credentialId, credential]));
 	for (const total of totals) {
-		const rostered = roster.has(total.credentialId);
-		const row = rostered ? current.get(total.credentialId) : undefined;
-		const account = rostered ? `credential:${total.credentialId}` : "unknown";
+		const row = current.get(total.credentialId);
+		const account = row ? `credential:${total.credentialId}` : "unknown";
 		const rawProvider = row?.provider ?? total.provider;
 		const provider = providers.has(rawProvider) ? rawProvider : "other";
 		const rawType = row?.credentialType ?? total.credentialType;
@@ -222,7 +238,6 @@ export function renderApiKeyMetrics(
 			add("llm_gateway_estimated_cost_usd_total", base, total.value, true);
 		}
 	}
-
 	const newestLimits = new Map<
 		string,
 		{ credentialId: number; provider: string; modelClass: string; at: number; limit: UsageLimit }
@@ -230,7 +245,7 @@ export function renderApiKeyMetrics(
 	const newestFetched = new Map<string, { provider: string; account: string; modelClass: string; at: number }>();
 	const newestCredit = new Map<number, StoredLimitObservation>();
 	for (const observation of observations) {
-		if (!roster.has(observation.credentialId)) continue;
+		if (!current.has(observation.credentialId)) continue;
 		const provider = providers.has(observation.provider) ? observation.provider : "other";
 		if (observation.credentialType === "api_key") {
 			const prior = newestCredit.get(observation.credentialId);
@@ -294,10 +309,8 @@ export function renderApiKeyMetrics(
 	}
 
 	const apiKeyRows = new Map<number, string>();
-	for (const credential of apiKeyCredentials) {
-		if (credential.credentialType === "api_key" && roster.has(credential.credentialId)) {
-			apiKeyRows.set(credential.credentialId, providers.has(credential.provider) ? credential.provider : "other");
-		}
+	for (const credential of selectedCredentials) {
+		apiKeyRows.set(credential.credentialId, providers.has(credential.provider) ? credential.provider : "other");
 	}
 	for (const [credentialId, observation] of newestCredit) {
 		if (!apiKeyRows.has(credentialId)) continue;

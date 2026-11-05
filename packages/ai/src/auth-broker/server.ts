@@ -887,6 +887,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					credentialId: row.id,
 					provider: row.provider,
 					credentialType: credentialAuthClassOf(row.credential),
+					enabled: row.disabledCause === null,
 				})),
 			);
 		} catch (error) {

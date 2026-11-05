@@ -351,7 +351,7 @@ export async function loadSubscriptionsConfig(
 	return parseSubscriptionsConfig(raw, file);
 }
 
-/** Read and validate the non-secret API-key metrics roster only while metrics are enabled. */
+/** Read and validate the non-secret API-key metrics config only while metrics are enabled. */
 export async function loadApiKeyMetricsConfig(
 	pathArg: string | undefined,
 	metricsEnabled: boolean,
@@ -852,7 +852,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const apiKeyMetrics = await loadApiKeyMetricsConfig(flags.apiKeyMetricsConfig, metrics.enabled);
 	if (apiKeyMetrics) {
 		logger.info("auth-broker API-key metrics config loaded", {
-			roster: apiKeyMetrics.roster.length,
+			maxRoster: apiKeyMetrics.maxRoster,
 			providers: apiKeyMetrics.providers.length,
 			modelClasses: apiKeyMetrics.modelClasses.length,
 		});
