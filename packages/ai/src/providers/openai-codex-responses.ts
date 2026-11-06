@@ -71,6 +71,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -1691,7 +1692,6 @@ async function openInitialCodexEventStream(
 				recordCodexWebSocketFailure(websocketState, activateFallback);
 				CODEX_DEBUG &&
 					logger.debug("[codex] codex websocket fallback", {
-						error: error.message,
 						retry: websocketRetries,
 						retryBudget: websocketRetryBudget,
 						activated: activateFallback,
@@ -1982,7 +1982,6 @@ async function openCodexWebSocketTransport(
 			url: toWebSocketUrl(requestContext.url),
 			model: requestContext.transformedBody.model,
 			reasoningEffort: requestContext.transformedBody.reasoning?.effort ?? null,
-			headers: redactHeaders(websocketHeaders),
 			sentTurnStateHeader: websocketHeaders.has(X_CODEX_TURN_STATE_HEADER),
 			sentModelsEtagHeader: websocketHeaders.has(X_MODELS_ETAG_HEADER),
 			requestType: websocketRequest.type,
@@ -2060,6 +2059,7 @@ async function openCodexSseTransport(
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
 				options?.fetch,
+				response => notifyProviderResponse(options, response, model),
 			),
 		);
 	};
@@ -3095,7 +3095,6 @@ class CodexStreamProcessor {
 		recordCodexWebSocketFailure(state, activateFallback);
 		CODEX_DEBUG &&
 			logger.debug("[codex] codex websocket stream fallback", {
-				error: streamError.message,
 				retry: this.runtime.websocketStreamRetries,
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 				activated: activateFallback,
@@ -3193,7 +3192,6 @@ class CodexStreamProcessor {
 
 		CODEX_DEBUG &&
 			logger.debug("[codex] retrying codex provider stream error", {
-				error: error instanceof Error ? error.message : String(error),
 				retry: this.runtime.providerRetryAttempt,
 				retryBudget: CODEX_MAX_RETRIES,
 				transport: this.runtime.transport,
@@ -3239,7 +3237,6 @@ class CodexStreamProcessor {
 			recordCodexWebSocketFailure(state, true);
 			CODEX_DEBUG &&
 				logger.debug("[codex] codex websocket reopen failed, falling back to SSE", {
-					error: error.message,
 					retry: this.runtime.websocketStreamRetries,
 				});
 			await this.#reopenSseStream(state);
@@ -3365,12 +3362,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			try {
 				const failure = await handleCodexStreamFailure(failureContext, error);
 				stream.push({ type: "error", reason: failure.stopReason as "error" | "aborted", error: failure });
-			} catch (failureError) {
+			} catch {
 				// Last resort — the failure handler itself threw (exotic error object or
 				// request-dump formatting). Never leave the stream un-ended.
-				logger.error("Codex stream failure handler threw", {
-					error: failureError instanceof Error ? failureError.message : String(failureError),
-				});
+				logger.error("Codex stream failure handler threw");
 				output.stopReason = "error";
 				output.errorMessage ??= error instanceof Error ? error.message : String(error);
 				stream.push({ type: "error", reason: "error", error: output });
@@ -4739,6 +4734,7 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	onResponse?: (response: Response) => Promise<void>,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -4763,6 +4759,7 @@ async function openCodexSseEventStream(
 		let response: Response | undefined;
 		try {
 			response = await (fetchOverride ?? fetch)(input, init);
+			await onResponse?.(response);
 			return response;
 		} finally {
 			// A successful streaming body is governed by the iterator-level idle
@@ -4787,7 +4784,6 @@ async function openCodexSseEventStream(
 		logger.debug("[codex] codex request", {
 			url,
 			model: body.model,
-			headers: redactHeaders(headers),
 			sentTurnStateHeader: headers.has(X_CODEX_TURN_STATE_HEADER),
 			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
 		});
@@ -4832,11 +4828,7 @@ async function openCodexSseEventStream(
 	}
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex response", {
-			url: response.url,
 			status: response.status,
-			statusText: response.statusText,
-			contentType: response.headers.get("content-type") || null,
-			cfRay: response.headers.get("cf-ray") || null,
 		});
 	if (!response.ok) {
 		// The pre-response guard is still armed for a non-2xx response; keep it live
@@ -4953,33 +4945,6 @@ function createCodexHeaders(
 		headers.delete("content-type");
 	}
 	return headers;
-}
-
-function redactHeaders(headers: Headers): Record<string, string> {
-	const redacted: Record<string, string> = {};
-	for (const [key, value] of headers.entries()) {
-		const lower = key.toLowerCase();
-		if (lower === "authorization") {
-			redacted[key] = "Bearer [redacted]";
-			continue;
-		}
-		if (
-			lower.includes("account") ||
-			lower.includes("session") ||
-			lower.includes("conversation") ||
-			lower.includes("thread") ||
-			lower.includes("window") ||
-			lower.includes("installation") ||
-			lower.startsWith("x-codex-turn") ||
-			lower === "x-client-request-id" ||
-			lower === "cookie"
-		) {
-			redacted[key] = "[redacted]";
-			continue;
-		}
-		redacted[key] = value;
-	}
-	return redacted;
 }
 
 /** Resolve a Codex Responses endpoint exactly as the chat and compaction transports do. */

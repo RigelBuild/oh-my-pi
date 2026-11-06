@@ -15,6 +15,7 @@ import {
 	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import { gatewayLogContext, logGatewayRequestFailure } from "../logging";
 import type { CallerIdentity } from "../types";
 import { readBoundedRequestBody, RequestBodyTooLargeError } from "../bounded-body";
 
@@ -156,7 +157,14 @@ async function handleImages(
 
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`images\u0000${model.provider}/${model.id}`);
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts.storage,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		gatewayLogContext(requestId, caller, "images", model.provider, model.id),
+	);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
@@ -165,7 +173,7 @@ async function handleImages(
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "images",
-		model: parsed.modelId,
+		model: model.id,
 		resolvedProvider: model.provider,
 		resolvedModel: model.id,
 		stream: false,
@@ -189,6 +197,7 @@ async function handleImages(
 				},
 				bootOpts.onUsageLimit,
 				outcomes.onAttemptFailed,
+				gatewayLogContext(requestId, caller, "images", model.provider, model.id),
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
@@ -204,7 +213,11 @@ async function handleImages(
 		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway image generation failed", { format: "images", error: classified.message, peer });
+		logGatewayRequestFailure(
+			gatewayLogContext(requestId, caller, "images", model.provider, model.id),
+			classified.status,
+			credentialId,
+		);
 		return imagesServer.formatError(classified.status, classified.type, classified.message);
 	}
 }

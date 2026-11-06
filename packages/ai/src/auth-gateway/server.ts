@@ -68,6 +68,7 @@ import {
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
 } from "./dispatch";
+import { gatewayLogContext, logGatewayProviderResponse, logGatewayRequestFailure } from "./logging";
 import {
 	armBudget,
 	candidateKey,
@@ -256,11 +257,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	) {
 		logger.debug("auth-gateway dropped unsupported typed options", {
 			api,
-			parallelToolCalls: options.parallelToolCalls,
-			previousResponseId: options.previousResponseId,
-			seed: options.seed,
 			hasLogitBias: options.logitBias !== undefined,
-			user: options.user,
 			hasResponseFormat: options.responseFormat !== undefined,
 		});
 	}
@@ -325,6 +322,7 @@ async function prepareFormatAttempt(
 	caller: AgentCaller,
 	clientKey: string | undefined,
 	toolsJson: string | undefined,
+	requestId: string,
 ): Promise<AttemptStart> {
 	const kindRejection = chatRouteRejection(model);
 	if (kindRejection) return incompatibleAttempt(kindRejection);
@@ -350,14 +348,27 @@ async function prepareFormatAttempt(
 	// expected to resolve the credential and pass it as `options.apiKey`.
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts.storage,
+		model,
+		sessionId,
+		signal,
+		peer,
+		gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
+	);
 	signal.throwIfAborted();
 	if ("status" in apiKey) return { ok: false, reason: apiKey.setupReason, failure: apiKey };
 
 	const streamOpts = buildStreamOptions(parsed, model.api, signal);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
-	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model);
-	if (limitObserver) streamOpts.onResponse = limitObserver;
+	const logContext = gatewayLogContext(requestId, caller, route.label, model.provider, model.id);
+	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model, logContext);
+	const callerOnResponse = streamOpts.onResponse;
+	streamOpts.onResponse = (response, responseModel, responseSignal) => {
+		logGatewayProviderResponse(logContext, response);
+		limitObserver?.(response, responseModel, responseSignal);
+		return callerOnResponse?.(response, responseModel, responseSignal);
+	};
 	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
 	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
 	// map is non-serializable, so no client can supply it and every turn would
@@ -387,6 +398,8 @@ async function prepareFormatAttempt(
 			lease.updateAccount(account);
 		},
 		bootOpts.onUsageLimit,
+		undefined,
+		logContext,
 	);
 	return { ok: true, streamOpts, lease, account: () => account };
 }
@@ -408,11 +421,19 @@ async function preparePiNativeAttempt(
 	caller: AgentCaller,
 	clientKey: string | undefined,
 	toolsJson: string | undefined,
+	requestId: string,
 ): Promise<AttemptStart> {
 	const kindRejection = chatRouteRejection(model);
 	if (kindRejection) return incompatibleAttempt(kindRejection);
 
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts.storage,
+		model,
+		sessionId,
+		signal,
+		peer,
+		gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
+	);
 	signal.throwIfAborted();
 	if ("status" in apiKey) return { ok: false, reason: apiKey.setupReason, failure: apiKey };
 
@@ -439,8 +460,14 @@ async function preparePiNativeAttempt(
 		providerSessionState: lease.states,
 	};
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
-	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model);
-	if (limitObserver) streamOpts.onResponse = limitObserver;
+	const logContext = gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id);
+	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model, logContext);
+	const callerOnResponse = streamOpts.onResponse;
+	streamOpts.onResponse = (response, responseModel, responseSignal) => {
+		logGatewayProviderResponse(logContext, response);
+		limitObserver?.(response, responseModel, responseSignal);
+		return callerOnResponse?.(response, responseModel, responseSignal);
+	};
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts.storage,
 		model,
@@ -454,6 +481,8 @@ async function preparePiNativeAttempt(
 			lease.updateAccount(account);
 		},
 		bootOpts.onUsageLimit,
+		undefined,
+		logContext,
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
@@ -502,6 +531,7 @@ interface FailoverRequest {
 	readonly controller: AbortController;
 	readonly model: Model<Api>;
 	readonly client: ClientUsageIdentity;
+	readonly caller: AgentCaller;
 	readonly peer: string;
 	readonly requestId: string;
 	readonly startedAt: number;
@@ -707,14 +737,16 @@ async function runFailoverLoop(
 		logger.warn("auth-gateway candidate failover", {
 			requestId,
 			format: route.label,
-			model: route.requestedModelId,
+			model: model.id,
 			resolvedProvider: model.provider,
 			resolvedModel: model.id,
 			peer,
 			attempt,
 			failure: failure?.kind,
 			status: failure?.status ?? status,
-			retryAfterMs: failure?.retryAfterMs,
+			...(failure?.retryAfterMs !== undefined &&
+				Number.isFinite(failure.retryAfterMs) &&
+				failure.retryAfterMs >= 0 && { retryAfterMs: failure.retryAfterMs }),
 			elapsedMs: Math.round(performance.now() - startedAt),
 			outcome,
 			next: next && `${next.provider}/${next.id}`,
@@ -739,13 +771,11 @@ async function runFailoverLoop(
 		let next: Model<Api> | undefined;
 		try {
 			next = await Promise.race([failover.next(route.requestedModelId, failoverContext()), stopLookup.promise]);
-		} catch (error) {
+		} catch {
 			logger.warn("auth-gateway candidate lookup failed", {
 				requestId,
 				format: route.label,
-				model: route.requestedModelId,
 				peer,
-				error: error instanceof Error ? error.message : String(error),
 			});
 			return undefined;
 		}
@@ -840,6 +870,7 @@ async function runFailoverLoop(
 				answering,
 				request.client,
 				`${requestId}:a${attempt}`,
+				gatewayLogContext(requestId, request.caller, route.label, answering.provider, answering.id),
 			);
 			const loop = gatewayThinkingLoopRecorder(
 				request.bootOpts,
@@ -851,7 +882,7 @@ async function runFailoverLoop(
 			logger.info("auth-gateway request", {
 				requestId,
 				format: route.label,
-				model: route.requestedModelId,
+				model: answering.id,
 				resolvedProvider: answering.provider,
 				resolvedModel: answering.id,
 				stream: route.stream,
@@ -1067,6 +1098,7 @@ async function handleFormatEndpoint(
 				controller,
 				model,
 				client,
+				caller,
 				peer,
 				requestId,
 				startedAt,
@@ -1093,6 +1125,7 @@ async function handleFormatEndpoint(
 						caller,
 						clientKey,
 						toolsJson,
+						requestId,
 					),
 			},
 		);
@@ -1112,6 +1145,7 @@ async function handleFormatEndpoint(
 			caller,
 			clientKey,
 			toolsJson,
+			requestId,
 		);
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
@@ -1119,12 +1153,18 @@ async function handleFormatEndpoint(
 	}
 	if (!start.ok) return route.module.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account } = start;
-	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(bootOpts, model, client, requestId);
+	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
+		bootOpts,
+		model,
+		client,
+		requestId,
+		gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
+	);
 
 	logger.info("auth-gateway request", {
 		requestId,
 		format: route.label,
-		model: parsed.modelId,
+		model: model.id,
 		resolvedProvider: model.provider,
 		resolvedModel: model.id,
 		stream: parsed.stream,
@@ -1153,12 +1193,11 @@ async function handleFormatEndpoint(
 				const errorMessage =
 					message.errorMessage ??
 					(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
-				logger.warn("auth-gateway non-streaming failed", {
-					format: route.label,
-					reason: message.stopReason,
-					error: errorMessage,
-					peer,
-				});
+				logGatewayRequestFailure(
+					gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
+					message.errorStatus,
+					message.credentialId,
+				);
 				if (message.stopReason === "aborted") {
 					return route.module.formatError(499, "request_aborted", errorMessage);
 				}
@@ -1173,11 +1212,10 @@ async function handleFormatEndpoint(
 		} catch (error) {
 			if (controller.signal.aborted) return clientClosedResponse(route);
 			const classified = classifyGatewayError(error);
-			logger.warn("auth-gateway non-streaming aborted", {
-				format: route.label,
-				error: classified.message,
-				peer,
-			});
+			logGatewayRequestFailure(
+				gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
+				classified.status,
+			);
 			return route.module.formatError(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
@@ -1197,13 +1235,22 @@ async function handleFormatEndpoint(
 			events = streamSimple(model, parsed.context, streamOpts);
 		} catch (error) {
 			const classified = classifyGatewayError(error);
-			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
+			logGatewayRequestFailure(
+				gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
+				classified.status,
+			);
 			return route.module.formatError(classified.status, classified.type, classified.message);
 		}
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		void events
 			.result()
 			.then(message => {
+				if (message.stopReason === "error")
+					logGatewayRequestFailure(
+						gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
+						message.errorStatus,
+						message.credentialId,
+					);
 				observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 				recordGatewayUsage(bootOpts, model, client, message.usage, {
 					requestId,
@@ -1314,6 +1361,7 @@ async function handlePiNative(
 				controller,
 				model,
 				client,
+				caller,
 				peer,
 				requestId,
 				startedAt,
@@ -1339,6 +1387,7 @@ async function handlePiNative(
 						caller,
 						clientKey,
 						toolsJson,
+						requestId,
 					),
 			},
 		);
@@ -1358,6 +1407,7 @@ async function handlePiNative(
 			caller,
 			clientKey,
 			toolsJson,
+			requestId,
 		);
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
@@ -1365,12 +1415,18 @@ async function handlePiNative(
 	}
 	if (!start.ok) return piNative.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account } = start;
-	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(bootOpts, model, client, requestId);
+	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
+		bootOpts,
+		model,
+		client,
+		requestId,
+		gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
+	);
 
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "pi-native",
-		model: parsed.modelId,
+		model: model.id,
 		resolvedProvider: model.provider,
 		resolvedModel: model.id,
 		stream: parsed.stream,
@@ -1399,12 +1455,11 @@ async function handlePiNative(
 				const errorMessage =
 					message.errorMessage ??
 					(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
-				logger.warn("auth-gateway non-streaming failed", {
-					format: "pi-native",
-					reason: message.stopReason,
-					error: errorMessage,
-					peer,
-				});
+				logGatewayRequestFailure(
+					gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
+					message.errorStatus,
+					message.credentialId,
+				);
 				if (message.stopReason === "aborted") {
 					return piNative.formatError(499, "request_aborted", errorMessage);
 				}
@@ -1419,7 +1474,10 @@ async function handlePiNative(
 		} catch (error) {
 			if (controller.signal.aborted) return aborted();
 			const classified = classifyGatewayError(error);
-			logger.warn("auth-gateway non-streaming aborted", { format: "pi-native", error: classified.message, peer });
+			logGatewayRequestFailure(
+				gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
+				classified.status,
+			);
 			return piNative.formatError(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
@@ -1439,13 +1497,22 @@ async function handlePiNative(
 			events = streamSimple(model, parsed.context, streamOpts);
 		} catch (error) {
 			const classified = classifyGatewayError(error);
-			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
+			logGatewayRequestFailure(
+				gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
+				classified.status,
+			);
 			return piNative.formatError(classified.status, classified.type, classified.message);
 		}
 		if (controller.signal.aborted) return aborted();
 		void events
 			.result()
 			.then(message => {
+				if (message.stopReason === "error")
+					logGatewayRequestFailure(
+						gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
+						message.errorStatus,
+						message.credentialId,
+					);
 				observeAttemptLimitStatus(bootOpts.storage, model.provider, message.credentialId, message);
 				recordGatewayUsage(bootOpts, model, client, message.usage, {
 					requestId,
@@ -1739,7 +1806,6 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 				method: req.method,
 				path: loggablePath(pathname),
 				peer,
-				error: String(error),
 			});
 			return json(500, { error: "internal error" });
 		}

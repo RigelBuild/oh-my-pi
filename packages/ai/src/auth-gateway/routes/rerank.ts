@@ -14,6 +14,7 @@ import {
 	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import { gatewayLogContext, logGatewayRequestFailure } from "../logging";
 import type { CallerIdentity } from "../types";
 
 /** OpenRouter-compatible `POST /v1/rerank` gateway handler. */
@@ -49,7 +50,14 @@ export async function handleRerank(
 
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`rerank\u0000${model.provider}/${model.id}`);
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts.storage,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		gatewayLogContext(requestId, caller, "rerank", model.provider, model.id),
+	);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return rerankWire.formatError(apiKey.status, apiKey.type, apiKey.message);
 
@@ -58,7 +66,7 @@ export async function handleRerank(
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "rerank",
-		model: parsed.modelId,
+		model: model.id,
 		resolvedProvider: model.provider,
 		resolvedModel: model.id,
 		stream: false,
@@ -82,6 +90,7 @@ export async function handleRerank(
 				},
 				bootOpts.onUsageLimit,
 				outcomes.onAttemptFailed,
+				gatewayLogContext(requestId, caller, "rerank", model.provider, model.id),
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
@@ -101,7 +110,11 @@ export async function handleRerank(
 		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway rerank failed", { format: "rerank", error: classified.message, peer });
+		logGatewayRequestFailure(
+			gatewayLogContext(requestId, caller, "rerank", model.provider, model.id),
+			classified.status,
+			credentialId,
+		);
 		return rerankWire.formatError(classified.status, classified.type, classified.message);
 	}
 }

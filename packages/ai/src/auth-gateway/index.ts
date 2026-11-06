@@ -1,5 +1,6 @@
 export * from "./dispatch";
 export * from "./http";
+export * from "./logging";
 export * from "./session-state";
 export * from "./stdio";
 export * from "./server";

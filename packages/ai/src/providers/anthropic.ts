@@ -81,7 +81,7 @@ import {
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
-import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import {
 	ANTHROPIC_SLOW_USAGE_LIMIT,
@@ -1110,11 +1110,8 @@ async function resizeAnthropicImageBlock(block: ImageContent, caps: AnthropicIma
 			data,
 			mimeType: best.mimeType,
 		};
-	} catch (error) {
-		logger.warn("anthropic: failed to resize oversized image", {
-			mimeType: block.mimeType,
-			error: error instanceof Error ? error.message : String(error),
-		});
+	} catch {
+		logger.warn("anthropic: failed to resize oversized image");
 		return block;
 	}
 }
@@ -2998,6 +2995,20 @@ const streamAnthropicOnce = (
 							recordsRawSseEvents,
 						} = await getAnthropicStreamResponse(anthropicRequest, requestSignal, rawSseObserver));
 					} catch (error) {
+						// SDK acquisition failures precede the normal response observer. Keep the attempt binding.
+						const status = AIError.status(error);
+						const errorHeaders = getHeadersFromError(error);
+						if (status !== undefined && Number.isInteger(status) && status >= 100 && status <= 599) {
+							const headers: Record<string, string> = {};
+							if (errorHeaders instanceof Headers)
+								errorHeaders.forEach((value, key) => {
+									headers[key] = value;
+								});
+							else if (errorHeaders)
+								for (const [key, value] of Object.entries(errorHeaders))
+									if (typeof value === "string") headers[key.toLowerCase()] = value;
+							await options?.onResponse?.({ status, headers }, model);
+						}
 						if (error instanceof AnthropicConnectionTimeoutError && !activeAbortTracker.wasCallerAbort()) {
 							throw firstEventTimeoutAbortError;
 						}
@@ -3559,7 +3570,6 @@ const streamAnthropicOnce = (
 						// success (consumers treat its presence as failure).
 						logger.warn("anthropic: strict tools rejected, retrying without strict tools", {
 							model: model.id,
-							error: await finalizeErrorMessage(streamFailure, rawRequestDump),
 						});
 						if (providerSessionState) {
 							providerSessionState.strictToolsDisabled = true;
@@ -3593,7 +3603,6 @@ const streamAnthropicOnce = (
 								"anthropic: fallback credit continuation shape rejected, retrying with unchanged body",
 								{
 									model: model.id,
-									error: errMessage,
 								},
 							);
 							fallbackCreditShape = "unchanged";
@@ -3612,7 +3621,6 @@ const streamAnthropicOnce = (
 								"anthropic: fallback credit token rejected, falling back to standard request without token",
 								{
 									model: model.id,
-									error: errMessage,
 								},
 							);
 							dropAllThinking = true;
@@ -3690,7 +3698,6 @@ const streamAnthropicOnce = (
 								provider: model.provider,
 								model: model.id,
 								baseUrl,
-								error: streamFailureMessage,
 							},
 						);
 						if (providerSessionState) {
@@ -3731,7 +3738,6 @@ const streamAnthropicOnce = (
 								provider: model.provider,
 								model: model.id,
 								baseUrl,
-								error: streamFailureMessage,
 							},
 						);
 						if (providerSessionState) {
@@ -3760,7 +3766,6 @@ const streamAnthropicOnce = (
 					) {
 						logger.debug("anthropic: fast mode unsupported, retrying without speed", {
 							model: model.id,
-							error: streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
 						});
 						if (providerSessionState) {
 							providerSessionState.fastModeDisabled = true;

@@ -15,6 +15,7 @@ import {
 } from "../dispatch";
 import { readBoundedRequestBody, RequestBodyTooLargeError } from "../bounded-body";
 import { gatewayResponseHeaders, resolveClientIdentity } from "../http";
+import { gatewayLogContext, logGatewayRequestFailure } from "../logging";
 import type { CallerIdentity } from "../types";
 
 const SPEECH_JSON_MAX_BYTES = 25 * 1024 * 1024;
@@ -72,7 +73,14 @@ export async function handleSpeech(
 
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`speech\u0000${model.provider}/${model.id}`);
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts.storage,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		gatewayLogContext(requestId, caller, "speech", model.provider, model.id),
+	);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return speechWire.formatError(apiKey.status, apiKey.type, apiKey.message);
 
@@ -81,7 +89,7 @@ export async function handleSpeech(
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "speech",
-		model: parsed.modelId,
+		model: model.id,
 		resolvedProvider: model.provider,
 		resolvedModel: model.id,
 		stream: false,
@@ -105,6 +113,7 @@ export async function handleSpeech(
 				},
 				bootOpts.onUsageLimit,
 				outcomes.onAttemptFailed,
+				gatewayLogContext(requestId, caller, "speech", model.provider, model.id),
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
@@ -122,7 +131,11 @@ export async function handleSpeech(
 		outcomes.recordFinal(credentialId, error, controller.signal.aborted ? "aborted" : "error");
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway speech failed", { format: "speech", error: classified.message, peer });
+		logGatewayRequestFailure(
+			gatewayLogContext(requestId, caller, "speech", model.provider, model.id),
+			classified.status,
+			credentialId,
+		);
 		return speechWire.formatError(classified.status, classified.type, classified.message);
 	}
 }
