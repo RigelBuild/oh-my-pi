@@ -11,7 +11,7 @@
 
 ### Fixed
 
-- Provider response observers no longer cause accepted Codex requests to be retransmitted or hide Anthropic recovery errors. Recovery/anomaly and Codex debug logs omit upstream payloads and caller cache identities.
+- Provider response observers no longer cause accepted Codex requests to be retransmitted or hide Anthropic recovery errors, including slow failure observers. Recovery/anomaly and Codex debug logs omit upstream payloads, unchecked block indices, stop reasons, response IDs and caller cache identities.
 - An OAuth login no longer disables the provider's stored API keys. They stay as the fallback the auth cascade reaches only once every OAuth account is unavailable.
 - A stored non-login API key now serves a request when every OAuth credential for the provider is blocked, instead of the selector returning a blocked OAuth account; with no unblocked key, blocked OAuth stays the last resort. The request that blocks the last OAuth account retries on the key at once, and `keys.hasUsable` reports the provider usable.
 - Anthropic "credit balance is too low" is a quota exhaustion: the credential is blocked for 30 minutes and rotated, not invalidated as an auth failure.

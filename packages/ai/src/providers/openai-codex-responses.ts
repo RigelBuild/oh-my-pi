@@ -2760,7 +2760,7 @@ class CodexStreamProcessor {
 		// complete and the server continues from it, so it chains and ends like a
 		// completed response.
 		const steered = status === "incomplete" && incompleteReason === "steered";
-		if (steered) logger.debug("Codex response stopped for steering", { responseId });
+		if (steered) logger.debug("Codex response stopped for steering", { responseIdPresent: responseId !== undefined });
 
 		const state = runtime.websocketState;
 		if (state) {

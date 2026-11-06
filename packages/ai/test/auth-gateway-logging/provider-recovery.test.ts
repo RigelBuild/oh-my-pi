@@ -6,7 +6,19 @@ import { withOfficialAnthropicEndpoint } from "../helpers";
 import { captureLogs, secret } from "./capture";
 
 withOfficialAnthropicEndpoint();
-for (const mode of ["cache", "strict", "fast", "malformed", "healthy"] as const)
+for (const mode of [
+	"cache",
+	"strict",
+	"fast",
+	"malformed",
+	"unknown-stop",
+	"unopened-index",
+	"duplicate-index",
+	"unterminated-index",
+	"replayed-index",
+	"post-terminal",
+	"healthy",
+] as const)
 	test(`Anthropic ${mode} lifecycle emits no provider payload`, async () => {
 		const capture = await captureLogs();
 		const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
@@ -48,13 +60,63 @@ for (const mode of ["cache", "strict", "fast", "malformed", "healthy"] as const)
 					{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
 					{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: secret.response } },
 					{ type: "content_block_stop", index: 0 },
-					{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+					{
+						type: "message_delta",
+						delta: { stop_reason: mode === "unknown-stop" ? secret.metadata : "end_turn" },
+						usage: { output_tokens: 1 },
+					},
 					{ type: "message_stop" },
 				];
+				const badStart = {
+					type: "content_block_start",
+					index: secret.captured,
+					content_block: { type: "text", text: "" },
+				};
+				const badStop = { type: "content_block_stop", index: secret.captured };
+				const injected =
+					mode === "unopened-index"
+						? [
+								{
+									type: "content_block_delta",
+									index: secret.captured,
+									delta: { type: "text_delta", text: secret.response },
+								},
+								badStop,
+							]
+						: mode === "duplicate-index"
+							? [badStart, badStart, badStop]
+							: mode === "unterminated-index"
+								? [badStart]
+								: mode === "replayed-index"
+									? [
+											badStart,
+											badStop,
+											{
+												type: "message_start",
+												message: { id: "synthetic", usage: { input_tokens: 1, output_tokens: 0 } },
+											},
+											badStart,
+											badStop,
+										]
+									: [];
+				const terminalExtras =
+					mode === "post-terminal"
+						? [
+								badStart,
+								{
+									type: "content_block_delta",
+									index: secret.captured,
+									delta: { type: "text_delta", text: secret.response },
+								},
+								badStop,
+							]
+						: [];
+				const wireEvents = [events[0], ...injected, ...events.slice(1, -1), ...terminalExtras, events.at(-1)];
 				const malformed =
 					mode === "malformed" ? `event: content_block_delta\ndata: {"private":"${secret.response}"\n\n` : "";
 				return new Response(
-					malformed + events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+					malformed +
+						wireEvents.map(event => `event: ${event?.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
 					{ headers: { "content-type": "text/event-stream", "x-private": secret.header } },
 				);
 			},
@@ -96,7 +158,20 @@ for (const mode of ["cache", "strict", "fast", "malformed", "healthy"] as const)
 			const anomalies = capture.events.filter(event =>
 				event.message.startsWith("anthropic: ignoring malformed stream envelope"),
 			);
-			expect(anomalies.length).toBe(mode === "malformed" ? 1 : 0);
+			expect(anomalies.length).toBe(
+				mode === "malformed" ||
+					mode === "unknown-stop" ||
+					mode === "duplicate-index" ||
+					mode === "unterminated-index"
+					? 1
+					: mode === "unopened-index"
+						? 2
+						: mode === "replayed-index"
+							? 2
+							: mode === "post-terminal"
+								? 3
+								: 0,
+			);
 			if (mode === "cache") {
 				expect(bodies[0]).toContain('"ttl":"1h"');
 				expect(bodies[1]).toContain('"cache_control"');

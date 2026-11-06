@@ -86,43 +86,66 @@ for (const status of [429, 400])
 			maxTokens: 8192,
 		});
 		const results = [];
-		for (const rejecting of [false, true]) {
-			let requests = 0;
-			const statuses: number[] = [];
-			const result = await streamAnthropic(
-				model,
-				{
-					...context,
-					tools: [{ name: "find", description: "lookup", parameters: { type: "object", properties: {} } }],
-				},
-				{
-					apiKey: "synthetic-api-key",
-					providerRetryWait: async () => {},
-					fetch: async () => {
-						requests++;
-						if (status === 400 && requests > 1) return anthropicSuccess();
-						return Response.json(
-							{
-								error: {
-									type: status === 429 ? "rate_limit_error" : "invalid_request_error",
-									message: status === 429 ? "usage limit reached" : "compiled grammar is too large",
+		vi.useFakeTimers();
+		try {
+			for (const mode of ["control", "slow", "slow-reject"] as const) {
+				let requests = 0;
+				const statuses: number[] = [];
+				const strictRequests: boolean[] = [];
+				const observerAborts: boolean[] = [];
+				let activeSignal: AbortSignal | null | undefined;
+				const result = await streamAnthropic(
+					model,
+					{
+						...context,
+						tools: [{ name: "find", description: "lookup", parameters: { type: "object", properties: {} } }],
+					},
+					{
+						apiKey: "synthetic-api-key",
+						providerRetryWait: async () => {},
+						streamFirstEventTimeoutMs: 5,
+						fetch: async (_input, init) => {
+							activeSignal = init?.signal;
+							strictRequests.push(String(init?.body).includes('"strict":true'));
+							requests++;
+							if (status === 400 && requests > 1) return anthropicSuccess();
+							return Response.json(
+								{
+									error: {
+										type: status === 429 ? "rate_limit_error" : "invalid_request_error",
+										message: status === 429 ? "usage limit reached" : "compiled grammar is too large",
+									},
 								},
-							},
-							{ status, headers: { "x-should-retry": "false" } },
-						);
+								{ status, headers: { "x-should-retry": "false" } },
+							);
+						},
+						onResponse: async response => {
+							statuses.push(response.status);
+							if (mode !== "control" && response.status !== 200) vi.advanceTimersByTime(20);
+							if (response.status !== 200) observerAborts.push(activeSignal?.aborted ?? true);
+							if (mode === "slow-reject" && response.status !== 200)
+								throw new Error("synthetic observer failure");
+						},
 					},
-					onResponse: async response => {
-						statuses.push(response.status);
-						if (rejecting && response.status !== 200) throw new Error("synthetic observer failure");
-					},
-				},
-			).result();
-			results.push({ requests, statuses, stopReason: result.stopReason, errorStatus: result.errorStatus });
+				).result();
+				results.push({
+					requests,
+					statuses,
+					strictRequests,
+					observerAborts,
+					stopReason: result.stopReason,
+					errorStatus: result.errorStatus,
+				});
+			}
+			expect(results[1]).toEqual(results[0]);
+			expect(results[2]).toEqual(results[0]);
+			expect(results[0]?.statuses[0]).toBe(status);
+			if (status === 400) {
+				expect(results[0]?.requests).toBe(2);
+				expect(results[0]?.strictRequests).toEqual([true, false]);
+				expect(results[0]?.stopReason).toBe("stop");
+			} else expect(results[0]?.errorStatus).toBe(429);
+		} finally {
+			vi.useRealTimers();
 		}
-		expect(results[1]).toEqual(results[0]);
-		expect(results[0]?.statuses[0]).toBe(status);
-		if (status === 400) {
-			expect(results[0]?.requests).toBe(2);
-			expect(results[0]?.stopReason).toBe("stop");
-		} else expect(results[0]?.errorStatus).toBe(429);
 	});
