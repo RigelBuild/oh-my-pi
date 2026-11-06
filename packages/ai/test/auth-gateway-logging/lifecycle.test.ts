@@ -265,17 +265,22 @@ for (const provider of ["anthropic", "openai-codex"] as const) {
 				window: provider === "anthropic" ? "requests" : "primary",
 				credentialId: row,
 			});
-			if (provider === "anthropic")
-				expect(
-					observedLimits.mock.calls.some(call =>
-						call[0].some(
-							observation =>
-								observation.credentialId === row &&
-								observation.modelClass === "sonnet-4.5" &&
-								observation.limits.some(limit => limit.window?.id === "requests"),
-						),
-					),
-				).toBe(true);
+			// The gateway filters the transport-only attempt override; Codex's six wire attempts are intentional.
+			expect(
+				capture
+					.matching("auth-gateway provider response")
+					.map(event => [event.context?.credentialId, event.context?.status]),
+			).toEqual(Array.from({ length: provider === "openai-codex" ? 6 : 1 }, () => [row, 429]));
+			const batches = observedLimits.mock.calls
+				.flatMap(call => call[0])
+				.filter(observation => observation.modelClass !== undefined);
+			expect(
+				batches.map(observation => [
+					observation.credentialId,
+					observation.modelClass,
+					observation.limits.map(limit => [limit.window?.id, limit.amount.remaining]),
+				]),
+			).toEqual(provider === "anthropic" ? [[row, "sonnet-4.5", [["requests", 0]]]] : []);
 			await capture.assertSafe([token]);
 		} finally {
 			observedLimits.mockRestore();

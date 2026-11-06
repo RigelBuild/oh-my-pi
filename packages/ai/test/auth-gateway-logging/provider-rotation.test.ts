@@ -1,6 +1,7 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { createAuthGatewayRouter } from "@oh-my-pi/pi-ai/auth-gateway";
+import type { GatewayUsageEvent } from "@oh-my-pi/pi-ai/auth-gateway/dispatch";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { createCodexModel, withOfficialAnthropicEndpoint } from "../helpers";
@@ -70,7 +71,14 @@ function success(provider: "anthropic" | "openai-codex"): Response {
 		events
 			.map(event => `${provider === "anthropic" ? `event: ${event.type}\n` : ""}data: ${JSON.stringify(event)}\n\n`)
 			.join(""),
-		{ headers: { "content-type": "text/event-stream", "x-private": secret.header } },
+		{
+			headers: {
+				"content-type": "text/event-stream",
+				"x-private": secret.header,
+				"anthropic-ratelimit-requests-limit": "50",
+				"anthropic-ratelimit-requests-remaining": "49",
+			},
+		},
 	);
 }
 
@@ -96,6 +104,10 @@ for (const provider of ["anthropic", "openai-codex"] as const) {
 			restoreWait();
 		});
 		const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
+		const limits = spyOn(storage.usage, "observeLimits");
+		const outcomes = spyOn(storage.usage, "observeOutcome");
+		const usage = spyOn(storage.usage, "observe");
+		const billed: GatewayUsageEvent[] = [];
 		let storageClosed = false;
 		const closeStorage = () => {
 			if (storageClosed) return;
@@ -142,6 +154,10 @@ for (const provider of ["anthropic", "openai-codex"] as const) {
 		const router = createAuthGatewayRouter({
 			storage,
 			resolveModel: () => model,
+			apiKeyLimitModelClasses: { [model.id]: "sonnet-4.5" },
+			onUsage: event => {
+				billed.push(event);
+			},
 			fetch: async (_input, init) => {
 				const headers = new Headers(init?.headers);
 				const bearer = headers.get("authorization")?.replace(/^Bearer /, "") ?? headers.get("x-api-key");
@@ -221,23 +237,38 @@ for (const provider of ["anthropic", "openai-codex"] as const) {
 			const rowB = rows.find(row => row.credential.type === "api_key" && row.credential.key === succeededBearer)?.id;
 			expect(rowA).toBeNumber();
 			expect(rowB).toBeNumber();
+			if (rowA === undefined || rowB === undefined) throw new Error("expected both sent credential rows");
 			const observations = capture.matching("auth-gateway provider response");
-			expect(observations.filter(event => event.context?.status === 429).length).toBeGreaterThan(0);
-			expect(
-				observations
-					.filter(event => event.context?.status === 429)
-					.every(event => event.context?.credentialId === rowA),
-			).toBe(true);
-			expect(observations.at(-1)?.context).toMatchObject({ status: 200, credentialId: rowB, pool: "pool" });
+			expect(observations.map(event => [event.context?.credentialId, event.context?.status])).toEqual([
+				...Array.from({ length: provider === "openai-codex" ? 6 : 1 }, () => [rowA, 429]),
+				[rowB, 200],
+			]);
+			expect(observations.at(-1)?.context?.pool).toBe("pool");
 			expect(capture.matching("auth-gateway quota observation")[0]?.context).toMatchObject({
 				credentialId: rowA,
 				resetAtMs: 1900000000000,
 			});
+			expect(billed.map(event => [event.credentialId, event.outcome])).toEqual([[rowB, "ok"]]);
+			expect(usage.mock.calls.map(call => [call[0].credentialId, call[0].outcome])).toEqual([[rowB, "ok"]]);
+			expect(outcomes.mock.calls.map(call => [call[0].credentialId, call[0].outcome])).toEqual([[rowA, "error"]]);
+			const mapped = limits.mock.calls
+				.flatMap(call => call[0])
+				.filter(observation => observation.modelClass !== undefined);
+			expect(
+				mapped.map(observation => [
+					observation.credentialId,
+					observation.modelClass,
+					observation.limits.map(limit => [limit.window?.id, limit.amount.remaining]),
+				]),
+			).toEqual(provider === "anthropic" ? [[rowB, "sonnet-4.5", [["requests", 49]]]] : []);
 			if (provider === "openai-codex") expect(wait?.mock.calls.length).toBeGreaterThan(0);
 			await capture.assertSafe([first, second]);
 		} finally {
 			close();
 			restoreWait();
+			limits.mockRestore();
+			outcomes.mockRestore();
+			usage.mockRestore();
 			await capture.close();
 		}
 	});

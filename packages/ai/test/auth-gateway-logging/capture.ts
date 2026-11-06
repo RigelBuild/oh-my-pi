@@ -51,6 +51,8 @@ function inspect(value: unknown, additionalSecrets: readonly string[] = []): voi
 
 export async function captureLogs() {
 	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-log-safety-"));
+	const previousLevel = process.env.OMP_LOG_LEVEL;
+	process.env.OMP_LOG_LEVEL = "debug";
 	logger.setTransports({ file: directory });
 	const args: unknown[][] = [];
 	const spies = (["debug", "info", "warn", "error"] as const).map(level => {
@@ -70,6 +72,8 @@ export async function captureLogs() {
 		dispose();
 		disposeSecond();
 		for (const spy of spies) spy.mockRestore();
+		if (previousLevel === undefined) delete process.env.OMP_LOG_LEVEL;
+		else process.env.OMP_LOG_LEVEL = previousLevel;
 		logger.setTransports({ file: true });
 		cleanup = fs.rm(directory, { recursive: true, force: true });
 		return cleanup;

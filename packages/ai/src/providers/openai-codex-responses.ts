@@ -3766,6 +3766,18 @@ function buildCodexTurnRequestDiagnostics(
 	};
 }
 
+function safeCodexTurnRequestDiagnostics(
+	request: OpenAICodexTurnRequestDiagnostics,
+): Record<string, string | number | boolean> {
+	return {
+		transport: request.transport,
+		previousResponseIdPresent: request.previousResponseIdPresent,
+		inputItemCount: request.inputItemCount,
+		inputJsonBytes: request.inputJsonBytes,
+		canAppendBeforeRequest: request.canAppendBeforeRequest,
+	};
+}
+
 function recordCodexTurnRequestDiagnostics(
 	state: CodexWebSocketSessionState | undefined,
 	request: Record<string, unknown>,
@@ -3791,7 +3803,11 @@ function recordCodexTurnRequestDiagnostics(
 	state.stats.lastTurn = {
 		request: buildCodexTurnRequestDiagnostics(request, transport, canAppendBeforeRequest),
 	};
-	CODEX_DEBUG && logger.debug("[codex] codex turn request diagnostics", { diagnostics: state.stats.lastTurn.request });
+	CODEX_DEBUG &&
+		logger.debug(
+			"[codex] codex turn request diagnostics",
+			safeCodexTurnRequestDiagnostics(state.stats.lastTurn.request),
+		);
 }
 
 function recordCodexTurnUsageDiagnostics(
@@ -3832,7 +3848,13 @@ function recordCodexTurnUsageDiagnostics(
 		...state.stats.lastTurn,
 		usage: usageDiagnostics,
 	};
-	CODEX_DEBUG && logger.debug("[codex] codex turn diagnostics", { diagnostics: state.stats.lastTurn });
+	if (CODEX_DEBUG) {
+		const safe = safeCodexTurnRequestDiagnostics(state.stats.lastTurn.request);
+		for (const [key, value] of Object.entries(usageDiagnostics)) {
+			if (typeof value === "number" && Number.isFinite(value) && value >= 0) safe[key] = value;
+		}
+		logger.debug("[codex] codex turn diagnostics", safe);
+	}
 }
 
 const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
@@ -4759,7 +4781,16 @@ async function openCodexSseEventStream(
 		let response: Response | undefined;
 		try {
 			response = await (fetchOverride ?? fetch)(input, init);
-			await onResponse?.(response);
+			if (response.ok) {
+				clearPreResponseTimeout?.();
+				clearPreResponseTimeout = undefined;
+			}
+			try {
+				await onResponse?.(response);
+			} catch {
+				// Observation must not turn accepted headers into a retryable transport failure.
+				logger.warn("[codex] response observer failed");
+			}
 			return response;
 		} finally {
 			// A successful streaming body is governed by the iterator-level idle

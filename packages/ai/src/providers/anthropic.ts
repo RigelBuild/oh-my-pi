@@ -1669,7 +1669,7 @@ async function* iterateAnthropicEvents(
 		try {
 			const event = JSON.parse(sse.data) as RawMessageStreamEvent;
 			if (event.type !== sse.event) {
-				reportAnthropicEnvelopeAnomaly(`event type ${event.type} does not match SSE event ${sse.event}`);
+				reportAnthropicEnvelopeAnomaly("event type does not match SSE event");
 			}
 			if (event.type === "message_start") {
 				sawMessageStart = true;
@@ -1677,11 +1677,8 @@ async function* iterateAnthropicEvents(
 				sawMessageEnd = true;
 			}
 			yield event;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			reportAnthropicEnvelopeAnomaly(
-				`could not parse SSE event ${sse.event}: ${message}; skipping frame; data=${sse.data}`,
-			);
+		} catch {
+			reportAnthropicEnvelopeAnomaly("could not parse SSE event; skipping frame");
 		}
 	}
 
@@ -2774,10 +2771,8 @@ const streamAnthropicOnce = (
 							} else {
 								reportAnthropicEnvelopeAnomaly("server_tool_use input is not a JSON object");
 							}
-						} catch (parseError) {
-							reportAnthropicEnvelopeAnomaly(
-								`server_tool_use ${block.block.id} input is not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
-							);
+						} catch {
+							reportAnthropicEnvelopeAnomaly("server_tool_use input is not valid JSON");
 						}
 					}
 					clearStreamingPartialJson(block);
@@ -2789,9 +2784,7 @@ const streamAnthropicOnce = (
 					// Keep malformed calls non-fatal, but never execute their auto-closed previews.
 					block.arguments = parseToolCallArguments(finalJson);
 					if (isRecord(block.arguments) && "__parseError" in block.arguments) {
-						reportAnthropicEnvelopeAnomaly(
-							`tool_use ${block.id} arguments are not valid JSON: ${block.arguments.__parseError}`,
-						);
+						reportAnthropicEnvelopeAnomaly("tool_use arguments are not valid JSON");
 					}
 					clearStreamingPartialJson(block);
 					stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
@@ -3007,7 +3000,12 @@ const streamAnthropicOnce = (
 							else if (errorHeaders)
 								for (const [key, value] of Object.entries(errorHeaders))
 									if (typeof value === "string") headers[key.toLowerCase()] = value;
-							await options?.onResponse?.({ status, headers }, model);
+							try {
+								await options?.onResponse?.({ status, headers }, model);
+							} catch {
+								// Recovery must classify the original SDK failure, not an observer error.
+								logger.warn("anthropic: failure response observer failed");
+							}
 						}
 						if (error instanceof AnthropicConnectionTimeoutError && !activeAbortTracker.wasCallerAbort()) {
 							throw firstEventTimeoutAbortError;
@@ -3804,7 +3802,6 @@ const streamAnthropicOnce = (
 								provider: model.provider,
 								model: model.id,
 								baseUrl,
-								error: streamFailureMessage,
 							},
 						);
 						cacheControlOptionRejectionReplayed = true;
@@ -3869,7 +3866,6 @@ const streamAnthropicOnce = (
 							provider: model.provider,
 							model: model.id,
 							baseUrl,
-							error: streamFailureMessage,
 						});
 						cacheControlRejectionReplayed = true;
 						dropCacheControl = true;
