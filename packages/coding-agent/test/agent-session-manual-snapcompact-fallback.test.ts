@@ -1,8 +1,10 @@
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
+import { cfgCompactionModels } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -123,6 +125,43 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 			type: "compaction",
 			summary: "llm summary",
 		});
+	});
+
+	it("advances to the next configured model on a rate limit", async () => {
+		const harness = await createHarness();
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage?.keys.setRuntime(fallbackModel.provider, "test-key");
+		cfgCompactionModels.override(harness.session.settings, [
+			`${harness.activeModel.provider}/${harness.activeModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.id === harness.activeModel.id) throw new AIError.ProviderHttpError("rate limit exceeded", 429);
+			return {
+				summary: "fallback summary",
+				shortSummary: "fallback",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		const result = await harness.session.compact();
+
+		expect(result.summary).toBe("fallback summary");
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${harness.activeModel.provider}/${harness.activeModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+	});
+
+	it("preserves a classified rate-limit error without an explicit model list", async () => {
+		const harness = await createHarness();
+		const rateLimit = new AIError.ProviderHttpError("rate limit exceeded", 429);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(rateLimit);
+
+		await expect(harness.session.compact()).rejects.toBe(rateLimit);
+		expect(compactSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("still fails locally for explicit /compact snapcompact on a text-only model (no-LLM contract)", async () => {

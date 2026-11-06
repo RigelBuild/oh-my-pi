@@ -9,6 +9,7 @@
 - `auth-broker serve` accepts `--api-key-metrics-config` (or `OMP_AUTH_BROKER_API_KEY_METRICS`) for bounded upstream credential metrics.
 - `auth-gateway serve` accepts `--api-key-limit-model-classes` (or `OMP_AUTH_GATEWAY_API_KEY_LIMIT_MODEL_CLASSES`) to report Anthropic API-key rate limits per model-class row.
 - Added `compaction.largestContextFallback` (default `true`) to skip the largest-context last-resort compaction candidate when disabled.
+- Added `compaction.models` to replace the implicit summary-model candidates with an ordered list, with `compaction.retryMaxDelayMs` and `compaction.maxRetries` to tune automatic compaction backoff and retry budgets.
 
 ### Fixed
 

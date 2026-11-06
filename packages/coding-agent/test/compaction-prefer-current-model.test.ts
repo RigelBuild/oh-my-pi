@@ -105,6 +105,23 @@ describe("compaction prefers the current session model over modelRoles.default",
 		expect(candidates).not.toContain("anthropic/claude-fable-5-1");
 	});
 
+	it("uses explicit summary models in order, skips duplicates, and ignores unresolved selectors", async () => {
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+			"compaction.models": [
+				"anthropic/claude-sonnet-4-5",
+				"openai/gpt-5",
+				"anthropic/claude-sonnet-4-5",
+				"missing-provider/missing-model",
+			],
+		});
+
+		const candidates = await compactCandidateIds(settings);
+
+		expect(candidates).toEqual(["anthropic/claude-sonnet-4-5", "openai/gpt-5"]);
+	});
+
 	it("uses the active Anthropic chat model when modelRoles.default points at an OpenAI model", async () => {
 		const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const defaultRoleModel = getBundledModel("openai", "gpt-5");

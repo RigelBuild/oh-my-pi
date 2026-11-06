@@ -285,6 +285,29 @@ export const cfgCompactionKeepRecentTokens = register({
 });
 
 export const cfgCompactionAutoContinue = register({ id: "compaction.autoContinue", type: "boolean", default: true });
+export const cfgCompactionRetryMaxDelayMs = register({
+	id: "compaction.retryMaxDelayMs",
+	type: "number",
+	default: 30_000,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Retry Delay Ceiling",
+		description: "Try the next summary model instead of waiting longer than this delay (0 disables the ceiling)",
+	},
+});
+
+export const cfgCompactionMaxRetries = register({
+	id: "compaction.maxRetries",
+	type: "number",
+	default: -1,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Compaction Retries",
+		description: "Maximum automatic retries per summary model; -1 inherits retry.maxRetries",
+	},
+});
 
 export const cfgCompactionRemoteEndpoint = register({
 	id: "compaction.remoteEndpoint",
@@ -360,6 +383,20 @@ export const cfgCompactionLargestContextFallback = register({
 	default: true,
 });
 
+export const cfgCompactionModels = register({
+	id: "compaction.models",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Compaction Models",
+		description: "Ordered summary model candidates; an empty list uses the configured model and role fallbacks",
+		editor: "json",
+		ordered: true,
+	},
+});
+
 export const cfgCompactionSupersedeReads = register({
 	id: "compaction.supersedeReads",
 	type: "boolean",
@@ -398,6 +435,9 @@ export const cfgCompaction = combine({
 	asyncEnabled: cfgCompactionAsyncEnabled,
 	handoffSaveToDisk: cfgCompactionHandoffSaveToDisk,
 	autoContinue: cfgCompactionAutoContinue,
+	retryMaxDelayMs: cfgCompactionRetryMaxDelayMs,
+	maxRetries: cfgCompactionMaxRetries,
+	models: cfgCompactionModels,
 	remoteEndpoint: cfgCompactionRemoteEndpoint,
 	remoteStreamingV2Enabled: cfgCompactionRemoteStreamingV2Enabled,
 	v2RetainedMessageBudget: cfgCompactionV2RetainedMessageBudget,
