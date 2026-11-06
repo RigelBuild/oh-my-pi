@@ -354,6 +354,12 @@ export const cfgCompactionIdleTimeoutSeconds = register({
 	},
 });
 
+export const cfgCompactionLargestContextFallback = register({
+	id: "compaction.largestContextFallback",
+	type: "boolean",
+	default: true,
+});
+
 export const cfgCompactionSupersedeReads = register({
 	id: "compaction.supersedeReads",
 	type: "boolean",
@@ -398,6 +404,7 @@ export const cfgCompaction = combine({
 	idleEnabled: cfgCompactionIdleEnabled,
 	idleThresholdTokens: cfgCompactionIdleThresholdTokens,
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
+	largestContextFallback: cfgCompactionLargestContextFallback,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
 });

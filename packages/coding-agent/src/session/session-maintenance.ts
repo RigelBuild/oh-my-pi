@@ -116,6 +116,7 @@ import {
 	type CompactionSettings,
 	cfgCompactionAutoContinue,
 	cfgCompactionEnabled,
+	cfgCompactionLargestContextFallback,
 	cfgCompactionMethodOrder,
 	cfgContextPromotionEnabled,
 	cfgSnapcompactShape,
@@ -3442,11 +3443,13 @@ export class SessionMaintenance {
 			);
 		}
 
-		const sortedByContext = [...availableModels].sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0));
-		for (const model of sortedByContext) {
-			if (!seen.has(`${model.provider}/${model.id}`)) {
-				addCandidate(model);
-				break;
+		if (cfgCompactionLargestContextFallback.get(settings)) {
+			const sortedByContext = [...availableModels].sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0));
+			for (const model of sortedByContext) {
+				if (!seen.has(`${model.provider}/${model.id}`)) {
+					addCandidate(model);
+					break;
+				}
 			}
 		}
 
