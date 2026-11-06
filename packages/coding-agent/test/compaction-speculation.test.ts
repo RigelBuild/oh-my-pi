@@ -13,7 +13,14 @@ import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-co
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
-import { cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import {
+	cfgCompactionMaxRetries,
+	cfgCompactionModels,
+	cfgCompactionMethodOrder,
+	cfgCompactionRetryMaxDelayMs,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgRetryBaseDelayMs, cfgRetryEnabled, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const CONTEXT_WINDOW = 100_000;
 const THRESHOLD = 50_000;
@@ -67,6 +74,7 @@ describe("async speculative compaction", () => {
 		options: {
 			asyncEnabled?: boolean;
 			methodOrder?: CompactionMethod[];
+			models?: string[];
 			experimental?: boolean;
 			recoveryTools?: boolean;
 			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
@@ -86,6 +94,7 @@ describe("async speculative compaction", () => {
 			"compaction.enabled": true,
 			"compaction.asyncEnabled": options.asyncEnabled ?? true,
 			"compaction.methodOrder": options.methodOrder ?? ["soft"],
+			...(options.models ? { "compaction.models": options.models } : {}),
 			"compaction.thresholdPercent": 50,
 			"compaction.keepRecentTokens": 1,
 			"compaction.autoContinue": false,
@@ -152,7 +161,10 @@ describe("async speculative compaction", () => {
 			removeAssistantMessageFromActiveContext: () => {},
 			dropPersistedAssistantTurn: async () => undefined,
 			runRecoveryCompactionWithRollback: async () => ({ continuationScheduled: false }),
-			parseRetryAfterMsFromError: () => undefined,
+			parseRetryAfterMsFromError: (errorMessage: string) => {
+				const match = /retry-after-ms=(\d+)/.exec(errorMessage);
+				return match ? Number(match[1]) : undefined;
+			},
 			setModelTemporary: async () => {},
 			abort: async () => {},
 			abortHandoff: () => {},
@@ -233,6 +245,130 @@ describe("async speculative compaction", () => {
 		expect(events).not.toContain("notes-reminder");
 	});
 
+	it("uses compaction retry settings for speculative retries and retries again for each candidate", async () => {
+		const fallbackModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime(fallbackModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, fallbackModel]);
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 100);
+		cfgRetryMaxRetries.set(maintenanceSettings, 3);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 1);
+		cfgCompactionRetryMaxDelayMs.override(maintenanceSettings, 300_000);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			if (
+				candidate.id === model.id ||
+				attemptedModels.filter(id => id === `${candidate.provider}/${candidate.id}`).length === 1
+			) {
+				throw new AIError.ProviderHttpError("service temporarily unavailable", 503);
+			}
+			return {
+				summary: "speculative retry summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		expect(compactSpy).toHaveBeenCalledTimes(4);
+		expect(attemptedModels).toEqual([
+			`${model.provider}/${model.id}`,
+			`${model.provider}/${model.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(waitSpy.mock.calls.map(([delay]) => delay)).toEqual([100, 100]);
+	});
+
+	it("does not retry a candidate when the explicit compaction retry budget is zero, but advances to the next candidate", async () => {
+		const fallbackModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime(fallbackModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, fallbackModel]);
+		cfgCompactionModels.override(maintenanceSettings, [
+			`${model.provider}/${model.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 1);
+		cfgRetryMaxRetries.set(maintenanceSettings, 3);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 0);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			throw new AIError.ProviderHttpError("service temporarily unavailable", 503);
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("idle");
+
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		expect(attemptedModels).toEqual([
+			`${model.provider}/${model.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(waitSpy).not.toHaveBeenCalled();
+	});
+
+	it("honors speculative retry hints above the default delay ceiling when configured", async () => {
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 1);
+		cfgRetryMaxRetries.set(maintenanceSettings, 1);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 1);
+		cfgCompactionRetryMaxDelayMs.override(maintenanceSettings, 300_000);
+		const waitSpy = mockSchedulerWaitWithClock();
+		let attempts = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			if (++attempts === 1) {
+				throw new AIError.ProviderHttpError("service temporarily unavailable retry-after-ms=60000", 503);
+			}
+			return {
+				summary: "speculative retry summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		expect(waitSpy.mock.calls.map(([delay]) => delay)).toEqual([60_000]);
+	});
+
+	it("advances speculative retry hints over the configured ceiling on the final candidate", async () => {
+		const fallbackModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime(fallbackModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, fallbackModel]);
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 1);
+		cfgRetryMaxRetries.set(maintenanceSettings, 1);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 1);
+		cfgCompactionRetryMaxDelayMs.override(maintenanceSettings, 30_000);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			throw new AIError.ProviderHttpError("service temporarily unavailable retry-after-ms=60000", 503);
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("idle");
+
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		expect(attemptedModels).toEqual([
+			`${model.provider}/${model.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(waitSpy).not.toHaveBeenCalled();
+	});
 	it("does not call the summarizer below the speculative band, then arms inside it", async () => {
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "speculative summary",
@@ -576,6 +712,44 @@ describe("async speculative compaction", () => {
 		expect(compactSpy).not.toHaveBeenCalled();
 	});
 
+	it("uses explicit summary models for speculation and excludes an active implicit model", async () => {
+		const explicitModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!explicitModel) throw new Error("Expected bundled explicit summary model");
+		authStorage.keys.setRuntime(explicitModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, explicitModel]);
+		maintenance = createMaintenance({
+			methodOrder: ["handoff", "soft"],
+			models: [`${explicitModel.provider}/${explicitModel.id}`],
+		});
+		const attemptedModels: string[] = [];
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			return {
+				summary: "explicit speculative summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(attemptedModels).toEqual([`${explicitModel.provider}/${explicitModel.id}`]);
+	});
+
+	it("does not request a summary or restore implicit models when explicit selectors are unresolved", async () => {
+		maintenance = createMaintenance({ models: ["missing-provider/missing-model"] });
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		const completion = maintenance.speculationCompletion;
+		if (!completion) throw new Error("Expected unresolved-selector speculation task");
+		await completion;
+
+		expect(maintenance.speculationState).toBe("idle");
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
 	it("does not speculate when snapcompact leads the configured methods", () => {
 		// Snapcompact is local and effectively instant — there is no
 		// summarization latency to hide, so no background run may start.
@@ -789,8 +963,39 @@ describe("async speculative compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 	});
 
-	it("keeps speculating natively after a failure a retry can clear", async () => {
+	it("retries a transient native speculative failure within the configured budget", async () => {
 		useNativeCompactionModel();
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 1);
+		cfgRetryMaxRetries.set(maintenanceSettings, 1);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 1);
+		const waitSpy = mockSchedulerWaitWithClock();
+		let attempts = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			if (++attempts === 1) {
+				throw new compactionModule.NativeCompactionError(
+					new AIError.ProviderHttpError("Anthropic compaction failed: Overloaded", 529),
+				);
+			}
+			return {
+				summary: "native speculative retry summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await maintenance.speculationCompletion;
+
+		expect(maintenance.speculationState).toBe("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		expect(waitSpy.mock.calls.map(([delay]) => delay)).toEqual([1]);
+	});
+	it("allows later native speculation after a transient failure exhausts the run budget", async () => {
+		useNativeCompactionModel();
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model]);
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 0);
 		const compactSpy = vi
 			.spyOn(compactionModule, "compact")
 			.mockRejectedValue(
@@ -804,6 +1009,7 @@ describe("async speculative compaction", () => {
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START + 500, CONTEXT_WINDOW);
 		expect(maintenance.speculationState).toBe("running");
 		await maintenance.speculationCompletion;
+
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 	});
 

@@ -5,7 +5,9 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
 import { cfgCompactionModels } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { create, Flag } from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { logger } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -155,6 +157,132 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		]);
 	});
 
+	it.each([
+		["quota", new AIError.ProviderHttpError("insufficient_quota", 429)],
+		["capacity", new AIError.ProviderHttpError("model capacity exhausted", 503)],
+	])(
+		"advances to an explicit model on a classified %s response without logging raw details",
+		async (_label, limitError) => {
+			const harness = await createHarness();
+			const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!fallbackModel) throw new Error("Expected bundled fallback model");
+			authStorage?.keys.setRuntime(fallbackModel.provider, "test-key");
+			cfgCompactionModels.override(harness.session.settings, [
+				`${harness.activeModel.provider}/${harness.activeModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			const sensitiveMarker = "SENSITIVE_PROVIDER_DETAIL";
+			const decoratedError = Object.assign(limitError, { message: `${limitError.message} ${sensitiveMarker}` });
+			const logEvents: logger.LogEvent[] = [];
+			const disposeLogSink = logger.registerLogSink(event => {
+				if (event.level === "warn") logEvents.push(event);
+			});
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+				if (model.provider === harness.activeModel.provider) throw decoratedError;
+				return {
+					summary: "fallback summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: 42,
+				};
+			});
+
+			try {
+				await expect(harness.session.compact()).resolves.toMatchObject({ summary: "fallback summary" });
+
+				expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+					`${harness.activeModel.provider}/${harness.activeModel.id}`,
+					`${fallbackModel.provider}/${fallbackModel.id}`,
+				]);
+				expect(JSON.stringify(logEvents)).not.toContain(sensitiveMarker);
+			} finally {
+				disposeLogSink();
+			}
+		},
+	);
+
+	it("preserves terminal HTTP 400 capacity errors without trying another candidate", async () => {
+		const harness = await createHarness();
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage?.keys.setRuntime(fallbackModel.provider, "test-key");
+		cfgCompactionModels.override(harness.session.settings, [
+			`${harness.activeModel.provider}/${harness.activeModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		const terminalCapacity = new AIError.ProviderHttpError("requested max_tokens exceeds model output capacity", 400);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(terminalCapacity);
+
+		await expect(harness.session.compact()).rejects.toBe(terminalCapacity);
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
+	});
+
+	it("does not advance explicit fallback for abort, user interrupt, or arbitrary errors", async () => {
+		for (const failure of [
+			new AIError.AbortError(),
+			Object.assign(new Error("user interrupted"), { errorId: create(Flag.UserInterrupt) }),
+			new Error("unexpected parser failure"),
+		]) {
+			const harness = await createHarness();
+			const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!fallbackModel) throw new Error("Expected bundled fallback model");
+			authStorage?.keys.setRuntime(fallbackModel.provider, "test-key");
+			cfgCompactionModels.override(harness.session.settings, [
+				`${harness.activeModel.provider}/${harness.activeModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(failure);
+
+			await expect(harness.session.compact()).rejects.toBe(failure);
+
+			expect(compactSpy).toHaveBeenCalledTimes(1);
+			expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
+			await harness.session.dispose();
+			session = undefined;
+			vi.restoreAllMocks();
+		}
+	});
+	it("does not advance explicit fallback after the compaction signal is aborted", async () => {
+		const harness = await createHarness();
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage?.keys.setRuntime(fallbackModel.provider, "test-key");
+		cfgCompactionModels.override(harness.session.settings, [
+			`${harness.activeModel.provider}/${harness.activeModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		const abortError = new AIError.ProviderHttpError("rate limit exceeded", 429);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async () => {
+			harness.session.abortCompaction();
+			throw abortError;
+		});
+
+		await expect(harness.session.compact()).rejects.toBe(abortError);
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
+	});
+	it("keeps native manual compaction failures inside the provider lane", async () => {
+		const harness = await createHarness();
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage?.keys.setRuntime(fallbackModel.provider, "test-key");
+		cfgCompactionModels.override(harness.session.settings, [
+			`${harness.activeModel.provider}/${harness.activeModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		const nativeFailure = new compactionModule.NativeCompactionError(new Error("native transport failed"));
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(nativeFailure);
+
+		await expect(harness.session.compact()).rejects.toBe(nativeFailure);
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(compactSpy.mock.calls.map(([, candidate]) => `${candidate.provider}/${candidate.id}`)).toEqual([
+			`${harness.activeModel.provider}/${harness.activeModel.id}`,
+		]);
+		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
+	});
 	it("preserves a classified rate-limit error without an explicit model list", async () => {
 		const harness = await createHarness();
 		const rateLimit = new AIError.ProviderHttpError("rate limit exceeded", 429);

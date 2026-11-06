@@ -198,7 +198,7 @@ function isCompactionMethodUsable(
 		: candidate === "snapcompact"
 			? !excludeMedia && model?.input.includes("image") === true
 			: candidate === "handoff"
-				? reason !== "overflow"
+				? reason !== "overflow" && settings.models.length === 0
 				: true;
 }
 
@@ -2278,6 +2278,8 @@ export class SessionMaintenance {
 				reason: "context_limit",
 				phase: "standalone_turn",
 			});
+			const retrySettings = cfgRetry.get(this.#host.settings);
+			const configuredMaxRetries = cfgCompactionMaxRetries.get(this.#host.settings);
 			const result = await this.#compactWithFallbackModel(
 				preparation,
 				undefined,
@@ -2294,6 +2296,13 @@ export class SessionMaintenance {
 					preferWebsockets: false,
 				},
 				candidates,
+				false,
+				{
+					enabled: retrySettings.enabled,
+					maxRetries: configuredMaxRetries >= 0 ? configuredMaxRetries : retrySettings.maxRetries,
+					baseDelayMs: retrySettings.baseDelayMs,
+					maxDelayMs: cfgCompactionRetryMaxDelayMs.get(this.#host.settings),
+				},
 			);
 			armed = {
 				result: {
@@ -3442,6 +3451,10 @@ export class SessionMaintenance {
 		if (configuredModels.length > 0) {
 			const resolutionBase = preferredModel ?? this.#model;
 			for (const selector of configuredModels) {
+				if (typeof selector !== "string") {
+					logger.warn("Configured compaction model is not a string; skipping malformed entry");
+					continue;
+				}
 				const resolved = resolutionBase
 					? resolveConfiguredModelTarget(selector, resolutionBase, availableModels)
 					: undefined;
@@ -3497,11 +3510,13 @@ export class SessionMaintenance {
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
 		advanceOnConfiguredLimit = false,
+		autoRetry?: { enabled: boolean; maxRetries: number; baseDelayMs: number; maxDelayMs: number },
 	): Promise<CompactionResult> {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
+		let lastAutoError: unknown;
 
 		for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 			const candidate = candidates[candidateIndex];
@@ -3516,76 +3531,119 @@ export class SessionMaintenance {
 				throw nativeCompactionFailure.error;
 			}
 
-			try {
-				return await compact(
-					this.#host.obfuscatePreparationForProvider(preparation),
-					candidate,
-					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
-					this.#host.obfuscateTextForProvider(customInstructions),
-					signal,
-					{
-						...options,
-						metadata: this.#host.agent.metadataForProvider(candidate.provider),
-						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
-						buildProviderContext: (summarized, retained, signal) =>
-							this.#host.buildLiveProviderContext(summarized, retained, signal),
-						isUserAuthored: isUserAuthoredMessage,
-						telemetry,
-						// Honor the user's /model thinking selection (incl. `off`) on
-						// the manual `/compact` path. Clamped per-model inside compact()
-						// via resolveCompactionEffort so unsupported-effort models
-						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
-						thinkingLevel: this.#host.thinkingLevel(),
-						tools: this.#host.agent.state.tools,
-						sessionId: this.#host.sessionId(),
-						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
-						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets(),
-						// Route every summarization HTTP request through the session's side-stream
-						// transport so provider concurrency caps bracket compaction too.
-						completeImpl: async (requestModel, requestContext, requestOptions) => {
-							const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-							return stream.result();
-						},
-					},
-				);
-			} catch (error) {
-				const classificationError = error instanceof NativeCompactionError ? error.cause : error;
-				const id = AIError.classify(classificationError, candidate.api);
-				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
-				if (error instanceof NativeCompactionError) {
-					nativeCompactionFailure ??= { error, provider: candidate.provider };
-					continue;
-				}
-				const message = error instanceof Error ? error.message : String(error);
-				const reason = AIError.parseRateLimitReason(message);
-				const rateOrCapacity =
-					reason === "RATE_LIMIT_EXCEEDED" ||
-					reason === "CONCURRENT_LIMIT" ||
-					reason === "MODEL_CAPACITY_EXHAUSTED" ||
-					(AIError.status(error) === 429 && AIError.is(id, AIError.Flag.Transient));
-				const cancelled = AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt);
-				if (
-					advanceOnConfiguredLimit &&
-					hasMoreCandidates &&
-					!signal.aborted &&
-					!cancelled &&
-					(AIError.is(id, AIError.Flag.UsageLimit) || rateOrCapacity)
-				) {
-					logger.warn(
-						"Manual compaction candidate hit a classified provider limit; trying the next configured model",
+			let attempt = 0;
+			while (true) {
+				try {
+					return await compact(
+						this.#host.obfuscatePreparationForProvider(preparation),
+						candidate,
+						this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
+						this.#host.obfuscateTextForProvider(customInstructions),
+						signal,
 						{
-							model: `${candidate.provider}/${candidate.id}`,
-							error: message,
+							...options,
+							...(autoRetry ? { oneshotRetry: false } : {}),
+							metadata: this.#host.agent.metadataForProvider(candidate.provider),
+							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+							buildProviderContext: (summarized, retained, signal) =>
+								this.#host.buildLiveProviderContext(summarized, retained, signal),
+							isUserAuthored: isUserAuthoredMessage,
+							telemetry,
+							// Honor the user's /model thinking selection (incl. `off`) on
+							// the manual `/compact` path. Clamped per-model inside compact()
+							// via resolveCompactionEffort so unsupported-effort models
+							// (xai-oauth/grok-build) don't trip requireSupportedEffort.
+							thinkingLevel: this.#host.thinkingLevel(),
+							tools: this.#host.agent.state.tools,
+							sessionId: this.#host.sessionId(),
+							promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
+							providerSessionState: this.#host.providerSessionState,
+							preferWebsockets: this.#host.preferWebsockets(),
+							// Route every summarization HTTP request through the session's side-stream
+							// transport so provider concurrency caps bracket compaction too.
+							completeImpl: async (requestModel, requestContext, requestOptions) => {
+								const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+								return stream.result();
+							},
 						},
 					);
-					continue;
+				} catch (error) {
+					if (signal.aborted) throw error;
+					const classificationError = error instanceof NativeCompactionError ? error.cause : error;
+					const id = AIError.classify(classificationError, candidate.api);
+					if (AIError.is(id, AIError.Flag.AuthFailed)) break;
+					if (error instanceof NativeCompactionError) {
+						nativeCompactionFailure ??= { error, provider: candidate.provider };
+						if (!autoRetry) break;
+					}
+					if (autoRetry) {
+						const message = error instanceof Error ? error.message : String(error);
+						const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+						const shouldRetry =
+							autoRetry.enabled &&
+							attempt < autoRetry.maxRetries &&
+							!AIError.is(id, AIError.Flag.ContextOverflow) &&
+							(retryAfterMs !== undefined ||
+								AIError.is(id, AIError.Flag.Transient) ||
+								AIError.is(id, AIError.Flag.UsageLimit));
+						if (shouldRetry) {
+							const baseDelayMs = autoRetry.baseDelayMs * 2 ** attempt;
+							const delayMs = retryAfterMs !== undefined ? Math.max(baseDelayMs, retryAfterMs) : baseDelayMs;
+							if (autoRetry.maxDelayMs > 0 && delayMs > autoRetry.maxDelayMs) {
+								lastAutoError = error;
+								break;
+							}
+							attempt++;
+							logger.warn("Speculative compaction failed, retrying", {
+								attempt,
+								maxRetries: autoRetry.maxRetries,
+								delayMs,
+								retryAfterMs,
+								model: `${candidate.provider}/${candidate.id}`,
+							});
+							await scheduler.wait(delayMs, { signal });
+							continue;
+						}
+						lastAutoError = error;
+						break;
+					}
+					if (error instanceof NativeCompactionError) {
+						nativeCompactionFailure ??= { error, provider: candidate.provider };
+						break;
+					}
+					const message = error instanceof Error ? error.message : String(error);
+					const reason = AIError.parseRateLimitReason(message);
+					const status = AIError.status(error);
+					const classifiedRateOrCapacity =
+						AIError.is(id, AIError.Flag.Transient) &&
+						(reason === "RATE_LIMIT_EXCEEDED" ||
+							reason === "CONCURRENT_LIMIT" ||
+							reason === "MODEL_CAPACITY_EXHAUSTED");
+					const cancelled = AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt);
+					if (
+						advanceOnConfiguredLimit &&
+						hasMoreCandidates &&
+						!cancelled &&
+						(AIError.is(id, AIError.Flag.UsageLimit) || classifiedRateOrCapacity)
+					) {
+						logger.warn(
+							"Manual compaction candidate hit a classified provider limit; trying the next configured model",
+							{
+								model: `${candidate.provider}/${candidate.id}`,
+								reason,
+								status,
+								usageLimit: AIError.is(id, AIError.Flag.UsageLimit),
+							},
+						);
+						break;
+					}
+					throw error;
 				}
-				throw error;
 			}
 		}
 
 		if (nativeCompactionFailure) throw nativeCompactionFailure.error;
+		if (lastAutoError) throw lastAutoError;
 		throw this.#buildCompactionAuthError();
 	}
 
@@ -5208,18 +5266,22 @@ export class SessionMaintenance {
 
 							// Long waits may use the next candidate instead, unless a native
 							// failure must remain within its provider-specific lane.
-							if (maxAcceptableDelayMs > 0 && delayMs > maxAcceptableDelayMs && hasMoreCandidates) {
+							if (maxAcceptableDelayMs > 0 && delayMs > maxAcceptableDelayMs) {
 								if (error instanceof NativeCompactionError) {
 									nativeCompactionFailure ??= { error, provider: candidate.provider };
 									lastError = nativeCompactionFailure.error;
 									break;
 								}
-								logger.warn("Auto-compaction retry delay too long, trying next model", {
-									delayMs,
-									retryAfterMs,
-									error: message,
-									model: `${candidate.provider}/${candidate.id}`,
-								});
+								logger.warn(
+									hasMoreCandidates
+										? "Auto-compaction retry delay too long, trying next model"
+										: "Auto-compaction retry delay exceeds the configured ceiling, stopping retries",
+									{
+										delayMs,
+										retryAfterMs,
+										model: `${candidate.provider}/${candidate.id}`,
+									},
+								);
 								lastError = error;
 								break;
 							}

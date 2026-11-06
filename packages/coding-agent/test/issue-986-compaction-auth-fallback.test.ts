@@ -394,6 +394,28 @@ describe("issue #986 compaction auth fallback", () => {
 		]);
 		expect(waitSpy).not.toHaveBeenCalled();
 	});
+	it("does not wait beyond the configured retry ceiling on the final automatic candidate", async () => {
+		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
+		cfgRetryEnabled.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 1);
+		cfgRetryMaxRetries.set(session.settings, 1);
+		cfgCompactionMaxRetries.override(session.settings, 1);
+		cfgCompactionRetryMaxDelayMs.override(session.settings, 30_000);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			throw new AIError.ProviderHttpError("service temporarily unavailable retry-after-ms=60000", 503);
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+		expect(waitSpy).not.toHaveBeenCalled();
+	});
 
 	it("uses the explicit compaction retry budget instead of the larger inherited retry budget", async () => {
 		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
@@ -430,7 +452,6 @@ describe("issue #986 compaction auth fallback", () => {
 		]);
 		expect(waitSpy).toHaveBeenCalledTimes(1);
 	});
-
 	it("inherits the retry.maxRetries budget when compaction.maxRetries is unset", async () => {
 		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
 		cfgRetryEnabled.set(session.settings, true);
@@ -465,6 +486,104 @@ describe("issue #986 compaction auth fallback", () => {
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 		]);
 		expect(waitSpy).toHaveBeenCalledTimes(2);
+	});
+	it("preserves exponential backoff and gives each fallback candidate a fresh retry budget", async () => {
+		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
+		cfgRetryEnabled.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 100);
+		cfgRetryMaxRetries.set(session.settings, 2);
+		cfgCompactionRetryMaxDelayMs.override(session.settings, 300_000);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.id === currentModel.id) throw new AIError.ProviderHttpError("service temporarily unavailable", 503);
+			if (
+				model.id === sameProviderModel.id &&
+				attemptedModels.filter(id => id === `${model.provider}/${model.id}`).length === 1
+			) {
+				throw new AIError.ProviderHttpError("service temporarily unavailable", 503);
+			}
+			return {
+				summary: "fallback summary",
+				shortSummary: "fallback",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${currentModel.provider}/${currentModel.id}`,
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+		expect(waitSpy.mock.calls.map(([delay]) => delay)).toEqual([100, 200, 100]);
+	});
+
+	it("does not retry when compaction.maxRetries is zero", async () => {
+		const { currentModel, sameProviderModel, triggerAutoCompaction } = await createAutoNativeFallbackSession();
+		cfgRetryEnabled.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 1);
+		cfgRetryMaxRetries.set(session.settings, 3);
+		cfgCompactionMaxRetries.override(session.settings, 0);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (model.id === currentModel.id) throw new AIError.ProviderHttpError("service temporarily unavailable", 503);
+			if (model.id !== sameProviderModel.id) throw new Error(`Unexpected compaction model ${model.id}`);
+			return {
+				summary: "fallback summary",
+				shortSummary: "fallback",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${sameProviderModel.provider}/${sameProviderModel.id}`,
+		]);
+		expect(waitSpy).not.toHaveBeenCalled();
+	});
+
+	it("disables the retry ceiling when the compaction delay limit is zero", async () => {
+		const { currentModel, triggerAutoCompaction } = await createAutoNativeFallbackSession({
+			includeSoftFallback: true,
+		});
+		cfgRetryEnabled.set(session.settings, true);
+		cfgRetryBaseDelayMs.set(session.settings, 1);
+		cfgRetryMaxRetries.set(session.settings, 1);
+		cfgCompactionMaxRetries.override(session.settings, 1);
+		cfgCompactionRetryMaxDelayMs.override(session.settings, 0);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			attemptedModels.push(`${model.provider}/${model.id}`);
+			if (attemptedModels.length === 1) {
+				throw new AIError.ProviderHttpError("service temporarily unavailable retry-after-ms=60000", 503);
+			}
+			return {
+				summary: "native retry summary",
+				shortSummary: "native retry",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await triggerAutoCompaction();
+
+		expect(attemptedModels).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+			`${currentModel.provider}/${currentModel.id}`,
+		]);
+		expect(waitSpy.mock.calls.map(([delay]) => delay)).toEqual([60_000]);
 	});
 
 	it("preserves native timeout failures before crossing providers", async () => {

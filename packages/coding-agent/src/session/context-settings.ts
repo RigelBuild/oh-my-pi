@@ -395,6 +395,12 @@ export const cfgCompactionModels = register({
 		editor: "json",
 		ordered: true,
 	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(entry => typeof entry !== "string")) {
+			throw new Error("compaction.models must be a list of model target strings");
+		}
+	},
 });
 
 export const cfgCompactionSupersedeReads = register({

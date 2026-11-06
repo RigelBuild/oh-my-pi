@@ -225,9 +225,9 @@ compaction:
   maxRetries: -1
 ```
 
-A non-empty list replaces all implicit summary candidates. Each entry uses `resolveConfiguredModelTarget`, the same configured-target resolver used by context promotion: `provider/model-id` selectors and same-provider model ids resolve without role aliases. Duplicate models are attempted once; unresolved targets warn and are skipped. An empty list keeps the legacy configured target, active model, chat-role candidates, and optional largest-context fallback.
+A non-empty list replaces all implicit summary candidates. Each entry uses `resolveConfiguredModelTarget`, the same configured-target resolver used by context promotion: `provider/model-id` selectors and same-provider model ids resolve without role aliases. Duplicate models are attempted once; unresolved targets warn and are skipped. An empty list keeps the legacy configured target, active model, chat-role candidates, and optional largest-context fallback. Automatic handoff is skipped when the list is non-empty because its generator cannot select from the configured candidates; standalone handoff is unchanged.
 
-Manual `/compact` advances to another explicitly listed model only after a classified rate, capacity, or usage-limit failure and when another candidate remains. Without an explicit list, that error is returned unchanged. Automatic compaction retains exponential backoff. `compaction.retryMaxDelayMs` (default 30 seconds) is the wait ceiling before auto-compaction tries the next candidate, and `compaction.maxRetries` (default `-1`) inherits `retry.maxRetries`; set it to zero to disable same-model retries.
+Manual `/compact` advances to another explicitly listed model only after a classified rate, capacity, or usage-limit failure and when another candidate remains. Without an explicit list, that error is returned unchanged. Automatic compaction retains exponential backoff. `compaction.retryMaxDelayMs` (default 30 seconds) is the wait ceiling before auto-compaction tries the next candidate, and `compaction.maxRetries` (default `-1`) inherits `retry.maxRetries`; set it to zero to disable same-model retries. These automatic retry settings also apply to speculative summaries.
 
 ### Maintenance progress guard
 
