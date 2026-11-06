@@ -38,6 +38,72 @@ describe("compaction prefers the current session model over modelRoles.default",
 		authStorage?.close();
 		tempDir.removeSync();
 	});
+	async function compactCandidateIds(settings: Settings): Promise<string[]> {
+		const baseCurrentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const compactionModel = getBundledModel("openai", "gpt-5");
+		const largerContextModel = getBundledModel("anthropic", "claude-fable-5-1");
+		if (!baseCurrentModel || !compactionModel || !largerContextModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const currentModel = buildModel({
+			...baseCurrentModel,
+			compactionModel: `${compactionModel.provider}/${compactionModel.id}`,
+			compat: baseCurrentModel.compatConfig,
+		});
+		const agent = new Agent({
+			initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		for (const model of [currentModel, compactionModel, largerContextModel]) {
+			authStorage.keys.setRuntime(model.provider, `${model.provider}-token`);
+		}
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([currentModel, compactionModel, largerContextModel]);
+		session.subscribe(() => {});
+
+		for (const [userText, assistantText] of [
+			["first question", "first answer"],
+			["second question", "second answer"],
+		] as const) {
+			const user = userMsg(userText);
+			const assistant = assistantMsg(assistantText);
+			session.agent.appendMessage(user);
+			session.sessionManager.appendMessage(user);
+			session.agent.appendMessage(assistant);
+			session.sessionManager.appendMessage(assistant);
+		}
+
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValue(new AIError.AwsCredentialsError("test auth failure", "resolution"));
+		await expect(session.compact()).rejects.toThrow();
+		return compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`);
+	}
+
+	it("appends the largest-context fallback after the configured compaction model by default", async () => {
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] });
+		const candidates = await compactCandidateIds(settings);
+		expect(candidates).toEqual(["openai/gpt-5", "anthropic/claude-sonnet-4-5", "anthropic/claude-fable-5-1"]);
+	});
+
+	it("omits the largest-context fallback when disabled and keeps the configured target first", async () => {
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+			"compaction.largestContextFallback": false,
+		});
+
+		const candidates = await compactCandidateIds(settings);
+		expect(candidates[0]).toBe("openai/gpt-5");
+		expect(candidates).not.toContain("anthropic/claude-fable-5-1");
+	});
 
 	it("uses the active Anthropic chat model when modelRoles.default points at an OpenAI model", async () => {
 		const currentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
