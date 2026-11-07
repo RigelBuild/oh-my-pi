@@ -1692,6 +1692,7 @@ async function openInitialCodexEventStream(
 				recordCodexWebSocketFailure(websocketState, activateFallback);
 				CODEX_DEBUG &&
 					logger.debug("[codex] codex websocket fallback", {
+						error: error.message,
 						retry: websocketRetries,
 						retryBudget: websocketRetryBudget,
 						activated: activateFallback,
@@ -1982,6 +1983,7 @@ async function openCodexWebSocketTransport(
 			url: toWebSocketUrl(requestContext.url),
 			model: requestContext.transformedBody.model,
 			reasoningEffort: requestContext.transformedBody.reasoning?.effort ?? null,
+			headers: redactHeaders(websocketHeaders),
 			sentTurnStateHeader: websocketHeaders.has(X_CODEX_TURN_STATE_HEADER),
 			sentModelsEtagHeader: websocketHeaders.has(X_MODELS_ETAG_HEADER),
 			requestType: websocketRequest.type,
@@ -2760,7 +2762,7 @@ class CodexStreamProcessor {
 		// complete and the server continues from it, so it chains and ends like a
 		// completed response.
 		const steered = status === "incomplete" && incompleteReason === "steered";
-		if (steered) logger.debug("Codex response stopped for steering", { responseIdPresent: responseId !== undefined });
+		if (steered) logger.debug("Codex response stopped for steering", { responseId });
 
 		const state = runtime.websocketState;
 		if (state) {
@@ -3095,6 +3097,7 @@ class CodexStreamProcessor {
 		recordCodexWebSocketFailure(state, activateFallback);
 		CODEX_DEBUG &&
 			logger.debug("[codex] codex websocket stream fallback", {
+				error: streamError.message,
 				retry: this.runtime.websocketStreamRetries,
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 				activated: activateFallback,
@@ -3192,6 +3195,7 @@ class CodexStreamProcessor {
 
 		CODEX_DEBUG &&
 			logger.debug("[codex] retrying codex provider stream error", {
+				error: error instanceof Error ? error.message : String(error),
 				retry: this.runtime.providerRetryAttempt,
 				retryBudget: CODEX_MAX_RETRIES,
 				transport: this.runtime.transport,
@@ -3237,6 +3241,7 @@ class CodexStreamProcessor {
 			recordCodexWebSocketFailure(state, true);
 			CODEX_DEBUG &&
 				logger.debug("[codex] codex websocket reopen failed, falling back to SSE", {
+					error: error.message,
 					retry: this.runtime.websocketStreamRetries,
 				});
 			await this.#reopenSseStream(state);
@@ -3362,10 +3367,12 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			try {
 				const failure = await handleCodexStreamFailure(failureContext, error);
 				stream.push({ type: "error", reason: failure.stopReason as "error" | "aborted", error: failure });
-			} catch {
+			} catch (failureError) {
 				// Last resort — the failure handler itself threw (exotic error object or
 				// request-dump formatting). Never leave the stream un-ended.
-				logger.error("Codex stream failure handler threw");
+				logger.error("Codex stream failure handler threw", {
+					error: failureError instanceof Error ? failureError.message : String(failureError),
+				});
 				output.stopReason = "error";
 				output.errorMessage ??= error instanceof Error ? error.message : String(error);
 				stream.push({ type: "error", reason: "error", error: output });
@@ -3766,18 +3773,6 @@ function buildCodexTurnRequestDiagnostics(
 	};
 }
 
-function safeCodexTurnRequestDiagnostics(
-	request: OpenAICodexTurnRequestDiagnostics,
-): Record<string, string | number | boolean> {
-	return {
-		transport: request.transport,
-		previousResponseIdPresent: request.previousResponseIdPresent,
-		inputItemCount: request.inputItemCount,
-		inputJsonBytes: request.inputJsonBytes,
-		canAppendBeforeRequest: request.canAppendBeforeRequest,
-	};
-}
-
 function recordCodexTurnRequestDiagnostics(
 	state: CodexWebSocketSessionState | undefined,
 	request: Record<string, unknown>,
@@ -3803,11 +3798,7 @@ function recordCodexTurnRequestDiagnostics(
 	state.stats.lastTurn = {
 		request: buildCodexTurnRequestDiagnostics(request, transport, canAppendBeforeRequest),
 	};
-	CODEX_DEBUG &&
-		logger.debug(
-			"[codex] codex turn request diagnostics",
-			safeCodexTurnRequestDiagnostics(state.stats.lastTurn.request),
-		);
+	CODEX_DEBUG && logger.debug("[codex] codex turn request diagnostics", { diagnostics: state.stats.lastTurn.request });
 }
 
 function recordCodexTurnUsageDiagnostics(
@@ -3848,13 +3839,7 @@ function recordCodexTurnUsageDiagnostics(
 		...state.stats.lastTurn,
 		usage: usageDiagnostics,
 	};
-	if (CODEX_DEBUG) {
-		const safe = safeCodexTurnRequestDiagnostics(state.stats.lastTurn.request);
-		for (const [key, value] of Object.entries(usageDiagnostics)) {
-			if (typeof value === "number" && Number.isFinite(value) && value >= 0) safe[key] = value;
-		}
-		logger.debug("[codex] codex turn diagnostics", safe);
-	}
+	CODEX_DEBUG && logger.debug("[codex] codex turn diagnostics", { diagnostics: state.stats.lastTurn });
 }
 
 const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
@@ -4815,6 +4800,7 @@ async function openCodexSseEventStream(
 		logger.debug("[codex] codex request", {
 			url,
 			model: body.model,
+			headers: redactHeaders(headers),
 			sentTurnStateHeader: headers.has(X_CODEX_TURN_STATE_HEADER),
 			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
 		});
@@ -4859,7 +4845,11 @@ async function openCodexSseEventStream(
 	}
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex response", {
+			url: response.url,
 			status: response.status,
+			statusText: response.statusText,
+			contentType: response.headers.get("content-type") || null,
+			cfRay: response.headers.get("cf-ray") || null,
 		});
 	if (!response.ok) {
 		// The pre-response guard is still armed for a non-2xx response; keep it live
@@ -4976,6 +4966,33 @@ function createCodexHeaders(
 		headers.delete("content-type");
 	}
 	return headers;
+}
+
+function redactHeaders(headers: Headers): Record<string, string> {
+	const redacted: Record<string, string> = {};
+	for (const [key, value] of headers.entries()) {
+		const lower = key.toLowerCase();
+		if (lower === "authorization") {
+			redacted[key] = "Bearer [redacted]";
+			continue;
+		}
+		if (
+			lower.includes("account") ||
+			lower.includes("session") ||
+			lower.includes("conversation") ||
+			lower.includes("thread") ||
+			lower.includes("window") ||
+			lower.includes("installation") ||
+			lower.startsWith("x-codex-turn") ||
+			lower === "x-client-request-id" ||
+			lower === "cookie"
+		) {
+			redacted[key] = "[redacted]";
+			continue;
+		}
+		redacted[key] = value;
+	}
+	return redacted;
 }
 
 /** Resolve a Codex Responses endpoint exactly as the chat and compaction transports do. */

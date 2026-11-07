@@ -81,7 +81,7 @@ import {
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
-import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import {
 	ANTHROPIC_SLOW_USAGE_LIMIT,
@@ -1110,8 +1110,11 @@ async function resizeAnthropicImageBlock(block: ImageContent, caps: AnthropicIma
 			data,
 			mimeType: best.mimeType,
 		};
-	} catch {
-		logger.warn("anthropic: failed to resize oversized image");
+	} catch (error) {
+		logger.warn("anthropic: failed to resize oversized image", {
+			mimeType: block.mimeType,
+			error: error instanceof Error ? error.message : String(error),
+		});
 		return block;
 	}
 }
@@ -1669,7 +1672,7 @@ async function* iterateAnthropicEvents(
 		try {
 			const event = JSON.parse(sse.data) as RawMessageStreamEvent;
 			if (event.type !== sse.event) {
-				reportAnthropicEnvelopeAnomaly("event type does not match SSE event");
+				reportAnthropicEnvelopeAnomaly(`event type ${event.type} does not match SSE event ${sse.event}`);
 			}
 			if (event.type === "message_start") {
 				sawMessageStart = true;
@@ -1677,8 +1680,11 @@ async function* iterateAnthropicEvents(
 				sawMessageEnd = true;
 			}
 			yield event;
-		} catch {
-			reportAnthropicEnvelopeAnomaly("could not parse SSE event; skipping frame");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			reportAnthropicEnvelopeAnomaly(
+				`could not parse SSE event ${sse.event}: ${message}; skipping frame; data=${sse.data}`,
+			);
 		}
 	}
 
@@ -2771,8 +2777,10 @@ const streamAnthropicOnce = (
 							} else {
 								reportAnthropicEnvelopeAnomaly("server_tool_use input is not a JSON object");
 							}
-						} catch {
-							reportAnthropicEnvelopeAnomaly("server_tool_use input is not valid JSON");
+						} catch (parseError) {
+							reportAnthropicEnvelopeAnomaly(
+								`server_tool_use ${block.block.id} input is not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+							);
 						}
 					}
 					clearStreamingPartialJson(block);
@@ -2784,7 +2792,9 @@ const streamAnthropicOnce = (
 					// Keep malformed calls non-fatal, but never execute their auto-closed previews.
 					block.arguments = parseToolCallArguments(finalJson);
 					if (isRecord(block.arguments) && "__parseError" in block.arguments) {
-						reportAnthropicEnvelopeAnomaly("tool_use arguments are not valid JSON");
+						reportAnthropicEnvelopeAnomaly(
+							`tool_use ${block.id} arguments are not valid JSON: ${block.arguments.__parseError}`,
+						);
 					}
 					clearStreamingPartialJson(block);
 					stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
@@ -3144,18 +3154,20 @@ const streamAnthropicOnce = (
 
 						if (event.type === "content_block_start") {
 							if (sawTerminalEnvelope) {
-								reportAnthropicEnvelopeAnomaly("received content block event after terminal stop signal");
+								reportAnthropicEnvelopeAnomaly(`received ${event.type} after terminal stop signal`);
 								continue;
 							}
 							if (openBlocks.has(event.index)) {
-								reportAnthropicEnvelopeAnomaly("duplicate content_block_start index");
+								reportAnthropicEnvelopeAnomaly(`duplicate content_block_start index ${event.index}`);
 								continue;
 							}
 							if (sawSplicedEnvelope && closedBlockIndexes.has(event.index)) {
 								// A spliced envelope replaying an index this stream already
 								// completed would append duplicate text/tool calls; consume its
 								// events silently instead.
-								reportAnthropicEnvelopeAnomaly("replayed content_block_start after duplicate message_start");
+								reportAnthropicEnvelopeAnomaly(
+									`replayed content_block_start index ${event.index} after duplicate message_start`,
+								);
 								openBlocks.set(event.index, { contentIndex: -1, kind: "ignored" });
 								continue;
 							}
@@ -3300,12 +3312,14 @@ const streamAnthropicOnce = (
 							}
 						} else if (event.type === "content_block_delta") {
 							if (sawTerminalEnvelope) {
-								reportAnthropicEnvelopeAnomaly("received content block event after terminal stop signal");
+								reportAnthropicEnvelopeAnomaly(`received ${event.type} after terminal stop signal`);
 								continue;
 							}
 							const openBlock = openBlocks.get(event.index);
 							if (!openBlock) {
-								reportAnthropicEnvelopeAnomaly("received content_block_delta for unopened index");
+								reportAnthropicEnvelopeAnomaly(
+									`received content_block_delta for unopened index ${event.index}`,
+								);
 								continue;
 							}
 							if (openBlock.kind === "ignored") continue;
@@ -3316,7 +3330,7 @@ const streamAnthropicOnce = (
 							const block = blocks[openBlock.contentIndex];
 							if (event.delta.type === "text_delta") {
 								if (openBlock.kind !== "text" || block?.type !== "text") {
-									reportAnthropicEnvelopeAnomaly("received text_delta for incompatible block");
+									reportAnthropicEnvelopeAnomaly(`received text_delta for ${openBlock.kind} block`);
 									continue;
 								}
 								streamedReplayUnsafeContent = true;
@@ -3329,7 +3343,7 @@ const streamAnthropicOnce = (
 								});
 							} else if (event.delta.type === "thinking_delta") {
 								if (openBlock.kind !== "thinking" || block?.type !== "thinking") {
-									reportAnthropicEnvelopeAnomaly("received thinking_delta for incompatible block");
+									reportAnthropicEnvelopeAnomaly(`received thinking_delta for ${openBlock.kind} block`);
 									continue;
 								}
 								streamedReplayUnsafeContent = true;
@@ -3351,7 +3365,7 @@ const streamAnthropicOnce = (
 									continue;
 								}
 								if (openBlock.kind !== "toolCall" || block?.type !== "toolCall") {
-									reportAnthropicEnvelopeAnomaly("received input_json_delta for incompatible block");
+									reportAnthropicEnvelopeAnomaly(`received input_json_delta for ${openBlock.kind} block`);
 									continue;
 								}
 								streamedReplayUnsafeContent = true;
@@ -3372,7 +3386,7 @@ const streamAnthropicOnce = (
 								});
 							} else if (event.delta.type === "signature_delta") {
 								if (openBlock.kind !== "thinking" || block?.type !== "thinking") {
-									reportAnthropicEnvelopeAnomaly("received signature_delta for incompatible block");
+									reportAnthropicEnvelopeAnomaly(`received signature_delta for ${openBlock.kind} block`);
 									continue;
 								}
 								streamedReplayUnsafeContent = true;
@@ -3381,12 +3395,12 @@ const streamAnthropicOnce = (
 							}
 						} else if (event.type === "content_block_stop") {
 							if (sawTerminalEnvelope) {
-								reportAnthropicEnvelopeAnomaly("received content block event after terminal stop signal");
+								reportAnthropicEnvelopeAnomaly(`received ${event.type} after terminal stop signal`);
 								continue;
 							}
 							const openBlock = openBlocks.get(event.index);
 							if (!openBlock) {
-								reportAnthropicEnvelopeAnomaly("received content_block_stop for unopened index");
+								reportAnthropicEnvelopeAnomaly(`received content_block_stop for unopened index ${event.index}`);
 								continue;
 							}
 							if (openBlock.kind === "ignored") {
@@ -3400,7 +3414,7 @@ const streamAnthropicOnce = (
 							}
 							const block = blocks[openBlock.contentIndex];
 							if (!block || block.type !== openBlock.kind) {
-								reportAnthropicEnvelopeAnomaly("content_block_stop kind mismatch");
+								reportAnthropicEnvelopeAnomaly(`content_block_stop kind mismatch for index ${event.index}`);
 								openBlocks.delete(event.index);
 								continue;
 							}
@@ -3536,8 +3550,10 @@ const streamAnthropicOnce = (
 						reportAnthropicEnvelopeAnomaly("stream ended before message_stop");
 					}
 					if (openBlocks.size > 0) {
-						for (const openBlock of openBlocks.values()) {
-							reportAnthropicEnvelopeAnomaly("stream ended with an unterminated content block");
+						for (const [openIndex, openBlock] of openBlocks) {
+							reportAnthropicEnvelopeAnomaly(
+								`stream ended with an unterminated ${openBlock.kind} block at index ${openIndex}`,
+							);
 							if (openBlock.kind === "ignored" || openBlock.contentIndex < 0) continue;
 							const danglingBlock = blocks[openBlock.contentIndex];
 							if (danglingBlock) finalizeStreamBlock(danglingBlock, openBlock.contentIndex);
@@ -3564,6 +3580,7 @@ const streamAnthropicOnce = (
 						// success (consumers treat its presence as failure).
 						logger.warn("anthropic: strict tools rejected, retrying without strict tools", {
 							model: model.id,
+							error: await finalizeErrorMessage(streamFailure, rawRequestDump),
 						});
 						if (providerSessionState) {
 							providerSessionState.strictToolsDisabled = true;
@@ -3597,6 +3614,7 @@ const streamAnthropicOnce = (
 								"anthropic: fallback credit continuation shape rejected, retrying with unchanged body",
 								{
 									model: model.id,
+									error: errMessage,
 								},
 							);
 							fallbackCreditShape = "unchanged";
@@ -3615,6 +3633,7 @@ const streamAnthropicOnce = (
 								"anthropic: fallback credit token rejected, falling back to standard request without token",
 								{
 									model: model.id,
+									error: errMessage,
 								},
 							);
 							dropAllThinking = true;
@@ -3692,6 +3711,7 @@ const streamAnthropicOnce = (
 								provider: model.provider,
 								model: model.id,
 								baseUrl,
+								error: streamFailureMessage,
 							},
 						);
 						if (providerSessionState) {
@@ -3732,6 +3752,7 @@ const streamAnthropicOnce = (
 								provider: model.provider,
 								model: model.id,
 								baseUrl,
+								error: streamFailureMessage,
 							},
 						);
 						if (providerSessionState) {
@@ -3760,6 +3781,7 @@ const streamAnthropicOnce = (
 					) {
 						logger.debug("anthropic: fast mode unsupported, retrying without speed", {
 							model: model.id,
+							error: streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
 						});
 						if (providerSessionState) {
 							providerSessionState.fastModeDisabled = true;
@@ -3798,6 +3820,7 @@ const streamAnthropicOnce = (
 								provider: model.provider,
 								model: model.id,
 								baseUrl,
+								error: streamFailureMessage,
 							},
 						);
 						cacheControlOptionRejectionReplayed = true;
@@ -3862,6 +3885,7 @@ const streamAnthropicOnce = (
 							provider: model.provider,
 							model: model.id,
 							baseUrl,
+							error: streamFailureMessage,
 						});
 						cacheControlRejectionReplayed = true;
 						dropCacheControl = true;
@@ -6752,7 +6776,7 @@ function mapStopReason(reason: string): StopReason {
 			// "model_context_window_exceeded") and arrive on the trailing
 			// message_delta after all content has streamed. Degrade to a normal
 			// stop instead of failing the fully streamed turn.
-			reportAnthropicEnvelopeAnomaly("unhandled stop reason");
+			reportAnthropicEnvelopeAnomaly(`unhandled stop reason: ${reason}`);
 			return "stop";
 	}
 }
