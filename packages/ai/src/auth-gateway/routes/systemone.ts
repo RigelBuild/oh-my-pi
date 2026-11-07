@@ -27,6 +27,7 @@ import {
 	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import { gatewayLogContext, logGatewayRequestFailure } from "../logging";
 import type { CallerIdentity } from "../types";
 
 export async function handleSystemOne(
@@ -77,7 +78,14 @@ export async function handleSystemOne(
 	// still lets `markUsageLimitReached` hand off to a sibling account.
 	const sessionId = deterministicUuid(`systemone\u0000${model.provider}/${model.id}`);
 
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+	const apiKey = await resolveGatewayApiKey(
+		bootOpts.storage,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
+		gatewayLogContext(requestId, caller, "systemone", model.provider, model.id),
+	);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
 	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
@@ -95,6 +103,8 @@ export async function handleSystemOne(
 				account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
 			},
 			bootOpts.onUsageLimit,
+			undefined,
+			gatewayLogContext(requestId, caller, "systemone", model.provider, model.id),
 		),
 		fetch: bootOpts.fetch,
 	});
@@ -102,7 +112,7 @@ export async function handleSystemOne(
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "systemone",
-		model: parsed.modelId,
+		model: model.id,
 		resolvedProvider: model.provider,
 		resolvedModel: model.id,
 		stream: false,
@@ -128,7 +138,10 @@ export async function handleSystemOne(
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway judgment failed", { format: "systemone", error: classified.message, peer });
+		logGatewayRequestFailure(
+			gatewayLogContext(requestId, caller, "systemone", model.provider, model.id),
+			classified.status,
+		);
 		return systemOne.formatError(classified.status, classified.type, classified.message);
 	}
 }

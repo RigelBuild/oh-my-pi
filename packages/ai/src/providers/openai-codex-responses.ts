@@ -71,6 +71,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -2060,6 +2061,7 @@ async function openCodexSseTransport(
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
 				options?.fetch,
+				response => notifyProviderResponse(options, response, model),
 			),
 		);
 	};
@@ -4739,6 +4741,7 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	onResponse?: (response: Response) => Promise<void>,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -4763,6 +4766,16 @@ async function openCodexSseEventStream(
 		let response: Response | undefined;
 		try {
 			response = await (fetchOverride ?? fetch)(input, init);
+			if (response.ok) {
+				clearPreResponseTimeout?.();
+				clearPreResponseTimeout = undefined;
+			}
+			try {
+				await onResponse?.(response);
+			} catch {
+				// Observation must not turn accepted headers into a retryable transport failure.
+				logger.warn("[codex] response observer failed");
+			}
 			return response;
 		} finally {
 			// A successful streaming body is governed by the iterator-level idle

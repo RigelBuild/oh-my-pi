@@ -25,6 +25,14 @@ import type { Api, AssistantMessage, FetchImpl, Model, StreamOptions, Usage } fr
 import type { ClientUsageIdentity } from "../usage";
 import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
 import { extractProviderRetryHint } from "../utils/retry-after";
+import {
+	logGatewayApiKeyQuota,
+	logGatewayAttemptFailure,
+	logGatewayRecoveryFailure,
+	logGatewayRequestFailure,
+	logGatewaySelection,
+	type GatewayLogContext,
+} from "./logging";
 import type { AgentCaller, AuthGatewayServerOptions, CallerIdentity } from "./types";
 
 export type ModelResolver = (
@@ -212,17 +220,20 @@ export async function resolveGatewayApiKey(
 	model: Model<Api>,
 	sessionId: string,
 	signal: AbortSignal,
-	peer: string,
+	_peer: string,
+	logContext?: GatewayLogContext,
 ): Promise<ResolvedApiKey | GatewaySetupFailure> {
 	let apiKey: ResolvedApiKey | undefined;
 	try {
 		apiKey = await storage.keys.getWithCredential(model.provider, sessionId, modelKeyOptions(model, signal));
 	} catch (error) {
 		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+		if (logContext) logGatewayRequestFailure(logContext, classified.status);
+		else logger.warn("auth-gateway getApiKey threw", { provider: model.provider, status: classified.status });
 		return { ...classified, setupReason: "store_error" };
 	}
 	if (apiKey) return apiKey;
+	if (logContext) logGatewayRequestFailure(logContext, 401);
 	return {
 		status: 401,
 		type: "authentication_error",
@@ -262,8 +273,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	credentialId: number | undefined,
 	error: unknown,
 	signal: AbortSignal,
-	format: string,
-	peer: string,
+	logContext: GatewayLogContext | undefined,
 	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
 ): Promise<ResolvedApiKey | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
@@ -282,21 +292,16 @@ async function refreshGatewayApiKeyAfterAuthError(
 					if (typeof retry === "string") return { apiKey: retry, afterSiblingWait: true };
 					return retry ?? undefined;
 				}
-			} catch (error) {
-				logger.warn("auth-gateway usage-limit recovery failed", {
-					format,
-					provider,
-					peer,
-					error: error instanceof Error ? error.message : String(error),
-				});
+			} catch {
+				if (logContext) logGatewayRecoveryFailure(logContext, credentialId);
 			}
 		}
 		const hintMs = extractProviderRetryHint(provider, message);
-		// A drained prepaid balance has no reset; don't re-probe the paid key every minute.
+		// A drained prepaid balance has no reset; preserve policy without logging it as an observation.
 		const retryAfterMs =
 			hintMs ??
 			(isAnthropicCreditBalanceTooLow(message) ? calculateRateLimitBackoffMs("QUOTA_EXHAUSTED") : undefined);
-		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
+		const { switched } = await storage.limits.markReached(provider, sessionId, {
 			retryAfterMs,
 			providerTimed: hintMs !== undefined,
 			baseUrl: model.baseUrl,
@@ -304,25 +309,10 @@ async function refreshGatewayApiKeyAfterAuthError(
 			apiKey: oldKey,
 			signal,
 		});
-		logger.debug("auth-gateway retrying provider request after usage-limit block", {
-			format,
-			provider,
-			peer,
-			switched,
-			retryAfterMs,
-			retryAtMs,
-			error: message,
-		});
 		if (!switched) return undefined;
 		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
 	}
 	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
-	logger.debug("auth-gateway retrying provider request after credential invalidation", {
-		format,
-		provider,
-		peer,
-		error: message,
-	});
 	return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
 }
 
@@ -355,21 +345,28 @@ export function buildGatewayApiKeyResolver(
 	sessionId: string,
 	initialKey: ResolvedApiKey,
 	requestSignal: AbortSignal,
-	format: string,
-	peer: string,
+	_format: string,
+	_peer: string,
 	onResolvedKey?: (apiKey: string, credentialId: number | undefined) => void,
 	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
 	onAttemptFailed?: (credentialId: number | undefined, error: unknown) => void,
+	logContext?: GatewayLogContext,
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
 	const credentialIdsByBearer = new Map<string, number | undefined>([[initialKey.apiKey, initialKey.credentialId]]);
+	if (logContext) logGatewaySelection(logContext, initialKey.credentialId);
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
 			return initialKey;
 		}
-		onAttemptFailed?.(credentialIdsByBearer.get(previousKey ?? lastKey), error);
+		// Snapshot before any callback or await can move the resolver to a later bearer.
+		const failedKey = previousKey ?? lastKey;
+		const failedCredentialId = credentialIdsByBearer.get(failedKey);
+		onAttemptFailed?.(failedCredentialId, error);
+		if (logContext)
+			logGatewayAttemptFailure(logContext, failedCredentialId, error, lastChance ? "rotation" : "refresh");
 		if (!lastChance) {
 			const refreshed = await storage.keys.getWithCredential(model.provider, sessionId, {
 				...modelKeyOptions(model, sig),
@@ -380,6 +377,7 @@ export function buildGatewayApiKeyResolver(
 			if (refreshed) {
 				credentialIdsByBearer.set(refreshed.apiKey, refreshed.credentialId);
 				onResolvedKey?.(refreshed.apiKey, refreshed.credentialId);
+				if (logContext) logGatewaySelection(logContext, refreshed.credentialId);
 			}
 			return refreshed;
 		}
@@ -388,17 +386,17 @@ export function buildGatewayApiKeyResolver(
 			model,
 			sessionId,
 			model.provider,
-			previousKey ?? lastKey,
-			credentialIdsByBearer.get(previousKey ?? lastKey),
+			failedKey,
+			failedCredentialId,
 			error,
 			sig,
-			format,
-			peer,
+			logContext,
 			onUsageLimit,
 		);
-		lastKey = next?.apiKey ?? lastKey;
 		if (next) {
+			lastKey = next.apiKey;
 			credentialIdsByBearer.set(next.apiKey, next.credentialId);
+			if (logContext) logGatewaySelection(logContext, next.credentialId);
 			onResolvedKey?.(next.apiKey, next.credentialId);
 		}
 		return next;
@@ -446,6 +444,7 @@ function isConsoleApiKeyRow(storage: AuthStorage, provider: string, credentialId
 export function gatewayApiKeyLimitObserver(
 	bootOpts: AuthGatewayRouteOptions,
 	model: Model<Api>,
+	logContext?: GatewayLogContext,
 ): StreamOptions["onResponse"] {
 	const classes = bootOpts.apiKeyLimitModelClasses;
 	const modelClass =
@@ -454,6 +453,7 @@ export function gatewayApiKeyLimitObserver(
 	return response => {
 		const credentialId = response.credentialId;
 		if (credentialId === undefined || !isConsoleApiKeyRow(bootOpts.storage, model.provider, credentialId)) return;
+		if (logContext) logGatewayApiKeyQuota(logContext, response, modelClass);
 		const limits = parseAnthropicApiKeyRateLimitHeaders(response.headers, modelClass);
 		if (limits.length === 0) return;
 		bootOpts.storage.usage.observeLimits([
@@ -523,10 +523,13 @@ export function gatewayDroppedAttemptRecorder(
 	model: Model<Api>,
 	client: ClientUsageIdentity,
 	requestId: string,
+	logContext?: GatewayLogContext,
 ): NonNullable<StreamOptions["onDroppedAttempt"]> {
 	let dropped = 0;
 	return attempt => {
 		dropped++;
+		if (logContext && attempt.outcome === "error")
+			logGatewayAttemptFailure(logContext, attempt.credentialId, attempt.error, "terminal");
 		observeAttemptLimitStatus(bootOpts.storage, model.provider, attempt.credentialId, attempt.error);
 		recordGatewayUsage(bootOpts, model, client, attempt.usage, {
 			requestId: `${requestId}:d${dropped}`,
@@ -635,10 +638,10 @@ export function emitGatewayUsage(bootOpts: AuthGatewayRouteOptions, event: Gatew
 	try {
 		const result = bootOpts.onUsage?.({ ...event, usage: structuredClone(event.usage), client: { ...event.client } });
 		if (result && typeof result.then === "function") {
-			void result.catch(error => logger.warn("auth-gateway onUsage hook failed", { error }));
+			void result.catch(() => logger.warn("auth-gateway onUsage hook failed"));
 		}
-	} catch (error) {
-		logger.warn("auth-gateway onUsage hook failed", { error });
+	} catch {
+		logger.warn("auth-gateway onUsage hook failed");
 	}
 }
 

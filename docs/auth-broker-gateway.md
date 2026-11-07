@@ -205,6 +205,16 @@ omp auth-gateway check   [--strict] [--json]
 - `token` manages the token file; `--regenerate` requires a running gateway to restart before accepting the replacement. `status` checks the local token file and an authenticated broker snapshot; it does not probe the gateway listener.
 - `check` constructs its own broker-backed store and probes the credentials the gateway would use, without calling a running gateway. Without `--strict` it uses provider usage probes. `--strict` additionally tries suitable bundled chat models and can consume quota; providers with no suitable candidate (including pi-native forwarding, Bedrock, Vertex, and Cursor transports) cannot be completion-probed.
 
+### Credential and quota logs
+
+The gateway uses the existing logger and configured transports. Fixed selection, provider-response, quota-observation, retry-failure and recovery-failure events carry the gateway-generated `requestId`, admitted `pool` (`ownerUserId`, otherwise `agentAccountId`), route format, resolved provider/model and exact stored `credentialId` when known. Runtime or environment keys without row provenance omit `credentialId`. Retry failures bind to the bearer that failed, not a later session selection; delayed responses retain their own attempt's row.
+
+Only projected primitive fields reach logger arguments and registered sinks. Provider errors, stacks, causes, request/response bodies, raw headers, tokens and arbitrary provider metadata are not logged on these paths. Usage and recovery callback failures use fixed messages without their thrown values.
+
+HTTP response observations include status and finite header-derived `retryAfterMs` (including explicit zero). Codex SSE observes successful and rejected HTTP attempts, with `primary`/`secondary` windows; Anthropic observes successful responses and SDK acquisition failures with headers, with `5h`, `7d` and `7d_oi` OAuth windows. Mapped Anthropic API-key models also expose `requests`, `input-tokens` and `output-tokens` observations. Window fields are numeric `durationMs`, epoch-millisecond `resetAtMs`, `usedPercent`, `limit` and `remaining`, only when observed and valid. Unknown windows remain absent. A 429, policy backoff or prepaid-credit depletion does not manufacture a reset or identify an exhausted window. Codex WebSocket handshakes do not provide this HTTP observation coverage.
+
+Response observation cannot retransmit an accepted Codex request or replace an Anthropic acquisition error used for recovery. Codex clears its successful-header deadline before calling an observer. Anthropic ends its acquisition deadline before awaiting a failure observer. Observer-failure warnings are fixed messages.
+
 ### stdio
 
 `omp auth-gateway stdio` is the gateway for one trusted parent process (an editor, a terminal's git UI, a script): no listener, no token, no broker requirement. It uses the credentials, models (`models.yml` and extension providers included) and settings any other `omp` command would: the broker when one is configured, else the local store. Requests and responses are JSON lines:

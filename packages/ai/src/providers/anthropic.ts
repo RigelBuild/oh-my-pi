@@ -2998,6 +2998,27 @@ const streamAnthropicOnce = (
 							recordsRawSseEvents,
 						} = await getAnthropicStreamResponse(anthropicRequest, requestSignal, rawSseObserver));
 					} catch (error) {
+						// Acquisition has settled; observer latency is not first-response latency.
+						clearTimeout(requestTimeout);
+						// SDK acquisition failures precede the normal response observer. Keep the attempt binding.
+						const status = AIError.status(error);
+						const errorHeaders = getHeadersFromError(error);
+						if (status !== undefined && Number.isInteger(status) && status >= 100 && status <= 599) {
+							const headers: Record<string, string> = {};
+							if (errorHeaders instanceof Headers)
+								errorHeaders.forEach((value, key) => {
+									headers[key] = value;
+								});
+							else if (errorHeaders)
+								for (const [key, value] of Object.entries(errorHeaders))
+									if (typeof value === "string") headers[key.toLowerCase()] = value;
+							try {
+								await options?.onResponse?.({ status, headers }, model);
+							} catch {
+								// Recovery must classify the original SDK failure, not an observer error.
+								logger.warn("anthropic: failure response observer failed");
+							}
+						}
 						if (error instanceof AnthropicConnectionTimeoutError && !activeAbortTracker.wasCallerAbort()) {
 							throw firstEventTimeoutAbortError;
 						}
