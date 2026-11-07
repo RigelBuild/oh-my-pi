@@ -149,3 +149,37 @@ test("snapshots failed identity before an awaited refresh and never invents row 
 		await capture.close();
 	}
 });
+
+test("duplicate bearer rows omit ambiguous failed-row provenance", async () => {
+	const capture = await captureLogs();
+	const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
+	const get = spyOn(storage.keys, "getWithCredential").mockResolvedValue({ apiKey: secret.apiA, credentialId: 12 });
+	const context = gatewayLogContext("duplicate", { kind: "agent", agentAccountId: "pool" }, "test", "mock", "model");
+	try {
+		const resolve = buildGatewayApiKeyResolver(
+			storage,
+			createMockModel(),
+			"session",
+			{ apiKey: secret.apiA, credentialId: 11 },
+			new AbortController().signal,
+			"test",
+			"peer",
+			undefined,
+			undefined,
+			undefined,
+			context,
+		);
+		const error = new ProviderHttpError(secret.error, 401);
+		await resolve({ error, lastChance: false, previousKey: secret.apiA });
+		await resolve({ error, lastChance: false, previousKey: secret.apiA });
+		await resolve({ error, lastChance: false, previousKey: secret.apiA });
+		expect(
+			capture.matching("auth-gateway provider attempt failed").map(event => event.context?.credentialId),
+		).toEqual([11, undefined, undefined]);
+		await capture.assertSafe();
+	} finally {
+		get.mockRestore();
+		storage.close();
+		await capture.close();
+	}
+});

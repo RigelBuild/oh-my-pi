@@ -98,11 +98,11 @@ function videoOptions(
 			resolved.controller.signal,
 			"video",
 			peer,
-			(_key, credentialId) => {
+			undefined,
+			bootOpts.onUsageLimit,
+			credentialId => {
 				resolved.credentialId = credentialId;
 			},
-			bootOpts.onUsageLimit,
-			undefined,
 			logContext,
 		),
 		fetch: bootOpts.fetch,
@@ -224,11 +224,11 @@ export async function handleVideoSubmit(
 				controller.signal,
 				"video",
 				peer,
-				(_key, resolvedCredentialId) => {
-					credentialId = resolvedCredentialId;
-				},
-				bootOpts.onUsageLimit,
 				undefined,
+				bootOpts.onUsageLimit,
+				failedCredentialId => {
+					credentialId = failedCredentialId;
+				},
 				gatewayLogContext(requestId, caller, "video-submit", model.provider, model.id),
 			),
 			fetch: bootOpts.fetch,

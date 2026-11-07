@@ -65,7 +65,6 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
-	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -4762,20 +4761,19 @@ async function openCodexSseEventStream(
 	// the retry loop's base signal remains reserved for caller cancellation, so
 	// an internal timeout stays retryable while an explicit abort fails fast.
 	let clearPreResponseTimeout: (() => void) | undefined;
+	let resumePreResponseTimeout: (() => void) | undefined;
 	const fetchAttempt: FetchImpl = async (input, init) => {
 		let response: Response | undefined;
 		try {
 			response = await (fetchOverride ?? fetch)(input, init);
-			if (response.ok) {
-				clearPreResponseTimeout?.();
-				clearPreResponseTimeout = undefined;
-			}
+			clearPreResponseTimeout?.();
 			try {
 				await onResponse?.(response);
 			} catch {
 				// Observation must not turn accepted headers into a retryable transport failure.
 				logger.warn("[codex] response observer failed");
 			}
+			if (!response.ok) resumePreResponseTimeout?.();
 			return response;
 		} finally {
 			// A successful streaming body is governed by the iterator-level idle
@@ -4815,9 +4813,19 @@ async function openCodexSseEventStream(
 				// A retried non-2xx attempt leaves its guard armed for the retry-status
 				// body read; disarm it before arming the next attempt's guard.
 				clearPreResponseTimeout?.();
-				const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
-				clearPreResponseTimeout = watchdog.clear;
-				return { signal: watchdog.signal };
+				const controller = new AbortController();
+				let timer: NodeJS.Timeout | undefined;
+				clearPreResponseTimeout = () => clearTimeout(timer);
+				resumePreResponseTimeout = () => {
+					if (firstEventTimeoutMs === undefined || firstEventTimeoutMs <= 0) return;
+					timer = setTimeout(
+						() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
+						firstEventTimeoutMs,
+					);
+					timer.unref?.();
+				};
+				resumePreResponseTimeout();
+				return { signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal };
 			},
 			maxAttempts: resolveCodexSseMaxAttempts(codexSseMaxAttempts),
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),

@@ -354,6 +354,11 @@ export function buildGatewayApiKeyResolver(
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
 	const credentialIdsByBearer = new Map<string, number | undefined>([[initialKey.apiKey, initialKey.credentialId]]);
+	const rememberCredential = (key: ResolvedApiKey): void => {
+		if (credentialIdsByBearer.has(key.apiKey) && credentialIdsByBearer.get(key.apiKey) !== key.credentialId)
+			credentialIdsByBearer.set(key.apiKey, undefined);
+		else if (!credentialIdsByBearer.has(key.apiKey)) credentialIdsByBearer.set(key.apiKey, key.credentialId);
+	};
 	if (logContext) logGatewaySelection(logContext, initialKey.credentialId);
 	return async ({ lastChance, error, signal, previousKey }) => {
 		const sig = signal ?? requestSignal;
@@ -375,7 +380,7 @@ export function buildGatewayApiKeyResolver(
 			});
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) {
-				credentialIdsByBearer.set(refreshed.apiKey, refreshed.credentialId);
+				rememberCredential(refreshed);
 				onResolvedKey?.(refreshed.apiKey, refreshed.credentialId);
 				if (logContext) logGatewaySelection(logContext, refreshed.credentialId);
 			}
@@ -395,7 +400,7 @@ export function buildGatewayApiKeyResolver(
 		);
 		if (next) {
 			lastKey = next.apiKey;
-			credentialIdsByBearer.set(next.apiKey, next.credentialId);
+			rememberCredential(next);
 			if (logContext) logGatewaySelection(logContext, next.credentialId);
 			onResolvedKey?.(next.apiKey, next.credentialId);
 		}
