@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -203,43 +203,55 @@ describe("ptree signal abort handling", () => {
 		}
 	});
 
-	it.skipIf(process.platform === "win32")(
-		"keeps abort armed across the root's exit while a read is open",
-		async () => {
-			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-abort-open-read-"));
-			const pidFile = path.join(dir, "pid");
-			const controller = new AbortController();
-			// The root exits cleanly once its stdin closes; its descendant keeps stdout and stderr open, so no
-			// later pipe event re-arms the signal after the root's exit.
-			using child = spawn(["/bin/sh", "-c", `${BLOCK_FOREVER} & echo $! > '${pidFile}'; read _ || :`], {
-				detached: true,
-				signal: controller.signal,
-				stdin: "pipe",
-			});
-			let orphan: Process | null = null;
-			let outcome: Promise<ExecResult> | undefined;
+	it.skipIf(process.platform === "win32")("aborts a pipe holder after an earlier graceful stop finishes", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-abort-after-stop-"));
+		const pidFile = path.join(dir, "pid");
+		const controller = new AbortController();
+		const holderScript =
+			'const pidFile = process.argv[1]; await Bun.write(pidFile, String(process.pid)); process.stdout.write("ready\\n"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)';
+		using child = spawn(
+			[
+				"/bin/sh",
+				"-c",
+				`(trap "" TERM; exec ${JSON.stringify(process.execPath)} -e '${holderScript}' "$1") & trap 'exit 0' TERM; wait`,
+				"sh",
+				pidFile,
+			],
+			{ detached: true, signal: controller.signal },
+		);
+		let orphan: Process | null = null;
+		let outcome: Promise<ExecResult> | undefined;
+		try {
+			const readyReader = child.stdout.getReader();
+			const ready = await readyReader.read();
+			readyReader.releaseLock();
+			expect(ready.done).toBe(false);
+			expect(new TextDecoder().decode(ready.value)).toContain("ready");
+			orphan = Process.fromPid(Number.parseInt(await Bun.file(pidFile).text(), 10));
+			if (!orphan) throw new Error("the fixture must expose its SIGTERM-ignoring descendant");
+			outcome = child.wait({ allowAbort: true });
+
+			// Force the direct-signal fallback. Its first graceful stop lets the root
+			// exit cleanly but leaves the SIGTERM-ignoring descendant holding stdout.
+			const lookup = spyOn(Process, "fromPid").mockReturnValue(null);
 			try {
-				// The read is open before the root exits, so the abort listener must stay attached through that exit.
-				outcome = child.wait({ allowAbort: true });
-				child.stdin.end();
-				expect(await child.exited).toBe(0);
-				orphan = Process.fromPid(Number.parseInt(await Bun.file(pidFile).text(), 10));
-				if (!orphan) throw new Error("the fixture must expose its pipe-holding descendant");
-
-				controller.abort("abort while a read is open");
-				expect(child.exitReason).toBeInstanceOf(AbortError);
-
-				const result = await outcome;
-				expect(result.exitError).toBeInstanceOf(AbortError);
-				expect(await orphan.waitForExit(), "the detached descendant must be terminated").toBe(true);
+				child.kill(undefined, 1_000);
 			} finally {
-				if (orphan) {
-					orphan.killTree(9);
-					await orphan.waitForExit();
-				}
-				await outcome?.catch(() => {});
-				await fs.rm(dir, { recursive: true, force: true });
+				lookup.mockRestore();
 			}
-		},
-	);
+			await child.exited;
+			controller.abort("abort after graceful stop");
+			expect(child.exitReason).toBeInstanceOf(AbortError);
+			const result = await outcome;
+			expect(result.exitError).toBeInstanceOf(AbortError);
+			expect(await orphan.waitForExit(), "cancellation must start a fresh descendant cleanup").toBe(true);
+		} finally {
+			if (orphan) {
+				orphan.killTree(9);
+				await orphan.waitForExit();
+			}
+			await outcome?.catch(() => {});
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });

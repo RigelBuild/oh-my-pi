@@ -270,12 +270,12 @@ export class ChildProcess<In extends InMask = InMask> {
 				}
 
 				await this.#stderrDone;
+
 				if (this.#exitReasonPending) {
 					this.#exitReason = this.#exitReasonPending;
 					reject(this.#exitReasonPending);
 					return;
 				}
-
 				if (exitCode !== null) {
 					this.#exitReason = new NonZeroExitError(exitCode, this.#stderrTail);
 					resolve(exitCode);
@@ -340,11 +340,9 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	kill(reason?: Exception, gracefulMs?: number) {
-		if (reason && !this.#exitReasonPending) {
-			this.#exitReasonPending = reason;
-			// The normalized exit promise may already have resolved from a dead
-			// group leader; wait() still needs to report the later deadline.
-			if (this.proc.exitCode !== null) this.#exitReason = reason;
+		if (reason) {
+			this.#exitReasonPending ??= reason;
+			this.#exitReason = reason;
 		}
 		// A command under the Linux subreaper is stopped without ever signalling
 		// the subreaper politely: SIGTERM would end it, its orphaned descendants
