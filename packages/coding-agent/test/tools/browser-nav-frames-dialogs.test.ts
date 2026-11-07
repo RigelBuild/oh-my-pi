@@ -472,12 +472,14 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 	}, 30_000);
 
 	test("stops the page load when a run is cancelled mid-goto", async () => {
-		const requested = Promise.withResolvers<AbortSignal>();
+		const requested = Promise.withResolvers<void>();
+		const stopped = Promise.withResolvers<"stopped">();
 		const slow = Bun.serve({
 			port: 0,
 			idleTimeout: 0,
 			fetch(request) {
-				requested.resolve(request.signal);
+				request.signal.addEventListener("abort", () => stopped.resolve("stopped"), { once: true });
+				requested.resolve();
 				return new Promise<Response>(() => {});
 			},
 		});
@@ -489,16 +491,11 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 				{ action: "run", name: "cancelled", code: `await tab.goto("http://127.0.0.1:${slow.port}/slow");` },
 				cancel.signal,
 			);
-			const request = await requested.promise;
+			await requested.promise;
 			cancel.abort();
 			// The cancel itself, not a cleanup failure from a page still loading.
 			expect(await run.catch((error: unknown) => error)).toMatchObject({ message: "Operation aborted" });
-			// Chrome drops the request once the load is stopped; a load left running keeps waiting.
-			const dropped = new Promise<string>(resolve => {
-				if (request.aborted) resolve("stopped");
-				request.addEventListener("abort", () => resolve("stopped"));
-			});
-			expect(await Promise.race([dropped, Bun.sleep(5_000).then(() => "still loading")])).toBe("stopped");
+			expect(await stopped.promise).toBe("stopped");
 		} finally {
 			slow.stop(true);
 		}
