@@ -47,7 +47,8 @@ export function gatewayLogContext(
 		pool: caller.kind === "agent" ? (caller.ownerUserId ?? caller.agentAccountId) : "enroll",
 		format,
 		provider,
-		model,
+		// OpenRouter routing suffixes are client selectors, not catalog identity.
+		model: provider === "openrouter" ? (model.split(":", 1)[0] ?? "unknown") : model,
 	};
 }
 

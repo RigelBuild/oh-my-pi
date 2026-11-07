@@ -7,6 +7,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { logger } from "@oh-my-pi/pi-utils";
 import { createCodexModel, withOfficialAnthropicEndpoint } from "../helpers";
+import { resolveProviderModelReference } from "../../../coding-agent/src/config/model-resolver";
 import { captureLogs, secret } from "./capture";
 
 withOfficialAnthropicEndpoint();
@@ -326,6 +327,39 @@ test("synchronous usage-hook failures never serialize their Error or cause", asy
 			storage.close();
 		}
 	} finally {
+		await capture.close();
+	}
+});
+
+test("resolved OpenRouter routing suffix never reaches gateway sinks", async () => {
+	registerMockApi();
+	const capture = await captureLogs();
+	const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
+	storage.keys.setRuntime("openrouter", secret.apiA);
+	const base = createMockModel({ provider: "openrouter", id: "vendor/model", handler: () => ({ content: ["ok"] }) });
+	const selector = `vendor/model:${secret.metadata}`;
+	const resolved = resolveProviderModelReference("openrouter", selector, [base]);
+	expect(resolved?.id).toBe(selector);
+	const router = createAuthGatewayRouter({ storage, resolveModel: () => resolved });
+	try {
+		const response = await router.route(
+			request("/v1/chat/completions", { ...chat(), model: selector }),
+			"peer",
+			caller,
+		);
+		await response.text();
+		const events = capture.matching("auth-gateway credential selected");
+		expect(events.length).toBeGreaterThan(0);
+		for (const event of events) expect(event.context?.model).toBe(base.id);
+		for (const event of capture.events.filter(event =>
+			/auth-gateway (credential selected|provider response|quota observation|provider attempt failed|request failed)/.test(
+				event.message,
+			),
+		))
+			expect(JSON.stringify(event)).not.toContain(secret.metadata);
+	} finally {
+		await router.close();
+		storage.close();
 		await capture.close();
 	}
 });
