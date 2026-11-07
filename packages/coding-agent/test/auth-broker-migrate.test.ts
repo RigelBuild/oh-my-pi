@@ -3,13 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
-import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { AuthBrokerClient, type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
 import { getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const TEAM_ORG = "org-team-1111";
 
-async function runMigrateCapturingStdout(): Promise<string> {
+async function runMigrateCapturingStdout(options: { dryRun?: boolean; json?: boolean } = {}): Promise<string> {
 	const originalWrite = process.stdout.write.bind(process.stdout);
 	let captured = "";
 	process.stdout.write = ((chunk: string | Uint8Array): boolean => {
@@ -19,7 +19,7 @@ async function runMigrateCapturingStdout(): Promise<string> {
 	try {
 		await runAuthBrokerCommand({
 			action: "migrate",
-			flags: { fromLocal: true, includeOauth: true },
+			flags: { fromLocal: true, includeOauth: true, dryRun: options.dryRun, json: options.json },
 		});
 	} finally {
 		process.stdout.write = originalWrite;
@@ -199,5 +199,100 @@ describe("auth-broker migrate", () => {
 		expect(output).toContain("already on broker");
 		expect(brokerStore!.listAuthCredentials(provider)).toHaveLength(1);
 		expect(brokerStore!.getOAuth(provider)?.refresh).toBe("refresh-broker-newer");
+	});
+
+	test("replans a matching local OAuth account after the broker disables its active account", async () => {
+		const provider = "anthropic";
+		const email = "alice@example.com";
+		await brokerStore!.upsertAuthCredential(provider, {
+			type: "oauth",
+			access: "access-broker-active",
+			refresh: "refresh-broker-active",
+			expires: Date.now() + 7_200_000,
+			email,
+			accountId: "acct-disabled-regression",
+			orgId: TEAM_ORG,
+			orgName: "Team",
+		});
+		await brokerStorage!.credentials.reload();
+
+		const localStore = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			await localStore.upsertAuthCredential(provider, {
+				type: "oauth",
+				access: "access-local",
+				refresh: "refresh-local",
+				expires: Date.now() + 3_600_000,
+				email,
+				accountId: "acct-disabled-regression",
+				orgId: TEAM_ORG,
+				orgName: "Team",
+			});
+		} finally {
+			localStore.close();
+		}
+
+		const beforeDisable: unknown = JSON.parse(await runMigrateCapturingStdout({ dryRun: true, json: true }));
+		expect(beforeDisable).toMatchObject({
+			dryRun: true,
+			plan: [],
+			skipped: [
+				{
+					source: "local-sqlite",
+					provider,
+					identity: `${email} (Team)`,
+					reason: "already on broker",
+				},
+			],
+		});
+		expect(brokerStore!.getOAuth(provider)).toMatchObject({
+			access: "access-broker-active",
+			refresh: "refresh-broker-active",
+		});
+
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const activeSnapshot = await client.fetchSnapshot();
+		if (activeSnapshot.status !== 200) throw new Error("expected active broker snapshot");
+		expect(activeSnapshot.snapshot.credentials).toHaveLength(1);
+		const activeCredential = activeSnapshot.snapshot.credentials[0];
+		if (!activeCredential) throw new Error("expected broker OAuth credential");
+		expect(activeCredential.credential).toMatchObject({ type: "oauth", access: "access-broker-active" });
+		const disableResult = await client.disableCredential(
+			activeCredential.id,
+			"disabled by migration regression test",
+		);
+		expect(disableResult.ok).toBe(true);
+
+		const disabledSnapshot = await client.fetchSnapshot();
+		if (disabledSnapshot.status !== 200) throw new Error("expected disabled broker snapshot");
+		expect(disabledSnapshot.snapshot.credentials).toHaveLength(0);
+		expect(brokerStore!.listAuthCredentials(provider)).toHaveLength(0);
+		const disabledRows = await client.listDisabledCredentials(provider);
+		expect(disabledRows).toHaveLength(1);
+		expect(disabledRows).toMatchObject([
+			{
+				id: activeCredential.id,
+				provider,
+				type: "oauth",
+				email,
+				accountId: "acct-disabled-regression",
+				orgId: TEAM_ORG,
+				cause: "disabled by migration regression test",
+			},
+		]);
+		expect(JSON.stringify(disabledRows)).not.toContain("refresh-broker-active");
+
+		const afterDisable: unknown = JSON.parse(await runMigrateCapturingStdout({ dryRun: true, json: true }));
+		expect(afterDisable).toMatchObject({
+			dryRun: true,
+			plan: [
+				{
+					source: "local-sqlite",
+					provider,
+					identity: `${email} (Team)`,
+				},
+			],
+			skipped: [],
+		});
 	});
 });
