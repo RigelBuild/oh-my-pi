@@ -97,15 +97,23 @@
           inherit (localPkgs) bun bun2nix;
           craneLib = (crane.mkLib pkgs).overrideToolchain localPkgs.rustToolchain;
         };
+      packageBinFor =
+        system:
+        let
+          pkgs = pkgsFor system;
+          localPkgs = localPackagesFor system;
+        in
+        pkgs.callPackage ./nix/package-bin.nix { inherit (localPkgs) bun; };
     in
     {
       packages = forAllSystems (
         system:
         let
           omp = packageFor system;
+          omp-bin = packageBinFor system;
         in
         {
-          inherit omp;
+          inherit omp omp-bin;
           default = omp;
         }
       );
