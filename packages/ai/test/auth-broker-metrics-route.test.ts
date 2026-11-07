@@ -335,6 +335,101 @@ describe("auth-broker GET /metrics route", () => {
 		expect(await res.text()).toBe("");
 	});
 
+	test("API-key metrics derive active credential rows on each scrape", async () => {
+		const readyStorage = storage!;
+		await readyStorage.credentials.set("anthropic", [
+			{ type: "api_key", key: "roster-key-one" },
+			{ type: "api_key", key: "roster-key-two" },
+		]);
+		const credentials = readyStorage.credentials.list("anthropic");
+		const first = credentials.find(
+			row => row.credential.type === "api_key" && row.credential.key === "roster-key-one",
+		);
+		const second = credentials.find(
+			row => row.credential.type === "api_key" && row.credential.key === "roster-key-two",
+		);
+		if (!first || !second) throw new Error("expected both credential rows");
+		readyStorage.usage.credentialTotals = () => [
+			{
+				credentialId: first.id,
+				provider: "anthropic",
+				credentialType: "api_key",
+				metric: "requests:ok",
+				value: 2,
+			},
+			{
+				credentialId: second.id,
+				provider: "anthropic",
+				credentialType: "api_key",
+				metric: "requests:ok",
+				value: 3,
+			},
+		];
+		const withKeys = startAuthBroker({
+			storage: readyStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [MASTER],
+			metricsTokens: [SCRAPE],
+			metricsEnabled: true,
+			disableRefresher: true,
+			apiKeyMetrics: { maxRoster: 6, providers: ["anthropic"], modelClasses: ["opus-5.5"] },
+		});
+		try {
+			const bothResponse = await fetch(`${withKeys.url}/metrics`, {
+				headers: { authorization: `Bearer ${SCRAPE}` },
+			});
+			expect(bothResponse.status).toBe(200);
+			const both = await bothResponse.text();
+			expect(both).toContain(`account="credential:${first.id}"`);
+			expect(both).toContain(`account="credential:${second.id}"`);
+
+			await readyStorage.credentials.disable(second.id, "disabled by test");
+			const disabledResponse = await fetch(`${withKeys.url}/metrics`, {
+				headers: { authorization: `Bearer ${SCRAPE}` },
+			});
+			expect(disabledResponse.status).toBe(200);
+			const disabled = await disabledResponse.text();
+			expect(disabled).not.toContain(`account="credential:${second.id}"`);
+			expect(disabled).toContain(
+				'llm_gateway_requests_total{provider="anthropic",account="unknown",credential_type="api_key",outcome="ok"} 3',
+			);
+
+			await readyStorage.credentials.set("anthropic", [
+				{ type: "api_key", key: "roster-key-one" },
+				{ type: "api_key", key: "roster-key-three" },
+			]);
+			const third = readyStorage.credentials
+				.list("anthropic")
+				.find(row => row.credential.type === "api_key" && row.credential.key === "roster-key-three");
+			if (!third) throw new Error("expected third credential row");
+			readyStorage.usage.credentialTotals = () => [
+				{
+					credentialId: first.id,
+					provider: "anthropic",
+					credentialType: "api_key",
+					metric: "requests:ok",
+					value: 2,
+				},
+				{
+					credentialId: third.id,
+					provider: "anthropic",
+					credentialType: "api_key",
+					metric: "requests:ok",
+					value: 4,
+				},
+			];
+			const afterAdditionResponse = await fetch(`${withKeys.url}/metrics`, {
+				headers: { authorization: `Bearer ${SCRAPE}` },
+			});
+			expect(afterAdditionResponse.status).toBe(200);
+			const afterAddition = await afterAdditionResponse.text();
+			expect(afterAddition).toContain(`account="credential:${third.id}"`);
+			expect(afterAddition).not.toContain(`account="credential:${second.id}"`);
+		} finally {
+			await withKeys.close();
+		}
+	});
+
 	test("an API-key metrics read failure keeps the legacy exposition at 200", async () => {
 		const readyStorage = storage!;
 		readyStorage.usage.credentialTotals = () => {
@@ -347,7 +442,7 @@ describe("auth-broker GET /metrics route", () => {
 			metricsTokens: [SCRAPE],
 			metricsEnabled: true,
 			disableRefresher: true,
-			apiKeyMetrics: { roster: [1], providers: ["anthropic"], modelClasses: ["opus-5.5"] },
+			apiKeyMetrics: { maxRoster: 1, providers: ["anthropic"], modelClasses: ["opus-5.5"] },
 		});
 		try {
 			const res = await fetch(`${withKeys.url}/metrics`, { headers: { authorization: `Bearer ${SCRAPE}` } });
@@ -358,7 +453,7 @@ describe("auth-broker GET /metrics route", () => {
 		}
 	});
 
-	test("startAuthBroker rejects an API-key metrics option past the roster bound", () => {
+	test("startAuthBroker rejects an API-key metrics option above maxRoster", () => {
 		expect(() =>
 			startAuthBroker({
 				storage: storage!,
@@ -367,9 +462,9 @@ describe("auth-broker GET /metrics route", () => {
 				metricsTokens: [SCRAPE],
 				metricsEnabled: true,
 				disableRefresher: true,
-				apiKeyMetrics: { roster: [1, 2, 3, 4, 5, 6, 7, 8], providers: ["anthropic"], modelClasses: ["opus-5.5"] },
+				apiKeyMetrics: { maxRoster: 7, providers: ["anthropic"], modelClasses: ["opus-5.5"] },
 			}),
-		).toThrow(/at most 6/);
+		).toThrow(/maxRoster/);
 	});
 });
 

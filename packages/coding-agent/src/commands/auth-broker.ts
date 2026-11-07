@@ -65,7 +65,7 @@ export default class AuthBroker extends Command {
 		}),
 		"api-key-metrics-config": Flags.string({
 			description:
-				"Path to the JSON API-key metrics roster for `serve`; env OMP_AUTH_BROKER_API_KEY_METRICS, flag wins",
+				"Path to the JSON API-key metrics config for `serve`; env OMP_AUTH_BROKER_API_KEY_METRICS, flag wins",
 		}),
 		"trust-proxy-headers": Flags.boolean({
 			description: "Trust forwarded peer IP headers from a reverse proxy (serve); off by default.",
