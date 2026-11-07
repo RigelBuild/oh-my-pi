@@ -38,7 +38,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 		authStorage?.close();
 		tempDir.removeSync();
 	});
-	async function compactCandidateIds(settings: Settings): Promise<string[]> {
+	async function compactCandidateIds(settings: Settings, expectRequest = true): Promise<string[]> {
 		const baseCurrentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const compactionModel = getBundledModel("openai", "gpt-5");
 		const largerContextModel = getBundledModel("anthropic", "claude-fable-5-1");
@@ -83,7 +83,12 @@ describe("compaction prefers the current session model over modelRoles.default",
 		const compactSpy = vi
 			.spyOn(compactionModule, "compact")
 			.mockRejectedValue(new AIError.AwsCredentialsError("test auth failure", "resolution"));
-		await expect(session.compact()).rejects.toThrow();
+		if (expectRequest) {
+			await expect(session.compact()).rejects.toThrow();
+		} else {
+			await expect(session.compact()).rejects.toThrow();
+			expect(compactSpy).not.toHaveBeenCalled();
+		}
 		return compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`);
 	}
 
@@ -103,6 +108,84 @@ describe("compaction prefers the current session model over modelRoles.default",
 		const candidates = await compactCandidateIds(settings);
 		expect(candidates[0]).toBe("openai/gpt-5");
 		expect(candidates).not.toContain("anthropic/claude-fable-5-1");
+	});
+
+	it("uses only explicit summary models, in order, when implicit models are available", async () => {
+		const baseCurrentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const compactionModel = getBundledModel("openai", "gpt-5");
+		const explicitModel = getBundledModel("google", "gemini-2.5-flash");
+		const explicitFallback = getBundledModel("openai", "gpt-4o");
+		const largerContextModel = getBundledModel("anthropic", "claude-fable-5-1");
+		if (!baseCurrentModel || !compactionModel || !explicitModel || !explicitFallback || !largerContextModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const currentModel = buildModel({
+			...baseCurrentModel,
+			compactionModel: `${compactionModel.provider}/${compactionModel.id}`,
+			compat: baseCurrentModel.compatConfig,
+		});
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+			"compaction.models": [
+				`${explicitModel.provider}/${explicitModel.id}`,
+				`${explicitModel.provider}/${explicitModel.id}`,
+				`${explicitFallback.provider}/${explicitFallback.id}`,
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: currentModel, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		for (const model of [currentModel, compactionModel, explicitModel, explicitFallback, largerContextModel]) {
+			authStorage.keys.setRuntime(model.provider, `${model.provider}-token`);
+		}
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
+			currentModel,
+			compactionModel,
+			explicitModel,
+			explicitFallback,
+			largerContextModel,
+		]);
+		session.subscribe(() => {});
+		for (const [question, answer] of [
+			["first", "answer"],
+			["second", "answer"],
+		]) {
+			const user = userMsg(question);
+			const assistant = assistantMsg(answer);
+			session.agent.appendMessage(user);
+			session.sessionManager.appendMessage(user);
+			session.agent.appendMessage(assistant);
+			session.sessionManager.appendMessage(assistant);
+		}
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			if (candidate.id === explicitModel.id) throw new AIError.ProviderHttpError("insufficient_quota", 429);
+			return {
+				summary: "explicit summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
+
+		await session.compact();
+
+		expect(compactSpy.mock.calls.map(([, candidate]) => `${candidate.provider}/${candidate.id}`)).toEqual([
+			`${explicitModel.provider}/${explicitModel.id}`,
+			`${explicitFallback.provider}/${explicitFallback.id}`,
+		]);
+	});
+	it("does not request a summary when every explicit selector is unresolved", async () => {
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.methodOrder": ["soft"],
+			"compaction.models": ["missing-provider/missing-model"],
+		});
+
+		expect(await compactCandidateIds(settings, false)).toEqual([]);
 	});
 
 	it("uses the active Anthropic chat model when modelRoles.default points at an OpenAI model", async () => {

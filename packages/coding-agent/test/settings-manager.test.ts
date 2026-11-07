@@ -49,6 +49,7 @@ import {
 	cfgProvidersOpenaiCodexCodeModeDirectTools,
 	cfgRetryModelFallback,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgCompactionModels } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import {
 	cfgToolsXdev,
 	cfgTodoReminders,
@@ -1507,6 +1508,16 @@ describe("Settings", () => {
 			expect(cfgSetupVersion.get(isolated)).toBe(0);
 			expect(cfgShellPath.get(isolated)).toBe("");
 			expect(cfgEnabledModels.get(isolated)).toEqual([]);
+		});
+		it("rejects non-string compaction model selectors on settings writes", () => {
+			const isolated = Settings.isolated();
+
+			expect(() => cfgCompactionModels.override(isolated, [42, "openai/gpt-5"] as never)).toThrow(
+				"compaction.models must be a list of model target strings",
+			);
+			expect(() => Settings.isolated({ "compaction.models": [42, "openai/gpt-5"] })).toThrow(
+				"compaction.models must be a list of model target strings",
+			);
 		});
 
 		it("treats a config key written without a value as unset", async () => {

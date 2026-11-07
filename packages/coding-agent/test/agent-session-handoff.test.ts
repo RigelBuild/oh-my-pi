@@ -1050,8 +1050,13 @@ describe("AgentSession handoff", () => {
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 
-	/** Rebuild the session so one terminal text turn crosses a 1% threshold with a `handoff` method order. */
-	async function createThresholdHandoffSession(autoContinue: boolean) {
+	/** Rebuild the session so one terminal text turn crosses a 1% threshold. */
+	async function createThresholdHandoffSession(
+		autoContinue: boolean,
+		explicitModels?: string[],
+		activeModelOverride?: Model,
+	) {
+		const activeModel = activeModelOverride ?? model;
 		await session.dispose();
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
@@ -1063,9 +1068,9 @@ describe("AgentSession handoff", () => {
 		sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "seed response" }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
+			api: activeModel.api,
+			provider: activeModel.provider,
+			model: activeModel.id,
 			stopReason: "stop",
 			usage: {
 				input: 16,
@@ -1098,7 +1103,7 @@ describe("AgentSession handoff", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
-				model,
+				model: activeModel,
 				systemPrompt: ["Test"],
 				tools: [],
 				messages: [],
@@ -1133,6 +1138,7 @@ describe("AgentSession handoff", () => {
 				"compaction.enabled": true,
 				"compaction.autoContinue": autoContinue,
 				"compaction.methodOrder": ["handoff", "soft"],
+				...(explicitModels ? { "compaction.models": explicitModels } : {}),
 				"compaction.thresholdPercent": 1,
 				"contextPromotion.enabled": false,
 			}),
@@ -1178,6 +1184,51 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "agent_end")).toEqual([
 			expect.objectContaining({ type: "agent_end", isTerminal: true, yielded: true }),
 		]);
+	});
+	it("skips auto-handoff when explicit compaction models exclude the active model", async () => {
+		const candidate = getBundledModel("google", "gemini-2.5-flash");
+		if (!candidate) throw new Error("Expected bundled explicit summary model");
+		authStorage.keys.setRuntime(candidate.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([candidate]);
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		const textOnlyModel: Model = { ...model, input: ["text"] };
+		const { mock, generateHandoffSpy } = await createThresholdHandoffSession(
+			false,
+			[`${candidate.provider}/${candidate.id}`],
+			textOnlyModel,
+		);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "explicit summary",
+			shortSummary: "explicit",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+		}));
+
+		await session.prompt("Trigger threshold handoff");
+
+		expect(mock.calls).toHaveLength(1);
+		expect(generateHandoffSpy).not.toHaveBeenCalled();
+		expect(compactSpy.mock.calls.map(([, candidate]) => `${candidate.provider}/${candidate.id}`)).toEqual([
+			`${candidate.provider}/${candidate.id}`,
+		]);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("does not restore implicit summary models when every explicit model is unresolved", async () => {
+		const textOnlyModel: Model = { ...model, input: ["text"] };
+		const { mock, generateHandoffSpy } = await createThresholdHandoffSession(
+			false,
+			["missing-provider/missing-model"],
+			textOnlyModel,
+		);
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+
+		await session.prompt("Trigger threshold handoff");
+
+		expect(mock.calls).toHaveLength(1);
+		expect(generateHandoffSpy).not.toHaveBeenCalled();
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 	});
 	it("resets to the base system prompt before generating a handoff", async () => {
 		const model = session.model;
