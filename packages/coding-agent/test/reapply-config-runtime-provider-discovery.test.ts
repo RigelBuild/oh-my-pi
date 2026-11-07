@@ -272,7 +272,7 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 		// No cursor key exists, so it falls through to the Anthropic candidate;
 		// the self-alias scan must not reclassify it and keep the baked model.
 		dynamicFetches = 0;
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const fallback = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -290,7 +290,7 @@ describe("--reapply-config runtime-provider cold discovery", () => {
 		// resolution is case-insensitive, so the provider must be normalized
 		// before the check or discovery is skipped and the fallback kept.
 		dynamicFetches = 0;
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const fallback = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 

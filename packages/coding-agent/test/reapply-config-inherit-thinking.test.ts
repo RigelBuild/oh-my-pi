@@ -125,7 +125,7 @@ describe("--reapply-config inherit thinking selector", () => {
 
 	it("keeps the session's thinking level when the configured default resolves with an inherit suffix", async () => {
 		const configured = anthropicModel("claude-sonnet-4-5");
-		const sessionFile = await writeBakedSession(modelValue(anthropicModel("claude-opus-4-1")), "high");
+		const sessionFile = await writeBakedSession(modelValue(anthropicModel("claude-sonnet-4-6")), "high");
 
 		// A resolved role reports `inherit` as explicit, yet it names no knob.
 		const settings = await loadOverlay(`${modelValue(configured)}:inherit`);
@@ -139,7 +139,7 @@ describe("--reapply-config inherit thinking selector", () => {
 	it("still adopts a configured thinking level that names a real knob", async () => {
 		// The inverse: a genuine suffix still overrides the session's level.
 		const configured = anthropicModel("claude-sonnet-4-5");
-		const sessionFile = await writeBakedSession(modelValue(anthropicModel("claude-opus-4-1")), "high");
+		const sessionFile = await writeBakedSession(modelValue(anthropicModel("claude-sonnet-4-6")), "high");
 
 		const settings = await loadOverlay(`${modelValue(configured)}:low`);
 
@@ -150,7 +150,7 @@ describe("--reapply-config inherit thinking selector", () => {
 	});
 
 	it("keeps the session's thinking level when an unresolved configured default carries inherit", async () => {
-		const baked = anthropicModel("claude-opus-4-1");
+		const baked = anthropicModel("claude-sonnet-4-6");
 		const sessionFile = await writeBakedSession(modelValue(baked), "high");
 
 		const settings = await loadOverlay("anthropic/no-such-model-xyz:inherit");

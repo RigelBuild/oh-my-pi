@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
-import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
+import { DaemonBrokerRejectedError, type DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonOperation, DaemonRpcResult } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import * as browserAttach from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
@@ -49,6 +49,7 @@ function handle(
 		kind,
 		browser: fakeBrowser(wsEndpoint),
 		refCount: 0,
+		wsEndpoint,
 		stealth: { browserSession: null, override: null },
 		...extra,
 	};
@@ -152,9 +153,10 @@ describe("shared daemon staging sweep", () => {
 			close() {},
 			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 				if (operation.op === "describe") {
-					if (!running) throw new Error(`Unknown daemon ${operation.name}`);
+					if (!running) throw new DaemonBrokerRejectedError(`Unknown daemon ${operation.name}`);
 					return { op: "describe", daemon } as DaemonRpcResult;
 				}
+				if (operation.op === "list") return { op: "list", daemons: [] };
 				if (operation.op === "start") {
 					starts++;
 					return { op: "start", daemon, readyTimedOut: false };

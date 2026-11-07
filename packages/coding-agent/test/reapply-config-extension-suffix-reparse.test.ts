@@ -526,8 +526,9 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		authStoragesToClose.push(authStorage);
 		authStorage.keys.setRuntime("google", "google-test-key");
 		const modelsPath = path.join(tempDir, `cached-google-${Bun.nanoseconds()}.yml`);
-		const cached = getBundledModels("google");
-		const preMigrationFingerprint = fingerprintStaticModels(cached);
+		const bundled = getBundledModels("google");
+		const preMigrationFingerprint = fingerprintStaticModels(bundled);
+		const cached = [...bundled, { ...bundled[0], id: "cached-migration-model" }];
 		writeModelCache("google", Date.now(), cached, true, preMigrationFingerprint, path.join(tempDir, "models.db"));
 		const fetched: string[] = [];
 		const networkStarted = Promise.withResolvers<void>();
@@ -545,11 +546,11 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		expect(providerModels.some(model => model.id === "gemini-3.7-flash")).toBe(true);
 		expect(modelRegistry.canRefreshProvider("google")).toBe(true);
 		expect(modelRegistry.getProviderDiscoveryState("google")).toMatchObject({
-			status: "idle",
-			source: "bundled",
+			status: "cached",
+			source: "cache",
 			stale: false,
 		});
-		expect(modelRegistry.getProviderDiscoveryState("google")?.models).toContain("gemini-3.7-flash");
+		expect(modelRegistry.getProviderDiscoveryState("google")?.models).toContain("cached-migration-model");
 
 		const created = reapplyOverSaved(
 			modelRegistry,
@@ -606,7 +607,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 			maxTokens: 8192,
 		});
 		writeModelCache(
-			"gateway:openai-models-list-context-v3",
+			"gateway:openai-models-list-context-v6",
 			Date.now() - 3 * 24 * 60 * 60 * 1000,
 			[cached],
 			true,
@@ -646,7 +647,7 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), {
 			fetch: async input => {
 				const url = String(input);
-				if (url !== "https://opencode.ai/zen/go/v1/models") return new Response("", { status: 404 });
+				if (url !== "https://opencode.ai/inference/go/v1/models") return new Response("", { status: 404 });
 				listed.push(url);
 				return Response.json({ data: [{ id: "router:low" }, { id: "deepseek-v4-flash" }] });
 			},

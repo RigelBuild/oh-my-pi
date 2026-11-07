@@ -37,6 +37,10 @@ export default class AuthGateway extends Command {
 			description:
 				"Path to JSON mapping exact Anthropic model ids to rate-limit rows for API-key limit reports (serve); env OMP_AUTH_GATEWAY_API_KEY_LIMIT_MODEL_CLASSES, flag wins",
 		}),
+		clients: Flags.string({
+			description:
+				"JSON file of scoped client tokens (serve), each limited to its own models and broker accounts; re-read while serving",
+		}),
 		strict: Flags.boolean({
 			description:
 				"For `check`: additionally probe each credential against its provider's chat-completion endpoint. Slower; consumes a tiny amount of quota per credential.",
@@ -51,6 +55,7 @@ export default class AuthGateway extends Command {
 		"# Print the gateway bearer token (creates one on first run)\n  omp auth-gateway token",
 		"# Rotate the gateway bearer token\n  omp auth-gateway token --regenerate",
 		"# Run on loopback without any bearer (anyone on this host can call)\n  omp auth-gateway serve --no-auth",
+		"# Also admit scoped client tokens listed in a file\n  omp auth-gateway serve --clients=/etc/omp/gateway-clients.json",
 		"# Show local gateway + broker config status\n  omp auth-gateway status",
 		"# Probe each broker credential to see which one is producing 401s\n  omp auth-gateway check",
 		"# Same, machine-readable for scripts\n  omp auth-gateway check --json",
@@ -73,6 +78,7 @@ export default class AuthGateway extends Command {
 				trustProxyHeaders: flags["trust-proxy-headers"],
 				apiKeyLimitModelClasses: flags["api-key-limit-model-classes"],
 				strict: flags.strict,
+				clients: flags.clients,
 			},
 		};
 		await initTheme();

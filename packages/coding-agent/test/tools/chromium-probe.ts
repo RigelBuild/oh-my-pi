@@ -47,7 +47,7 @@ export async function chromiumCanLaunch(
 	}
 }
 
-/** A disposable headless launch must answer CDP. */
+/** A disposable headless launch must actually answer CDP, not just --version. */
 export async function chromiumCdpAvailable(
 	executable: string,
 	timeoutMs = 5000,

@@ -36,7 +36,7 @@ test("binds repeated rotations, delayed A and previousKey to exact rows across a
 	});
 	try {
 		const resolve = buildGatewayApiKeyResolver(
-			storage,
+			{ storage },
 			model,
 			"session",
 			a,
@@ -66,7 +66,7 @@ test("binds repeated rotations, delayed A and previousKey to exact rows across a
 			model.id,
 		);
 		const otherResolve = buildGatewayApiKeyResolver(
-			storage,
+			{ storage },
 			model,
 			"other-session",
 			{ apiKey: secret.apiB, credentialId: 11 },
@@ -117,7 +117,7 @@ test("snapshots failed identity before an awaited refresh and never invents row 
 	);
 	try {
 		const resolve = buildGatewayApiKeyResolver(
-			storage,
+			{ storage },
 			model,
 			"session",
 			{ apiKey: secret.apiA, credentialId: 1 },

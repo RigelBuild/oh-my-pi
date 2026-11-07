@@ -138,6 +138,10 @@ describe("auth-gateway onUsage hook", () => {
 			{ type: "api_key", key: "key-two" },
 		]);
 		const events: GatewayUsageEvent[] = [];
+		const secondCredential = storage.credentials
+			.list("mock")
+			.find(row => row.credential.type === "api_key" && row.credential.key === "key-two");
+		if (!secondCredential) throw new Error("expected key-two credential row");
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			authorize: bearerTokenAuthorizer(["test-token"]),
@@ -158,9 +162,7 @@ describe("auth-gateway onUsage hook", () => {
 			expect(events).toHaveLength(1);
 			expect(model.calls).toHaveLength(2);
 			expect(model.calls.at(-1)?.options?.apiKey).toBeDefined();
-			const account = `key:${Bun.hash("key-two").toString(36)}`;
-			expect(events[0]?.account).toBe(account);
-			expect(events[0]?.account).not.toBe(`key:${Bun.hash("key-one").toString(36)}`);
+			expect(events[0]?.account).toBe(`credential:${secondCredential.id}`);
 		} finally {
 			await handle.close();
 			storage.close();

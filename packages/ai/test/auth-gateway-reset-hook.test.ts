@@ -42,7 +42,7 @@ async function setup(
 	}
 	const model = createMockModel({ provider: "mock", id: "gateway-reset-model" }).model;
 	const resolver = buildGatewayApiKeyResolver(
-		storage,
+		{ storage },
 		model,
 		sessionId,
 		initialKey,

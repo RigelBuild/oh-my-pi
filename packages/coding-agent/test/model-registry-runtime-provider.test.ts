@@ -1748,7 +1748,7 @@ describe("ModelRegistry runtime provider registration", () => {
 	// still holds the migrated ids, so the manager refetches it.
 	test("a built-in cache awaiting a migration-policy refetch still counts as due", async () => {
 		const bundled = getBundledModels("google");
-		const catalogFingerprint = fingerprintStaticModels(bundled);
+		const catalogFingerprint = fingerprintStaticModels(bundled, { additive: true });
 		const dbPath = path.join(tempDir, "models.db");
 		authStorage.keys.setRuntime("google", "google-test-key");
 		try {
@@ -1775,7 +1775,7 @@ describe("ModelRegistry runtime provider registration", () => {
 			Date.now(),
 			seed,
 			true,
-			fingerprintStaticModels(seed, true),
+			fingerprintStaticModels(seed, { authoritative: true }),
 			path.join(tempDir, "models.db"),
 		);
 		authStorage.keys.setRuntime("factory-droid", token);
@@ -1809,7 +1809,7 @@ describe("ModelRegistry runtime provider registration", () => {
 				Date.now(),
 				seed,
 				true,
-				fingerprintStaticModels(seed, true),
+				fingerprintStaticModels(seed, { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const warm = await builtInOnly("gitlab-duo-agent");

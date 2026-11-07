@@ -194,6 +194,10 @@ describe("auth-gateway POST /v1/embeddings", () => {
 
 	it("attributes rotated usage to the key that served the embedding", async () => {
 		harness = await boot({ apiKeys: ["key-one", "key-two"] });
+		const secondCredential = harness.storage.credentials
+			.list("openai")
+			.find(row => row.credential.type === "api_key" && row.credential.key === "key-two");
+		if (!secondCredential) throw new Error("expected key-two credential row");
 		const response = await fetch(`${harness.url}/v1/embeddings`, {
 			method: "POST",
 			headers: HEADERS,
@@ -202,7 +206,7 @@ describe("auth-gateway POST /v1/embeddings", () => {
 		expect(harness.attemptedKeys).toEqual(["Bearer key-one", "Bearer key-two"]);
 		expect(response.status).toBe(200);
 		expect(harness.events).toHaveLength(1);
-		expect(harness.events[0]?.account).toBe(`key:${Bun.hash("key-two").toString(36)}`);
+		expect(harness.events[0]?.account).toBe(`credential:${secondCredential.id}`);
 	});
 
 	it("attributes rotated usage to the stored row of the key that served the embedding", async () => {
