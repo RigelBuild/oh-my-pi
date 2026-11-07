@@ -207,23 +207,26 @@ describe("ptree signal abort handling", () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-abort-after-stop-"));
 		const pidFile = path.join(dir, "pid");
 		const controller = new AbortController();
+		const holderScript =
+			'const pidFile = process.argv[1]; await Bun.write(pidFile, String(process.pid)); process.stdout.write("ready\\n"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)';
 		using child = spawn(
 			[
 				"/bin/sh",
 				"-c",
-				`(trap "" TERM; exec ${BLOCK_FOREVER}) & echo $! > '${pidFile}'; trap 'exit 0' TERM; echo token; wait`,
+				`(trap "" TERM; exec ${JSON.stringify(process.execPath)} -e '${holderScript}' "$1") & trap 'exit 0' TERM; wait`,
+				"sh",
+				pidFile,
 			],
 			{ detached: true, signal: controller.signal },
 		);
 		let orphan: Process | null = null;
 		let outcome: Promise<ExecResult> | undefined;
 		try {
-			// The root writes the pid before this output, so one real output chunk
-			// confirms that its SIGTERM-ignoring descendant is ready.
 			const readyReader = child.stdout.getReader();
 			const ready = await readyReader.read();
 			readyReader.releaseLock();
 			expect(ready.done).toBe(false);
+			expect(new TextDecoder().decode(ready.value)).toContain("ready");
 			orphan = Process.fromPid(Number.parseInt(await Bun.file(pidFile).text(), 10));
 			if (!orphan) throw new Error("the fixture must expose its SIGTERM-ignoring descendant");
 			outcome = child.wait({ allowAbort: true });
@@ -237,12 +240,8 @@ describe("ptree signal abort handling", () => {
 				lookup.mockRestore();
 			}
 			await child.exited;
-			// Finish the direct-signal continuation after observing the root's clean exit.
-			await Promise.resolve();
-
 			controller.abort("abort after graceful stop");
 			expect(child.exitReason).toBeInstanceOf(AbortError);
-
 			const result = await outcome;
 			expect(result.exitError).toBeInstanceOf(AbortError);
 			expect(await orphan.waitForExit(), "cancellation must start a fresh descendant cleanup").toBe(true);
