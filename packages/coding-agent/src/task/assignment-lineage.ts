@@ -36,6 +36,11 @@ export class AssignmentLineage {
 	readonly #instances = new Map<string, string>();
 	readonly #orphaned = new Set<string>();
 	readonly #parked = new Map<string, string>();
+	readonly #terminalListeners = new Set<(assignmentId: string) => void>();
+	onTerminal(listener: (assignmentId: string) => void): () => void {
+		this.#terminalListeners.add(listener);
+		return () => this.#terminalListeners.delete(listener);
+	}
 
 	branch(sessionId: string): string {
 		let branch = this.#branches.get(sessionId);
@@ -102,7 +107,10 @@ export class AssignmentLineage {
 
 	terminal(sessionId: string, assignmentId: string): void {
 		const assignment = this.#assignments.get(sessionId);
-		if (assignment?.ref.assignmentId === assignmentId) assignment.phase = "terminal";
+		if (assignment?.ref.assignmentId === assignmentId) {
+			assignment.phase = "terminal";
+			for (const listener of this.#terminalListeners) listener(assignmentId);
+		}
 	}
 
 	wake(sessionId: string): void {

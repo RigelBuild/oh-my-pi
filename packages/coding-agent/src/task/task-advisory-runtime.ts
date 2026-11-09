@@ -76,6 +76,13 @@ class AdvisoryRuntime {
 				return receipt;
 			},
 		};
+		const stopTerminal = lineage.onTerminal(assignmentId => {
+			for (const [key, watch] of this.watches) {
+				if (!key.startsWith(`${assignmentId}:`)) continue;
+				clearInterval(watch.timer);
+				this.watches.delete(key);
+			}
+		});
 		const unsubscribe = session.subscribe(event => {
 			const binding = this.lineage.getAssignment(this.id);
 			if (binding && binding.ref.assignmentId !== this.assignmentId) {
@@ -91,7 +98,7 @@ class AdvisoryRuntime {
 				this.publish({ type: "snapshot", snapshot });
 			}
 		});
-		session.addDisposer(() => { unsubscribe(); for (const watch of this.watches.values()) clearInterval(watch.timer); this.watches.clear(); this.listeners.clear(); runtimes.delete(session); });
+		session.addDisposer(() => { unsubscribe(); stopTerminal(); for (const watch of this.watches.values()) clearInterval(watch.timer); this.watches.clear(); this.listeners.clear(); runtimes.delete(session); });
 	}
 
 	get id(): string { return this.session.sessionManager.getSessionId(); }
