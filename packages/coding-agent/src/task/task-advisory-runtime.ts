@@ -61,7 +61,7 @@ class AdvisoryRuntime {
 					clearInterval(timer);
 					void IrcBus.global().sendBound({ from, to, body: "Please share your progress and next action.", assignmentId: ref.assignmentId, checkId: requestId }, transport).catch(() => {});
 				}, 15_000);
-				const watch = { timer, content: contentDigest, expired: false };
+				const watch: { timer: NodeJS.Timeout; content: string; reply?: string; replyDelivered?: boolean; expired: boolean } = { timer, content: contentDigest, expired: false };
 				const assignmentKeys = [...this.watches.keys()].filter(item => item.startsWith(`${ref.assignmentId}:`));
 				if (assignmentKeys.length >= 64) {
 					const oldest = assignmentKeys[0];
