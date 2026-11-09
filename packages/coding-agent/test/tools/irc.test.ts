@@ -150,6 +150,15 @@ describe("IRC", () => {
 			expect((await bus.wait("0-Sub", {}, 5))?.body).toBe("ping");
 		});
 
+		it("does not buffer a failed non-retryable handoff", async () => {
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			sub.setError(new Error("handoff failed"));
+			const receipt = await bus.send({ from: "Main", to: "0-Sub", body: "notice" }, { suppressRelay: true, noBuffer: true });
+			expect(receipt.outcome).toBe("failed");
+			expect(bus.take("0-Sub")).toBeUndefined();
+		});
+
 		it("send revives a parked recipient through the lifecycle manager", async () => {
 			const sub = makeFakeSession();
 			sub.setOutcome("woken");
