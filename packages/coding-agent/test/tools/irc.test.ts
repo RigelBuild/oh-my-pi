@@ -100,6 +100,30 @@ describe("IRC", () => {
 	});
 
 	describe("IrcBus", () => {
+		it("wakes an idle bound recipient and suppresses waiter relay", async () => {
+			const parent = createRealSession();
+			const child = createRealSession();
+			const main = makeFakeSession();
+			sessions.push(parent.session, child.session);
+			registry.register({ id: "Main", displayName: "Main", kind: "main", session: main.session });
+			registry.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: parent.session });
+			registry.register({ id: "Child", displayName: "Child", kind: "sub", parentId: "Parent", session: child.session });
+			const parentId = parent.sessionManager.getSessionId();
+			const childId = child.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint(childId, parentId);
+			assignmentLineage.attach(childId, "child-instance");
+			const binding = { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" };
+			const wake = vi.spyOn(parent.session, "deliverIrcMessage").mockResolvedValue("woken");
+			expect((await bus.sendBound({ from: "Child", to: "Parent", body: "idle reply" }, binding)).outcome).toBe("woken");
+			expect(wake).toHaveBeenCalledTimes(1);
+			const waiter = bus.wait("Parent", {}, 0);
+			expect((await bus.sendBound({ from: "Child", to: "Parent", body: "waiter reply" }, binding)).outcome).toBe("injected");
+			expect((await waiter)?.body).toBe("waiter reply");
+			expect(main.relayed).toEqual([]);
+			assignmentLineage.disposeSession(childId, "child-instance");
+			assignmentLineage.disposeSession(parentId, "parent-instance");
+		});
 		it("rejects a stale bound handoff without buffering or relay", async () => {
 			const parent = createRealSession();
 			const child = createRealSession();
