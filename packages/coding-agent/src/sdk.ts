@@ -176,6 +176,7 @@ import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import { assignmentLineage } from "./task/assignment-lineage";
+import { createTaskAdvisory } from "./task/task-advisory-runtime";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -5396,6 +5397,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const lineageSessionId = sessionManager.getSessionId();
 		const lineageInstanceId = crypto.randomUUID();
 		assignmentLineage.attach(lineageSessionId, lineageInstanceId);
+		createTaskAdvisory(session, assignmentLineage);
 		session.addDisposer(() => assignmentLineage.disposeSession(lineageSessionId, lineageInstanceId));
 		hasRegistered = true;
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,

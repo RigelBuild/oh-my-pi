@@ -16,6 +16,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AdvisoryReceipt } from "../extensibility/extensions/task-advisory";
 import { assignmentLineage, type AdvisoryTransportBinding } from "../task/assignment-lineage";
 import type { CustomMessage } from "../session/messages";
+import { receiveTaskAdvisory } from "../task/task-advisory-runtime";
 
 interface IrcWaiter {
 	from?: string;
@@ -174,6 +175,8 @@ export class IrcBus {
 		if (opts?.validate && !opts.validate()) {
 			return { to: message.to, outcome: "failed", error: "Message binding is no longer valid." };
 		}
+		const advisoryRecipient = this.#registry.get(message.to)?.session;
+		if (advisoryRecipient && message.advisoryBinding) receiveTaskAdvisory(advisoryRecipient, message);
 
 
 		// A pending `wait` from the recipient consumes the message directly —

@@ -17,6 +17,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { createTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -70,6 +71,23 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		expect(binding.ref.parentSessionId).toBe(managerId);
 		expect(assignmentLineage.children(mainId).map(item => item.ref.childSessionId)).toEqual([managerId]);
 		const relay = vi.spyOn(main, "emitIrcRelayObservation");
+		const managerAdvisory = createTaskAdvisory(manager, assignmentLineage);
+		const childAdvisory = createTaskAdvisory(child, assignmentLineage);
+		expect(managerAdvisory.children().map(snapshot => snapshot.ref.childSessionId)).toEqual([binding.ref.childSessionId]);
+		expect(childAdvisory.current()?.ref.childSessionId).toBe(binding.ref.childSessionId);
+		expect(childAdvisory.children()).toEqual([]);
+		const replies: string[] = [];
+		const unsubscribe = managerAdvisory.subscribe(event => { if (event.type === "reply") replies.push(event.requestId); });
+		const reminder = await managerAdvisory.remind(binding.ref, "check-1", "Please report progress");
+		expect(reminder.outcome).toBe("injected");
+		const reply = await IrcBus.global().sendBound(
+			{ from: "LineageManager.LineageChild", to: "LineageManager", body: "progress" },
+			{ ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId, requestId: "check-1" },
+		);
+		expect(reply.outcome).toBe("injected");
+		expect(replies).toEqual(["check-1"]);
+		expect(relay).toHaveBeenCalledTimes(0);
+		unsubscribe();
 		const ordinary = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: "ordinary nested message" });
 		expect(ordinary.outcome).not.toBe("failed");
 		expect(relay).toHaveBeenCalledTimes(1);
@@ -88,6 +106,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		if (!first) throw new Error("manager has no navigation target");
 		await manager.navigateTree(first);
 		expect(assignmentLineage.isCurrent(binding.ref, binding.instanceId, binding.branchId)).toBe(false);
+		expect((await managerAdvisory.remind(binding.ref, "stale", "progress")).outcome).toBe("unavailable");
 		expect(manager.drainPendingIrcInboxMessages("LineageManager")).toEqual([]);
 		expect(relay).toHaveBeenCalledTimes(1);
 		expect(JSON.stringify(main.messages)).not.toContain("nested private advisory");
