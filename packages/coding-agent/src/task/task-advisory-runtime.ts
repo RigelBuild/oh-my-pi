@@ -12,6 +12,7 @@ class AdvisoryRuntime {
 	readonly adapter = new AdvisorySessionAdapter();
 	readonly listeners = new Set<(event: TaskAdvisoryEvent) => void>();
 	readonly api: TaskAdvisory;
+	lastSnapshot?: AdvisorySnapshot;
 
 	constructor(readonly session: AgentSession, readonly lineage: AssignmentLineage) {
 		this.api = {
@@ -43,7 +44,11 @@ class AdvisoryRuntime {
 		const unsubscribe = session.subscribe(event => {
 			this.adapter.accept(event, performance.now());
 			const snapshot = this.api.current();
-			if (snapshot) this.publish({ type: "snapshot", snapshot });
+			const previous = this.lastSnapshot;
+			if (snapshot && (!previous || snapshot.ref.assignmentId !== previous.ref.assignmentId || snapshot.instanceId !== previous.instanceId || snapshot.phase !== previous.phase || snapshot.wallMs !== previous.wallMs || snapshot.unblockedMs !== previous.unblockedMs || snapshot.workTokens !== previous.workTokens || snapshot.usagePartial !== previous.usagePartial || snapshot.waitReasons.join(",") !== previous.waitReasons.join(",") || snapshot.messaging.status !== previous.messaging.status)) {
+				this.lastSnapshot = snapshot;
+				this.publish({ type: "snapshot", snapshot });
+			}
 		});
 		session.addDisposer(() => { unsubscribe(); this.listeners.clear(); runtimes.delete(session); });
 	}
