@@ -98,4 +98,17 @@ describe("assignment lineage", () => {
 		lineage.disposeSession("child", "child-instance");
 		expect(lineage.isCurrent(grandchild, binding.instanceId, binding.branchId)).toBe(false);
 	});
+
+	test("distinguishes stale assignment, branch, and instance", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "parent-instance");
+		const ref = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		const binding = { ref, senderInstanceId: "parent-instance", recipientInstanceId: "child-instance", branchId: ref.parentBranchId };
+		expect(lineage.validateBinding(binding)).toBeUndefined();
+		expect(lineage.validateBinding({ ...binding, recipientInstanceId: "other" })).toBe("stale-instance");
+		expect(lineage.validateBinding({ ...binding, ref: { ...ref, assignmentId: "other" } })).toBe("stale-assignment");
+		lineage.navigate("parent");
+		expect(lineage.validateBinding(binding)).toBe("stale-parent-branch");
+	});
 });

@@ -9,6 +9,15 @@ export interface AssignmentBinding {
 	phase: "running" | "terminal";
 }
 
+export interface AdvisoryTransportBinding {
+	ref: AssignmentRef;
+	senderInstanceId: string;
+	recipientInstanceId: string;
+	branchId: string;
+}
+
+export type AdvisoryBindingFailure = "stale-assignment" | "stale-parent-branch" | "stale-instance";
+
 interface PendingAssignment {
 	ref: AssignmentRef;
 	instanceId?: string;
@@ -90,6 +99,16 @@ export class AssignmentLineage {
 	isCurrent(ref: AssignmentRef, instanceId: string, branchId: string): boolean {
 		const current = this.getAssignment(ref.childSessionId);
 		return current !== undefined && current.phase === "running" && current.instanceId === instanceId && current.branchId === branchId && current.ref.assignmentId === ref.assignmentId && current.ref.parentSessionId === ref.parentSessionId && current.ref.parentBranchId === ref.parentBranchId;
+	}
+
+	validateBinding(binding: AdvisoryTransportBinding): AdvisoryBindingFailure | undefined {
+		const assignment = this.#assignments.get(binding.ref.childSessionId);
+		if (!assignment || assignment.phase !== "running" || assignment.ref.assignmentId !== binding.ref.assignmentId || assignment.ref.parentSessionId !== binding.ref.parentSessionId || assignment.ref.parentBranchId !== binding.ref.parentBranchId) return "stale-assignment";
+		if (assignment.branchId !== binding.branchId || this.branch(binding.ref.parentSessionId) !== binding.branchId || this.branch(binding.ref.childSessionId) !== assignment.childBranchId) return "stale-parent-branch";
+		const child = assignment.instanceId;
+		const parent = assignment.parentInstanceId;
+		if (!child || !parent || this.#orphaned.has(binding.ref.parentSessionId) || this.#instances.get(binding.ref.childSessionId) !== child || this.#instances.get(binding.ref.parentSessionId) !== parent || !((binding.senderInstanceId === child && binding.recipientInstanceId === parent) || (binding.senderInstanceId === parent && binding.recipientInstanceId === child))) return "stale-instance";
+		return undefined;
 	}
 
 	children(parentSessionId: string): AssignmentBinding[] {
