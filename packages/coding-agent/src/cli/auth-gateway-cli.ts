@@ -547,6 +547,7 @@ function hasExhaustedCodexWeekly(report: UsageReport | null): boolean {
 	return weekly?.status === "exhausted" || (weekly !== undefined && (resolveUsedFraction(weekly) ?? 0) >= 0.999);
 }
 
+/** The exhaustion clock is sample-based: usage-limit hooks and the five-minute sweep provide samples. */
 export function createGatewayCodexResetHook(args: {
 	storage: AuthStorage;
 	settings: Settings;
@@ -588,16 +589,16 @@ export function createGatewayCodexResetHook(args: {
 				return false;
 			}
 			if (now() - since < 5 * 60_000) return false;
-			const finalReport = await read();
-			if (!finalReport || !hasExhaustedCodexWeekly(finalReport)) {
-				args.coordinator.exhaustedSinceByCredential.delete(credentialId);
-				return false;
-			}
 			try {
 				const statuses = await args.storage.resets.list({
 					provider,
 					signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
 				});
+				const finalReport = await read();
+				if (!finalReport || !hasExhaustedCodexWeekly(finalReport)) {
+					args.coordinator.exhaustedSinceByCredential.delete(credentialId);
+					return false;
+				}
 				const plan = planCodexResetRedemptions({
 					nowMs: now(),
 					trigger: "blocked",
@@ -872,18 +873,20 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const resetSweep = setInterval(() => {
 		if (resetSweepInFlight) return;
 		resetSweepInFlight = true;
-		void Promise.all([
-			runGatewayClaudeResetSweep({ storage, hook: claudeResetHook, signal: resetSweepAbort.signal }),
-			runGatewayCodexResetSweep({ storage, hook: codexResetHook, signal: resetSweepAbort.signal }),
-		])
-			.catch(error => {
-				logger.warn("auth-gateway reset sweep failed", {
+		void Promise.allSettled([
+			runGatewayClaudeResetSweep({ storage, hook: claudeResetHook, signal: resetSweepAbort.signal }).catch(error => {
+				logger.warn("auth-gateway Claude reset sweep failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-			})
-			.finally(() => {
-				resetSweepInFlight = false;
-			});
+			}),
+			runGatewayCodexResetSweep({ storage, hook: codexResetHook, signal: resetSweepAbort.signal }).catch(error => {
+				logger.warn("auth-gateway Codex reset sweep failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}),
+		]).finally(() => {
+			resetSweepInFlight = false;
+		});
 	}, GATEWAY_CLAUDE_RESET_SWEEP_INTERVAL_MS);
 	resetSweep.unref();
 

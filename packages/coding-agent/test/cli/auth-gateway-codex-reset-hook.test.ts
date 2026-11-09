@@ -159,18 +159,37 @@ describe("gateway Codex reset hook", () => {
 		expect(await s.call()).toBe(false);
 		expect(s.redeem).not.toHaveBeenCalled();
 	});
-	it("does not spend for a 429, 5h-only, or Spark-only exhaustion", async () => {
+	it("does not start the clock for a 429 below the weekly threshold", async () => {
 		const s = await setup();
 		s.setWeekly(0.998);
 		await s.call();
+		s.advance(300_000);
+		expect(await s.call()).toBe(false);
+		expect(s.coordinator.exhaustedSinceByCredential.size).toBe(0);
+		expect(s.list).not.toHaveBeenCalled();
+		expect(s.redeem).not.toHaveBeenCalled();
+	});
+	it("does not start the clock for 5h-only exhaustion", async () => {
+		const s = await setup();
+		s.setWeekly(0.2);
 		s.setPrimary(1);
 		await s.call();
-		s.setPrimary(0.2);
+		s.advance(300_000);
+		expect(await s.call()).toBe(false);
+		expect(s.coordinator.exhaustedSinceByCredential.size).toBe(0);
+		expect(s.list).not.toHaveBeenCalled();
+		expect(s.redeem).not.toHaveBeenCalled();
+	});
+	it("does not start the clock for Spark-only exhaustion", async () => {
+		const s = await setup();
+		s.setWeekly(0.2);
 		s.setSpark(1);
 		await s.call();
 		s.advance(300_000);
 		expect(await s.call()).toBe(false);
+		expect(s.coordinator.exhaustedSinceByCredential.size).toBe(0);
 		expect(s.list).not.toHaveBeenCalled();
+		expect(s.redeem).not.toHaveBeenCalled();
 	});
 	it("does not list or redeem without consent", async () => {
 		const s = await setup(false);
@@ -183,18 +202,29 @@ describe("gateway Codex reset hook", () => {
 	});
 	it("shares one redeem among concurrent hooks", async () => {
 		const s = await setup();
-		await s.call();
+		expect(await Promise.all([s.call(), s.call()])).toEqual([false, false]);
+		expect(s.report).toHaveBeenCalledTimes(1);
 		s.advance(300_000);
 		expect(await Promise.all([s.call(), s.call()])).toEqual([true, true]);
+		expect(s.report).toHaveBeenCalledTimes(3);
 		expect(s.redeem).toHaveBeenCalledTimes(1);
 	});
 	it("sweeps without traffic", async () => {
 		const s = await setup();
+		const models: string[] = [];
 		const sweep = () =>
-			runGatewayCodexResetSweep({ storage: s.storage, hook: s.hook, signal: new AbortController().signal });
+			runGatewayCodexResetSweep({
+				storage: s.storage,
+				hook: context => {
+					models.push(context.modelId);
+					return s.hook(context);
+				},
+				signal: new AbortController().signal,
+			});
 		await sweep();
 		s.advance(300_000);
 		await sweep();
+		expect(models).toEqual(["", ""]);
 		expect(s.redeem).toHaveBeenCalledTimes(1);
 	});
 });
