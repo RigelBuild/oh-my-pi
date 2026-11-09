@@ -52,9 +52,9 @@ export class AssignmentLineage {
 		}
 	}
 
-	terminal(sessionId: string): void {
+	terminal(sessionId: string, assignmentId: string): void {
 		const assignment = this.#assignments.get(sessionId);
-		if (assignment) assignment.phase = "terminal";
+		if (assignment?.ref.assignmentId === assignmentId) assignment.phase = "terminal";
 	}
 
 	wake(sessionId: string): void {

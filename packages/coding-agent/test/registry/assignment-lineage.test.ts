@@ -30,7 +30,7 @@ describe("assignment lineage", () => {
 		if (!active) throw new Error("missing binding");
 		lineage.wake("child");
 		expect(lineage.isCurrent(first, "instance", active.branchId)).toBe(true);
-		lineage.terminal("child");
+		lineage.terminal("child", first.assignmentId);
 		expect(lineage.isCurrent(first, "instance", active.branchId)).toBe(false);
 		lineage.wake("child");
 		const wake = lineage.getAssignment("child");
@@ -42,5 +42,16 @@ describe("assignment lineage", () => {
 		expect(lineage.getAssignment("child")?.parentInstanceId).toBe("parent-instance");
 		lineage.attach("parent", "replacement-instance");
 		expect(lineage.getAssignment("child")).toBeUndefined();
+	});
+
+	test("stale completion cannot terminalize a later assignment", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "parent-instance");
+		const first = lineage.mint("child", "parent");
+		const second = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		lineage.terminal("child", first.assignmentId);
+		expect(lineage.getAssignment("child")?.ref).toEqual(second);
+		expect(lineage.getAssignment("child")?.phase).toBe("running");
 	});
 });
