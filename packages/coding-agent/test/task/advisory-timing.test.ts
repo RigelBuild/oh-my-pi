@@ -51,6 +51,11 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 		clock.mockReturnValue(300_000);
 		vi.advanceTimersByTime(1);
 		expect(send).toHaveBeenCalledTimes(5);
+		const lateBinding = { ref: next, branchId: next.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "timing" };
+		const lateReply = { ...message, advisoryBinding: lateBinding };
+		expect(admitTaskAdvisory(parent, lateReply, lateBinding)).toBe("accept");
+		rollbackTaskAdvisory(parent, lateReply);
+		expect(vi.getTimerCount()).toBe(0);
 		vi.advanceTimersByTime(300_000);
 		expect(send).toHaveBeenCalledTimes(5);
 		const expiry = lineage.mint("child", "parent");

@@ -72,6 +72,8 @@ export class AssignmentLineage {
 	expireParked(sessionId: string): void {
 		if (!this.#parked.delete(sessionId)) return;
 		for (const listener of this.#resumeListeners) listener(sessionId);
+		const own = this.#assignments.get(sessionId);
+		if (own) for (const listener of this.#terminalListeners) listener(own.ref.assignmentId);
 		this.#branches.delete(sessionId);
 		this.#assignments.delete(sessionId);
 		for (const [childId, assignment] of this.#assignments) {
@@ -92,6 +94,8 @@ export class AssignmentLineage {
 		}
 		this.#parked.delete(sessionId);
 		for (const listener of this.#resumeListeners) listener(sessionId);
+		const own = this.#assignments.get(sessionId);
+		if (own) for (const listener of this.#terminalListeners) listener(own.ref.assignmentId);
 		this.#instances.delete(sessionId);
 		this.#branches.delete(sessionId);
 		this.#assignments.delete(sessionId);
@@ -105,6 +109,8 @@ export class AssignmentLineage {
 	}
 
 	mint(childSessionId: string, parentSessionId: string, branchId = this.branch(parentSessionId), messaging: AdvisoryMessagingSupport = { status: "supported" }): AssignmentRef {
+		const previous = this.#assignments.get(childSessionId);
+		if (previous) for (const listener of this.#terminalListeners) listener(previous.ref.assignmentId);
 		const ref: AssignmentRef = { childSessionId, parentSessionId, parentBranchId: branchId, assignmentId: crypto.randomUUID() };
 		this.#assignments.set(childSessionId, { ref, branchId, childBranchId: this.branch(childSessionId), phase: "running", messaging });
 		this.#orphaned.delete(childSessionId);

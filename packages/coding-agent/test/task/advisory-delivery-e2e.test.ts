@@ -123,7 +123,7 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 	auth.keys.setRuntime("mock", "test-key");
 	const registry = new ModelRegistry(auth);
 	const contexts: string[] = [];
-	const mock = createMockModel({ handler: context => { contexts.push(JSON.stringify(context.messages)); return { content: ["acknowledged"] }; } });
+	const mock = createMockModel({ handler: context => { const text = JSON.stringify(context.messages); contexts.push(text); return { content: [text.includes("IDLE_PRIVATE_ADVISORY") ? "IDLE_PRIVATE_ADVISORY" : "acknowledged"] }; } });
 	const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false, "todo.reminders": false, "advisor.enabled": false });
 	const sessions: AgentSession[] = [];
 	try {

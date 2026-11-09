@@ -18,7 +18,7 @@ class AdvisoryRuntime {
 	disposed = false;
 	readonly issuedIds = new Map<string, string>();
 	readonly parkedSnapshots = new Map<string, AdvisorySnapshot>();
-	readonly watches = new Map<string, { timer: NodeJS.Timeout; content: string; reply?: string; replyDelivered?: boolean; expired: boolean; rearm: () => void }>();
+	readonly watches = new Map<string, { timer: NodeJS.Timeout; content: string; reply?: string; replyDelivered?: boolean; expired: boolean; pending: boolean; followUpSent: boolean; rearm: () => void }>();
 
 	constructor(readonly session: AgentSession, readonly lineage: AssignmentLineage) {
 		this.api = {
@@ -48,7 +48,7 @@ class AdvisoryRuntime {
 				const key = `${ref.assignmentId}:${requestId}`;
 				const contentDigest = createHash("sha256").update(content).digest("hex");
 				const previous = this.issuedIds.get(key);
-				if (previous !== undefined) return previous === contentDigest ? { outcome: "duplicate" } : { outcome: "unavailable", reason: "handoff-failed" };
+				if (previous !== undefined) return !this.watches.get(key)?.pending && previous === contentDigest ? { outcome: "duplicate" } : { outcome: "unavailable", reason: "handoff-failed" };
 				this.issuedIds.set(key, contentDigest);
 				const started = performance.now();
 				const tick = () => {
@@ -59,6 +59,7 @@ class AdvisoryRuntime {
 						return;
 					}
 					if (performance.now() - started >= 300_000) {
+						watch.followUpSent = true;
 						void IrcBus.global().sendBound({ from, to, body: "Please share your progress and next action.", assignmentId: ref.assignmentId, checkId: requestId }, transport).catch(() => {});
 						return;
 					}
@@ -68,7 +69,7 @@ class AdvisoryRuntime {
 					const remaining = Math.max(0, 300_000 - (performance.now() - started));
 					watch.timer = setTimeout(tick, Math.min(15_000, remaining));
 				};
-				const watch = { timer: setTimeout(tick, 15_000), content: contentDigest, expired: false, rearm, reply: undefined as string | undefined, replyDelivered: false };
+				const watch = { timer: setTimeout(tick, 15_000), content: contentDigest, expired: false, pending: true, followUpSent: false, rearm, reply: undefined as string | undefined, replyDelivered: false };
 				const assignmentKeys = [...this.watches.keys()].filter(item => item.startsWith(`${ref.assignmentId}:`));
 				if (assignmentKeys.length >= 64) {
 					const oldest = assignmentKeys[0];
@@ -85,8 +86,9 @@ class AdvisoryRuntime {
 				} catch {
 					receipt = { outcome: "unavailable", reason: "handoff-failed" } as const;
 				}
+				watch.pending = false;
 				if (receipt.outcome === "unavailable" || !this.lineage.isCurrent(ref, binding.instanceId, binding.branchId)) {
-					if (receipt.outcome === "unavailable") { this.issuedIds.delete(key); this.watches.delete(key); }
+					if (receipt.outcome === "unavailable" && this.watches.get(key) === watch) { this.issuedIds.delete(key); this.watches.delete(key); }
 					clearTimeout(watch.timer);
 					watch.expired = true;
 				}
@@ -97,6 +99,7 @@ class AdvisoryRuntime {
 			if (sessionId === this.id) {
 				for (const watch of this.watches.values()) clearInterval(watch.timer);
 				this.watches.clear();
+				this.issuedIds.clear();
 				return;
 			}
 			const binding = lineage.getAssignment(sessionId);
@@ -191,7 +194,7 @@ export function rollbackTaskAdvisory(session: AgentSession, message: IrcMessage)
 	const binding = message.advisoryBinding;
 	if (!binding?.requestId || binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
 	const watch = runtimes.get(session)?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
-	if (watch) { watch.reply = undefined; watch.replyDelivered = false; if (!watch.expired) watch.rearm(); }
+	if (watch) { watch.reply = undefined; watch.replyDelivered = false; if (!watch.expired && !watch.followUpSent) watch.rearm(); }
 }
 
 export function createTaskAdvisoryForSessionId(id: string): TaskAdvisory | undefined {
