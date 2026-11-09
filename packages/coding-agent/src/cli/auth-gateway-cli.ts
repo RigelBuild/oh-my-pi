@@ -60,8 +60,13 @@ import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders, cfgModelProviderOrder } from "../config/model-settings";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import { REDEEM_RETRY_DEFER_MS, resetPlanSettings } from "../session/codex-auto-reset";
-import { cfgClaudeResets } from "../session/settings";
+import {
+	overlayLiveResetCredits,
+	planCodexResetRedemptions,
+	REDEEM_RETRY_DEFER_MS,
+	resetPlanSettings,
+} from "../session/codex-auto-reset";
+import { cfgClaudeResets, cfgCodexResets } from "../session/settings";
 import {
 	type AuthBrokerClientConfig,
 	loadEffectiveAuthAccountPolicyConfig,
@@ -533,6 +538,144 @@ export async function runGatewayClaudeResetSweep(args: {
 	}
 }
 
+export interface GatewayCodexResetCoordinator extends GatewayClaudeResetCoordinator {
+	exhaustedSinceByCredential: Map<number, number>;
+}
+
+function hasExhaustedCodexWeekly(report: UsageReport | null): boolean {
+	const weekly = report?.limits.find(limit => limit.id === "openai-codex:secondary");
+	return weekly?.status === "exhausted" || (weekly !== undefined && (resolveUsedFraction(weekly) ?? 0) >= 0.999);
+}
+
+export function createGatewayCodexResetHook(args: {
+	storage: AuthStorage;
+	settings: Settings;
+	coordinator: GatewayCodexResetCoordinator;
+	now?: () => number;
+}): NonNullable<AuthGatewayRouteOptions["onUsageLimit"]> {
+	const now = args.now ?? Date.now;
+	return async ({ provider, credentialId, modelId, signal }) => {
+		const cfg = cfgCodexResets.get(args.settings);
+		if (provider !== "openai-codex" || cfg.autoRedeem !== "yes") return false;
+		const current = args.coordinator.inFlightByCredential.get(credentialId);
+		if (current) return current;
+		const attempt = (async () => {
+			const credential = args.storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
+			if (credential?.type !== "oauth") {
+				args.coordinator.exhaustedSinceByCredential.delete(credentialId);
+				return false;
+			}
+			const read = async (): Promise<UsageReport | null> => {
+				try {
+					return await args.storage.usage.report(provider, credential, {
+						fresh: true,
+						timeoutMs: 10_000,
+						signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+					});
+				} catch (error) {
+					logger.info("auth-gateway Codex usage check failed", { credentialId, error: String(error) });
+					return null;
+				}
+			};
+			const report = await read();
+			if (!hasExhaustedCodexWeekly(report)) {
+				args.coordinator.exhaustedSinceByCredential.delete(credentialId);
+				return false;
+			}
+			const since = args.coordinator.exhaustedSinceByCredential.get(credentialId);
+			if (since === undefined) {
+				args.coordinator.exhaustedSinceByCredential.set(credentialId, now());
+				return false;
+			}
+			if (now() - since < 5 * 60_000) return false;
+			const finalReport = await read();
+			if (!finalReport || !hasExhaustedCodexWeekly(finalReport)) {
+				args.coordinator.exhaustedSinceByCredential.delete(credentialId);
+				return false;
+			}
+			try {
+				const statuses = await args.storage.resets.list({
+					provider,
+					signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+				});
+				const plan = planCodexResetRedemptions({
+					nowMs: now(),
+					trigger: "blocked",
+					provider,
+					modelId,
+					settings: resetPlanSettings(cfg),
+					identity: undefined,
+					reports: overlayLiveResetCredits(
+						[finalReport],
+						statuses.filter(status => status.credentialId === credentialId),
+					),
+					permitsCredential: id => id === credentialId,
+					attemptedKeys: args.coordinator.attemptedKeys,
+					deferredUntilByKey: args.coordinator.deferredUntilByKey,
+					lastAttemptAtByAccount: args.coordinator.lastAttemptAtByAccount,
+				});
+				for (const action of plan.actions) {
+					if (
+						action.reason !== "blocked-account" ||
+						action.target.credentialId !== credentialId ||
+						!action.blockedWindows?.includes("weekly")
+					)
+						continue;
+					if (args.coordinator.attemptedKeys.has(action.attemptKey)) continue;
+					const previous = args.coordinator.lastAttemptAtByAccount.get(action.accountKey);
+					args.coordinator.attemptedKeys.add(action.attemptKey);
+					args.coordinator.lastAttemptAtByAccount.set(action.accountKey, now());
+					let outcome: ResetCreditRedeemOutcome;
+					try {
+						outcome = await args.storage.resets.redeem({
+							target: action.target,
+							signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+						});
+					} catch (error) {
+						logger.info("auth-gateway Codex reset redeem failed", { credentialId, error: String(error) });
+						outcome = { ok: false, code: "error", provider: "openai-codex" };
+					}
+					if (!outcome.ok && outcome.code !== "already_redeemed" && outcome.code !== "no_credit") {
+						args.coordinator.attemptedKeys.delete(action.attemptKey);
+						args.coordinator.deferredUntilByKey.set(action.attemptKey, now() + REDEEM_RETRY_DEFER_MS);
+						if (previous === undefined) args.coordinator.lastAttemptAtByAccount.delete(action.accountKey);
+						else args.coordinator.lastAttemptAtByAccount.set(action.accountKey, previous);
+					}
+					if (outcome.ok) args.coordinator.exhaustedSinceByCredential.delete(credentialId);
+					return outcome.ok;
+				}
+			} catch (error) {
+				logger.info("auth-gateway Codex reset planning failed", { credentialId, error: String(error) });
+			}
+			return false;
+		})();
+		args.coordinator.inFlightByCredential.set(credentialId, attempt);
+		try {
+			return await attempt;
+		} finally {
+			if (args.coordinator.inFlightByCredential.get(credentialId) === attempt)
+				args.coordinator.inFlightByCredential.delete(credentialId);
+		}
+	};
+}
+
+export async function runGatewayCodexResetSweep(args: {
+	storage: AuthStorage;
+	hook: NonNullable<AuthGatewayRouteOptions["onUsageLimit"]>;
+	signal: AbortSignal;
+}): Promise<void> {
+	for (const row of args.storage.credentials.list("openai-codex")) {
+		args.signal.throwIfAborted();
+		if (row.credential.type !== "oauth") continue;
+		await args.hook({
+			provider: "openai-codex",
+			credentialId: row.id,
+			modelId: "",
+			signal: AbortSignal.any([args.signal, AbortSignal.timeout(45_000)]),
+		});
+	}
+}
+
 /** Env var honored by `serve` when `--api-key-limit-model-classes` is not passed (flag wins). */
 const API_KEY_LIMIT_MODEL_CLASSES_ENV = "OMP_AUTH_GATEWAY_API_KEY_LIMIT_MODEL_CLASSES";
 
@@ -604,6 +747,13 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		lastAttemptAtByAccount: new Map(),
 		inFlightByCredential: new Map(),
 	};
+	const codexResetCoordinator: GatewayCodexResetCoordinator = {
+		attemptedKeys: new Set(),
+		deferredUntilByKey: new Map(),
+		lastAttemptAtByAccount: new Map(),
+		inFlightByCredential: new Map(),
+		exhaustedSinceByCredential: new Map(),
+	};
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);
 	const store = new RemoteAuthCredentialStore({
@@ -657,6 +807,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	await rebuildCatalog();
 
 	const claudeResetHook = createGatewayClaudeResetHook({ storage, settings, coordinator: resetCoordinator });
+	const codexResetHook = createGatewayCodexResetHook({ storage, settings, coordinator: codexResetCoordinator });
 	const handle = startAuthGateway({
 		storage,
 		bind,
@@ -666,7 +817,8 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		resolveModel: (id, options) => resolveGatewayModel(id, index, options),
 		listModels: () => index.qualified.values(),
 		excludeProviders: new Set(cfgDisabledProviders.get(settings)),
-		onUsageLimit: claudeResetHook,
+		onUsageLimit: context =>
+			context.provider === "openai-codex" ? codexResetHook(context) : claudeResetHook(context),
 		...(apiKeyLimitModelClasses ? { apiKeyLimitModelClasses } : {}),
 		clients,
 	});
@@ -720,13 +872,12 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const resetSweep = setInterval(() => {
 		if (resetSweepInFlight) return;
 		resetSweepInFlight = true;
-		void runGatewayClaudeResetSweep({
-			storage,
-			hook: claudeResetHook,
-			signal: resetSweepAbort.signal,
-		})
+		void Promise.all([
+			runGatewayClaudeResetSweep({ storage, hook: claudeResetHook, signal: resetSweepAbort.signal }),
+			runGatewayCodexResetSweep({ storage, hook: codexResetHook, signal: resetSweepAbort.signal }),
+		])
 			.catch(error => {
-				logger.warn("auth-gateway Claude reset sweep failed", {
+				logger.warn("auth-gateway reset sweep failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			})
