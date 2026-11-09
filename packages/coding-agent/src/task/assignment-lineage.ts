@@ -101,13 +101,15 @@ export class AssignmentLineage {
 		return current !== undefined && current.phase === "running" && current.instanceId === instanceId && current.branchId === branchId && current.ref.assignmentId === ref.assignmentId && current.ref.parentSessionId === ref.parentSessionId && current.ref.parentBranchId === ref.parentBranchId;
 	}
 
-	validateBinding(binding: AdvisoryTransportBinding): AdvisoryBindingFailure | undefined {
+	validateBinding(binding: AdvisoryTransportBinding, senderSessionId: string, recipientSessionId: string): AdvisoryBindingFailure | undefined {
 		const assignment = this.#assignments.get(binding.ref.childSessionId);
 		if (!assignment || assignment.phase !== "running" || assignment.ref.assignmentId !== binding.ref.assignmentId || assignment.ref.parentSessionId !== binding.ref.parentSessionId || assignment.ref.parentBranchId !== binding.ref.parentBranchId) return "stale-assignment";
 		if (assignment.branchId !== binding.branchId || this.branch(binding.ref.parentSessionId) !== binding.branchId || this.branch(binding.ref.childSessionId) !== assignment.childBranchId) return "stale-parent-branch";
 		const child = assignment.instanceId;
 		const parent = assignment.parentInstanceId;
-		if (!child || !parent || this.#orphaned.has(binding.ref.parentSessionId) || this.#instances.get(binding.ref.childSessionId) !== child || this.#instances.get(binding.ref.parentSessionId) !== parent || !((binding.senderInstanceId === child && binding.recipientInstanceId === parent) || (binding.senderInstanceId === parent && binding.recipientInstanceId === child))) return "stale-instance";
+		const childToParent = senderSessionId === binding.ref.childSessionId && recipientSessionId === binding.ref.parentSessionId && binding.senderInstanceId === child && binding.recipientInstanceId === parent;
+		const parentToChild = senderSessionId === binding.ref.parentSessionId && recipientSessionId === binding.ref.childSessionId && binding.senderInstanceId === parent && binding.recipientInstanceId === child;
+		if (!child || !parent || this.#orphaned.has(binding.ref.parentSessionId) || this.#instances.get(binding.ref.childSessionId) !== child || this.#instances.get(binding.ref.parentSessionId) !== parent || (!childToParent && !parentToChild)) return "stale-instance";
 		return undefined;
 	}
 

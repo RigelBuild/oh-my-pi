@@ -105,10 +105,12 @@ describe("assignment lineage", () => {
 		const ref = lineage.mint("child", "parent");
 		lineage.attach("child", "child-instance");
 		const binding = { ref, senderInstanceId: "parent-instance", recipientInstanceId: "child-instance", branchId: ref.parentBranchId };
-		expect(lineage.validateBinding(binding)).toBeUndefined();
-		expect(lineage.validateBinding({ ...binding, recipientInstanceId: "other" })).toBe("stale-instance");
-		expect(lineage.validateBinding({ ...binding, ref: { ...ref, assignmentId: "other" } })).toBe("stale-assignment");
+		expect(lineage.validateBinding(binding, "parent", "child")).toBeUndefined();
+		expect(lineage.validateBinding(binding, "other", "child")).toBe("stale-instance");
+		expect(lineage.validateBinding(binding, "child", "parent")).toBe("stale-instance");
+		expect(lineage.validateBinding({ ...binding, recipientInstanceId: "other" }, "parent", "child")).toBe("stale-instance");
+		expect(lineage.validateBinding({ ...binding, ref: { ...ref, assignmentId: "other" } }, "parent", "child")).toBe("stale-assignment");
 		lineage.navigate("parent");
-		expect(lineage.validateBinding(binding)).toBe("stale-parent-branch");
+		expect(lineage.validateBinding(binding, "parent", "child")).toBe("stale-parent-branch");
 	});
 });
