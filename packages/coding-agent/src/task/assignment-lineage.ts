@@ -1,0 +1,81 @@
+import type { AssignmentRef } from "../extensibility/extensions/task-advisory";
+
+export interface AssignmentBinding {
+	ref: AssignmentRef;
+	instanceId: string;
+	branchId: string;
+	phase: "running" | "terminal";
+}
+
+interface PendingAssignment {
+	ref: AssignmentRef;
+	instanceId?: string;
+	branchId: string;
+	childBranchId: string;
+	phase: "running" | "terminal";
+}
+
+/** Live assignment identities. The owner wires session attachment and lifecycle transitions. */
+export class AssignmentLineage {
+	readonly #assignments = new Map<string, PendingAssignment>();
+	readonly #branches = new Map<string, string>();
+
+	branch(sessionId: string): string {
+		let branch = this.#branches.get(sessionId);
+		if (!branch) {
+			branch = crypto.randomUUID();
+			this.#branches.set(sessionId, branch);
+		}
+		return branch;
+	}
+
+	navigate(sessionId: string): void {
+		this.#branches.set(sessionId, crypto.randomUUID());
+	}
+
+	mint(childSessionId: string, parentSessionId: string): AssignmentRef {
+		const branchId = this.branch(parentSessionId);
+		const ref: AssignmentRef = { childSessionId, parentSessionId, parentBranchId: branchId, assignmentId: crypto.randomUUID() };
+		this.#assignments.set(childSessionId, { ref, branchId, childBranchId: this.branch(childSessionId), phase: "running" });
+		return ref;
+	}
+
+	attach(sessionId: string, instanceId: string): void {
+		const assignment = this.#assignments.get(sessionId);
+		if (assignment) assignment.instanceId = instanceId;
+	}
+
+	terminal(sessionId: string): void {
+		const assignment = this.#assignments.get(sessionId);
+		if (assignment) assignment.phase = "terminal";
+	}
+
+	wake(sessionId: string): void {
+		const assignment = this.#assignments.get(sessionId);
+		if (!assignment || assignment.phase !== "terminal") return;
+		const instanceId = assignment.instanceId;
+		this.mint(sessionId, assignment.ref.parentSessionId);
+		if (instanceId) this.attach(sessionId, instanceId);
+	}
+
+	getAssignment(sessionId: string): AssignmentBinding | undefined {
+		const assignment = this.#assignments.get(sessionId);
+		if (!assignment?.instanceId || this.branch(assignment.ref.parentSessionId) !== assignment.branchId || this.branch(sessionId) !== assignment.childBranchId) return undefined;
+		return { ref: assignment.ref, instanceId: assignment.instanceId, branchId: assignment.branchId, phase: assignment.phase };
+	}
+
+	isCurrent(ref: AssignmentRef, instanceId: string, branchId: string): boolean {
+		const current = this.getAssignment(ref.childSessionId);
+		return current !== undefined && current.phase === "running" && current.instanceId === instanceId && current.branchId === branchId && current.ref.assignmentId === ref.assignmentId && current.ref.parentSessionId === ref.parentSessionId && current.ref.parentBranchId === ref.parentBranchId;
+	}
+
+	children(parentSessionId: string): AssignmentBinding[] {
+		const children: AssignmentBinding[] = [];
+		for (const assignment of this.#assignments.values()) {
+			if (assignment.ref.parentSessionId !== parentSessionId) continue;
+			const binding = this.getAssignment(assignment.ref.childSessionId);
+			if (binding) children.push(binding);
+		}
+		return children;
+	}
+}
