@@ -73,6 +73,8 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		const relay = vi.spyOn(main, "emitIrcRelayObservation");
 		const managerAdvisory = createTaskAdvisory(manager, assignmentLineage);
 		const childAdvisory = createTaskAdvisory(child, assignmentLineage);
+		expect(manager.extensionRunner?.createContext().taskAdvisory).toBe(managerAdvisory);
+		expect(child.extensionRunner?.createContext().taskAdvisory).toBe(childAdvisory);
 		expect(managerAdvisory.children().map(snapshot => snapshot.ref.childSessionId)).toEqual([binding.ref.childSessionId]);
 		expect(childAdvisory.current()?.ref.childSessionId).toBe(binding.ref.childSessionId);
 		expect(childAdvisory.children()).toEqual([]);

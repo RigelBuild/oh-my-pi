@@ -2,6 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createTaskAdvisoryForSessionId } from "../../task/task-advisory-runtime";
 import {
 	type AgentMessage,
 	type AgentTool,
@@ -1380,6 +1381,7 @@ export class ExtensionRunner {
 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
 			this.runtime.sendUserMessage(text, options);
 		return {
+			taskAdvisory: createTaskAdvisoryForSessionId(this.sessionManager.getSessionId()),
 			ui: this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),

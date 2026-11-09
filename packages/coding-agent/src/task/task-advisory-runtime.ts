@@ -83,3 +83,8 @@ export function receiveTaskAdvisory(session: AgentSession, message: IrcMessage):
 	if (!runtime) return;
 	for (const listener of runtime.listeners) listener({ type: "reply", ref: binding.ref, requestId: binding.requestId, senderInstanceId: binding.senderInstanceId, recipientInstanceId: binding.recipientInstanceId });
 }
+
+export function createTaskAdvisoryForSessionId(id: string): TaskAdvisory | undefined {
+	const session = AgentRegistry.global().list().find(item => item.session?.sessionManager.getSessionId() === id)?.session;
+	return session ? runtimes.get(session)?.api : undefined;
+}
