@@ -144,6 +144,10 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		expect(JSON.stringify(main.messages)).not.toContain("nested private advisory");
 		releaseChild.resolve();
 		expect((await run).exitCode).toBe(0);
+		const oldId = main.sessionManager.getSessionId();
+		expect(await main.newSession()).toBe(true);
+		expect(assignmentLineage.children(oldId)).toEqual([]);
+		expect(assignmentLineage.children(main.sessionManager.getSessionId())).toEqual([]);
 	} finally {
 		releaseChild.resolve();
 		await AgentLifecycleManager.global().dispose();

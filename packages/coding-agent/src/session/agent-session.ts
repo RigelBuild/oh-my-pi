@@ -887,6 +887,7 @@ export class AgentSession implements SettingsScope {
 	#autoQaEnabled = false;
 	/** Teardowns registered via {@link addDisposer} (including settings listeners bound to this session); drained on dispose. */
 	#disposers: Array<() => void> = [];
+	#lineageKey?: { sessionId: string; instanceId: string };
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -2545,6 +2546,17 @@ export class AgentSession implements SettingsScope {
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
 	addDisposer(dispose: () => void): void {
 		this.#disposers.push(dispose);
+	}
+
+	resetAdvisoryLineage(): void {
+		if (this.#lineageKey) assignmentLineage.disposeSession(this.#lineageKey.sessionId, this.#lineageKey.instanceId, "dispose");
+		this.#lineageKey = { sessionId: this.sessionManager.getSessionId(), instanceId: crypto.randomUUID() };
+		assignmentLineage.attach(this.#lineageKey.sessionId, this.#lineageKey.instanceId);
+	}
+
+	disposeAdvisoryLineage(): void {
+		if (this.#lineageKey) assignmentLineage.disposeSession(this.#lineageKey.sessionId, this.#lineageKey.instanceId, "dispose");
+		this.#lineageKey = undefined;
 	}
 
 	/**
@@ -9890,6 +9902,7 @@ export class AgentSession implements SettingsScope {
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
 				});
+				this.resetAdvisoryLineage();
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
@@ -11950,6 +11963,7 @@ export class AgentSession implements SettingsScope {
 				} else {
 					this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
 				}
+				this.resetAdvisoryLineage();
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
@@ -12064,6 +12078,7 @@ export class AgentSession implements SettingsScope {
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
 				this.sessionManager.createBranchedSession(leafId);
+				this.resetAdvisoryLineage();
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;

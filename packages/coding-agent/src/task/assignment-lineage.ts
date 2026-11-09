@@ -73,6 +73,7 @@ export class AssignmentLineage {
 		this.#orphaned.delete(sessionId);
 		for (const [childId, assignment] of this.#assignments) {
 			if (assignment.ref.parentSessionId !== sessionId) continue;
+			for (const listener of this.#terminalListeners) listener(assignment.ref.assignmentId);
 			this.#assignments.delete(childId);
 			this.#orphaned.add(childId);
 		}

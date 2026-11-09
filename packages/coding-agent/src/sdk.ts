@@ -5394,11 +5394,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		) {
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
-		const lineageSessionId = sessionManager.getSessionId();
-		const lineageInstanceId = crypto.randomUUID();
-		assignmentLineage.attach(lineageSessionId, lineageInstanceId);
+		session.resetAdvisoryLineage();
 		createTaskAdvisory(session, assignmentLineage);
-		session.addDisposer(() => assignmentLineage.disposeSession(lineageSessionId, lineageInstanceId));
+		session.addDisposer(() => session.disposeAdvisoryLineage());
 		hasRegistered = true;
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both
