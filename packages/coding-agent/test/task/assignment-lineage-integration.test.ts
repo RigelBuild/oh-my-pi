@@ -83,6 +83,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		expect(assignmentLineage.isCurrent(binding.ref, binding.instanceId, binding.branchId)).toBe(true);
 		expect(binding.ref.parentSessionId).toBe(managerId);
 		expect(assignmentLineage.children(mainId).map(item => item.ref.childSessionId)).toEqual([managerId]);
+		const callsBeforeDelivery = mock.calls.length;
 		const relay = vi.spyOn(main, "emitIrcRelayObservation");
 		const managerAdvisory = createTaskAdvisory(manager, assignmentLineage);
 		const childAdvisory = createTaskAdvisory(child, assignmentLineage);
@@ -116,6 +117,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		expect(reply.outcome).toBe("injected");
 		expect(replies).toEqual(["check-1", "", "", ""]);
 		expect(relay).toHaveBeenCalledTimes(0);
+		expect(mock.calls.length).toBe(callsBeforeDelivery);
 		unsubscribe();
 		const ordinary = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: "ordinary nested message" });
 		expect(ordinary.outcome).not.toBe("failed");
