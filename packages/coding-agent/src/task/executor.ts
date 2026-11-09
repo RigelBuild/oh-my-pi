@@ -47,6 +47,7 @@ import { type OverlayLayers, Settings } from "../config/settings";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { PreparedExtension } from "../extensibility/extensions/types";
+import type { AdvisoryMessagingSupport } from "../extensibility/extensions/task-advisory";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -3549,8 +3550,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		const parent = AgentRegistry.global().get(ref.parentId)?.session;
 		if (parent) {
 			const childSessionId = session.sessionManager.getSessionId();
-			const instanceId = assignmentLineage.getAssignment(childSessionId)?.instanceId;
-			followUpAssignmentId = assignmentLineage.mint(childSessionId, parent.sessionManager.getSessionId()).assignmentId;
+			const previous = assignmentLineage.getAssignment(childSessionId);
+			const instanceId = previous?.instanceId;
+			followUpAssignmentId = assignmentLineage.mint(childSessionId, parent.sessionManager.getSessionId(), undefined, previous?.messaging).assignmentId;
 			if (instanceId) assignmentLineage.attach(childSessionId, instanceId);
 		}
 	}
@@ -4400,7 +4402,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
 			if (options.parentSessionId) {
 				advisorySessionId = sessionManager.getSessionId();
-				advisoryAssignmentId = assignmentLineage.mint(advisorySessionId, options.parentSessionId, options.parentBranchId).assignmentId;
+				const messaging: AdvisoryMessagingSupport = options.restrictToolNames
+					? { status: "unsupported", reasons: ircEnabled ? ["extension-disabled"] : ["extension-disabled", "messaging-disabled"] }
+					: ircEnabled ? { status: "supported" } : { status: "unsupported", reasons: ["messaging-disabled"] };
+				advisoryAssignmentId = assignmentLineage.mint(advisorySessionId, options.parentSessionId, options.parentBranchId, messaging).assignmentId;
 			}
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);

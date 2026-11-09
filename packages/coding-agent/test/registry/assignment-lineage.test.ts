@@ -64,4 +64,14 @@ describe("assignment lineage", () => {
 		lineage.attach("child", "child-instance");
 		expect(lineage.getAssignment("child")).toBeUndefined();
 	});
+
+	test("preserves unsupported messaging across wake", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "parent-instance");
+		const ref = lineage.mint("child", "parent", undefined, { status: "unsupported", reasons: ["extension-disabled"] });
+		lineage.attach("child", "child-instance");
+		lineage.terminal("child", ref.assignmentId);
+		lineage.wake("child");
+		expect(lineage.getAssignment("child")?.messaging).toEqual({ status: "unsupported", reasons: ["extension-disabled"] });
+	});
 });

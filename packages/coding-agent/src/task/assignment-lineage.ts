@@ -1,10 +1,11 @@
-import type { AssignmentRef } from "../extensibility/extensions/task-advisory";
+import type { AdvisoryMessagingSupport, AssignmentRef } from "../extensibility/extensions/task-advisory";
 
 export interface AssignmentBinding {
 	ref: AssignmentRef;
 	instanceId: string;
 	parentInstanceId: string;
 	branchId: string;
+	messaging: AdvisoryMessagingSupport;
 	phase: "running" | "terminal";
 }
 
@@ -14,6 +15,7 @@ interface PendingAssignment {
 	parentInstanceId?: string;
 	branchId: string;
 	childBranchId: string;
+	messaging: AdvisoryMessagingSupport;
 	phase: "running" | "terminal";
 }
 
@@ -36,9 +38,9 @@ export class AssignmentLineage {
 		this.#branches.set(sessionId, crypto.randomUUID());
 	}
 
-	mint(childSessionId: string, parentSessionId: string, branchId = this.branch(parentSessionId)): AssignmentRef {
+	mint(childSessionId: string, parentSessionId: string, branchId = this.branch(parentSessionId), messaging: AdvisoryMessagingSupport = { status: "supported" }): AssignmentRef {
 		const ref: AssignmentRef = { childSessionId, parentSessionId, parentBranchId: branchId, assignmentId: crypto.randomUUID() };
-		this.#assignments.set(childSessionId, { ref, branchId, childBranchId: this.branch(childSessionId), phase: "running" });
+		this.#assignments.set(childSessionId, { ref, branchId, childBranchId: this.branch(childSessionId), phase: "running", messaging });
 		return ref;
 	}
 
@@ -60,14 +62,14 @@ export class AssignmentLineage {
 		const assignment = this.#assignments.get(sessionId);
 		if (!assignment || assignment.phase !== "terminal") return;
 		const instanceId = assignment.instanceId;
-		this.mint(sessionId, assignment.ref.parentSessionId);
+		this.mint(sessionId, assignment.ref.parentSessionId, this.branch(assignment.ref.parentSessionId), assignment.messaging);
 		if (instanceId) this.attach(sessionId, instanceId);
 	}
 
 	getAssignment(sessionId: string): AssignmentBinding | undefined {
 		const assignment = this.#assignments.get(sessionId);
 		if (!assignment?.instanceId || !assignment.parentInstanceId || this.#instances.get(assignment.ref.parentSessionId) !== assignment.parentInstanceId || this.branch(assignment.ref.parentSessionId) !== assignment.branchId || this.branch(sessionId) !== assignment.childBranchId) return undefined;
-		return { ref: assignment.ref, instanceId: assignment.instanceId, parentInstanceId: assignment.parentInstanceId, branchId: assignment.branchId, phase: assignment.phase };
+		return { ref: assignment.ref, instanceId: assignment.instanceId, parentInstanceId: assignment.parentInstanceId, branchId: assignment.branchId, phase: assignment.phase, messaging: assignment.messaging };
 	}
 
 	isCurrent(ref: AssignmentRef, instanceId: string, branchId: string): boolean {
