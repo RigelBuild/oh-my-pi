@@ -16,7 +16,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AdvisoryReceipt } from "../extensibility/extensions/task-advisory";
 import type { AdvisoryTransportBinding } from "../task/assignment-lineage";
 import type { CustomMessage } from "../session/messages";
-import { admitTaskAdvisory, receiveTaskAdvisory } from "../task/task-advisory-runtime";
+import { admitTaskAdvisory, receiveTaskAdvisory, rollbackTaskAdvisory } from "../task/task-advisory-runtime";
 import { advisoryBindingFailure, advisoryIsCurrent } from "./advisory";
 
 interface IrcWaiter {
@@ -78,6 +78,7 @@ export class IrcBus {
 		const sender = this.#registry.get(msg.from)?.session;
 		// Tool arguments are deobfuscated only when the sender has known secrets.
 		const body = msg.advisoryBinding ? sender?.obfuscator?.obfuscate(msg.body) ?? msg.body : msg.body;
+		if (msg.advisoryBinding && Buffer.byteLength(body) > 4096) return { to: msg.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 		const message: IrcMessage = { ...msg, body, id: Snowflake.next(), ts: Date.now() };
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
@@ -209,6 +210,7 @@ export class IrcBus {
 			if (!opts?.suppressRelay && !message.advisoryBinding) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
+			if (message.advisoryBinding) rollbackTaskAdvisory(session, message);
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
 			// the message so a later `wait`/`inbox` from the recipient can still
 			// pick it up. The receipt stays "failed" — the recipient has not

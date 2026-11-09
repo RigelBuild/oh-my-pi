@@ -72,7 +72,7 @@ export async function executeSend(
 		);
 		return receipt.outcome === "unavailable"
 			? coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to })
-			: { content: [{ type: "text", text: `Delivered to ${to}.` }], details: { op: "send", from: senderId, to } };
+			: { content: [{ type: "text", text: receipt.outcome === "duplicate" ? "Duplicate advisory message." : `Delivered to ${to}.` }], details: { op: "send", from: senderId, to } };
 	}
 	const isBroadcast = to === "all";
 	// Restore parked recipients only when needed; never delay delivery to a live peer.

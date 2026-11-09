@@ -15,6 +15,8 @@ class AdvisoryRuntime {
 	readonly listeners = new Set<(event: TaskAdvisoryEvent) => void>();
 	readonly api: TaskAdvisory;
 	lastSnapshot?: AdvisorySnapshot;
+	disposed = false;
+	readonly expiredIds = new Set<string>();
 	readonly watches = new Map<string, { timer: NodeJS.Timeout; content: string; reply?: string; expired: boolean }>();
 
 	constructor(readonly session: AgentSession, readonly lineage: AssignmentLineage) {
@@ -32,6 +34,7 @@ class AdvisoryRuntime {
 				this.publish({ type: "signal", ref: binding.ref, signal, count });
 			},
 			remind: async (ref, requestId, content) => {
+				if (this.disposed) return { outcome: "unavailable", reason: "parent-gone" };
 				if (!requestId || Buffer.byteLength(requestId) > 128 || Buffer.byteLength(ref.assignmentId) > 128 || Buffer.byteLength(ref.childSessionId) > 128 || Buffer.byteLength(ref.parentSessionId) > 128 || Buffer.byteLength(ref.parentBranchId) > 128 || Buffer.byteLength(content) > 4096) return { outcome: "unavailable", reason: "handoff-failed" };
 				const binding = this.lineage.getAssignment(ref.childSessionId);
 				if (!binding || ref.parentSessionId !== this.id || !this.lineage.isCurrent(ref, binding.instanceId, binding.branchId)) return { outcome: "unavailable", reason: "stale-assignment" };
@@ -42,6 +45,7 @@ class AdvisoryRuntime {
 				if (!from || !to) return { outcome: "unavailable", reason: "stale-instance" };
 				const transport = { ref, branchId: binding.branchId, senderInstanceId: binding.parentInstanceId, recipientInstanceId: binding.instanceId, requestId };
 				const key = `${ref.assignmentId}:${requestId}`;
+				if (this.expiredIds.has(key)) return { outcome: "unavailable", reason: "stale-assignment" };
 				const contentDigest = createHash("sha256").update(content).digest("hex");
 				const previous = this.watches.get(key);
 				if (previous) return previous.content === contentDigest && !previous.expired ? { outcome: "duplicate" } : { outcome: "unavailable", reason: "handoff-failed" };
@@ -60,7 +64,15 @@ class AdvisoryRuntime {
 				const assignmentKeys = [...this.watches.keys()].filter(item => item.startsWith(`${ref.assignmentId}:`));
 				if (assignmentKeys.length >= 64) {
 					const oldest = assignmentKeys[0];
-					if (oldest !== undefined) { clearInterval(this.watches.get(oldest)?.timer); this.watches.delete(oldest); }
+					if (oldest !== undefined) {
+						clearInterval(this.watches.get(oldest)?.timer);
+						this.watches.delete(oldest);
+						this.expiredIds.add(oldest);
+						if (this.expiredIds.size > 64) {
+							const first = this.expiredIds.values().next().value;
+							if (first !== undefined) this.expiredIds.delete(first);
+						}
+					}
 				}
 				this.watches.set(key, watch);
 				let receipt;
@@ -98,7 +110,7 @@ class AdvisoryRuntime {
 				this.publish({ type: "snapshot", snapshot });
 			}
 		});
-		session.addDisposer(() => { unsubscribe(); stopTerminal(); for (const watch of this.watches.values()) clearInterval(watch.timer); this.watches.clear(); this.listeners.clear(); runtimes.delete(session); });
+		session.addDisposer(() => { this.disposed = true; unsubscribe(); stopTerminal(); for (const watch of this.watches.values()) clearInterval(watch.timer); this.watches.clear(); this.listeners.clear(); runtimes.delete(session); });
 	}
 
 	get id(): string { return this.session.sessionManager.getSessionId(); }
@@ -136,6 +148,7 @@ export function receiveTaskAdvisory(session: AgentSession, message: IrcMessage):
 	const runtime = runtimes.get(session);
 	if (!runtime) return;
 	if (binding.requestId && !runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`)?.reply) return;
+	if (binding.requestId) clearInterval(runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`)?.timer);
 	for (const listener of runtime.listeners) listener({ type: "reply", ref: binding.ref, requestId: binding.requestId ?? "", senderInstanceId: binding.senderInstanceId, recipientInstanceId: binding.recipientInstanceId });
 }
 
@@ -147,8 +160,14 @@ export function admitTaskAdvisory(session: AgentSession, message: Omit<IrcMessag
 	const digest = createHash("sha256").update(message.body).digest("hex");
 	if (watch.reply !== undefined) return watch.reply === digest ? "duplicate" : "reject";
 	watch.reply = digest;
-	clearInterval(watch.timer);
 	return "accept";
+}
+
+export function rollbackTaskAdvisory(session: AgentSession, message: IrcMessage): void {
+	const binding = message.advisoryBinding;
+	if (!binding?.requestId || binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
+	const watch = runtimes.get(session)?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
+	if (watch) watch.reply = undefined;
 }
 
 export function createTaskAdvisoryForSessionId(id: string): TaskAdvisory | undefined {

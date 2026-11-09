@@ -11745,6 +11745,7 @@ export class AgentSession implements SettingsScope {
 			this.#releaseTtsrReservations(previousSteeringMessages);
 			this.#releaseTtsrReservations(previousFollowUpMessages);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
+				this.resetAdvisoryLineage();
 				this.#notifySessionChangeCallbacks();
 			}
 			generationSettled.resolve();
