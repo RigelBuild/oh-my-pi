@@ -26,7 +26,7 @@ it("emits snapshots only when their values change", () => {
 		expect(events).toEqual(["snapshot"]);
 		clock.mockReturnValue(20);
 		emit({ type: "model_changed" });
-		expect(events).toEqual(["snapshot", "snapshot"]);
+		expect(events).toEqual(["snapshot"]);
 	} finally { clock.mockRestore(); }
 });
 

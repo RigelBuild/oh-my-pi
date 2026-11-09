@@ -1234,7 +1234,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 			}
 			safe.push(message);
 		}
-		return safe.flatMap((message, index) => convertOne(message, message.role === "assistant" && followedByInterruptedThinking(safe, index)));
+		return safe.flatMap((message, index) => convertOneCached(message, message.role === "assistant" && followedByInterruptedThinking(safe, index)));
 	}
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);
