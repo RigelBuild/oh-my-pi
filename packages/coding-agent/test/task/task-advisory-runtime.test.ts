@@ -27,3 +27,31 @@ it("emits snapshots only when their values change", () => {
 		expect(events).toEqual(["snapshot", "snapshot"]);
 	} finally { clock.mockRestore(); }
 });
+
+
+it("starts a fresh baseline after reassignment", () => {
+	const lineage = new AssignmentLineage();
+	lineage.attach("parent", "parent-instance");
+	const first = lineage.mint("child", "parent");
+	lineage.attach("child", "child-instance");
+	let emit: (event: AgentSessionEvent) => void = () => {};
+	const session = {
+		sessionManager: { getSessionId: () => "child" },
+		subscribe: (listener: typeof emit) => { emit = listener; return () => {}; },
+		addDisposer: () => {},
+	} as unknown as AgentSession;
+	const clock = spyOn(performance, "now").mockReturnValue(0);
+	try {
+		const advisory = createTaskAdvisory(session, lineage);
+		emit({ type: "agent_start" });
+		clock.mockReturnValue(100);
+		expect(advisory.current()?.wallMs).toBe(100);
+		const second = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		expect(advisory.current()).toBeUndefined();
+		emit({ type: "agent_start" });
+		clock.mockReturnValue(125);
+		expect(advisory.current()).toMatchObject({ ref: second, wallMs: 25, workTokens: null });
+		expect(second.assignmentId).not.toBe(first.assignmentId);
+	} finally { clock.mockRestore(); }
+});

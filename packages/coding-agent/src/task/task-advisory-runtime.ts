@@ -9,7 +9,8 @@ import { type AssignmentBinding, type AssignmentLineage } from "./assignment-lin
 const runtimes = new WeakMap<AgentSession, AdvisoryRuntime>();
 
 class AdvisoryRuntime {
-	readonly adapter = new AdvisorySessionAdapter();
+	adapter = new AdvisorySessionAdapter();
+	assignmentId?: string;
 	readonly listeners = new Set<(event: TaskAdvisoryEvent) => void>();
 	readonly api: TaskAdvisory;
 	lastSnapshot?: AdvisorySnapshot;
@@ -42,6 +43,12 @@ class AdvisoryRuntime {
 			},
 		};
 		const unsubscribe = session.subscribe(event => {
+			const binding = this.lineage.getAssignment(this.id);
+			if (binding && binding.ref.assignmentId !== this.assignmentId) {
+				this.assignmentId = binding.ref.assignmentId;
+				this.adapter = new AdvisorySessionAdapter();
+				this.lastSnapshot = undefined;
+			}
 			this.adapter.accept(event, performance.now());
 			const snapshot = this.api.current();
 			const previous = this.lastSnapshot;
@@ -61,6 +68,7 @@ class AdvisoryRuntime {
 
 	snapshot(binding: AssignmentBinding | undefined): AdvisorySnapshot | undefined {
 		if (!binding || binding.ref.childSessionId !== this.id) return undefined;
+		if (binding.ref.assignmentId !== this.assignmentId) return undefined;
 		const values = this.adapter.source.snapshot(performance.now());
 		if (!values) return undefined;
 		return { ref: binding.ref, instanceId: binding.instanceId, phase: binding.phase, ...values, messaging: binding.messaging,
