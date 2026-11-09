@@ -143,6 +143,15 @@ it("validates bound reports before consuming a reply watch", async () => {
 			{ requestId: "valid-stuck", state: "stuck" },
 			{ requestId: "valid-waiting", state: "waiting" },
 		]);
+		const unboundMessage = {
+			from: "ReportChild",
+			to: "ReportParent",
+			body: JSON.stringify({ state: "progressing", progress: "ok", tried: [], blocker: "", nextAction: "next" }),
+		};
+		const unboundBinding = { ...bindingFor("unused"), requestId: undefined };
+		const noRuntime = { sessionManager: { getSessionId: () => "report-parent" } } as unknown as AgentSession;
+		expect(admitTaskAdvisory(noRuntime, unboundMessage, unboundBinding)).toBe("reject");
+		expect(admitTaskAdvisory(child, unboundMessage, unboundBinding)).toBe("reject");
 
 		const invalidReports: Array<[string, string]> = [
 			["invalid-json", "not-json"],
@@ -152,7 +161,6 @@ it("validates bound reports before consuming a reply watch", async () => {
 			["empty-blocker", reportFor("struggling", "empty-blocker", { blocker: "" })],
 			["mismatched-request-id", reportFor("progressing", "mismatched-request-id", { requestId: "other-check" })],
 			["oversize-body", `${reportFor("progressing", "oversize-body")}${" ".repeat(4096)}`],
-			["oversize-report-id", reportFor("progressing", "valid-report-id", { requestId: "é".repeat(65) })],
 			["null-report-id", reportFor("progressing", "null-report-id", { requestId: null })],
 			["unknown-key", reportFor("progressing", "unknown-key", { unexpected: true })],
 		];
@@ -171,6 +179,13 @@ it("validates bound reports before consuming a reply watch", async () => {
 			expect(admitTaskAdvisory(parent, valid, binding)).toBe("accept");
 			receiveTaskAdvisory(parent, valid as Parameters<typeof receiveTaskAdvisory>[1]);
 			expect(admitTaskAdvisory(parent, valid, binding)).toBe("duplicate");
+			expect(
+				admitTaskAdvisory(
+					parent,
+					{ ...valid, body: reportFor("progressing", checkId, { progress: "changed" }) },
+					binding,
+				),
+			).toBe("reject");
 		}
 	} finally {
 		dispose();

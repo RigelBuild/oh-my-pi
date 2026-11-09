@@ -13,6 +13,7 @@ import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-st
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
+import { admitTaskAdvisory, createTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 
 function report(progress: string): string {
 	return JSON.stringify({ state: "progressing", progress, tried: [], blocker: "", nextAction: "continue" });
@@ -131,8 +132,80 @@ describe("IRC", () => {
 		}
 	});
 	describe("IrcBus", () => {
+		it("emits a reply state to a waiting recipient", async () => {
+			const parent = createRealSession();
+			const child = createRealSession();
+			sessions.push(parent.session, child.session);
+			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
+			registry.register({ id: "Child", displayName: "child", kind: "sub", session: child.session });
+			const parentId = parent.sessionManager.getSessionId();
+			const childId = child.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint(childId, parentId);
+			assignmentLineage.attach(childId, "child-instance");
+			const advisory = createTaskAdvisory(parent.session, assignmentLineage);
+			const events: unknown[] = [];
+			advisory.subscribe(event => {
+				if (event.type === "reply") events.push(event);
+			});
+			const binding = {
+				ref,
+				branchId: ref.parentBranchId,
+				senderInstanceId: "child-instance",
+				recipientInstanceId: "parent-instance",
+			};
+			const waiter = bus.wait("Parent", {}, 0);
+			const receipt = await bus.send({
+				from: "Child",
+				to: "Parent",
+				body: report("waiter"),
+				advisoryBinding: binding,
+			});
+			expect(receipt.outcome).toBe("injected");
+			expect((await waiter)?.body).toBe(report("waiter"));
+			expect(events).toEqual([
+				{
+					type: "reply",
+					ref,
+					requestId: "",
+					senderInstanceId: "child-instance",
+					recipientInstanceId: "parent-instance",
+					state: "progressing",
+				},
+			]);
+		});
+		it("does not roll back a delivered report when a reply listener throws", async () => {
+			const parent = createRealSession();
+			const child = createRealSession();
+			sessions.push(parent.session, child.session);
+			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
+			registry.register({ id: "Child", displayName: "child", kind: "sub", session: child.session });
+			const parentId = parent.sessionManager.getSessionId();
+			const childId = child.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint(childId, parentId);
+			assignmentLineage.attach(childId, "child-instance");
+			const advisory = createTaskAdvisory(parent.session, assignmentLineage);
+			const sendBound = vi.spyOn(bus, "sendBound").mockResolvedValueOnce({ outcome: "injected" });
+			expect((await advisory.remind(ref, "check", "status")).outcome).toBe("injected");
+			sendBound.mockRestore();
+			advisory.subscribe(event => {
+				if (event.type === "reply") throw new Error("listener failure");
+			});
+			const binding = {
+				ref,
+				branchId: ref.parentBranchId,
+				senderInstanceId: "child-instance",
+				recipientInstanceId: "parent-instance",
+				requestId: "check",
+			};
+			const message = { from: "Child", to: "Parent", body: report("delivered"), advisoryBinding: binding };
+			await expect(bus.send(message)).rejects.toThrow("listener failure");
+			expect(admitTaskAdvisory(parent.session, message, binding)).toBe("duplicate");
+		});
 		it("suppresses relay when a waiter receives a bound advisory", async () => {
 			const parent = createRealSession();
+			createTaskAdvisory(parent.session, assignmentLineage);
 			const child = createRealSession();
 			const main = makeFakeSession();
 			sessions.push(parent.session, child.session);
@@ -237,6 +310,7 @@ describe("IRC", () => {
 
 		it("drops queued advisory after parent navigation without relaying to Main", async () => {
 			const parent = createRealSession();
+			createTaskAdvisory(parent.session, assignmentLineage);
 			Object.defineProperty(parent.session, "isStreaming", { configurable: true, get: () => true });
 			const child = createRealSession();
 			const main = makeFakeSession();
@@ -279,6 +353,7 @@ describe("IRC", () => {
 		});
 		it("drops a flushed advisory after navigation at provider conversion", async () => {
 			const parent = createRealSession();
+			createTaskAdvisory(parent.session, assignmentLineage);
 			Object.defineProperty(parent.session, "isStreaming", { configurable: true, get: () => true });
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
@@ -326,6 +401,7 @@ describe("IRC", () => {
 
 		it("drops a resolved waiter advisory after navigation at provider conversion", async () => {
 			const parent = createRealSession();
+			createTaskAdvisory(parent.session, assignmentLineage);
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
@@ -377,6 +453,7 @@ describe("IRC", () => {
 			const file = manager.getSessionFile();
 			if (!file) throw new Error("missing session file");
 			const parent = createRealSession();
+			createTaskAdvisory(parent.session, assignmentLineage);
 			Object.defineProperty(parent.session, "isStreaming", { configurable: true, get: () => true });
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);

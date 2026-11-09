@@ -323,15 +323,15 @@ export function admitTaskAdvisory(
 	message: Omit<IrcMessage, "id" | "ts">,
 	binding: NonNullable<IrcMessage["advisoryBinding"]>,
 ): "accept" | "duplicate" | "reject" {
-	if (binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return "accept";
+	if (binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return "reject";
 	const report = parseReportInput(message.body, binding.requestId);
 	if (!report) return "reject";
 	const runtime = runtimes.get(session);
+	if (!runtime) return "reject";
 	if (!binding.requestId) {
-		runtime?.replyStates.set(message, report.state);
+		runtime.replyStates.set(message, report.state);
 		return "accept";
 	}
-	if (!runtime) return "reject";
 	const watch = runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
 	if (!watch || watch.expired) return "reject";
 	const digest = createHash("sha256").update(message.body).digest("hex");
@@ -344,9 +344,10 @@ export function admitTaskAdvisory(
 
 export function rollbackTaskAdvisory(session: AgentSession, message: IrcMessage): void {
 	const binding = message.advisoryBinding;
+	const runtime = runtimes.get(session);
+	runtime?.replyStates.delete(message);
 	if (!binding?.requestId || binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
-	runtimes.get(session)?.replyStates.delete(message);
-	const watch = runtimes.get(session)?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
+	const watch = runtime?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
 	if (watch) {
 		watch.reply = undefined;
 		watch.replyDelivered = false;

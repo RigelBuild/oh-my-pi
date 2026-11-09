@@ -192,10 +192,12 @@ export class IrcBus {
 			const recipient = this.#registry.get(message.to)?.session;
 			if (!recipient || !advisoryIsCurrent(message))
 				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
-			const admission = admitTaskAdvisory(recipient, message, message.advisoryBinding);
-			if (admission === "duplicate") return { to: message.to, outcome: "duplicate" };
-			if (admission === "reject")
-				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			if (recipient.sessionManager.getSessionId() === message.advisoryBinding.ref.parentSessionId) {
+				const admission = admitTaskAdvisory(recipient, message, message.advisoryBinding);
+				if (admission === "duplicate") return { to: message.to, outcome: "duplicate" };
+				if (admission === "reject")
+					return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			}
 			markAdvisoryAdmitted(message);
 		}
 
@@ -216,11 +218,9 @@ export class IrcBus {
 			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		}
 
+		let delivery: "injected" | "woken";
 		try {
-			const delivery = await session.deliverIrcMessage(message);
-			if (message.advisoryBinding) receiveTaskAdvisory(session, message);
-			if (!opts?.suppressRelay && !message.advisoryBinding) this.#relayToMainUi(message);
-			return { to: message.to, outcome: revived ? "revived" : delivery };
+			delivery = await session.deliverIrcMessage(message);
 		} catch (error) {
 			if (message.advisoryBinding) rollbackTaskAdvisory(session, message);
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
@@ -234,6 +234,9 @@ export class IrcBus {
 				error: error instanceof Error ? error.message : String(error),
 			};
 		}
+		if (message.advisoryBinding) receiveTaskAdvisory(session, message);
+		if (!opts?.suppressRelay && !message.advisoryBinding) this.#relayToMainUi(message);
+		return { to: message.to, outcome: revived ? "revived" : delivery };
 	}
 
 	/**

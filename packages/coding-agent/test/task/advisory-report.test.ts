@@ -16,6 +16,14 @@ it("accepts every report state without retaining unrelated data", () => {
 	for (const state of ["progressing", "struggling", "stuck", "waiting"]) {
 		expect(parseReportInput(report(state), "check-1")).toMatchObject({ state });
 	}
+	expect(parseReportInput(report("progressing", { progress: "x".repeat(240) }), "check-1")).toBeDefined();
+});
+
+it("enforces the request ID UTF-8 byte limit", () => {
+	const requestId = "é".repeat(64);
+	expect(parseReportInput(report("progressing", { requestId }), requestId)).toBeDefined();
+	expect(parseReportInput(report("progressing", { requestId: "é".repeat(65) }), undefined)).toBeUndefined();
+	expect(parseReportInput(report("progressing", { requestId: "é".repeat(65) }), "é".repeat(65))).toBeUndefined();
 });
 
 it("rejects malformed and over-limit reports", () => {
