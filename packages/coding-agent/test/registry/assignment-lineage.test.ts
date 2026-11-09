@@ -74,4 +74,28 @@ describe("assignment lineage", () => {
 		lineage.wake("child");
 		expect(lineage.getAssignment("child")?.messaging).toEqual({ status: "unsupported", reasons: ["extension-disabled"] });
 	});
+
+	test("disposal removes only owned assignments and preserves sibling bindings", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("root", "root-instance");
+		lineage.mint("manager", "root");
+		lineage.attach("manager", "manager-instance");
+		lineage.mint("sibling", "root");
+		lineage.attach("sibling", "sibling-instance");
+		lineage.mint("child", "manager");
+		lineage.attach("child", "child-instance");
+		const grandchild = lineage.mint("grandchild", "child");
+		lineage.attach("grandchild", "grandchild-instance");
+		const binding = lineage.getAssignment("grandchild");
+		lineage.mint("other-child", "sibling");
+		lineage.attach("other-child", "other-instance");
+		if (!binding) throw new Error("missing grandchild");
+		lineage.disposeSession("manager", "manager-instance");
+		expect(lineage.getAssignment("manager")).toBeUndefined();
+		expect(lineage.getAssignment("child")).toBeUndefined();
+		expect(lineage.children("sibling")).toHaveLength(1);
+		expect(lineage.isCurrent(grandchild, binding.instanceId, binding.branchId)).toBe(false);
+		lineage.disposeSession("child", "child-instance");
+		expect(lineage.isCurrent(grandchild, binding.instanceId, binding.branchId)).toBe(false);
+	});
 });

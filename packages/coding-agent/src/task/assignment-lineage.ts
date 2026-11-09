@@ -24,6 +24,7 @@ export class AssignmentLineage {
 	readonly #assignments = new Map<string, PendingAssignment>();
 	readonly #branches = new Map<string, string>();
 	readonly #instances = new Map<string, string>();
+	readonly #orphaned = new Set<string>();
 
 	branch(sessionId: string): string {
 		let branch = this.#branches.get(sessionId);
@@ -38,9 +39,23 @@ export class AssignmentLineage {
 		this.#branches.set(sessionId, crypto.randomUUID());
 	}
 
+	disposeSession(sessionId: string, instanceId: string): void {
+		if (this.#instances.get(sessionId) !== instanceId) return;
+		this.#instances.delete(sessionId);
+		this.#branches.delete(sessionId);
+		this.#assignments.delete(sessionId);
+		this.#orphaned.delete(sessionId);
+		for (const [childId, assignment] of this.#assignments) {
+			if (assignment.ref.parentSessionId !== sessionId) continue;
+			this.#assignments.delete(childId);
+			this.#orphaned.add(childId);
+		}
+	}
+
 	mint(childSessionId: string, parentSessionId: string, branchId = this.branch(parentSessionId), messaging: AdvisoryMessagingSupport = { status: "supported" }): AssignmentRef {
 		const ref: AssignmentRef = { childSessionId, parentSessionId, parentBranchId: branchId, assignmentId: crypto.randomUUID() };
 		this.#assignments.set(childSessionId, { ref, branchId, childBranchId: this.branch(childSessionId), phase: "running", messaging });
+		this.#orphaned.delete(childSessionId);
 		return ref;
 	}
 
@@ -68,7 +83,7 @@ export class AssignmentLineage {
 
 	getAssignment(sessionId: string): AssignmentBinding | undefined {
 		const assignment = this.#assignments.get(sessionId);
-		if (!assignment?.instanceId || !assignment.parentInstanceId || this.#instances.get(assignment.ref.parentSessionId) !== assignment.parentInstanceId || this.branch(assignment.ref.parentSessionId) !== assignment.branchId || this.branch(sessionId) !== assignment.childBranchId) return undefined;
+		if (!assignment?.instanceId || !assignment.parentInstanceId || this.#orphaned.has(assignment.ref.parentSessionId) || this.#instances.get(assignment.ref.parentSessionId) !== assignment.parentInstanceId || this.branch(assignment.ref.parentSessionId) !== assignment.branchId || this.branch(sessionId) !== assignment.childBranchId) return undefined;
 		return { ref: assignment.ref, instanceId: assignment.instanceId, parentInstanceId: assignment.parentInstanceId, branchId: assignment.branchId, phase: assignment.phase, messaging: assignment.messaging };
 	}
 
