@@ -36,6 +36,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 	setAgentDir(path.join(home, ".omp", "agent"));
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	registerMockApi("test/assignment-lineage");
 	const auth = createInMemoryAuthStorage();
 	auth.keys.setRuntime("mock", "test-key");
@@ -268,6 +269,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		await main?.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
 		unregisterCustomApis("test/assignment-lineage");
 		auth.close();
 		vi.restoreAllMocks();
