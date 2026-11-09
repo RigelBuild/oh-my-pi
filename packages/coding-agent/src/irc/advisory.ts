@@ -19,7 +19,12 @@ export function advisoryBindingFailure(msg: Pick<IrcMessage, "from" | "to" | "ad
 	const sender = registry.get(msg.from)?.session;
 	const recipient = registry.get(msg.to)?.session;
 	return sender && recipient
-		? assignmentLineage.validateBinding(msg.advisoryBinding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId(), wasAdmitted)
+		? assignmentLineage.validateBinding(
+				msg.advisoryBinding,
+				sender.sessionManager.getSessionId(),
+				recipient.sessionManager.getSessionId(),
+				wasAdmitted,
+			)
 		: "stale-instance";
 }
 

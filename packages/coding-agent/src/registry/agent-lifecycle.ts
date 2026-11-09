@@ -323,8 +323,11 @@ export class AgentLifecycleManager {
 					logger.debug("AgentLifecycleManager.park: cost snapshot failed", { id, error: String(error) });
 				}
 
-				const sessionId = session.sessionManager?.getSessionId();
-				if (sessionId) { adopted.parkedSessionId = sessionId; assignmentLineage.parkSession(sessionId); }
+				const sessionId = session.sessionManager?.getSessionId?.();
+				if (sessionId) {
+					adopted.parkedSessionId = sessionId;
+					assignmentLineage.parkSession(sessionId);
+				}
 				// Commit: detach + parked *before* dispose so callers never see a
 				// dying session via ref.session / idle status.
 				park.detached = true;

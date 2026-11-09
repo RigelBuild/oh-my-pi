@@ -5,7 +5,11 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { AssignmentLineage, assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
-import { admitTaskAdvisory, createTaskAdvisory, receiveTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
+import {
+	admitTaskAdvisory,
+	createTaskAdvisory,
+	receiveTaskAdvisory,
+} from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 
 it("emits snapshots only when their values change", () => {
 	const lineage = new AssignmentLineage();
@@ -15,7 +19,10 @@ it("emits snapshots only when their values change", () => {
 	let emit: (event: AgentSessionEvent) => void = () => {};
 	const session = {
 		sessionManager: { getSessionId: () => "child" },
-		subscribe: (listener: typeof emit) => { emit = listener; return () => {}; },
+		subscribe: (listener: typeof emit) => {
+			emit = listener;
+			return () => {};
+		},
 		addDisposer: () => {},
 	} as unknown as AgentSession;
 	const clock = spyOn(performance, "now").mockReturnValue(10);
@@ -28,7 +35,9 @@ it("emits snapshots only when their values change", () => {
 		clock.mockReturnValue(20);
 		emit({ type: "model_changed" });
 		expect(events).toEqual(["snapshot"]);
-	} finally { clock.mockRestore(); }
+	} finally {
+		clock.mockRestore();
+	}
 });
 
 it("starts a fresh baseline after reassignment", () => {
@@ -39,7 +48,10 @@ it("starts a fresh baseline after reassignment", () => {
 	let emit: (event: AgentSessionEvent) => void = () => {};
 	const session = {
 		sessionManager: { getSessionId: () => "child" },
-		subscribe: (listener: typeof emit) => { emit = listener; return () => {}; },
+		subscribe: (listener: typeof emit) => {
+			emit = listener;
+			return () => {};
+		},
 		addDisposer: () => {},
 	} as unknown as AgentSession;
 	const clock = spyOn(performance, "now").mockReturnValue(0);
@@ -56,12 +68,16 @@ it("starts a fresh baseline after reassignment", () => {
 		expect(advisory.current()).toMatchObject({ ref: second, wallMs: 25, workTokens: null });
 		expect(second.assignmentId).not.toBe(first.assignmentId);
 		let signals = 0;
-		advisory.subscribe(event => { if (event.type === "signal") signals++; });
+		advisory.subscribe(event => {
+			if (event.type === "signal") signals++;
+		});
 		advisory.signal("tool-repeat", 3);
 		lineage.terminal("child", second.assignmentId);
 		advisory.signal("tool-repeat", 3);
 		expect(signals).toBe(1);
-	} finally { clock.mockRestore(); }
+	} finally {
+		clock.mockRestore();
+	}
 });
 
 it("closes a reply watch before reminder delivery resolves", async () => {
@@ -72,7 +88,13 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 	const ref = lineage.mint("race-child", "race-parent");
 	lineage.attach("race-child", "child-instance");
 	let dispose = () => {};
-	const parent = { sessionManager: { getSessionId: () => "race-parent" }, subscribe: () => () => {}, addDisposer: (fn: () => void) => { dispose = fn; } } as unknown as AgentSession;
+	const parent = {
+		sessionManager: { getSessionId: () => "race-parent" },
+		subscribe: () => () => {},
+		addDisposer: (fn: () => void) => {
+			dispose = fn;
+		},
+	} as unknown as AgentSession;
 	const child = { sessionManager: { getSessionId: () => "race-child" } } as unknown as AgentSession;
 	const registry = AgentRegistry.global();
 	registry.register({ id: "RaceParent", displayName: "Parent", kind: "sub", session: parent });
@@ -82,13 +104,28 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 	try {
 		const advisory = createTaskAdvisory(parent, lineage);
 		const replies: string[] = [];
-		advisory.subscribe(event => { if (event.type === "reply") replies.push(event.requestId); });
+		advisory.subscribe(event => {
+			if (event.type === "reply") replies.push(event.requestId);
+		});
 		expect((await advisory.remind(ref, "é".repeat(65), "request")).outcome).toBe("unavailable");
 		expect((await advisory.remind(ref, "check", "é".repeat(2049))).outcome).toBe("unavailable");
 		const pending = advisory.remind(ref, "check", "request");
 		expect((await advisory.remind(ref, "check", "request")).outcome).toBe("unavailable");
 		expect((await advisory.remind(ref, "check", "changed")).outcome).toBe("unavailable");
-		const message = { id: "message", ts: 0, from: "RaceChild", to: "RaceParent", body: "progress", advisoryBinding: { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "check" } };
+		const message = {
+			id: "message",
+			ts: 0,
+			from: "RaceChild",
+			to: "RaceParent",
+			body: "progress",
+			advisoryBinding: {
+				ref,
+				branchId: ref.parentBranchId,
+				senderInstanceId: "child-instance",
+				recipientInstanceId: "parent-instance",
+				requestId: "check",
+			},
+		};
 		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("accept");
 		vi.advanceTimersByTime(300_000);
 		expect(send).toHaveBeenCalledTimes(1);
@@ -108,7 +145,12 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		lineage.terminal("race-child", ref.assignmentId);
 		vi.advanceTimersByTime(600_000);
 		expect(send).toHaveBeenCalledTimes(66);
-	} finally { dispose(); send.mockRestore(); vi.useRealTimers(); AgentRegistry.resetGlobalForTests(); }
+	} finally {
+		dispose();
+		send.mockRestore();
+		vi.useRealTimers();
+		AgentRegistry.resetGlobalForTests();
+	}
 });
 
 it("reattaches a parked parent and expires it on release", async () => {
@@ -121,15 +163,37 @@ it("reattaches a parked parent and expires it on release", async () => {
 	const lineage = assignmentLineage;
 	const parentId = crypto.randomUUID();
 	const childId = crypto.randomUUID();
-	const makeParent = () => { let disposer = () => {}; return { sessionManager: { getSessionId: () => parentId, getUsageStatistics: () => ({ cost: 0, subagentCost: 0 }) }, subscribe: () => () => {}, addDisposer: (fn: () => void) => { disposer = fn; }, dispose: async () => { disposer(); } } as unknown as AgentSession; };
+	const makeParent = () => {
+		let disposer = () => {};
+		return {
+			sessionManager: { getSessionId: () => parentId, getUsageStatistics: () => ({ cost: 0, subagentCost: 0 }) },
+			subscribe: () => () => {},
+			addDisposer: (fn: () => void) => {
+				disposer = fn;
+			},
+			dispose: async () => {
+				disposer();
+			},
+		} as unknown as AgentSession;
+	};
 	const parent = makeParent();
-	const child = { sessionManager: { getSessionId: () => childId }, deliverIrcMessage: async () => "injected" } as unknown as AgentSession;
+	const child = {
+		sessionManager: { getSessionId: () => childId },
+		deliverIrcMessage: async () => "injected",
+	} as unknown as AgentSession;
 	registry.register({ id: "ParkParent", displayName: "Parent", kind: "sub", session: parent, status: "idle" });
 	registry.register({ id: "ParkChild", displayName: "Child", kind: "sub", parentId: "ParkParent", session: child });
 	lineage.attach(parentId, "old");
 	const ref = lineage.mint(childId, parentId);
 	lineage.attach(childId, "child");
-	lifecycle.adopt("ParkParent", { idleTtlMs: 0, revive: async () => { const revived = makeParent(); lineage.attach(parentId, "new"); return revived; } });
+	lifecycle.adopt("ParkParent", {
+		idleTtlMs: 0,
+		revive: async () => {
+			const revived = makeParent();
+			lineage.attach(parentId, "new");
+			return revived;
+		},
+	});
 	try {
 		await lifecycle.park("ParkParent");
 		const revived = await lifecycle.ensureLive("ParkParent");
@@ -140,7 +204,10 @@ it("reattaches a parked parent and expires it on release", async () => {
 		await lifecycle.release("ParkParent");
 		expect(vi.getTimerCount()).toBe(0);
 		expect(lineage.children(parentId)).toEqual([]);
-		expect(await advisory.remind(ref, "expired-check", "progress")).toMatchObject({ outcome: "unavailable", reason: "parent-gone" });
+		expect(await advisory.remind(ref, "expired-check", "progress")).toMatchObject({
+			outcome: "unavailable",
+			reason: "parent-gone",
+		});
 	} finally {
 		await lifecycle.dispose();
 		lineage.disposeSession(childId, "child");

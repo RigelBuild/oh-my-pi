@@ -3,7 +3,11 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AssignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
-import { admitTaskAdvisory, createTaskAdvisory, rollbackTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
+import {
+	admitTaskAdvisory,
+	createTaskAdvisory,
+	rollbackTaskAdvisory,
+} from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 
 it("checks every 15 seconds and sends one follow-up at 300 seconds", async () => {
 	vi.useFakeTimers();
@@ -13,7 +17,13 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 	const ref = lineage.mint("child", "parent");
 	lineage.attach("child", "child-instance");
 	let dispose = () => {};
-	const parent = { sessionManager: { getSessionId: () => "parent" }, subscribe: () => () => {}, addDisposer: (fn: () => void) => { dispose = fn; } } as unknown as AgentSession;
+	const parent = {
+		sessionManager: { getSessionId: () => "parent" },
+		subscribe: () => () => {},
+		addDisposer: (fn: () => void) => {
+			dispose = fn;
+		},
+	} as unknown as AgentSession;
 	const child = { sessionManager: { getSessionId: () => "child" } } as unknown as AgentSession;
 	AgentRegistry.global().register({ id: "TimerParent", displayName: "Parent", kind: "sub", session: parent });
 	AgentRegistry.global().register({ id: "TimerChild", displayName: "Child", kind: "sub", session: child });
@@ -25,8 +35,21 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 		send.mockResolvedValueOnce({ outcome: "unavailable", reason: "handoff-failed" });
 		expect((await advisory.remind(ref, "retry", "status")).outcome).toBe("unavailable");
 		expect((await advisory.remind(ref, "retry", "status")).outcome).toBe("injected");
-		const binding = { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "retry" };
-		const message = { id: "reply", ts: 0, from: "TimerChild", to: "TimerParent", body: "progress", advisoryBinding: binding };
+		const binding = {
+			ref,
+			branchId: ref.parentBranchId,
+			senderInstanceId: "child-instance",
+			recipientInstanceId: "parent-instance",
+			requestId: "retry",
+		};
+		const message = {
+			id: "reply",
+			ts: 0,
+			from: "TimerChild",
+			to: "TimerParent",
+			body: "progress",
+			advisoryBinding: binding,
+		};
 		expect(admitTaskAdvisory(parent, message, binding)).toBe("accept");
 		expect(vi.getTimerCount()).toBe(0);
 		clock.mockReturnValue(290_000);
@@ -51,7 +74,13 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 		clock.mockReturnValue(300_000);
 		vi.advanceTimersByTime(1);
 		expect(send).toHaveBeenCalledTimes(5);
-		const lateBinding = { ref: next, branchId: next.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "timing" };
+		const lateBinding = {
+			ref: next,
+			branchId: next.parentBranchId,
+			senderInstanceId: "child-instance",
+			recipientInstanceId: "parent-instance",
+			requestId: "timing",
+		};
 		const lateReply = { ...message, advisoryBinding: lateBinding };
 		expect(admitTaskAdvisory(parent, lateReply, lateBinding)).toBe("accept");
 		rollbackTaskAdvisory(parent, lateReply);

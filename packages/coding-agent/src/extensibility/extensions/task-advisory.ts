@@ -12,7 +12,10 @@ export type AdvisoryMessagingSupport =
 	| { status: "unsupported"; reasons: readonly [AdvisoryUnsupportedReason, ...AdvisoryUnsupportedReason[]] };
 export type DetectorCoverage =
 	| { status: "full" }
-	| { status: "partial" | "unavailable"; reason: "detector-unregistered" | "edit-inspection-unavailable" | "fingerprint-limits" };
+	| {
+			status: "partial" | "unavailable";
+			reason: "detector-unregistered" | "edit-inspection-unavailable" | "fingerprint-limits";
+	  };
 export type AdvisoryLocalCoverage = { edits: DetectorCoverage; loops: DetectorCoverage };
 export type AdvisorySnapshot = {
 	ref: AssignmentRef;
@@ -36,7 +39,16 @@ export type AdvisoryMessageBinding = {
 };
 export type AdvisoryReceipt =
 	| { outcome: "injected" | "woken" | "revived" | "duplicate" }
-	| { outcome: "unavailable"; reason: "messaging-disabled" | "parent-gone" | "stale-assignment" | "stale-parent-branch" | "stale-instance" | "handoff-failed" };
+	| {
+			outcome: "unavailable";
+			reason:
+				| "messaging-disabled"
+				| "parent-gone"
+				| "stale-assignment"
+				| "stale-parent-branch"
+				| "stale-instance"
+				| "handoff-failed";
+	  };
 export type TaskAdvisoryEvent =
 	| { type: "snapshot"; snapshot: AdvisorySnapshot }
 	| { type: "signal"; ref: AssignmentRef; signal: LocalSignal; count: number }

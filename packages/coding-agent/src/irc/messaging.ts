@@ -40,7 +40,12 @@ export function drainPendingInbox(registry: AgentRegistry, senderId: string, fro
 export function messageResult(senderId: string, waited: IrcMessage): AgentToolResult<CoordinationDetails> {
 	return {
 		content: [{ type: "text", text: formatIncoming(waited) }],
-		details: { op: "wait", from: senderId, waited, ...(waited.advisoryBinding ? { advisory: true, [advisoryMessage]: waited } : {}) },
+		details: {
+			op: "wait",
+			from: senderId,
+			waited,
+			...(waited.advisoryBinding ? { advisory: true, [advisoryMessage]: waited } : {}),
+		},
 	};
 }
 
@@ -58,21 +63,56 @@ export async function executeSend(
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	if (params.assignmentId !== undefined || params.checkId !== undefined) {
-		if (!params.assignmentId || Buffer.byteLength(params.assignmentId) > 128 || (params.checkId !== undefined && (!params.checkId || Buffer.byteLength(params.checkId) > 128)) || Buffer.byteLength(message) > 4096) return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
+		if (
+			!params.assignmentId ||
+			Buffer.byteLength(params.assignmentId) > 128 ||
+			(params.checkId !== undefined && (!params.checkId || Buffer.byteLength(params.checkId) > 128)) ||
+			Buffer.byteLength(message) > 4096
+		)
+			return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
 		const sender = registry.get(senderId)?.session;
 		const recipient = registry.get(to)?.session;
 		const childId = sender?.sessionManager.getSessionId();
 		const binding = childId ? assignmentLineage.getAssignment(childId) : undefined;
-		if (!params.assignmentId || !binding || !childId || !recipient || assignmentLineage.validateBinding({ ref: { ...binding.ref, assignmentId: params.assignmentId }, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId }, childId, recipient.sessionManager.getSessionId())) {
+		if (
+			!params.assignmentId ||
+			!binding ||
+			!childId ||
+			!recipient ||
+			assignmentLineage.validateBinding(
+				{
+					ref: { ...binding.ref, assignmentId: params.assignmentId },
+					branchId: binding.branchId,
+					senderInstanceId: binding.instanceId,
+					recipientInstanceId: binding.parentInstanceId,
+				},
+				childId,
+				recipient.sessionManager.getSessionId(),
+			)
+		) {
 			return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
 		}
 		const receipt = await IrcBus.global().sendBound(
 			{ from: senderId, to, body: message, assignmentId: params.assignmentId, checkId: params.checkId },
-			{ ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId, requestId: params.checkId },
+			{
+				ref: binding.ref,
+				branchId: binding.branchId,
+				senderInstanceId: binding.instanceId,
+				recipientInstanceId: binding.parentInstanceId,
+				requestId: params.checkId,
+			},
 		);
 		return receipt.outcome === "unavailable"
 			? coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to })
-			: { content: [{ type: "text", text: receipt.outcome === "duplicate" ? "Duplicate advisory message." : `Delivered to ${to}.` }], details: { op: "send", from: senderId, to } };
+			: {
+					content: [
+						{
+							type: "text",
+							text: receipt.outcome === "duplicate" ? "Duplicate advisory message." : `Delivered to ${to}.`,
+						},
+					],
+					details: { op: "send", from: senderId, to },
+				};
 	}
 	const isBroadcast = to === "all";
 	// Restore parked recipients only when needed; never delay delivery to a live peer.

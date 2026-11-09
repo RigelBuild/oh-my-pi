@@ -35,7 +35,19 @@ describe("IrcBridge wake-relay marking", () => {
 		assignmentLineage.attach(childId, "child-instance");
 		try {
 			const { bridge, woken } = makeBridge();
-			const outcome = await bridge.deliver({ id: "bound", from: "Child", to: "Parent", body: "progress", ts: 1, advisoryBinding: { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" } });
+			const outcome = await bridge.deliver({
+				id: "bound",
+				from: "Child",
+				to: "Parent",
+				body: "progress",
+				ts: 1,
+				advisoryBinding: {
+					ref,
+					branchId: ref.parentBranchId,
+					senderInstanceId: "child-instance",
+					recipientInstanceId: "parent-instance",
+				},
+			});
 			expect(outcome).toBe("woken");
 			expect(woken).toHaveLength(1);
 			const record = woken[0][0] as CustomMessage;

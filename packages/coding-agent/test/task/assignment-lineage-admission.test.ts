@@ -6,7 +6,12 @@ it("retains admitted messages after terminal but rejects new sends and stale bra
 	lineage.attach("parent", "parent-instance");
 	const ref = lineage.mint("child", "parent");
 	lineage.attach("child", "child-instance");
-	const binding = { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" };
+	const binding = {
+		ref,
+		branchId: ref.parentBranchId,
+		senderInstanceId: "child-instance",
+		recipientInstanceId: "parent-instance",
+	};
 	expect(lineage.validateBinding(binding, "child", "parent")).toBeUndefined();
 	lineage.terminal("child", ref.assignmentId);
 	expect(lineage.validateBinding(binding, "child", "parent")).toBe("stale-assignment");

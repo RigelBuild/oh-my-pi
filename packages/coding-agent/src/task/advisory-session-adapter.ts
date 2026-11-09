@@ -15,7 +15,12 @@ export class AdvisorySessionAdapter {
 				}
 				break;
 			case "tool_execution_start":
-				this.source.accept({ kind: "blocked-start", at, token: `tool:${event.toolCallId}`, reason: event.toolName === "ask" ? "ask" : event.toolName === "wait" ? "wait" : "tool" });
+				this.source.accept({
+					kind: "blocked-start",
+					at,
+					token: `tool:${event.toolCallId}`,
+					reason: event.toolName === "ask" ? "ask" : event.toolName === "wait" ? "wait" : "tool",
+				});
 				break;
 			case "tool_execution_end":
 				this.source.accept({ kind: "blocked-end", at, token: `tool:${event.toolCallId}` });

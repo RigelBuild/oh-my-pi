@@ -3093,8 +3093,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	session.setIrcWakeTurnObserver(records => {
-		assignmentLineage.wake(session.sessionManager.getSessionId());
-		const wakeAssignment = assignmentLineage.getAssignment(session.sessionManager.getSessionId());
+		const sessionId = session.sessionManager?.getSessionId?.();
+		if (sessionId) assignmentLineage.wake(sessionId);
+		const wakeAssignment = sessionId ? assignmentLineage.getAssignment(sessionId) : undefined;
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
 		// and retry counters so this wake turn's guards see only its own state.
@@ -3219,7 +3220,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				providerError ??
 				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
 			turnMonitor.finish();
-			if (wakeAssignment && (yielded || aborted || turnError !== undefined)) assignmentLineage.terminal(wakeAssignment.ref.childSessionId, wakeAssignment.ref.assignmentId);
+			if (wakeAssignment && (yielded || aborted || turnError !== undefined))
+				assignmentLineage.terminal(wakeAssignment.ref.childSessionId, wakeAssignment.ref.assignmentId);
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
 				// turn's terminal yield is settled, so terminalize the ref here
@@ -3553,7 +3555,12 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 			const childSessionId = session.sessionManager.getSessionId();
 			const previous = assignmentLineage.getAssignment(childSessionId);
 			const instanceId = previous?.instanceId;
-			followUpAssignmentId = assignmentLineage.mint(childSessionId, parent.sessionManager.getSessionId(), undefined, previous?.messaging).assignmentId;
+			followUpAssignmentId = assignmentLineage.mint(
+				childSessionId,
+				parent.sessionManager.getSessionId(),
+				undefined,
+				previous?.messaging,
+			).assignmentId;
 			if (instanceId) assignmentLineage.attach(childSessionId, instanceId);
 		}
 	}
@@ -4404,9 +4411,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (options.parentSessionId) {
 				advisorySessionId = sessionManager.getSessionId();
 				const messaging: AdvisoryMessagingSupport = options.restrictToolNames
-					? { status: "unsupported", reasons: ircEnabled ? ["extension-disabled"] : ["extension-disabled", "messaging-disabled"] }
-					: ircEnabled ? { status: "supported" } : { status: "unsupported", reasons: ["messaging-disabled"] };
-				advisoryAssignmentId = assignmentLineage.mint(advisorySessionId, options.parentSessionId, options.parentBranchId, messaging).assignmentId;
+					? {
+							status: "unsupported",
+							reasons: ircEnabled ? ["extension-disabled"] : ["extension-disabled", "messaging-disabled"],
+						}
+					: ircEnabled
+						? { status: "supported" }
+						: { status: "unsupported", reasons: ["messaging-disabled"] };
+				advisoryAssignmentId = assignmentLineage.mint(
+					advisorySessionId,
+					options.parentSessionId,
+					options.parentBranchId,
+					messaging,
+				).assignmentId;
 			}
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);

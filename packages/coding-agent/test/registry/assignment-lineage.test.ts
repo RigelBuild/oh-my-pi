@@ -95,11 +95,17 @@ describe("assignment lineage", () => {
 	test("preserves unsupported messaging across wake", () => {
 		const lineage = new AssignmentLineage();
 		lineage.attach("parent", "parent-instance");
-		const ref = lineage.mint("child", "parent", undefined, { status: "unsupported", reasons: ["extension-disabled"] });
+		const ref = lineage.mint("child", "parent", undefined, {
+			status: "unsupported",
+			reasons: ["extension-disabled"],
+		});
 		lineage.attach("child", "child-instance");
 		lineage.terminal("child", ref.assignmentId);
 		lineage.wake("child");
-		expect(lineage.getAssignment("child")?.messaging).toEqual({ status: "unsupported", reasons: ["extension-disabled"] });
+		expect(lineage.getAssignment("child")?.messaging).toEqual({
+			status: "unsupported",
+			reasons: ["extension-disabled"],
+		});
 	});
 
 	test("disposal removes only owned assignments and preserves sibling bindings", () => {
@@ -131,12 +137,21 @@ describe("assignment lineage", () => {
 		lineage.attach("parent", "parent-instance");
 		const ref = lineage.mint("child", "parent");
 		lineage.attach("child", "child-instance");
-		const binding = { ref, senderInstanceId: "parent-instance", recipientInstanceId: "child-instance", branchId: ref.parentBranchId };
+		const binding = {
+			ref,
+			senderInstanceId: "parent-instance",
+			recipientInstanceId: "child-instance",
+			branchId: ref.parentBranchId,
+		};
 		expect(lineage.validateBinding(binding, "parent", "child")).toBeUndefined();
 		expect(lineage.validateBinding(binding, "other", "child")).toBe("stale-instance");
 		expect(lineage.validateBinding(binding, "child", "parent")).toBe("stale-instance");
-		expect(lineage.validateBinding({ ...binding, recipientInstanceId: "other" }, "parent", "child")).toBe("stale-instance");
-		expect(lineage.validateBinding({ ...binding, ref: { ...ref, assignmentId: "other" } }, "parent", "child")).toBe("stale-assignment");
+		expect(lineage.validateBinding({ ...binding, recipientInstanceId: "other" }, "parent", "child")).toBe(
+			"stale-instance",
+		);
+		expect(lineage.validateBinding({ ...binding, ref: { ...ref, assignmentId: "other" } }, "parent", "child")).toBe(
+			"stale-assignment",
+		);
 		lineage.navigate("parent");
 		expect(lineage.validateBinding(binding, "parent", "child")).toBe("stale-parent-branch");
 	});

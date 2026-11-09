@@ -7,10 +7,15 @@ export type AdvisoryEvent =
 	| {
 			kind: "assistant-usage";
 			id: string;
-			usage: { input?: number; output?: number; cacheWrite?: number; cacheRead?: number; total?: number } | undefined;
-		};
+			usage:
+				| { input?: number; output?: number; cacheWrite?: number; cacheRead?: number; total?: number }
+				| undefined;
+	  };
 
-export type AdvisorySourceSnapshot = Pick<AdvisorySnapshot, "wallMs" | "unblockedMs" | "waitReasons" | "workTokens" | "usagePartial">;
+export type AdvisorySourceSnapshot = Pick<
+	AdvisorySnapshot,
+	"wallMs" | "unblockedMs" | "waitReasons" | "workTokens" | "usagePartial"
+>;
 
 /** Accumulates normalized events in order and excludes the union of blocked intervals. */
 export class AdvisorySnapshotSource {
@@ -49,7 +54,12 @@ export class AdvisorySnapshotSource {
 				const usage = event.usage;
 				if (!usage || Object.values(usage).every(value => value === 0 || value === undefined)) {
 					this.#usagePartial = true;
-				} else if (usage.total !== undefined && usage.input === undefined && usage.output === undefined && usage.cacheWrite === undefined) {
+				} else if (
+					usage.total !== undefined &&
+					usage.input === undefined &&
+					usage.output === undefined &&
+					usage.cacheWrite === undefined
+				) {
 					this.#usageDisabled = true;
 				} else {
 					this.#usageKnown = true;

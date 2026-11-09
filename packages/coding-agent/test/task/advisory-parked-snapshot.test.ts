@@ -13,10 +13,27 @@ it("retains a paused snapshot when the child parks", () => {
 	lineage.attach("child", "child-instance");
 	let emit: (event: AgentSessionEvent) => void = () => {};
 	const disposers: Array<() => void> = [];
-	const parent = { sessionManager: { getSessionId: () => "parent" }, subscribe: () => () => {}, addDisposer: (fn: () => void) => disposers.push(fn) } as unknown as AgentSession;
-	const child = { sessionManager: { getSessionId: () => "child" }, subscribe: (fn: typeof emit) => { emit = fn; return () => {}; }, addDisposer: (fn: () => void) => disposers.push(fn) } as unknown as AgentSession;
+	const parent = {
+		sessionManager: { getSessionId: () => "parent" },
+		subscribe: () => () => {},
+		addDisposer: (fn: () => void) => disposers.push(fn),
+	} as unknown as AgentSession;
+	const child = {
+		sessionManager: { getSessionId: () => "child" },
+		subscribe: (fn: typeof emit) => {
+			emit = fn;
+			return () => {};
+		},
+		addDisposer: (fn: () => void) => disposers.push(fn),
+	} as unknown as AgentSession;
 	AgentRegistry.global().register({ id: "SnapshotParent", displayName: "Parent", kind: "sub", session: parent });
-	AgentRegistry.global().register({ id: "SnapshotChild", displayName: "Child", kind: "sub", parentId: "SnapshotParent", session: child });
+	AgentRegistry.global().register({
+		id: "SnapshotChild",
+		displayName: "Child",
+		kind: "sub",
+		parentId: "SnapshotParent",
+		session: child,
+	});
 	try {
 		const advisory = createTaskAdvisory(parent, lineage);
 		createTaskAdvisory(child, lineage);

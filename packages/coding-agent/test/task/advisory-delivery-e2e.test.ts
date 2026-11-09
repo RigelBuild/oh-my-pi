@@ -62,7 +62,19 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 			}
 			if (text.includes("manager assignment") && tools.some(tool => tool.name === "task")) {
 				managerContexts.push(text);
-				if (managerContexts.length === 1) return { content: [{ type: "toolCall", name: "task", arguments: { context: "Report the result.", tasks: [{ name: "LineageChild", agent: "task", task: "child assignment" }] } }] };
+				if (managerContexts.length === 1)
+					return {
+						content: [
+							{
+								type: "toolCall",
+								name: "task",
+								arguments: {
+									context: "Report the result.",
+									tasks: [{ name: "LineageChild", agent: "task", task: "child assignment" }],
+								},
+							},
+						],
+					};
 				return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] };
 			}
 			return { content: ["label"] };
@@ -70,12 +82,51 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 	});
 	const available = registry.getAvailable.bind(registry);
 	vi.spyOn(registry, "getAvailable").mockImplementation(kind => [mock, ...available(kind)]);
-	const settings = Settings.isolated({ "async.enabled": false, "task.maxRecursionDepth": 4, "task.agentIdleTtlMs": 0, "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false, "todo.reminders": false, "advisor.enabled": false, modelRoles: { default: "mock/mock-model" } });
+	const settings = Settings.isolated({
+		"async.enabled": false,
+		"task.maxRecursionDepth": 4,
+		"task.agentIdleTtlMs": 0,
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.enabled": false,
+		"todo.reminders": false,
+		"advisor.enabled": false,
+		modelRoles: { default: "mock/mock-model" },
+	});
 	let main: AgentSession | undefined;
 	try {
-		({ session: main } = await createAgentSession({ cwd, authStorage: auth, modelRegistry: registry, model: mock, settings, sessionManager: SessionManager.inMemory(cwd), disableExtensionDiscovery: true, enableMCP: false, enableLsp: false, skipPythonPreflight: true, cacheWarming: false }));
+		({ session: main } = await createAgentSession({
+			cwd,
+			authStorage: auth,
+			modelRegistry: registry,
+			model: mock,
+			settings,
+			sessionManager: SessionManager.inMemory(cwd),
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			cacheWarming: false,
+		}));
 		const mainId = main.sessionManager.getSessionId();
-		const run = runSubprocess({ cwd, artifactsDir, agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" }, task: "manager assignment", index: 0, id: "LineageManager", parentAgentId: "Main", parentSessionId: mainId, parentBranchId: assignmentLineage.branch(mainId), modelOverride: "mock/mock-model", authStorage: auth, modelRegistry: registry, settings, enableLsp: false, enableMCP: false, enableIrc: true });
+		const run = runSubprocess({
+			cwd,
+			artifactsDir,
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" },
+			task: "manager assignment",
+			index: 0,
+			id: "LineageManager",
+			parentAgentId: "Main",
+			parentSessionId: mainId,
+			parentBranchId: assignmentLineage.branch(mainId),
+			modelOverride: "mock/mock-model",
+			authStorage: auth,
+			modelRegistry: registry,
+			settings,
+			enableLsp: false,
+			enableMCP: false,
+			enableIrc: true,
+		});
 		await childStarted.promise;
 		const child = AgentRegistry.global().get("LineageManager.LineageChild")?.session;
 		if (!child) throw new Error("child session missing");
@@ -83,7 +134,19 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 		if (!binding) throw new Error("child binding missing");
 		const body = "DELAYED_PRIVATE_ADVISORY";
 		expect(managerContexts).toHaveLength(1);
-		expect((await IrcBus.global().sendBound({ from: "LineageManager.LineageChild", to: "LineageManager", body }, { ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId })).outcome).toBe("injected");
+		expect(
+			(
+				await IrcBus.global().sendBound(
+					{ from: "LineageManager.LineageChild", to: "LineageManager", body },
+					{
+						ref: binding.ref,
+						branchId: binding.branchId,
+						senderInstanceId: binding.instanceId,
+						recipientInstanceId: binding.parentInstanceId,
+					},
+				)
+			).outcome,
+		).toBe("injected");
 		expect(managerContexts).toHaveLength(1);
 		releaseChild.resolve();
 		expect((await run).exitCode).toBe(0);
@@ -98,7 +161,8 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 		unregisterCustomApis("test/advisory-delivery-e2e");
 		auth.close();
 		vi.restoreAllMocks();
-		if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
 		__resetDirsFromEnvForTests();
 		AgentStorage.close();
 		closeModelCache();
@@ -123,20 +187,56 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 	auth.keys.setRuntime("mock", "test-key");
 	const registry = new ModelRegistry(auth);
 	const contexts: string[] = [];
-	const mock = createMockModel({ handler: context => { const text = JSON.stringify(context.messages); contexts.push(text); return { content: [text.includes("IDLE_PRIVATE_ADVISORY") ? "IDLE_PRIVATE_ADVISORY" : "acknowledged"] }; } });
-	const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false, "todo.reminders": false, "advisor.enabled": false });
+	const mock = createMockModel({
+		handler: context => {
+			const text = JSON.stringify(context.messages);
+			contexts.push(text);
+			return { content: [text.includes("IDLE_PRIVATE_ADVISORY") ? "IDLE_PRIVATE_ADVISORY" : "acknowledged"] };
+		},
+	});
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.enabled": false,
+		"todo.reminders": false,
+		"advisor.enabled": false,
+	});
 	const sessions: AgentSession[] = [];
 	try {
 		for (let i = 0; i < 3; i++) {
-			const { session } = await createAgentSession({ cwd, authStorage: auth, modelRegistry: registry, model: mock, settings, sessionManager: SessionManager.inMemory(cwd), disableExtensionDiscovery: true, enableMCP: false, enableLsp: false, skipPythonPreflight: true, cacheWarming: false });
+			const { session } = await createAgentSession({
+				cwd,
+				authStorage: auth,
+				modelRegistry: registry,
+				model: mock,
+				settings,
+				sessionManager: SessionManager.inMemory(cwd),
+				disableExtensionDiscovery: true,
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				cacheWarming: false,
+			});
 			sessions.push(session);
 		}
 		const [main, manager, child] = sessions;
 		if (!main || !manager || !child) throw new Error("sessions missing");
 		const agents = AgentRegistry.global();
 		agents.register({ id: "Main", displayName: "Main", kind: "main", session: main });
-		agents.register({ id: "StrandedManager", displayName: "Manager", kind: "sub", parentId: "Main", session: manager });
-		agents.register({ id: "StrandedChild", displayName: "Child", kind: "sub", parentId: "StrandedManager", session: child });
+		agents.register({
+			id: "StrandedManager",
+			displayName: "Manager",
+			kind: "sub",
+			parentId: "Main",
+			session: manager,
+		});
+		agents.register({
+			id: "StrandedChild",
+			displayName: "Child",
+			kind: "sub",
+			parentId: "StrandedManager",
+			session: child,
+		});
 		const managerId = manager.sessionManager.getSessionId();
 		const childId = child.sessionManager.getSessionId();
 		assignmentLineage.attach(managerId, "stranded-manager");
@@ -145,12 +245,27 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		const binding = assignmentLineage.getAssignment(childId);
 		if (!binding) throw new Error("child binding missing");
 		const observer = vi.spyOn(manager, "setIrcWakeTurnObserver");
-		attachIrcWakeTurnMonitor(manager, { id: "StrandedManager", agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" } });
+		attachIrcWakeTurnMonitor(manager, {
+			id: "StrandedManager",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" },
+		});
 		expect(observer).toHaveBeenCalledTimes(1);
 		const idleBody = "IDLE_PRIVATE_ADVISORY";
 		const idleSend = vi.spyOn(IrcBus.prototype, "send");
 		const idleRelay = vi.spyOn(main, "emitIrcRelayObservation");
-		expect((await IrcBus.global().sendBound({ from: "StrandedChild", to: "StrandedManager", body: idleBody }, { ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId })).outcome).toBe("woken");
+		expect(
+			(
+				await IrcBus.global().sendBound(
+					{ from: "StrandedChild", to: "StrandedManager", body: idleBody },
+					{
+						ref,
+						branchId: binding.branchId,
+						senderInstanceId: binding.instanceId,
+						recipientInstanceId: binding.parentInstanceId,
+					},
+				)
+			).outcome,
+		).toBe("woken");
 		idleSend.mockClear();
 		await manager.waitForIdle();
 		expect(contexts).toHaveLength(1);
@@ -166,7 +281,19 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		const relay = vi.spyOn(main, "emitIrcRelayObservation");
 		// Reproduce the final-poll race: delivery observes streaming, then settle observes idle.
 		manager.agent.state.isStreaming = true;
-		expect((await IrcBus.global().sendBound({ from: "StrandedChild", to: "StrandedManager", body }, { ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId })).outcome).toBe("injected");
+		expect(
+			(
+				await IrcBus.global().sendBound(
+					{ from: "StrandedChild", to: "StrandedManager", body },
+					{
+						ref,
+						branchId: binding.branchId,
+						senderInstanceId: binding.instanceId,
+						recipientInstanceId: binding.parentInstanceId,
+					},
+				)
+			).outcome,
+		).toBe("injected");
 		manager.agent.state.isStreaming = false;
 		assignmentLineage.terminal(childId, ref.assignmentId);
 		assignmentLineage.wake(childId);
@@ -174,7 +301,19 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		manager.agent.state.isStreaming = true;
 		const next = assignmentLineage.getAssignment(childId);
 		if (!next) throw new Error("new child binding missing");
-		expect((await IrcBus.global().sendBound({ from: "StrandedChild", to: "StrandedManager", body: "DRAINED_PRIVATE_ADVISORY" }, { ref: next.ref, branchId: next.branchId, senderInstanceId: next.instanceId, recipientInstanceId: next.parentInstanceId })).outcome).toBe("injected");
+		expect(
+			(
+				await IrcBus.global().sendBound(
+					{ from: "StrandedChild", to: "StrandedManager", body: "DRAINED_PRIVATE_ADVISORY" },
+					{
+						ref: next.ref,
+						branchId: next.branchId,
+						senderInstanceId: next.instanceId,
+						recipientInstanceId: next.parentInstanceId,
+					},
+				)
+			).outcome,
+		).toBe("injected");
 		assignmentLineage.terminal(childId, next.ref.assignmentId);
 		const drained = manager.drainPendingIrcInboxMessages("StrandedManager", { limit: 2 });
 		expect(drained.map(item => item.body)).toEqual([body, "DRAINED_PRIVATE_ADVISORY"]);
@@ -200,7 +339,8 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		unregisterCustomApis("test/advisory-stranded-e2e");
 		auth.close();
 		vi.restoreAllMocks();
-		if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
 		__resetDirsFromEnvForTests();
 		AgentStorage.close();
 		closeModelCache();

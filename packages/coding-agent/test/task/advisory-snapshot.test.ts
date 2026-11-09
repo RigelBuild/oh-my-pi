@@ -11,7 +11,12 @@ describe("advisory snapshot source", () => {
 		source.accept({ kind: "blocked-start", at: 150, token: "tool", reason: "tool" });
 		source.accept({ kind: "blocked-start", at: 170, token: "approval", reason: "approval" });
 		source.accept({ kind: "blocked-end", at: 200, token: "tool" });
-		expect(source.snapshot(230)).toMatchObject({ wallMs: 130, unblockedMs: 50, waitReasons: ["approval"], workTokens: null });
+		expect(source.snapshot(230)).toMatchObject({
+			wallMs: 130,
+			unblockedMs: 50,
+			waitReasons: ["approval"],
+			workTokens: null,
+		});
 		source.accept({ kind: "blocked-end", at: 230, token: "approval" });
 		expect(source.snapshot(250)).toMatchObject({ wallMs: 150, unblockedMs: 70, waitReasons: [] });
 	});

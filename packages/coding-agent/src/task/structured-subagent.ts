@@ -536,7 +536,7 @@ function buildExecutorOptions(
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
-	const parentSessionId = request.invocationKind === "task" ? session.getSessionId?.() ?? undefined : undefined;
+	const parentSessionId = request.invocationKind === "task" ? (session.getSessionId?.() ?? undefined) : undefined;
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,

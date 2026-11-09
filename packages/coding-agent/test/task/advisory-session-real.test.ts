@@ -50,10 +50,12 @@ test("overlapping real tool calls close in completion order", async () => {
 		},
 	}));
 	const { session, auth } = setup(tools, [
-		{ content: [
-			{ type: "toolCall", id: "first", name: "tool0", arguments: {} },
-			{ type: "toolCall", id: "second", name: "tool1", arguments: {} },
-		] },
+		{
+			content: [
+				{ type: "toolCall", id: "first", name: "tool0", arguments: {} },
+				{ type: "toolCall", id: "second", name: "tool1", arguments: {} },
+			],
+		},
 		{ content: ["done"] },
 	]);
 	const adapter = new AdvisorySessionAdapter();
@@ -64,7 +66,11 @@ test("overlapping real tool calls close in completion order", async () => {
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 			events.push(`${event.type}:${event.toolCallId}`);
 			if (event.type === "tool_execution_end" && event.toolCallId === "second") secondEnded.resolve();
-			if (event.type === "tool_execution_start" && events.filter(item => item.startsWith("tool_execution_start:")).length === 2) startsObserved.resolve();
+			if (
+				event.type === "tool_execution_start" &&
+				events.filter(item => item.startsWith("tool_execution_start:")).length === 2
+			)
+				startsObserved.resolve();
 		}
 	});
 	const run = session.prompt("go");
@@ -81,7 +87,12 @@ test("overlapping real tool calls close in completion order", async () => {
 		await run;
 		now = 30;
 		expect(adapter.source.snapshot(now)).toMatchObject({ unblockedMs: 10, waitReasons: [] });
-		expect(events).toEqual(["tool_execution_start:first", "tool_execution_start:second", "tool_execution_end:second", "tool_execution_end:first"]);
+		expect(events).toEqual([
+			"tool_execution_start:first",
+			"tool_execution_start:second",
+			"tool_execution_end:second",
+			"tool_execution_end:first",
+		]);
 	} finally {
 		for (const release of releases) release.resolve();
 		await run.catch(() => {});
@@ -93,8 +104,14 @@ test("overlapping real tool calls close in completion order", async () => {
 test("denied ACP approval closes the real tool interval", async () => {
 	let executed = false;
 	const tool: AgentTool = {
-		name: "bash", label: "bash", description: "controlled tool", parameters: type({ "command?": "string" }),
-		async execute() { executed = true; return { content: [{ type: "text", text: "ok" }], details: {} }; },
+		name: "bash",
+		label: "bash",
+		description: "controlled tool",
+		parameters: type({ "command?": "string" }),
+		async execute() {
+			executed = true;
+			return { content: [{ type: "text", text: "ok" }], details: {} };
+		},
 	};
 	const permission = Promise.withResolvers<void>();
 	const decision = Promise.withResolvers<void>();
@@ -107,10 +124,13 @@ test("denied ACP approval closes the real tool interval", async () => {
 			return { outcome: "selected", optionId: "reject_once", kind: "reject_once" };
 		},
 	};
-	const { session, auth } = setup([tool], [
-		{ content: [{ type: "toolCall", id: "denied", name: "bash", arguments: { command: "echo hi" } }] },
-		{ content: ["done"] },
-	]);
+	const { session, auth } = setup(
+		[tool],
+		[
+			{ content: [{ type: "toolCall", id: "denied", name: "bash", arguments: { command: "echo hi" } }] },
+			{ content: ["done"] },
+		],
+	);
 	session.setClientBridge(bridge);
 	const adapter = new AdvisorySessionAdapter();
 	const events: string[] = [];
@@ -143,7 +163,10 @@ test("denied ACP approval closes the real tool interval", async () => {
 });
 
 test("real persisted assistant usage is counted once by id", async () => {
-	const { session, auth, manager } = setup([], [{ content: ["done"], usage: { input: 11, output: 7, cacheWrite: 3, cacheRead: 5, totalTokens: 26 } }]);
+	const { session, auth, manager } = setup(
+		[],
+		[{ content: ["done"], usage: { input: 11, output: 7, cacheWrite: 3, cacheRead: 5, totalTokens: 26 } }],
+	);
 	const adapter = new AdvisorySessionAdapter();
 	const ids: string[] = [];
 	session.subscribe(event => {

@@ -74,11 +74,15 @@ export class IrcBus {
 	 * agent directly: the main agent then already sees the body as its own
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
-	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean; noBuffer?: boolean; validate?: () => boolean }): Promise<IrcDeliveryReceipt> {
+	async send(
+		msg: Omit<IrcMessage, "id" | "ts">,
+		opts?: { suppressRelay?: boolean; noBuffer?: boolean; validate?: () => boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const sender = this.#registry.get(msg.from)?.session;
 		// Tool arguments are deobfuscated only when the sender has known secrets.
-		const body = msg.advisoryBinding ? sender?.obfuscator?.obfuscate(msg.body) ?? msg.body : msg.body;
-		if (msg.advisoryBinding && Buffer.byteLength(body) > 4096) return { to: msg.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+		const body = msg.advisoryBinding ? (sender?.obfuscator?.obfuscate(msg.body) ?? msg.body) : msg.body;
+		if (msg.advisoryBinding && Buffer.byteLength(body) > 4096)
+			return { to: msg.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 		const message: IrcMessage = { ...msg, body, id: Snowflake.next(), ts: Date.now() };
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
@@ -101,7 +105,10 @@ export class IrcBus {
 		};
 		const initial = validate();
 		if (initial) return { outcome: "unavailable", reason: initial };
-		const receipt = await this.send({ ...msg, advisoryBinding: binding }, { suppressRelay: true, noBuffer: true, validate: () => validate() === undefined });
+		const receipt = await this.send(
+			{ ...msg, advisoryBinding: binding },
+			{ suppressRelay: true, noBuffer: true, validate: () => validate() === undefined },
+		);
 		if (receipt.outcome === "failed") return { outcome: "unavailable", reason: validate() ?? "handoff-failed" };
 		return { outcome: receipt.outcome };
 	}
@@ -116,7 +123,10 @@ export class IrcBus {
 		return ts !== undefined && ts >= sinceTs;
 	}
 
-	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean; noBuffer?: boolean; validate?: () => boolean }): Promise<IrcDeliveryReceipt> {
+	async #deliver(
+		message: IrcMessage,
+		opts?: { suppressRelay?: boolean; noBuffer?: boolean; validate?: () => boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
@@ -180,10 +190,12 @@ export class IrcBus {
 		}
 		if (message.advisoryBinding) {
 			const recipient = this.#registry.get(message.to)?.session;
-			if (!recipient || !advisoryIsCurrent(message)) return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			if (!recipient || !advisoryIsCurrent(message))
+				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 			const admission = admitTaskAdvisory(recipient, message, message.advisoryBinding);
 			if (admission === "duplicate") return { to: message.to, outcome: "duplicate" };
-			if (admission === "reject") return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			if (admission === "reject")
+				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 			markAdvisoryAdmitted(message);
 		}
 

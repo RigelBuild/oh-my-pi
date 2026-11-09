@@ -2065,7 +2065,9 @@ export class AgentSession implements SettingsScope {
 		// boundary injection would drain them. Foreground tools are unaffected.
 		this.agent.hasQueuedAsides = () => this.#irc.hasAsides();
 		this.agent.setAsideMessageProvider(() => {
-			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => this.#irc.isCurrent(record) ? record : null);
+			const thunks: AsideMessage[] = this.#irc
+				.drainPending()
+				.map(record => () => (this.#irc.isCurrent(record) ? record : null));
 			thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
@@ -2547,13 +2549,15 @@ export class AgentSession implements SettingsScope {
 	}
 
 	resetAdvisoryLineage(): void {
-		if (this.#lineageKey) assignmentLineage.disposeSession(this.#lineageKey.sessionId, this.#lineageKey.instanceId, "dispose");
+		if (this.#lineageKey)
+			assignmentLineage.disposeSession(this.#lineageKey.sessionId, this.#lineageKey.instanceId, "dispose");
 		this.#lineageKey = { sessionId: this.sessionManager.getSessionId(), instanceId: crypto.randomUUID() };
 		assignmentLineage.attach(this.#lineageKey.sessionId, this.#lineageKey.instanceId);
 	}
 
 	disposeAdvisoryLineage(): void {
-		if (this.#lineageKey) assignmentLineage.disposeSession(this.#lineageKey.sessionId, this.#lineageKey.instanceId, "dispose");
+		if (this.#lineageKey)
+			assignmentLineage.disposeSession(this.#lineageKey.sessionId, this.#lineageKey.instanceId, "dispose");
 		this.#lineageKey = undefined;
 	}
 
@@ -4107,7 +4111,8 @@ export class AgentSession implements SettingsScope {
 			if (this.#promptGeneration !== eventPromptGeneration) return;
 			if (event.message.role === "assistant") {
 				const id = (event.message as PersistedAssistantMessage)[kPersistedSessionEntryId];
-				if (id !== undefined) await this.#emitSessionEvent({ type: "message_persisted", id, usage: event.message.usage });
+				if (id !== undefined)
+					await this.#emitSessionEvent({ type: "message_persisted", id, usage: event.message.usage });
 			}
 			if (interruptedThinkingMessage) {
 				this.sessionManager.appendCustomMessageEntry(

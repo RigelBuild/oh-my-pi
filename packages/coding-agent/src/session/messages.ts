@@ -1045,7 +1045,10 @@ interface ConvertArrayMemo {
 
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
-const advisoryScanCache = new WeakMap<AgentMessage[], { generation: number; length: number; tail: AgentMessage | undefined; found: boolean }>();
+const advisoryScanCache = new WeakMap<
+	AgentMessage[],
+	{ generation: number; length: number; tail: AgentMessage | undefined; found: boolean }
+>();
 
 /** Drop the outer-array shortcut when an owner replaces a live history in place. */
 export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void {
@@ -1208,7 +1211,12 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
 }
 
 function isAdvisoryBearing(message: AgentMessage): boolean {
-	return advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details));
+	return (
+		advisoryMessage in message ||
+		((message.role === "custom" || message.role === "toolResult") &&
+			isRecord(message.details) &&
+			(message.details.advisory === true || advisoryMessage in message.details))
+	);
 }
 function hasAdvisory(messages: AgentMessage[]): boolean {
 	const cached = advisoryScanCache.get(messages);
@@ -1247,17 +1255,28 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	if (hasAdvisory(messages)) {
 		const safe: AgentMessage[] = [];
 		for (const message of messages) {
-			const metadata = advisoryMessage in message ? message[advisoryMessage] : message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details ? message.details[advisoryMessage] : undefined;
+			const metadata =
+				advisoryMessage in message
+					? message[advisoryMessage]
+					: message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details
+						? message.details[advisoryMessage]
+						: undefined;
 			// SAFETY: only the bridge and wait tool attach this private symbol, both with an IrcMessage.
 			const bound = metadata as IrcMessage | undefined;
-			const marked = (message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && message.details.advisory === true;
+			const marked =
+				(message.role === "custom" || message.role === "toolResult") &&
+				isRecord(message.details) &&
+				message.details.advisory === true;
 			if ((marked && !bound) || (bound && !advisoryIsCurrent(bound))) {
-				if (message.role === "toolResult") safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
+				if (message.role === "toolResult")
+					safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
 				continue;
 			}
 			safe.push(message);
 		}
-		return safe.flatMap((message, index) => convertOneCached(message, message.role === "assistant" && followedByInterruptedThinking(safe, index)));
+		return safe.flatMap((message, index) =>
+			convertOneCached(message, message.role === "assistant" && followedByInterruptedThinking(safe, index)),
+		);
 	}
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);

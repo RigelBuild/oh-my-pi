@@ -106,16 +106,35 @@ describe("IRC", () => {
 			const main = makeFakeSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Main", displayName: "Main", kind: "main", session: main.session });
-			registry.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: parent.session });
-			registry.register({ id: "Child", displayName: "Child", kind: "sub", parentId: "Parent", session: child.session });
+			registry.register({
+				id: "Parent",
+				displayName: "Parent",
+				kind: "sub",
+				parentId: "Main",
+				session: parent.session,
+			});
+			registry.register({
+				id: "Child",
+				displayName: "Child",
+				kind: "sub",
+				parentId: "Parent",
+				session: child.session,
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			const childId = child.sessionManager.getSessionId();
 			assignmentLineage.attach(parentId, "parent-instance");
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
-			const binding = { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" };
+			const binding = {
+				ref,
+				branchId: ref.parentBranchId,
+				senderInstanceId: "child-instance",
+				recipientInstanceId: "parent-instance",
+			};
 			const waiter = bus.wait("Parent", {}, 0);
-			expect((await bus.sendBound({ from: "Child", to: "Parent", body: "waiter reply" }, binding)).outcome).toBe("injected");
+			expect((await bus.sendBound({ from: "Child", to: "Parent", body: "waiter reply" }, binding)).outcome).toBe(
+				"injected",
+			);
 			expect((await waiter)?.body).toBe("waiter reply");
 			expect(main.relayed).toEqual([]);
 			assignmentLineage.disposeSession(childId, "child-instance");
@@ -126,14 +145,28 @@ describe("IRC", () => {
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
-			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Parent",
+				session: child.session,
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			const childId = child.sessionManager.getSessionId();
 			assignmentLineage.attach(parentId, "parent-instance");
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
 			assignmentLineage.navigate(parentId);
-			const result = await bus.sendBound({ from: "Parent", to: "Child", body: "private" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "parent-instance", recipientInstanceId: "child-instance" });
+			const result = await bus.sendBound(
+				{ from: "Parent", to: "Child", body: "private" },
+				{
+					ref,
+					branchId: ref.parentBranchId,
+					senderInstanceId: "parent-instance",
+					recipientInstanceId: "child-instance",
+				},
+			);
 			expect(result).toEqual({ outcome: "unavailable", reason: "stale-parent-branch" });
 			expect(bus.take("Child")).toBeUndefined();
 			assignmentLineage.disposeSession(childId, "child-instance");
@@ -144,12 +177,27 @@ describe("IRC", () => {
 			const parent = createRealSession();
 			sessions.push(parent.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
-			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: null, status: "parked" });
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Parent",
+				session: null,
+				status: "parked",
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			assignmentLineage.attach(parentId, "parent-instance");
 			const ref = assignmentLineage.mint("parked-child", parentId);
 			assignmentLineage.attach("parked-child", "child-instance");
-			const result = await bus.sendBound({ from: "Parent", to: "Child", body: "private" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "parent-instance", recipientInstanceId: "child-instance" });
+			const result = await bus.sendBound(
+				{ from: "Parent", to: "Child", body: "private" },
+				{
+					ref,
+					branchId: ref.parentBranchId,
+					senderInstanceId: "parent-instance",
+					recipientInstanceId: "child-instance",
+				},
+			);
 			expect(result).toEqual({ outcome: "unavailable", reason: "stale-instance" });
 			expect(bus.take("Child")).toBeUndefined();
 			assignmentLineage.disposeSession("parked-child", "child-instance");
@@ -163,14 +211,34 @@ describe("IRC", () => {
 			const main = makeFakeSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Main", displayName: "main", kind: "main", session: main.session });
-			registry.register({ id: "Parent", displayName: "parent", kind: "sub", parentId: "Main", session: parent.session });
-			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			registry.register({
+				id: "Parent",
+				displayName: "parent",
+				kind: "sub",
+				parentId: "Main",
+				session: parent.session,
+			});
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Parent",
+				session: child.session,
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			const childId = child.sessionManager.getSessionId();
 			assignmentLineage.attach(parentId, "parent-instance");
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
-			const result = await bus.sendBound({ from: "Child", to: "Parent", body: "secret report" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
+			const result = await bus.sendBound(
+				{ from: "Child", to: "Parent", body: "secret report" },
+				{
+					ref,
+					branchId: ref.parentBranchId,
+					senderInstanceId: "child-instance",
+					recipientInstanceId: "parent-instance",
+				},
+			);
 			expect(result.outcome).toBe("injected");
 			assignmentLineage.navigate(parentId);
 			expect(parent.session.drainPendingIrcInboxMessages("Parent")).toEqual([]);
@@ -184,14 +252,36 @@ describe("IRC", () => {
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
-			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Parent",
+				session: child.session,
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			const childId = child.sessionManager.getSessionId();
 			assignmentLineage.attach(parentId, "parent-instance");
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
-			await bus.sendBound({ from: "Child", to: "Parent", body: "flush secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
-			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => true, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
+			await bus.sendBound(
+				{ from: "Child", to: "Parent", body: "flush secret" },
+				{
+					ref,
+					branchId: ref.parentBranchId,
+					senderInstanceId: "child-instance",
+					recipientInstanceId: "parent-instance",
+				},
+			);
+			const bridge = new IrcBridge({
+				agent: parent.session.agent,
+				sessionManager: parent.sessionManager,
+				isDisposed: () => false,
+				isStreaming: () => true,
+				planModeEnabled: () => false,
+				emitSessionEvent: async () => {},
+				wakeForIrc: () => {},
+			});
 			// Move the queued record into a bridge and flush it into agent context.
 			const queued = parent.session.drainPendingIrcInboxMessages("Parent")[0];
 			if (!queued) throw new Error("missing advisory");
@@ -208,18 +298,42 @@ describe("IRC", () => {
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
-			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Parent",
+				session: child.session,
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			const childId = child.sessionManager.getSessionId();
 			assignmentLineage.attach(parentId, "parent-instance");
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
 			const waiting = bus.wait("Parent", {}, 1000);
-			await bus.sendBound({ from: "Child", to: "Parent", body: "wait secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
+			await bus.sendBound(
+				{ from: "Child", to: "Parent", body: "wait secret" },
+				{
+					ref,
+					branchId: ref.parentBranchId,
+					senderInstanceId: "child-instance",
+					recipientInstanceId: "parent-instance",
+				},
+			);
 			const waited = await waiting;
 			if (!waited) throw new Error("waiter did not receive advisory");
 			const result = messageResult("Parent", waited);
-			const messages = [{ role: "toolResult" as const, toolCallId: "call", toolName: "wait", content: result.content, details: result.details, isError: false, timestamp: Date.now() }];
+			const messages = [
+				{
+					role: "toolResult" as const,
+					toolCallId: "call",
+					toolName: "wait",
+					content: result.content,
+					details: result.details,
+					isError: false,
+					timestamp: Date.now(),
+				},
+			];
 			expect(JSON.stringify(convertToLlm(messages))).toContain("wait secret");
 			assignmentLineage.navigate(parentId);
 			expect(JSON.stringify(convertToLlm(messages))).not.toContain("wait secret");
@@ -236,23 +350,59 @@ describe("IRC", () => {
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
-			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Parent",
+				session: child.session,
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			const childId = child.sessionManager.getSessionId();
 			assignmentLineage.attach(parentId, "parent-instance");
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
-			await bus.sendBound({ from: "Child", to: "Parent", body: "persisted secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
+			await bus.sendBound(
+				{ from: "Child", to: "Parent", body: "persisted secret" },
+				{
+					ref,
+					branchId: ref.parentBranchId,
+					senderInstanceId: "child-instance",
+					recipientInstanceId: "parent-instance",
+				},
+			);
 			const queued = parent.session.drainPendingIrcInboxMessages("Parent")[0];
 			if (!queued) throw new Error("missing advisory");
-			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => true, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
+			const bridge = new IrcBridge({
+				agent: parent.session.agent,
+				sessionManager: parent.sessionManager,
+				isDisposed: () => false,
+				isStreaming: () => true,
+				planModeEnabled: () => false,
+				emitSessionEvent: async () => {},
+				wakeForIrc: () => {},
+			});
 			await bridge.deliver(queued);
 			bridge.flushPending();
 			const record = parent.session.agent.state.messages.at(-1);
 			if (!record || record.role !== "custom") throw new Error("missing custom advisory record");
-			manager.appendCustomMessageEntry(record.customType, record.content, record.display, record.details, record.attribution ?? "agent");
+			manager.appendCustomMessageEntry(
+				record.customType,
+				record.content,
+				record.display,
+				record.details,
+				record.attribution ?? "agent",
+			);
 			const result = messageResult("Parent", queued);
-			manager.appendMessage({ role: "toolResult", toolCallId: "call", toolName: "wait", content: result.content, details: result.details, isError: false, timestamp: Date.now() });
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "call",
+				toolName: "wait",
+				content: result.content,
+				details: result.details,
+				isError: false,
+				timestamp: Date.now(),
+			});
 			await manager.close();
 			const reopened = await SessionManager.open(file, dir.path(), new FileSessionStorage());
 			const entries = reopened.getEntries();
@@ -324,7 +474,10 @@ describe("IRC", () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
 			sub.setError(new Error("handoff failed"));
-			const receipt = await bus.send({ from: "Main", to: "0-Sub", body: "notice" }, { suppressRelay: true, noBuffer: true });
+			const receipt = await bus.send(
+				{ from: "Main", to: "0-Sub", body: "notice" },
+				{ suppressRelay: true, noBuffer: true },
+			);
 			expect(receipt.outcome).toBe("failed");
 			expect(bus.take("0-Sub")).toBeUndefined();
 		});
