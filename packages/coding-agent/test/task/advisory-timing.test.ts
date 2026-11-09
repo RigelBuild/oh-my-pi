@@ -136,3 +136,62 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 		AgentRegistry.resetGlobalForTests();
 	}
 });
+
+it("expires a reminder when child messaging support changes", async () => {
+	vi.useFakeTimers();
+	AgentRegistry.resetGlobalForTests();
+	const lineage = new AssignmentLineage();
+	lineage.attach("parent", "parent-instance");
+	const messaging = { status: "supported" as const };
+	const ref = lineage.mint("child", "parent", undefined, messaging);
+	lineage.attach("child", "child-instance");
+	let dispose = () => {};
+	const parent = {
+		sessionManager: { getSessionId: () => "parent" },
+		subscribe: () => () => {},
+		addDisposer: (fn: () => void) => {
+			dispose = fn;
+		},
+	} as unknown as AgentSession;
+	const child = { sessionManager: { getSessionId: () => "child" } } as unknown as AgentSession;
+	AgentRegistry.global().register({ id: "TimerParent", displayName: "Parent", kind: "sub", session: parent });
+	AgentRegistry.global().register({ id: "TimerChild", displayName: "Child", kind: "sub", session: child });
+	const send = spyOn(IrcBus.global(), "sendBound").mockResolvedValue({ outcome: "injected" });
+	let now = 0;
+	const clock = spyOn(performance, "now").mockImplementation(() => now);
+	try {
+		const advisory = createTaskAdvisory(parent, lineage);
+		await advisory.remind(ref, "support-change", "status");
+		Object.assign(messaging, { status: "unsupported", reasons: ["messaging-disabled"] });
+		now = 300_000;
+		vi.advanceTimersByTime(300_000);
+		expect(send).toHaveBeenCalledTimes(1);
+		const binding = {
+			ref,
+			branchId: ref.parentBranchId,
+			senderInstanceId: "child-instance",
+			recipientInstanceId: "parent-instance",
+			requestId: "support-change",
+		};
+		const reply = {
+			from: "TimerChild",
+			to: "TimerParent",
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "worked",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+				requestId: "support-change",
+			}),
+			advisoryBinding: binding,
+		};
+		expect(admitTaskAdvisory(parent, reply, binding)).toBe("reject");
+	} finally {
+		dispose();
+		clock.mockRestore();
+		send.mockRestore();
+		vi.useRealTimers();
+		AgentRegistry.resetGlobalForTests();
+	}
+});

@@ -107,7 +107,11 @@ class AdvisoryRuntime {
 				const started = performance.now();
 				const tick = () => {
 					if (watch.reply !== undefined) return;
-					if (!this.lineage.isCurrent(ref, binding.instanceId, binding.branchId)) {
+					const currentBinding = this.lineage.getAssignment(ref.childSessionId);
+					if (
+						!this.lineage.isCurrent(ref, binding.instanceId, binding.branchId) ||
+						currentBinding?.messaging.status !== "supported"
+					) {
 						clearTimeout(watch.timer);
 						watch.expired = true;
 						return;
