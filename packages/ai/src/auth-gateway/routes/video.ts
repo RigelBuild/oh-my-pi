@@ -82,6 +82,41 @@ async function resolveVideoJob(
 	if ("status" in apiKey) return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	return { model, upstreamId: identity.upstreamId, sessionId, apiKey, credentialId: apiKey.credentialId, controller };
 }
+function videoCredentialTracking(
+	bootOpts: AuthGatewayRouteOptions,
+	model: Model<Api>,
+	sessionId: string,
+	initialKey: ResolvedApiKey,
+	controller: AbortController,
+	peer: string,
+	logContext: GatewayLogContext,
+	onSent: (credentialId: number | undefined) => void,
+) {
+	const credentialIds = new Map([[initialKey.apiKey, initialKey.credentialId]]);
+	return {
+		apiKey: buildGatewayApiKeyResolver(
+			bootOpts.storage,
+			model,
+			sessionId,
+			initialKey,
+			controller.signal,
+			"video",
+			peer,
+			(apiKey, credentialId) => {
+				credentialIds.set(apiKey, credentialId);
+			},
+			bootOpts.onUsageLimit,
+			undefined,
+			logContext,
+		),
+		fetch: ((input, init) => {
+			const authorization = new Headers(init?.headers).get("authorization");
+			onSent(authorization?.startsWith("Bearer ") ? credentialIds.get(authorization.slice(7)) : undefined);
+			return (bootOpts.fetch ?? fetch)(input, init);
+		}) satisfies NonNullable<AuthGatewayRouteOptions["fetch"]>,
+		signal: controller.signal,
+	};
+}
 
 function videoOptions(
 	bootOpts: AuthGatewayRouteOptions,
@@ -89,25 +124,18 @@ function videoOptions(
 	peer: string,
 	logContext: GatewayLogContext,
 ) {
-	return {
-		apiKey: buildGatewayApiKeyResolver(
-			bootOpts.storage,
-			resolved.model,
-			resolved.sessionId,
-			resolved.apiKey,
-			resolved.controller.signal,
-			"video",
-			peer,
-			undefined,
-			bootOpts.onUsageLimit,
-			credentialId => {
-				resolved.credentialId = credentialId;
-			},
-			logContext,
-		),
-		fetch: bootOpts.fetch,
-		signal: resolved.controller.signal,
-	};
+	return videoCredentialTracking(
+		bootOpts,
+		resolved.model,
+		resolved.sessionId,
+		resolved.apiKey,
+		resolved.controller,
+		peer,
+		logContext,
+		credentialId => {
+			resolved.credentialId = credentialId;
+		},
+	);
 }
 
 function logVideoRequest(
@@ -215,25 +243,22 @@ export async function handleVideoSubmit(
 		peer,
 	});
 	try {
-		const job = await submitVideo(model, parsed.request, {
-			apiKey: buildGatewayApiKeyResolver(
-				bootOpts.storage,
+		const job = await submitVideo(
+			model,
+			parsed.request,
+			videoCredentialTracking(
+				bootOpts,
 				model,
 				sessionId,
 				apiKey,
-				controller.signal,
-				"video",
+				controller,
 				peer,
-				undefined,
-				bootOpts.onUsageLimit,
-				failedCredentialId => {
-					credentialId = failedCredentialId;
-				},
 				gatewayLogContext(requestId, caller, "video-submit", model.provider, model.id),
+				selectedCredentialId => {
+					credentialId = selectedCredentialId;
+				},
 			),
-			fetch: bootOpts.fetch,
-			signal: controller.signal,
-		});
+		);
 		const gatewayId = videoServer.encodeGatewayJobId({
 			provider: model.provider,
 			modelId: model.id,

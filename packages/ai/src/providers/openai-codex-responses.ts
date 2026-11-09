@@ -2456,10 +2456,7 @@ class CodexStreamProcessor {
 
 		if (eventType === "response.function_call_arguments.delta") {
 			const interruption = this.runtime.handleToolCallArgumentsDelta(rawEvent, stream, output);
-			if (interruption) {
-				this.runtime.websocketState?.connection?.close("degenerate-tool-call");
-				throw new CodexWhitespaceToolCallLoopError(interruption.message);
-			}
+			this.#interruptWhitespaceToolCallLoop(interruption);
 			return firstTokenTime;
 		}
 
@@ -2471,10 +2468,7 @@ class CodexStreamProcessor {
 
 		if (eventType === "response.custom_tool_call_input.delta") {
 			const interruption = this.runtime.handleCustomToolCallInputDelta(rawEvent, stream, output);
-			if (interruption) {
-				this.runtime.websocketState?.connection?.close("degenerate-tool-call");
-				throw new CodexWhitespaceToolCallLoopError(interruption.message);
-			}
+			this.#interruptWhitespaceToolCallLoop(interruption);
 			return firstTokenTime;
 		}
 
@@ -2522,6 +2516,13 @@ class CodexStreamProcessor {
 		}
 
 		return firstTokenTime;
+	}
+
+	#interruptWhitespaceToolCallLoop(interruption: CodexWhitespaceToolCallArgumentsDeltaInterruption | undefined): void {
+		if (interruption) {
+			this.runtime.websocketState?.connection?.close("degenerate-tool-call");
+			throw new CodexWhitespaceToolCallLoopError(interruption.message);
+		}
 	}
 
 	/** Start delivering caller steering into the response `response.created` announced. */
