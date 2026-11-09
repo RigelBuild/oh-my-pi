@@ -6,6 +6,7 @@ import { IrcBus } from "./bus";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
+import { escapeHarnessTags } from "../session/harness-tags";
 
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
@@ -22,7 +23,7 @@ export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 
 export function formatIncoming(msg: IrcMessage): string {
 	const replyTag = msg.replyTo ? ` (reply to ${msg.replyTo})` : "";
-	return `[${msg.id}] ${msg.from}${replyTag}: ${msg.body}`;
+	return `[${msg.id}] ${msg.from}${replyTag}: ${escapeHarnessTags(msg.body)}`;
 }
 
 /** Session-buffered inbox drain used before parking a bus waiter. */

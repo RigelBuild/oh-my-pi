@@ -179,7 +179,7 @@ export class IrcBus {
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or
 		// the session injection path.
-		const waiter = this.#takeMatchingWaiter(message.to, message.from);
+		const waiter = message.advisoryBinding ? undefined : this.#takeMatchingWaiter(message.to, message.from);
 		if (waiter) {
 			waiter.resolve(message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);

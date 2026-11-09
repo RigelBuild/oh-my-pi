@@ -2060,7 +2060,7 @@ export class AgentSession implements SettingsScope {
 		// boundary injection would drain them. Foreground tools are unaffected.
 		this.agent.hasQueuedAsides = () => this.#irc.hasAsides();
 		this.agent.setAsideMessageProvider(() => {
-			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
+			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => this.#irc.isCurrent(record) ? record : null);
 			thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.

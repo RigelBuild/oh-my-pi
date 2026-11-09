@@ -1,9 +1,10 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { assignmentLineage } from "../task/assignment-lineage";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
@@ -31,9 +32,25 @@ export class IrcBridge {
 	#deferredWakes: AgentMessage[] = [];
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
+	readonly #advisoryRecords = new WeakMap<AgentMessage, IrcMessage>();
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
+	}
+
+	/** Revalidates live-only metadata without trusting transcript contents. */
+	isCurrent(record: AgentMessage): boolean {
+		const msg = this.#advisoryRecords.get(record);
+		if (!msg?.advisoryBinding) return true;
+		const registry = AgentRegistry.global();
+		const sender = registry.get(msg.from)?.session;
+		const recipient = registry.get(msg.to)?.session;
+		const reason = sender && recipient
+			? assignmentLineage.validateBinding(msg.advisoryBinding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId())
+			: "stale-instance";
+		if (!reason) return true;
+		logger.debug("Dropping stale advisory message", { reason });
+		return false;
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -69,7 +86,7 @@ export class IrcBridge {
 		const records = [...this.#interrupts, ...this.#asides];
 		this.#interrupts = [];
 		this.#asides = [];
-		return records;
+		return records.filter(record => this.isCurrent(record));
 	}
 
 	/** Snapshots and discards every queued IRC record — used when a session-boundary transition
@@ -105,7 +122,7 @@ export class IrcBridge {
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
 	 *  session transition, and extension `deliverAs: "aside"` sends. */
 	queueAside(records: AgentMessage[]): void {
-		this.#asides.push(...records);
+		this.#asides.push(...records.filter(record => this.isCurrent(record)));
 	}
 
 	/** Parks wake-intended records while a pooled contract owns the worker. Unlike
@@ -119,7 +136,7 @@ export class IrcBridge {
 	drainDeferredWakes(): AgentMessage[] {
 		const records = this.#deferredWakes;
 		this.#deferredWakes = [];
-		return records;
+		return records.filter(record => this.isCurrent(record));
 	}
 
 	/** Surfaces and consumes queued incoming records before automatic injection. */
@@ -133,6 +150,7 @@ export class IrcBridge {
 		];
 		for (const queue of queues) {
 			for (const record of queue.records) {
+				if (!this.isCurrent(record)) continue;
 				if (record.role !== "custom") {
 					queue.remaining.push(record);
 					continue;
@@ -180,13 +198,20 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
+		if (msg.advisoryBinding) {
+			const registry = AgentRegistry.global();
+			const sender = registry.get(msg.from)?.session;
+			const recipient = registry.get(msg.to)?.session;
+			const reason = sender && recipient ? assignmentLineage.validateBinding(msg.advisoryBinding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId()) : "stale-instance";
+			if (reason) throw new Error("Advisory binding is stale.");
+		}
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
 		// agent and mid-turn asides have no such relay.
-		const relayOnStop = !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true;
+		const relayOnStop = !msg.advisoryBinding && !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -214,6 +239,11 @@ export class IrcBridge {
 			attribution: "agent",
 			timestamp: msg.ts,
 		};
+		if (msg.advisoryBinding) {
+			this.#advisoryRecords.set(record, msg);
+			this.queueAside([record]);
+			return "injected";
+		}
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
 			if (fromParent) {
