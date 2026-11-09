@@ -663,7 +663,7 @@ export type RpcDeltaMessageUpdateFrame = Omit<
 
 /** Session event as written to stdout by default: message lifecycle events carry a `messageId`. */
 export type RpcAgentSessionEventFrame =
-	| Exclude<AgentSessionEvent, { type: RpcMessageEventType }>
+	| Exclude<AgentSessionEvent, { type: RpcMessageEventType | "message_persisted" }>
 	| RpcMessageEventFrame;
 
 /** Every session event shape RPC mode can write, including the opt-in `messageUpdates: "delta"` projection. */

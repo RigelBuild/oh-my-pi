@@ -71,6 +71,7 @@ export type AgentSessionEvent =
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }
+	| { type: "message_persisted"; readonly id: string; readonly usage: { input?: number; output?: number; cacheWrite?: number; cacheRead?: number; total?: number } | undefined }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| {
 			type: "thinking_level_changed";
