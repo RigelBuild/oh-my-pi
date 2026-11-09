@@ -1301,9 +1301,7 @@ export class AgentSession implements SettingsScope {
 		// Parked wake records resume alongside ordinary stranded asides; they were
 		// already decided wake-intended at deferral time.
 		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
-		const advisories = records.filter(record => this.#irc.isAdvisory(record));
-		this.#irc.queueAside(advisories);
-		const wakeRecords = records.filter(record => !this.#irc.isAdvisory(record));
+		const wakeRecords = records;
 		if (wakeRecords.length === 0) return;
 		if (this.#planModeState?.enabled) {
 			// Plan mode: fold stranded IRC asides into context without waking an

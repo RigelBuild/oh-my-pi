@@ -2931,6 +2931,7 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 	for (const record of records) {
 		if (record.role !== "custom") continue;
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
+		if (details && Reflect.get(details, "advisory") === true) continue;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
 		// Automated wake-turn relays are answers, not wake sources: relaying one
