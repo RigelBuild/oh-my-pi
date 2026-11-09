@@ -18,6 +18,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -39,11 +40,23 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 	auth.keys.setRuntime("mock", "test-key");
 	const registry = new ModelRegistry(auth);
 	let managerCalls = 0;
+	const childStarted = Promise.withResolvers<void>();
+	const releaseChild = Promise.withResolvers<void>();
+	let childCalled = false;
+	vi.spyOn(WaitTool.prototype, "execute").mockImplementation(async () => {
+		childStarted.resolve();
+		await releaseChild.promise;
+		return { content: [{ type: "text", text: "done" }], details: { op: "wait" } };
+	});
 	const mock = createMockModel({
 		handler: context => {
 			const text = JSON.stringify(context.messages);
 			if (text.includes("manager assignment") && !text.includes("child assignment") && managerCalls++ === 0) {
 				return { content: [{ type: "toolCall", name: "task", arguments: { context: "Report the result.", tasks: [{ name: "LineageChild", agent: "task", task: "child assignment" }] } }] };
+			}
+			if (text.includes("child assignment") && !childCalled && (context.tools ?? []).some(tool => tool.name === "wait")) {
+				childCalled = true;
+				return { content: [{ type: "toolCall", name: "wait", arguments: {} }] };
 			}
 			if ((context.tools ?? []).some(tool => tool.name === "yield")) {
 				return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "done" } }] };
@@ -58,13 +71,12 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 	try {
 		({ session: main } = await createAgentSession({ cwd, authStorage: auth, modelRegistry: registry, model: mock, settings, sessionManager: SessionManager.inMemory(cwd), disableExtensionDiscovery: true, enableMCP: false, enableLsp: false, skipPythonPreflight: true, cacheWarming: false }));
 		const mainId = main.sessionManager.getSessionId();
-		const result = await runSubprocess({ cwd, artifactsDir, agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" }, task: "manager assignment", index: 0, id: "LineageManager", parentAgentId: "Main", parentSessionId: mainId, parentBranchId: assignmentLineage.branch(mainId), modelOverride: "mock/mock-model", authStorage: auth, modelRegistry: registry, settings, enableLsp: false, enableMCP: false, enableIrc: false });
-		expect(result.exitCode).toBe(0);
+		const run = runSubprocess({ cwd, artifactsDir, agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" }, task: "manager assignment", index: 0, id: "LineageManager", parentAgentId: "Main", parentSessionId: mainId, parentBranchId: assignmentLineage.branch(mainId), modelOverride: "mock/mock-model", authStorage: auth, modelRegistry: registry, settings, enableLsp: false, enableMCP: false, enableIrc: true });
+		await childStarted.promise;
 		const manager = AgentRegistry.global().get("LineageManager")?.session;
 		const child = AgentRegistry.global().get("LineageManager.LineageChild")?.session;
 		if (!manager || !child) throw new Error("nested sessions were not retained");
 		const managerId = manager.sessionManager.getSessionId();
-		assignmentLineage.wake(child.sessionManager.getSessionId());
 		const binding = assignmentLineage.getAssignment(child.sessionManager.getSessionId());
 		if (!binding) throw new Error("missing child binding");
 		expect(assignmentLineage.isCurrent(binding.ref, binding.instanceId, binding.branchId)).toBe(true);
@@ -109,10 +121,13 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		await manager.navigateTree(first);
 		expect(assignmentLineage.isCurrent(binding.ref, binding.instanceId, binding.branchId)).toBe(false);
 		expect((await managerAdvisory.remind(binding.ref, "stale", "progress")).outcome).toBe("unavailable");
-		expect(manager.drainPendingIrcInboxMessages("LineageManager")).toEqual([]);
+		expect(manager.drainPendingIrcInboxMessages("LineageManager").map(message => message.body)).toEqual(["ordinary nested message"]);
 		expect(relay).toHaveBeenCalledTimes(1);
 		expect(JSON.stringify(main.messages)).not.toContain("nested private advisory");
+		releaseChild.resolve();
+		expect((await run).exitCode).toBe(0);
 	} finally {
+		releaseChild.resolve();
 		await AgentLifecycleManager.global().dispose();
 		await main?.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
