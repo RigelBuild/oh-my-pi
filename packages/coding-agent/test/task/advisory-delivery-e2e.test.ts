@@ -132,7 +132,13 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 		if (!child) throw new Error("child session missing");
 		const binding = assignmentLineage.getAssignment(child.sessionManager.getSessionId());
 		if (!binding) throw new Error("child binding missing");
-		const body = "DELAYED_PRIVATE_ADVISORY";
+		const body = JSON.stringify({
+			state: "progressing",
+			progress: "DELAYED_PRIVATE_ADVISORY",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
 		expect(managerContexts).toHaveLength(1);
 		expect(
 			(
@@ -151,7 +157,7 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 		releaseChild.resolve();
 		expect((await run).exitCode).toBe(0);
 		expect(managerContexts.length).toBeGreaterThanOrEqual(2);
-		expect(managerContexts[1]?.split(body)).toHaveLength(2);
+		expect(managerContexts[1]?.split(JSON.stringify(body).slice(1, -1))).toHaveLength(2);
 	} finally {
 		releaseChild.resolve();
 		await AgentLifecycleManager.global().dispose();
@@ -250,7 +256,13 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" },
 		});
 		expect(observer).toHaveBeenCalledTimes(1);
-		const idleBody = "IDLE_PRIVATE_ADVISORY";
+		const idleBody = JSON.stringify({
+			state: "progressing",
+			progress: "IDLE_PRIVATE_ADVISORY",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
 		const idleSend = vi.spyOn(IrcBus.prototype, "send");
 		const idleRelay = vi.spyOn(main, "emitIrcRelayObservation");
 		expect(
@@ -270,13 +282,19 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		await manager.waitForIdle();
 		expect(contexts).toHaveLength(1);
 		await manager.waitForIrcReplies();
-		expect(contexts[0]).toContain(idleBody);
-		expect(JSON.stringify(idleSend.mock.calls)).not.toContain(idleBody);
-		expect(JSON.stringify(idleRelay.mock.calls)).not.toContain(idleBody);
+		expect(contexts[0]).toContain(JSON.stringify(idleBody).slice(1, -1));
+		expect(JSON.stringify(idleSend.mock.calls)).not.toContain(JSON.stringify(idleBody).slice(1, -1));
+		expect(JSON.stringify(idleRelay.mock.calls)).not.toContain(JSON.stringify(idleBody).slice(1, -1));
 		contexts.length = 0;
 		idleSend.mockRestore();
 		idleRelay.mockRestore();
-		const body = "STRANDED_PRIVATE_ADVISORY";
+		const body = JSON.stringify({
+			state: "progressing",
+			progress: "STRANDED_PRIVATE_ADVISORY",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
 		const send = vi.spyOn(IrcBus.prototype, "send");
 		const relay = vi.spyOn(main, "emitIrcRelayObservation");
 		// Reproduce the final-poll race: delivery observes streaming, then settle observes idle.
@@ -301,10 +319,17 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		manager.agent.state.isStreaming = true;
 		const next = assignmentLineage.getAssignment(childId);
 		if (!next) throw new Error("new child binding missing");
+		const drainedBody = JSON.stringify({
+			state: "progressing",
+			progress: "DRAINED_PRIVATE_ADVISORY",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
 		expect(
 			(
 				await IrcBus.global().sendBound(
-					{ from: "StrandedChild", to: "StrandedManager", body: "DRAINED_PRIVATE_ADVISORY" },
+					{ from: "StrandedChild", to: "StrandedManager", body: drainedBody },
 					{
 						ref: next.ref,
 						branchId: next.branchId,
@@ -316,7 +341,7 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		).toBe("injected");
 		assignmentLineage.terminal(childId, next.ref.assignmentId);
 		const drained = manager.drainPendingIrcInboxMessages("StrandedManager", { limit: 2 });
-		expect(drained.map(item => item.body)).toEqual([body, "DRAINED_PRIVATE_ADVISORY"]);
+		expect(drained.map(item => item.body)).toEqual([body, drainedBody]);
 		manager.agent.state.isStreaming = false;
 		// Requeue the first admitted record through the same bridge before the settle wake.
 		if (!drained[0]) throw new Error("advisory missing from inbox");
@@ -328,9 +353,9 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		await manager.abort({ reason: "internal" });
 		await manager.waitForIdle();
 		expect(contexts).toHaveLength(1);
-		expect(contexts[0]?.split(body)).toHaveLength(2);
-		expect(JSON.stringify(send.mock.calls)).not.toContain(body);
-		expect(JSON.stringify(relay.mock.calls)).not.toContain(body);
+		expect(contexts[0]?.split(JSON.stringify(body).slice(1, -1))).toHaveLength(2);
+		expect(JSON.stringify(send.mock.calls)).not.toContain(JSON.stringify(body).slice(1, -1));
+		expect(JSON.stringify(relay.mock.calls)).not.toContain(JSON.stringify(body).slice(1, -1));
 	} finally {
 		for (const session of sessions) await session.dispose();
 		await AgentLifecycleManager.global().dispose();

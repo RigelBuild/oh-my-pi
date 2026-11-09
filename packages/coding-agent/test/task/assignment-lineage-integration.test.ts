@@ -149,14 +149,24 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		expect(JSON.stringify(managerAdvisory.children())).not.toContain("child assignment");
 		expect(childAdvisory.current()?.ref.childSessionId).toBe(binding.ref.childSessionId);
 		expect(childAdvisory.children()).toEqual([]);
-		const replies: string[] = [];
+		const replies: Array<{ requestId: string; state: string }> = [];
 		const unsubscribe = managerAdvisory.subscribe(event => {
-			if (event.type === "reply") replies.push(event.requestId);
+			if (event.type === "reply") replies.push({ requestId: event.requestId, state: event.state });
 		});
 		const reminder = await managerAdvisory.remind(binding.ref, "check-1", "Please report progress");
 		expect(reminder.outcome).toBe("injected");
 		const reply = await IrcBus.global().sendBound(
-			{ from: "LineageManager.LineageChild", to: "LineageManager", body: "progress" },
+			{
+				from: "LineageManager.LineageChild",
+				to: "LineageManager",
+				body: JSON.stringify({
+					state: "progressing",
+					progress: "worked",
+					tried: [],
+					blocker: "",
+					nextAction: "continue",
+				}),
+			},
 			{
 				ref: binding.ref,
 				branchId: binding.branchId,
@@ -168,7 +178,13 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		const privateDirect = await IrcBus.global().send({
 			from: "LineageManager.LineageChild",
 			to: "LineageManager",
-			body: "private",
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "private",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+			}),
 			advisoryBinding: {
 				ref: binding.ref,
 				branchId: binding.branchId,
@@ -178,11 +194,18 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		});
 		expect(privateDirect.outcome).toBe("injected");
 		const secret = "SYNTHETIC_SECRET_12345";
+		const secretReport = JSON.stringify({
+			state: "progressing",
+			progress: secret,
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
 		child.setObfuscator(new SecretObfuscator([{ type: "plain", content: secret }]));
 		const redacted = await IrcBus.global().send({
 			from: "LineageManager.LineageChild",
 			to: "LineageManager",
-			body: secret,
+			body: secretReport,
 			advisoryBinding: {
 				ref: binding.ref,
 				branchId: binding.branchId,
@@ -195,7 +218,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		const unchanged = await IrcBus.global().send({
 			from: "LineageManager.LineageChild",
 			to: "LineageManager",
-			body: secret,
+			body: secretReport,
 			advisoryBinding: {
 				ref: binding.ref,
 				branchId: binding.branchId,
@@ -205,11 +228,16 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		});
 		expect(unchanged.outcome).toBe("injected");
 		const advisoryBodies = manager.drainPendingIrcInboxMessages("LineageManager").map(message => message.body);
-		expect(advisoryBodies.some(body => body === secret)).toBe(true);
+		expect(advisoryBodies.some(body => body === secretReport)).toBe(true);
 		expect(advisoryBodies.some(body => body !== secret && !body.includes(secret))).toBe(true);
 		expect(relay).toHaveBeenCalledTimes(0);
 		expect(reply.outcome).toBe("injected");
-		expect(replies).toEqual(["check-1", "", "", ""]);
+		expect(replies).toEqual([
+			{ requestId: "check-1", state: "progressing" },
+			{ requestId: "", state: "progressing" },
+			{ requestId: "", state: "progressing" },
+			{ requestId: "", state: "progressing" },
+		]);
 		expect(relay).toHaveBeenCalledTimes(0);
 		expect(mock.calls.length).toBe(callsBeforeDelivery);
 		unsubscribe();
@@ -237,7 +265,17 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		]);
 		const bus = IrcBus.global();
 		const receipt = await bus.sendBound(
-			{ from: "LineageManager.LineageChild", to: "LineageManager", body: "nested private advisory" },
+			{
+				from: "LineageManager.LineageChild",
+				to: "LineageManager",
+				body: JSON.stringify({
+					state: "progressing",
+					progress: "nested private advisory",
+					tried: [],
+					blocker: "",
+					nextAction: "continue",
+				}),
+			},
 			{
 				ref: binding.ref,
 				branchId: binding.branchId,

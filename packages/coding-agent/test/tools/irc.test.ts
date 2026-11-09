@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { messageResult } from "@oh-my-pi/pi-coding-agent/irc/messaging";
+import { executeSend, messageResult } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -13,6 +13,10 @@ import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-st
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
+
+function report(progress: string): string {
+	return JSON.stringify({ state: "progressing", progress, tried: [], blocker: "", nextAction: "continue" });
+}
 
 interface FakeSession {
 	session: AgentSession;
@@ -100,6 +104,32 @@ describe("IRC", () => {
 		}
 	});
 
+	it("does not echo an invalid bound report from executeSend", async () => {
+		const parent = createRealSession();
+		const child = createRealSession();
+		sessions.push(parent.session, child.session);
+		registry.register({ id: "Parent", displayName: "Parent", kind: "sub", session: parent.session });
+		registry.register({ id: "Child", displayName: "Child", kind: "sub", session: child.session });
+		const parentId = parent.sessionManager.getSessionId();
+		const childId = child.sessionManager.getSessionId();
+		assignmentLineage.attach(parentId, "parent-instance");
+		const ref = assignmentLineage.mint(childId, parentId);
+		assignmentLineage.attach(childId, "child-instance");
+		const body = "PRIVATE_INVALID_REPORT_BODY";
+		try {
+			const result = await executeSend(
+				{ registry, senderId: "Child" },
+				{ to: "Parent", message: body, assignmentId: ref.assignmentId, checkId: "check-1" },
+			);
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result.content)).toContain("Invalid advisory reply");
+			expect(JSON.stringify(result.content)).not.toContain(body);
+			expect(JSON.stringify(result.details)).not.toContain(body);
+		} finally {
+			assignmentLineage.disposeSession(childId, "child-instance");
+			assignmentLineage.disposeSession(parentId, "parent-instance");
+		}
+	});
 	describe("IrcBus", () => {
 		it("suppresses relay when a waiter receives a bound advisory", async () => {
 			const parent = createRealSession();
@@ -133,10 +163,10 @@ describe("IRC", () => {
 				recipientInstanceId: "parent-instance",
 			};
 			const waiter = bus.wait("Parent", {}, 0);
-			expect((await bus.sendBound({ from: "Child", to: "Parent", body: "waiter reply" }, binding)).outcome).toBe(
-				"injected",
-			);
-			expect((await waiter)?.body).toBe("waiter reply");
+			expect(
+				(await bus.sendBound({ from: "Child", to: "Parent", body: report("waiter reply") }, binding)).outcome,
+			).toBe("injected");
+			expect((await waiter)?.body).toBe(report("waiter reply"));
 			expect(main.relayed).toEqual([]);
 			assignmentLineage.disposeSession(childId, "child-instance");
 			assignmentLineage.disposeSession(parentId, "parent-instance");
@@ -232,7 +262,7 @@ describe("IRC", () => {
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
 			const result = await bus.sendBound(
-				{ from: "Child", to: "Parent", body: "secret report" },
+				{ from: "Child", to: "Parent", body: report("secret report") },
 				{
 					ref,
 					branchId: ref.parentBranchId,
@@ -266,7 +296,7 @@ describe("IRC", () => {
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
 			await bus.sendBound(
-				{ from: "Child", to: "Parent", body: "flush secret" },
+				{ from: "Child", to: "Parent", body: report("flush secret") },
 				{
 					ref,
 					branchId: ref.parentBranchId,
@@ -313,7 +343,7 @@ describe("IRC", () => {
 			assignmentLineage.attach(childId, "child-instance");
 			const waiting = bus.wait("Parent", {}, 1000);
 			await bus.sendBound(
-				{ from: "Child", to: "Parent", body: "wait secret" },
+				{ from: "Child", to: "Parent", body: report("wait secret") },
 				{
 					ref,
 					branchId: ref.parentBranchId,
@@ -364,7 +394,7 @@ describe("IRC", () => {
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
 			await bus.sendBound(
-				{ from: "Child", to: "Parent", body: "persisted secret" },
+				{ from: "Child", to: "Parent", body: report("persisted secret") },
 				{
 					ref,
 					branchId: ref.parentBranchId,

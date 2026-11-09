@@ -47,7 +47,14 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 			ts: 0,
 			from: "TimerChild",
 			to: "TimerParent",
-			body: "progress",
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "worked",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+				requestId: "retry",
+			}),
 			advisoryBinding: binding,
 		};
 		expect(admitTaskAdvisory(parent, message, binding)).toBe("accept");
@@ -58,6 +65,14 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 		clock.mockReturnValue(300_000);
 		vi.advanceTimersByTime(10_000);
 		expect(send).toHaveBeenCalledTimes(3);
+		expect(send).toHaveBeenCalledWith(
+			expect.objectContaining({
+				body: "Reply with a JSON ReportInput via irc send for check retry.",
+				assignmentId: ref.assignmentId,
+				checkId: "retry",
+			}),
+			expect.objectContaining({ requestId: "retry" }),
+		);
 		lineage.terminal("child", ref.assignmentId);
 		const next = lineage.mint("child", "parent");
 		lineage.attach("child", "child-instance");
@@ -81,7 +96,18 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 			recipientInstanceId: "parent-instance",
 			requestId: "timing",
 		};
-		const lateReply = { ...message, advisoryBinding: lateBinding };
+		const lateReply = {
+			...message,
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "worked",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+				requestId: "timing",
+			}),
+			advisoryBinding: lateBinding,
+		};
 		expect(admitTaskAdvisory(parent, lateReply, lateBinding)).toBe("accept");
 		rollbackTaskAdvisory(parent, lateReply);
 		expect(vi.getTimerCount()).toBe(0);

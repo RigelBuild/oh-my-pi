@@ -1,9 +1,15 @@
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { createHash } from "node:crypto";
-import type { AdvisorySnapshot, TaskAdvisory, TaskAdvisoryEvent } from "../extensibility/extensions/task-advisory";
+import type {
+	AdvisorySnapshot,
+	AdvisoryState,
+	TaskAdvisory,
+	TaskAdvisoryEvent,
+} from "../extensibility/extensions/task-advisory";
 import { IrcBus } from "../irc/bus";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
+import { parseReportInput } from "./advisory-report";
 import { AdvisorySessionAdapter } from "./advisory-session-adapter";
 import { type AssignmentBinding, type AssignmentLineage } from "./assignment-lineage";
 
@@ -18,6 +24,7 @@ class AdvisoryRuntime {
 	disposed = false;
 	readonly issuedIds = new Map<string, string>();
 	readonly parkedSnapshots = new Map<string, AdvisorySnapshot>();
+	readonly replyStates = new WeakMap<object, AdvisoryState>();
 	readonly watches = new Map<
 		string,
 		{
@@ -112,7 +119,7 @@ class AdvisoryRuntime {
 								{
 									from,
 									to,
-									body: "Please share your progress and next action.",
+									body: `Reply with a JSON ReportInput via irc send for check ${requestId}.`,
 									assignmentId: ref.assignmentId,
 									checkId: requestId,
 								},
@@ -289,7 +296,10 @@ export function receiveTaskAdvisory(session: AgentSession, message: IrcMessage):
 	if (!binding || binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
 	const runtime = runtimes.get(session);
 	if (!runtime) return;
-	if (binding.requestId && !runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`)?.reply) return;
+	const state = runtime.replyStates.get(message);
+	if (!state || (binding.requestId && !runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`)?.reply))
+		return;
+	runtime.replyStates.delete(message);
 	if (binding.requestId) {
 		const watch = runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
 		if (watch) {
@@ -304,6 +314,7 @@ export function receiveTaskAdvisory(session: AgentSession, message: IrcMessage):
 			requestId: binding.requestId ?? "",
 			senderInstanceId: binding.senderInstanceId,
 			recipientInstanceId: binding.recipientInstanceId,
+			state,
 		});
 }
 
@@ -313,19 +324,28 @@ export function admitTaskAdvisory(
 	binding: NonNullable<IrcMessage["advisoryBinding"]>,
 ): "accept" | "duplicate" | "reject" {
 	if (binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return "accept";
-	if (!binding.requestId) return "accept";
-	const watch = runtimes.get(session)?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
+	const report = parseReportInput(message.body, binding.requestId);
+	if (!report) return "reject";
+	const runtime = runtimes.get(session);
+	if (!binding.requestId) {
+		runtime?.replyStates.set(message, report.state);
+		return "accept";
+	}
+	if (!runtime) return "reject";
+	const watch = runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
 	if (!watch || watch.expired) return "reject";
 	const digest = createHash("sha256").update(message.body).digest("hex");
 	if (watch.reply !== undefined) return watch.replyDelivered && watch.reply === digest ? "duplicate" : "reject";
 	clearInterval(watch.timer);
 	watch.reply = digest;
+	runtime.replyStates.set(message, report.state);
 	return "accept";
 }
 
 export function rollbackTaskAdvisory(session: AgentSession, message: IrcMessage): void {
 	const binding = message.advisoryBinding;
 	if (!binding?.requestId || binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
+	runtimes.get(session)?.replyStates.delete(message);
 	const watch = runtimes.get(session)?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
 	if (watch) {
 		watch.reply = undefined;

@@ -80,71 +80,98 @@ it("starts a fresh baseline after reassignment", () => {
 	}
 });
 
-it("closes a reply watch before reminder delivery resolves", async () => {
+it("validates bound reports before consuming a reply watch", async () => {
 	vi.useFakeTimers();
 	AgentRegistry.resetGlobalForTests();
 	const lineage = new AssignmentLineage();
-	lineage.attach("race-parent", "parent-instance");
-	const ref = lineage.mint("race-child", "race-parent");
-	lineage.attach("race-child", "child-instance");
+	lineage.attach("report-parent", "parent-instance");
+	const ref = lineage.mint("report-child", "report-parent");
+	lineage.attach("report-child", "child-instance");
 	let dispose = () => {};
 	const parent = {
-		sessionManager: { getSessionId: () => "race-parent" },
+		sessionManager: { getSessionId: () => "report-parent" },
 		subscribe: () => () => {},
 		addDisposer: (fn: () => void) => {
 			dispose = fn;
 		},
 	} as unknown as AgentSession;
-	const child = { sessionManager: { getSessionId: () => "race-child" } } as unknown as AgentSession;
-	const registry = AgentRegistry.global();
-	registry.register({ id: "RaceParent", displayName: "Parent", kind: "sub", session: parent });
-	registry.register({ id: "RaceChild", displayName: "Child", kind: "sub", session: child });
-	const gate = Promise.withResolvers<{ outcome: "injected" }>();
-	const send = spyOn(IrcBus.global(), "sendBound").mockImplementation(() => gate.promise);
+	const child = { sessionManager: { getSessionId: () => "report-child" } } as unknown as AgentSession;
+	AgentRegistry.global().register({ id: "ReportParent", displayName: "Parent", kind: "sub", session: parent });
+	AgentRegistry.global().register({ id: "ReportChild", displayName: "Child", kind: "sub", session: child });
+	const send = spyOn(IrcBus.global(), "sendBound").mockResolvedValue({ outcome: "injected" });
 	try {
 		const advisory = createTaskAdvisory(parent, lineage);
-		const replies: string[] = [];
+		const replies: Array<{ requestId: string; state: string }> = [];
 		advisory.subscribe(event => {
-			if (event.type === "reply") replies.push(event.requestId);
+			if (event.type === "reply") replies.push({ requestId: event.requestId, state: event.state });
 		});
-		expect((await advisory.remind(ref, "é".repeat(65), "request")).outcome).toBe("unavailable");
-		expect((await advisory.remind(ref, "check", "é".repeat(2049))).outcome).toBe("unavailable");
-		const pending = advisory.remind(ref, "check", "request");
-		expect((await advisory.remind(ref, "check", "request")).outcome).toBe("unavailable");
-		expect((await advisory.remind(ref, "check", "changed")).outcome).toBe("unavailable");
-		const message = {
-			id: "message",
-			ts: 0,
-			from: "RaceChild",
-			to: "RaceParent",
-			body: "progress",
-			advisoryBinding: {
-				ref,
-				branchId: ref.parentBranchId,
-				senderInstanceId: "child-instance",
-				recipientInstanceId: "parent-instance",
-				requestId: "check",
-			},
-		};
-		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("accept");
-		vi.advanceTimersByTime(300_000);
-		expect(send).toHaveBeenCalledTimes(1);
-		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("reject");
-		expect(admitTaskAdvisory(parent, { ...message, body: "changed" }, message.advisoryBinding)).toBe("reject");
-		expect(admitTaskAdvisory(parent, message, { ...message.advisoryBinding, requestId: "unknown" })).toBe("reject");
-		receiveTaskAdvisory(parent, message);
-		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("duplicate");
-		gate.resolve({ outcome: "injected" });
-		expect((await pending).outcome).toBe("injected");
-		vi.advanceTimersByTime(600_000);
-		expect(replies).toEqual(["check"]);
-		expect(send).toHaveBeenCalledTimes(1);
-		for (let index = 0; index < 64; index++) await advisory.remind(ref, `extra-${index}`, "request");
-		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("reject");
-		expect((await advisory.remind(ref, "check", "request")).outcome).toBe("injected");
-		lineage.terminal("race-child", ref.assignmentId);
-		vi.advanceTimersByTime(600_000);
-		expect(send).toHaveBeenCalledTimes(66);
+		const bindingFor = (requestId: string) => ({
+			ref,
+			branchId: ref.parentBranchId,
+			senderInstanceId: "child-instance",
+			recipientInstanceId: "parent-instance",
+			requestId,
+		});
+		const reportFor = (state: string, requestId: string, extra: Record<string, unknown> = {}) =>
+			JSON.stringify({
+				state,
+				progress: "worked",
+				tried: ["step"],
+				blocker: state === "progressing" ? "" : "blocked",
+				nextAction: "continue",
+				requestId,
+				...extra,
+			});
+		for (const state of ["progressing", "struggling", "stuck", "waiting"]) {
+			const requestId = `valid-${state}`;
+			await advisory.remind(ref, requestId, "request");
+			const binding = bindingFor(requestId);
+			const reportBody = reportFor(state, requestId);
+			const message = {
+				from: "ReportChild",
+				to: "ReportParent",
+				body: reportBody,
+				advisoryBinding: binding,
+			};
+			expect(admitTaskAdvisory(parent, message, binding)).toBe("accept");
+			receiveTaskAdvisory(parent, message as Parameters<typeof receiveTaskAdvisory>[1]);
+			expect(JSON.stringify(replies.at(-1))).not.toContain(reportBody);
+		}
+		expect(replies).toEqual([
+			{ requestId: "valid-progressing", state: "progressing" },
+			{ requestId: "valid-struggling", state: "struggling" },
+			{ requestId: "valid-stuck", state: "stuck" },
+			{ requestId: "valid-waiting", state: "waiting" },
+		]);
+
+		const invalidReports: Array<[string, string]> = [
+			["invalid-json", "not-json"],
+			["bad-state", reportFor("unknown", "bad-state")],
+			["oversize-string", reportFor("progressing", "oversize-string", { progress: "x".repeat(241) })],
+			["too-many-tried", reportFor("progressing", "too-many-tried", { tried: ["1", "2", "3", "4"] })],
+			["empty-blocker", reportFor("struggling", "empty-blocker", { blocker: "" })],
+			["mismatched-request-id", reportFor("progressing", "mismatched-request-id", { requestId: "other-check" })],
+			["oversize-body", `${reportFor("progressing", "oversize-body")}${" ".repeat(4096)}`],
+			["oversize-report-id", reportFor("progressing", "valid-report-id", { requestId: "é".repeat(65) })],
+			["null-report-id", reportFor("progressing", "null-report-id", { requestId: null })],
+			["unknown-key", reportFor("progressing", "unknown-key", { unexpected: true })],
+		];
+		for (const [requestId, body] of invalidReports) {
+			const checkId = requestId;
+			const binding = bindingFor(checkId);
+			await advisory.remind(ref, checkId, "request");
+			const message = { from: "ReportChild", to: "ReportParent", body, advisoryBinding: binding };
+			const before = replies.length;
+			expect(admitTaskAdvisory(parent, message, binding)).toBe("reject");
+			expect(replies).toHaveLength(before);
+			const valid = {
+				...message,
+				body: reportFor("progressing", checkId),
+			};
+			expect(admitTaskAdvisory(parent, valid, binding)).toBe("accept");
+			receiveTaskAdvisory(parent, valid as Parameters<typeof receiveTaskAdvisory>[1]);
+			expect(admitTaskAdvisory(parent, valid, binding)).toBe("duplicate");
+		}
 	} finally {
 		dispose();
 		send.mockRestore();

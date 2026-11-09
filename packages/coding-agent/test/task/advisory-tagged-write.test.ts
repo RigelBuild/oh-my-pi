@@ -30,15 +30,22 @@ it("routes a tagged agent write through its live assignment binding", async () =
 		taskDepth: 1,
 	} as unknown as ToolSession;
 	try {
+		const report = JSON.stringify({
+			state: "progressing",
+			progress: "worked",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
 		const result = await new WriteTool(toolSession).execute("write", {
 			path: "agent://Parent",
-			content: "progress",
+			content: report,
 			assignmentId: ref.assignmentId,
 			checkId: "check-1",
 		});
 		expect(result.isError).not.toBe(true);
 		expect(send).toHaveBeenCalledWith(
-			{ from: "Parent.Child", to: "Parent", body: "progress", assignmentId: ref.assignmentId, checkId: "check-1" },
+			{ from: "Parent.Child", to: "Parent", body: report, assignmentId: ref.assignmentId, checkId: "check-1" },
 			{
 				ref,
 				branchId: ref.parentBranchId,
@@ -47,12 +54,22 @@ it("routes a tagged agent write through its live assignment binding", async () =
 				requestId: "check-1",
 			},
 		);
+		const privateInput = "PRIVATE_REPORT_BODY_MUST_NOT_APPEAR";
+		const invalid = await new WriteTool(toolSession).execute("write-invalid", {
+			path: "agent://Parent",
+			content: privateInput,
+			assignmentId: ref.assignmentId,
+			checkId: "check-1",
+		});
+		expect(invalid.isError).toBe(true);
+		expect(JSON.stringify(invalid.content)).not.toContain(privateInput);
 		const oversized = await new WriteTool(toolSession).execute("write-large", {
 			path: "agent://Parent",
 			content: "é".repeat(2049),
 			assignmentId: ref.assignmentId,
 		});
 		expect(oversized.isError).toBe(true);
+		expect(send).toHaveBeenCalledTimes(1);
 	} finally {
 		send.mockRestore();
 		assignmentLineage.disposeSession(childId, "child-instance");

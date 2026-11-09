@@ -10,6 +10,7 @@ import { canSpawnAtDepth } from "../task/types";
 import { escapeHarnessTags } from "../session/harness-tags";
 import { assignmentLineage } from "../task/assignment-lineage";
 
+import { parseReportInput } from "../task/advisory-report";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
 function coordinationErrorResult(text: string, details: CoordinationDetails): AgentToolResult<CoordinationDetails> {
@@ -58,7 +59,7 @@ export async function executeSend(
 	const to = params.to.trim();
 	const message = params.message;
 	if (!to) return coordinationErrorResult("A recipient is required.", { op: "send", from: senderId });
-	if (!message.trim())
+	if (!message.trim() && params.assignmentId === undefined && params.checkId === undefined)
 		return coordinationErrorResult("A non-empty message is required.", { op: "send", from: senderId });
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
@@ -66,10 +67,15 @@ export async function executeSend(
 		if (
 			!params.assignmentId ||
 			Buffer.byteLength(params.assignmentId) > 128 ||
-			(params.checkId !== undefined && (!params.checkId || Buffer.byteLength(params.checkId) > 128)) ||
-			Buffer.byteLength(message) > 4096
+			(params.checkId !== undefined && (!params.checkId || Buffer.byteLength(params.checkId) > 128))
 		)
 			return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
+		const report = parseReportInput(message, params.checkId);
+		if (!report)
+			return coordinationErrorResult(
+				'Invalid advisory reply. Send JSON shaped as {"state":"progressing|struggling|stuck|waiting","progress":"...","tried":["..."],"blocker":"...","nextAction":"...","requestId":"optional check ID"}. Strings are at most 240 characters, tried has at most 3 entries, blocker may be empty only for progressing, requestId is at most 128 UTF-8 bytes and must match the check ID, no extra keys are allowed, and the body is at most 4096 UTF-8 bytes.',
+				{ op: "send", from: senderId, to },
+			);
 		const sender = registry.get(senderId)?.session;
 		const recipient = registry.get(to)?.session;
 		const childId = sender?.sessionManager.getSessionId();

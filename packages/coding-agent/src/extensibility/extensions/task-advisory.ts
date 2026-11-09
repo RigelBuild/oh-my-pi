@@ -30,6 +30,15 @@ export type AdvisorySnapshot = {
 	messaging: AdvisoryMessagingSupport;
 	localCoverage: AdvisoryLocalCoverage;
 };
+export type AdvisoryState = "progressing" | "struggling" | "stuck" | "waiting";
+export type ReportInput = {
+	requestId?: string;
+	state: AdvisoryState;
+	progress: string;
+	tried: string[];
+	blocker: string;
+	nextAction: string;
+};
 export type LocalSignal = "edit-repeat" | "tool-repeat";
 export type AdvisoryMessageBinding = {
 	ref: AssignmentRef;
@@ -52,7 +61,14 @@ export type AdvisoryReceipt =
 export type TaskAdvisoryEvent =
 	| { type: "snapshot"; snapshot: AdvisorySnapshot }
 	| { type: "signal"; ref: AssignmentRef; signal: LocalSignal; count: number }
-	| { type: "reply"; ref: AssignmentRef; requestId: string; senderInstanceId: string; recipientInstanceId: string };
+	| {
+			type: "reply";
+			ref: AssignmentRef;
+			requestId: string;
+			senderInstanceId: string;
+			recipientInstanceId: string;
+			state: AdvisoryState;
+	  };
 
 export interface TaskAdvisory {
 	current(): AdvisorySnapshot | undefined;
