@@ -159,7 +159,7 @@ describe("gateway Codex reset hook", () => {
 		expect(await s.call()).toBe(false);
 		expect(s.redeem).not.toHaveBeenCalled();
 	});
-	it("does not start the clock for a 429 below the weekly threshold", async () => {
+	it("does not start the clock when a usage-limit hook reads weekly below the threshold", async () => {
 		const s = await setup();
 		s.setWeekly(0.998);
 		await s.call();
