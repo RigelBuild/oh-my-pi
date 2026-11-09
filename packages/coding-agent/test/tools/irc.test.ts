@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { messageResult } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
-import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
 
@@ -152,6 +153,51 @@ describe("IRC", () => {
 			expect(main.relayed).toEqual([]);
 			assignmentLineage.disposeSession(childId, "child-instance");
 			assignmentLineage.disposeSession(parentId, "parent-instance");
+		});
+		it("drops a flushed advisory after navigation at provider conversion", async () => {
+			const parent = createRealSession();
+			const child = createRealSession();
+			sessions.push(parent.session, child.session);
+			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
+			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			const parentId = parent.sessionManager.getSessionId();
+			const childId = child.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint(childId, parentId);
+			assignmentLineage.attach(childId, "child-instance");
+			await bus.sendBound({ from: "Child", to: "Parent", body: "flush secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
+			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => false, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
+			// Move the queued record into a bridge and flush it into agent context.
+			const queued = parent.session.drainPendingIrcInboxMessages("Parent")[0];
+			if (!queued) throw new Error("missing advisory");
+			await bridge.deliver(queued);
+			bridge.flushPending();
+			const messages = parent.session.agent.state.messages;
+			expect(JSON.stringify(convertToLlm(messages))).toContain("flush secret");
+			assignmentLineage.navigate(parentId);
+			expect(JSON.stringify(convertToLlm(messages))).not.toContain("flush secret");
+		});
+
+		it("drops a resolved waiter advisory after navigation at provider conversion", async () => {
+			const parent = createRealSession();
+			const child = createRealSession();
+			sessions.push(parent.session, child.session);
+			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
+			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			const parentId = parent.sessionManager.getSessionId();
+			const childId = child.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint(childId, parentId);
+			assignmentLineage.attach(childId, "child-instance");
+			const waiting = bus.wait("Parent", {}, 1000);
+			await bus.sendBound({ from: "Child", to: "Parent", body: "wait secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
+			const waited = await waiting;
+			if (!waited) throw new Error("waiter did not receive advisory");
+			const result = messageResult("Parent", waited);
+			const messages = [{ role: "toolResult" as const, toolCallId: "call", toolName: "wait", content: result.content, details: result.details, isError: false, timestamp: Date.now() }];
+			expect(JSON.stringify(convertToLlm(messages))).toContain("wait secret");
+			assignmentLineage.navigate(parentId);
+			expect(JSON.stringify(convertToLlm(messages))).not.toContain("wait secret");
 		});
 
 		it("send delivers to a live recipient and reports the session outcome", async () => {

@@ -55,6 +55,8 @@ import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage 
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { advisoryIsCurrent, advisoryMessage } from "../irc/advisory";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
@@ -1218,6 +1220,21 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * through the shared registry before the next pass.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
+	// Bound records cannot use the identity cache: lineage can change without a message mutation.
+	if (messages.some(message => advisoryMessage in message || (message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details))) {
+		const safe: AgentMessage[] = [];
+		for (const message of messages) {
+			const metadata = advisoryMessage in message ? message[advisoryMessage] : message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details ? message.details[advisoryMessage] : undefined;
+			// SAFETY: only the bridge and wait tool attach this private symbol, both with an IrcMessage.
+			const bound = metadata as IrcMessage | undefined;
+			if (bound && !advisoryIsCurrent(bound)) {
+				if (message.role === "toolResult") safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
+				continue;
+			}
+			safe.push(message);
+		}
+		return safe.flatMap((message, index) => convertOne(message, message.role === "assistant" && followedByInterruptedThinking(safe, index)));
+	}
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);
 	const sameGeneration = memo !== undefined && memo.generation === convertGeneration;

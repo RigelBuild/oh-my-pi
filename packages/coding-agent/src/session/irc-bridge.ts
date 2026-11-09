@@ -1,6 +1,7 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { advisoryIsCurrent, advisoryMessage } from "../irc/advisory";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -10,7 +11,6 @@ import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
-const advisoryMessage = Symbol("advisoryMessage");
 type AdvisoryRecord = AgentMessage & { [advisoryMessage]: IrcMessage };
 
 function isAdvisoryRecord(record: AgentMessage): record is AdvisoryRecord {
@@ -47,17 +47,7 @@ export class IrcBridge {
 	/** Revalidates live-only metadata without trusting transcript contents. */
 	isCurrent(record: AgentMessage): boolean {
 		if (!isAdvisoryRecord(record)) return true;
-		const msg = record[advisoryMessage];
-		if (!msg.advisoryBinding) return true;
-		const registry = AgentRegistry.global();
-		const sender = registry.get(msg.from)?.session;
-		const recipient = registry.get(msg.to)?.session;
-		const reason = sender && recipient
-			? assignmentLineage.validateBinding(msg.advisoryBinding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId())
-			: "stale-instance";
-		if (!reason) return true;
-		logger.debug("Dropping stale advisory message", { reason });
-		return false;
+		return advisoryIsCurrent(record[advisoryMessage]);
 	}
 
 	/** Bound advisories wait for an existing turn and never cause a wake. */
@@ -198,6 +188,7 @@ export class IrcBridge {
 					to: agentId,
 					body,
 					ts: record.timestamp,
+					...(isAdvisoryRecord(record) ? { advisoryBinding: record[advisoryMessage].advisoryBinding } : {}),
 					...(typeof replyTo === "string" ? { replyTo } : {}),
 				});
 			}
