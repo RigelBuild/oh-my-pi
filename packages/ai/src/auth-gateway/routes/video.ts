@@ -103,7 +103,9 @@ function videoCredentialTracking(
 			"video",
 			peer,
 			(apiKey, credentialId) => {
-				credentialIds.set(apiKey, credentialId);
+				if (credentialIds.has(apiKey) && credentialIds.get(apiKey) !== credentialId)
+					credentialIds.set(apiKey, undefined);
+				else if (!credentialIds.has(apiKey)) credentialIds.set(apiKey, credentialId);
 			},
 			bootOpts.onUsageLimit,
 			undefined,
@@ -111,7 +113,10 @@ function videoCredentialTracking(
 		),
 		fetch: ((input, init) => {
 			const authorization = new Headers(init?.headers).get("authorization");
-			onSent(authorization?.startsWith("Bearer ") ? credentialIds.get(authorization.slice(7)) : undefined);
+			if (authorization?.startsWith("Bearer ")) {
+				const bearer = authorization.slice(7);
+				if (credentialIds.has(bearer)) onSent(credentialIds.get(bearer));
+			}
 			return (bootOpts.fetch ?? fetch)(input, init);
 		}) satisfies NonNullable<AuthGatewayRouteOptions["fetch"]>,
 		signal: controller.signal,

@@ -2877,6 +2877,39 @@ describe("openai-codex streaming", () => {
 		expect(result.errorMessage).toContain("timed out");
 	});
 
+	it("uses the remaining pre-response deadline for a stalled error body", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const timeoutMs = 300;
+		let startedAt = 0;
+		let abortedAt = 0;
+		const fetchMock: FetchImpl = async (input, init) => {
+			startedAt = performance.now();
+			const requestSignal = getRequestSignal(input, init);
+			requestSignal?.addEventListener(
+				"abort",
+				() => {
+					abortedAt = performance.now();
+				},
+				{ once: true },
+			);
+			// Bun fake timers can fire a cleared watchdog; exercise the real platform clock.
+			const delay = Promise.withResolvers<void>();
+			setTimeout(delay.resolve, 270);
+			await delay.promise;
+			return createStalledErrorResponse(403, requestSignal);
+		};
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			fetch: fetchMock,
+			streamFirstEventTimeoutMs: timeoutMs,
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(abortedAt - startedAt).toBeGreaterThan(200);
+		expect(abortedAt - startedAt).toBeLessThan(500);
+	});
+
 	it("bounds Codex SSE socket-close attempts and preserves the default when omitted", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

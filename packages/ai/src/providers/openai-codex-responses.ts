@@ -4816,12 +4816,19 @@ async function openCodexSseEventStream(
 				clearPreResponseTimeout?.();
 				const controller = new AbortController();
 				let timer: NodeJS.Timeout | undefined;
-				clearPreResponseTimeout = () => clearTimeout(timer);
+				let remainingMs = firstEventTimeoutMs;
+				let deadline: number | undefined;
+				clearPreResponseTimeout = () => {
+					clearTimeout(timer);
+					if (deadline !== undefined) remainingMs = Math.max(0, deadline - performance.now());
+					deadline = undefined;
+				};
 				resumePreResponseTimeout = () => {
-					if (firstEventTimeoutMs === undefined || firstEventTimeoutMs <= 0) return;
+					if (firstEventTimeoutMs === undefined || firstEventTimeoutMs <= 0 || remainingMs === undefined) return;
+					deadline = performance.now() + remainingMs;
 					timer = setTimeout(
 						() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
-						firstEventTimeoutMs,
+						remainingMs,
 					);
 					timer.unref?.();
 				};
