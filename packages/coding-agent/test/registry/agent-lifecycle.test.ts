@@ -12,10 +12,11 @@ interface SessionStub {
 	disposeCalls: () => number;
 }
 
-/** Minimal session: the lifecycle manager only ever calls dispose() on it. */
+/** Minimal session for lifecycle tests. */
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 	let calls = 0;
 	const stub = {
+		sessionManager: { getSessionId: () => "lifecycle-session" },
 		dispose: async () => {
 			calls++;
 			await dispose?.();
