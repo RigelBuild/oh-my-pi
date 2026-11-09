@@ -182,6 +182,7 @@ export class IrcBridge {
 					continue;
 				}
 				messages.push({
+					...(isAdvisoryRecord(record) ? record[advisoryMessage] : {}),
 					id,
 					from,
 					to: agentId,

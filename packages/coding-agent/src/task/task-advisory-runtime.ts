@@ -16,7 +16,8 @@ class AdvisoryRuntime {
 	readonly api: TaskAdvisory;
 	lastSnapshot?: AdvisorySnapshot;
 	disposed = false;
-	readonly expiredIds = new Set<string>();
+	readonly issuedIds = new Set<string>();
+	readonly parkedSnapshots = new Map<string, AdvisorySnapshot>();
 	readonly watches = new Map<string, { timer: NodeJS.Timeout; content: string; reply?: string; replyDelivered?: boolean; expired: boolean }>();
 
 	constructor(readonly session: AgentSession, readonly lineage: AssignmentLineage) {
@@ -24,8 +25,8 @@ class AdvisoryRuntime {
 			current: () => this.snapshot(this.lineage.getAssignment(this.id)),
 			children: () => this.lineage.children(this.id).flatMap(binding => {
 				const child = this.find(binding.ref.childSessionId);
-				const snapshot = child && runtimes.get(child)?.snapshot(binding);
-				return snapshot ? [snapshot] : [];
+				const snapshot = (child && runtimes.get(child)?.snapshot(binding)) ?? this.parkedSnapshots.get(binding.ref.childSessionId);
+				return snapshot?.ref.assignmentId === binding.ref.assignmentId ? [snapshot] : [];
 			}),
 			subscribe: listener => { this.listeners.add(listener); return () => this.listeners.delete(listener); },
 			signal: (signal, count) => {
@@ -44,14 +45,13 @@ class AdvisoryRuntime {
 				const to = registry.list().find(item => item.session?.sessionManager.getSessionId() === ref.childSessionId)?.id;
 				if (!from || !to) return { outcome: "unavailable", reason: "stale-instance" };
 				const transport = { ref, branchId: binding.branchId, senderInstanceId: binding.parentInstanceId, recipientInstanceId: binding.instanceId, requestId };
-				// Once its bounded tombstone is evicted, an extension may issue the ID anew.
 				const key = `${ref.assignmentId}:${requestId}`;
-				if (this.expiredIds.has(key)) return { outcome: "unavailable", reason: "stale-assignment" };
+				if (this.issuedIds.has(key)) return { outcome: "duplicate" };
+				this.issuedIds.add(key);
 				const contentDigest = createHash("sha256").update(content).digest("hex");
-				const previous = this.watches.get(key);
-				if (previous) return previous.content === contentDigest && !previous.expired ? { outcome: "duplicate" } : { outcome: "unavailable", reason: "handoff-failed" };
 				const started = performance.now();
 				const timer = setInterval(() => {
+					if (watch.reply !== undefined) return;
 					if (!this.lineage.isCurrent(ref, binding.instanceId, binding.branchId)) {
 						clearInterval(timer);
 						watch.expired = true;
@@ -68,11 +68,6 @@ class AdvisoryRuntime {
 					if (oldest !== undefined) {
 						clearInterval(this.watches.get(oldest)?.timer);
 						this.watches.delete(oldest);
-						this.expiredIds.add(oldest);
-						if (this.expiredIds.size > 64) {
-							const first = this.expiredIds.values().next().value;
-							if (first !== undefined) this.expiredIds.delete(first);
-						}
 					}
 				}
 				this.watches.set(key, watch);
@@ -89,7 +84,21 @@ class AdvisoryRuntime {
 				return receipt;
 			},
 		};
+		const stopPark = lineage.onPark(sessionId => {
+			if (sessionId === this.id) {
+				for (const watch of this.watches.values()) clearInterval(watch.timer);
+				this.watches.clear();
+				return;
+			}
+			const binding = lineage.getAssignment(sessionId);
+			if (!binding || binding.ref.parentSessionId !== this.id) return;
+			const child = this.find(sessionId);
+			const snapshot = child && runtimes.get(child)?.snapshot(binding);
+			if (snapshot) this.parkedSnapshots.set(sessionId, { ...snapshot, phase: "paused" });
+		});
 		const stopTerminal = lineage.onTerminal(assignmentId => {
+			for (const key of this.issuedIds) if (key.startsWith(`${assignmentId}:`)) this.issuedIds.delete(key);
+			for (const [id, snapshot] of this.parkedSnapshots) if (snapshot.ref.assignmentId === assignmentId) this.parkedSnapshots.delete(id);
 			for (const [key, watch] of this.watches) {
 				if (!key.startsWith(`${assignmentId}:`)) continue;
 				clearInterval(watch.timer);
@@ -111,7 +120,7 @@ class AdvisoryRuntime {
 				this.publish({ type: "snapshot", snapshot });
 			}
 		});
-		session.addDisposer(() => { this.disposed = true; unsubscribe(); stopTerminal(); for (const watch of this.watches.values()) clearInterval(watch.timer); this.watches.clear(); this.listeners.clear(); runtimes.delete(session); });
+		session.addDisposer(() => { this.disposed = true; unsubscribe(); stopPark(); stopTerminal(); for (const watch of this.watches.values()) clearInterval(watch.timer); this.watches.clear(); this.issuedIds.clear(); this.parkedSnapshots.clear(); this.listeners.clear(); runtimes.delete(session); });
 	}
 
 	get id(): string { return this.session.sessionManager.getSessionId(); }
@@ -163,6 +172,7 @@ export function admitTaskAdvisory(session: AgentSession, message: Omit<IrcMessag
 	if (!watch || watch.expired) return "reject";
 	const digest = createHash("sha256").update(message.body).digest("hex");
 	if (watch.reply !== undefined) return watch.replyDelivered && watch.reply === digest ? "duplicate" : "reject";
+	clearInterval(watch.timer);
 	watch.reply = digest;
 	return "accept";
 }

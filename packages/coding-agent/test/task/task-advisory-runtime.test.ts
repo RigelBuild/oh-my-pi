@@ -31,7 +31,6 @@ it("emits snapshots only when their values change", () => {
 	} finally { clock.mockRestore(); }
 });
 
-
 it("starts a fresh baseline after reassignment", () => {
 	const lineage = new AssignmentLineage();
 	lineage.attach("parent", "parent-instance");
@@ -89,6 +88,8 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		const pending = advisory.remind(ref, "check", "request");
 		const message = { id: "message", ts: 0, from: "RaceChild", to: "RaceParent", body: "progress", advisoryBinding: { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "check" } };
 		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("accept");
+		vi.advanceTimersByTime(300_000);
+		expect(send).toHaveBeenCalledTimes(1);
 		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("reject");
 		expect(admitTaskAdvisory(parent, { ...message, body: "changed" }, message.advisoryBinding)).toBe("reject");
 		expect(admitTaskAdvisory(parent, message, { ...message.advisoryBinding, requestId: "unknown" })).toBe("reject");
@@ -100,6 +101,7 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		expect(replies).toEqual(["check"]);
 		expect(send).toHaveBeenCalledTimes(1);
 		for (let index = 0; index < 64; index++) await advisory.remind(ref, `extra-${index}`, "request");
+		expect((await advisory.remind(ref, "check", "request")).outcome).toBe("duplicate");
 		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("reject");
 		lineage.terminal("race-child", ref.assignmentId);
 		vi.advanceTimersByTime(600_000);
@@ -108,6 +110,7 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 });
 
 it("reattaches a parked parent and expires it on release", async () => {
+	vi.useFakeTimers();
 	AgentRegistry.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
@@ -116,7 +119,7 @@ it("reattaches a parked parent and expires it on release", async () => {
 	const lineage = assignmentLineage;
 	const parentId = crypto.randomUUID();
 	const childId = crypto.randomUUID();
-	const makeParent = () => ({ sessionManager: { getSessionId: () => parentId, getUsageStatistics: () => ({ cost: 0, subagentCost: 0 }) }, subscribe: () => () => {}, addDisposer: () => {}, dispose: async () => {} }) as unknown as AgentSession;
+	const makeParent = () => { let disposer = () => {}; return { sessionManager: { getSessionId: () => parentId, getUsageStatistics: () => ({ cost: 0, subagentCost: 0 }) }, subscribe: () => () => {}, addDisposer: (fn: () => void) => { disposer = fn; }, dispose: async () => { disposer(); } } as unknown as AgentSession; };
 	const parent = makeParent();
 	const child = { sessionManager: { getSessionId: () => childId }, deliverIrcMessage: async () => "injected" } as unknown as AgentSession;
 	registry.register({ id: "ParkParent", displayName: "Parent", kind: "sub", session: parent, status: "idle" });
@@ -131,13 +134,16 @@ it("reattaches a parked parent and expires it on release", async () => {
 		const advisory = createTaskAdvisory(revived, lineage);
 		expect((await advisory.remind(ref, "revived-check", "progress")).outcome).toBe("injected");
 		await lifecycle.park("ParkParent");
+		expect(vi.getTimerCount()).toBe(0);
 		await lifecycle.release("ParkParent");
+		expect(vi.getTimerCount()).toBe(0);
 		expect(lineage.children(parentId)).toEqual([]);
-		expect(await advisory.remind(ref, "expired-check", "progress")).toMatchObject({ outcome: "unavailable", reason: "stale-assignment" });
+		expect(await advisory.remind(ref, "expired-check", "progress")).toMatchObject({ outcome: "unavailable", reason: "parent-gone" });
 	} finally {
 		await lifecycle.dispose();
 		lineage.disposeSession(childId, "child");
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		vi.useRealTimers();
 	}
 });

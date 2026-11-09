@@ -42,7 +42,6 @@ export type TaskAdvisoryEvent =
 	| { type: "signal"; ref: AssignmentRef; signal: LocalSignal; count: number }
 	| { type: "reply"; ref: AssignmentRef; requestId: string; senderInstanceId: string; recipientInstanceId: string };
 
-
 export interface TaskAdvisory {
 	current(): AdvisorySnapshot | undefined;
 	children(): readonly AdvisorySnapshot[];

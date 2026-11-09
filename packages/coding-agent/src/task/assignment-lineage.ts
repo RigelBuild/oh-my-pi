@@ -37,6 +37,11 @@ export class AssignmentLineage {
 	readonly #orphaned = new Set<string>();
 	readonly #parked = new Map<string, string>();
 	readonly #terminalListeners = new Set<(assignmentId: string) => void>();
+	readonly #parkListeners = new Set<(sessionId: string) => void>();
+	onPark(listener: (sessionId: string) => void): () => void {
+		this.#parkListeners.add(listener);
+		return () => this.#parkListeners.delete(listener);
+	}
 	onTerminal(listener: (assignmentId: string) => void): () => void {
 		this.#terminalListeners.add(listener);
 		return () => this.#terminalListeners.delete(listener);
@@ -74,6 +79,7 @@ export class AssignmentLineage {
 	disposeSession(sessionId: string, instanceId: string, reason: "park" | "dispose" = "dispose"): void {
 		if (this.#instances.get(sessionId) !== instanceId) return;
 		if (reason === "park") {
+			for (const listener of this.#parkListeners) listener(sessionId);
 			this.#parked.set(sessionId, this.branch(sessionId));
 			this.#instances.delete(sessionId);
 			return;
@@ -147,7 +153,7 @@ export class AssignmentLineage {
 
 	validateBinding(binding: AdvisoryTransportBinding, senderSessionId: string, recipientSessionId: string, admitted = false): AdvisoryBindingFailure | undefined {
 		const assignment = this.#assignments.get(binding.ref.childSessionId);
-		if (!assignment || (!admitted && assignment.phase !== "running") || assignment.ref.assignmentId !== binding.ref.assignmentId || assignment.ref.parentSessionId !== binding.ref.parentSessionId || assignment.ref.parentBranchId !== binding.ref.parentBranchId) return "stale-assignment";
+		if (!assignment || (!admitted && (assignment.phase !== "running" || assignment.ref.assignmentId !== binding.ref.assignmentId)) || assignment.ref.parentSessionId !== binding.ref.parentSessionId || assignment.ref.parentBranchId !== binding.ref.parentBranchId) return "stale-assignment";
 		if (assignment.branchId !== binding.branchId || this.branch(binding.ref.parentSessionId) !== binding.branchId || this.branch(binding.ref.childSessionId) !== assignment.childBranchId) return "stale-parent-branch";
 		const child = assignment.instanceId;
 		const parent = assignment.parentInstanceId;

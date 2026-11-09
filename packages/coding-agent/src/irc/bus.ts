@@ -187,7 +187,6 @@ export class IrcBus {
 			markAdvisoryAdmitted(message);
 		}
 
-
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or
 		// the session injection path.

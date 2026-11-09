@@ -63,7 +63,7 @@ export async function executeSend(
 		const recipient = registry.get(to)?.session;
 		const childId = sender?.sessionManager.getSessionId();
 		const binding = childId ? assignmentLineage.getAssignment(childId) : undefined;
-		if (!params.assignmentId || !binding || binding.ref.assignmentId !== params.assignmentId || binding.ref.parentSessionId !== recipient?.sessionManager.getSessionId()) {
+		if (!params.assignmentId || !binding || !childId || !recipient || assignmentLineage.validateBinding({ ref: { ...binding.ref, assignmentId: params.assignmentId }, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId }, childId, recipient.sessionManager.getSessionId())) {
 			return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
 		}
 		const receipt = await IrcBus.global().sendBound(

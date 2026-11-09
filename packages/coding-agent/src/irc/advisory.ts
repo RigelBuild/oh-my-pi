@@ -6,11 +6,11 @@ import { assignmentLineage } from "../task/assignment-lineage";
 /** Live metadata survives record copies but is not serialized into transcripts. */
 export const advisoryMessage = Symbol("advisoryMessage");
 const dropped = new WeakSet<IrcMessage>();
-const admitted = new WeakSet<IrcMessage>();
+const admitted = Symbol("advisoryAdmitted");
 
 /** Marks a live-bound message after the bus accepts it. */
 export function markAdvisoryAdmitted(message: IrcMessage): void {
-	admitted.add(message);
+	Object.assign(message, { [admitted]: true });
 }
 
 export function advisoryBindingFailure(msg: Pick<IrcMessage, "from" | "to" | "advisoryBinding">, wasAdmitted = false) {
@@ -24,7 +24,7 @@ export function advisoryBindingFailure(msg: Pick<IrcMessage, "from" | "to" | "ad
 }
 
 export function advisoryIsCurrent(msg: IrcMessage): boolean {
-	const reason = advisoryBindingFailure(msg, admitted.has(msg));
+	const reason = advisoryBindingFailure(msg, admitted in msg && msg[admitted] === true);
 	if (!reason) return true;
 	if (!dropped.has(msg)) {
 		dropped.add(msg);

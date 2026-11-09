@@ -1207,20 +1207,6 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
 	return message.role === "user" || (message.role === "custom" && isUserTurnInitiator(message));
 }
 
-/**
- * Transform AgentMessages (including custom types) to LLM-compatible Messages.
- *
- * This is used by:
- * - Agent's transormToLlm option (for prompt calls and queued messages)
- * - Compaction's generateSummary (for summarization)
- * - Custom extensions and tools
- *
- * Settled history converts once and is reused per message identity: an
- * append-only turn on the same array re-pays only the new suffix, and an
- * unchanged re-convert of the same array hands back the same outer `Message[]`.
- * Owner mutations (prune/shake/strip-images) invalidate the affected message
- * through the shared registry before the next pass.
- */
 function isAdvisoryBearing(message: AgentMessage): boolean {
 	return advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details));
 }
@@ -1242,7 +1228,20 @@ function hasAdvisory(messages: AgentMessage[]): boolean {
 	return found;
 }
 
-
+/**
+ * Transform AgentMessages (including custom types) to LLM-compatible Messages.
+ *
+ * This is used by:
+ * - Agent's transormToLlm option (for prompt calls and queued messages)
+ * - Compaction's generateSummary (for summarization)
+ * - Custom extensions and tools
+ *
+ * Settled history converts once and is reused per message identity: an
+ * append-only turn on the same array re-pays only the new suffix, and an
+ * unchanged re-convert of the same array hands back the same outer `Message[]`.
+ * Owner mutations (prune/shake/strip-images) invalidate the affected message
+ * through the shared registry before the next pass.
+ */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	// Bound records cannot use the identity cache: lineage can change without a message mutation.
 	if (hasAdvisory(messages)) {

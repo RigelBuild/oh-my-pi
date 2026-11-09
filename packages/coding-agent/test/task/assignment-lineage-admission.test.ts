@@ -11,6 +11,9 @@ it("retains admitted messages after terminal but rejects new sends and stale bra
 	lineage.terminal("child", ref.assignmentId);
 	expect(lineage.validateBinding(binding, "child", "parent")).toBe("stale-assignment");
 	expect(lineage.validateBinding(binding, "child", "parent", true)).toBeUndefined();
+	lineage.wake("child");
+	expect(lineage.validateBinding(binding, "child", "parent")).toBe("stale-assignment");
+	expect(lineage.validateBinding(binding, "child", "parent", true)).toBeUndefined();
 	lineage.navigate("parent");
 	expect(lineage.validateBinding(binding, "child", "parent", true)).toBe("stale-parent-branch");
 });
