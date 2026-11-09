@@ -44,6 +44,7 @@ class AdvisoryRuntime {
 				const to = registry.list().find(item => item.session?.sessionManager.getSessionId() === ref.childSessionId)?.id;
 				if (!from || !to) return { outcome: "unavailable", reason: "stale-instance" };
 				const transport = { ref, branchId: binding.branchId, senderInstanceId: binding.parentInstanceId, recipientInstanceId: binding.instanceId, requestId };
+				// Once its bounded tombstone is evicted, an extension may issue the ID anew.
 				const key = `${ref.assignmentId}:${requestId}`;
 				if (this.expiredIds.has(key)) return { outcome: "unavailable", reason: "stale-assignment" };
 				const contentDigest = createHash("sha256").update(content).digest("hex");
