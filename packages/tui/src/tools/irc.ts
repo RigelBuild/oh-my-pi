@@ -37,7 +37,7 @@ export interface IrcMessage {
 /** Delivery outcome for one peer recipient. */
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "injected" | "woken" | "revived" | "duplicate" | "failed";
 	error?: string;
 }
 /** Status ordering for peer rosters in child prompts. */

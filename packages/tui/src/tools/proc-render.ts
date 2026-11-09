@@ -319,6 +319,7 @@ function quotedPreview(body: string, tone = "muted"): NativeNode | undefined {
 
 const RECEIPT_TONE: Record<IrcDeliveryReceipt["outcome"], TspTone> = {
 	injected: "success",
+	duplicate: "success",
 	woken: "success",
 	revived: "warning",
 	failed: "error",

@@ -16,7 +16,8 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AdvisoryReceipt } from "../extensibility/extensions/task-advisory";
 import { assignmentLineage, type AdvisoryTransportBinding } from "../task/assignment-lineage";
 import type { CustomMessage } from "../session/messages";
-import { receiveTaskAdvisory } from "../task/task-advisory-runtime";
+import { admitTaskAdvisory, receiveTaskAdvisory } from "../task/task-advisory-runtime";
+import { advisoryIsCurrent } from "./advisory";
 
 interface IrcWaiter {
 	from?: string;
@@ -175,8 +176,13 @@ export class IrcBus {
 		if (opts?.validate && !opts.validate()) {
 			return { to: message.to, outcome: "failed", error: "Message binding is no longer valid." };
 		}
-		const advisoryRecipient = this.#registry.get(message.to)?.session;
-		if (advisoryRecipient && message.advisoryBinding) receiveTaskAdvisory(advisoryRecipient, message);
+		if (message.advisoryBinding) {
+			const recipient = this.#registry.get(message.to)?.session;
+			if (!recipient || !advisoryIsCurrent(message)) return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			const admission = admitTaskAdvisory(recipient, message, message.advisoryBinding);
+			if (admission === "duplicate") return { to: message.to, outcome: "duplicate" };
+			if (admission === "reject") return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+		}
 
 
 		// A pending `wait` from the recipient consumes the message directly —
@@ -185,6 +191,8 @@ export class IrcBus {
 		const waiter = this.#takeMatchingWaiter(message.to, message.from);
 		if (waiter) {
 			waiter.resolve(message);
+			const recipient = this.#registry.get(message.to)?.session;
+			if (recipient && message.advisoryBinding) receiveTaskAdvisory(recipient, message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
@@ -196,6 +204,7 @@ export class IrcBus {
 
 		try {
 			const delivery = await session.deliverIrcMessage(message);
+			if (message.advisoryBinding) receiveTaskAdvisory(session, message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {

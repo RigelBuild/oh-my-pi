@@ -1,8 +1,10 @@
-import { expect, it, spyOn } from "bun:test";
+import { expect, it, spyOn, vi } from "bun:test";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { AssignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
-import { createTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
+import { admitTaskAdvisory, createTaskAdvisory, receiveTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 
 it("emits snapshots only when their values change", () => {
 	const lineage = new AssignmentLineage();
@@ -54,4 +56,38 @@ it("starts a fresh baseline after reassignment", () => {
 		expect(advisory.current()).toMatchObject({ ref: second, wallMs: 25, workTokens: null });
 		expect(second.assignmentId).not.toBe(first.assignmentId);
 	} finally { clock.mockRestore(); }
+});
+
+it("closes a reply watch before reminder delivery resolves", async () => {
+	vi.useFakeTimers();
+	AgentRegistry.resetGlobalForTests();
+	const lineage = new AssignmentLineage();
+	lineage.attach("race-parent", "parent-instance");
+	const ref = lineage.mint("race-child", "race-parent");
+	lineage.attach("race-child", "child-instance");
+	let dispose = () => {};
+	const parent = { sessionManager: { getSessionId: () => "race-parent" }, subscribe: () => () => {}, addDisposer: (fn: () => void) => { dispose = fn; } } as unknown as AgentSession;
+	const child = { sessionManager: { getSessionId: () => "race-child" } } as unknown as AgentSession;
+	const registry = AgentRegistry.global();
+	registry.register({ id: "RaceParent", displayName: "Parent", kind: "sub", session: parent });
+	registry.register({ id: "RaceChild", displayName: "Child", kind: "sub", session: child });
+	const gate = Promise.withResolvers<{ outcome: "injected" }>();
+	const send = spyOn(IrcBus.global(), "sendBound").mockImplementation(() => gate.promise);
+	try {
+		const advisory = createTaskAdvisory(parent, lineage);
+		const replies: string[] = [];
+		advisory.subscribe(event => { if (event.type === "reply") replies.push(event.requestId); });
+		const pending = advisory.remind(ref, "check", "request");
+		const message = { id: "message", ts: 0, from: "RaceChild", to: "RaceParent", body: "progress", advisoryBinding: { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "check" } };
+		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("accept");
+		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("duplicate");
+		expect(admitTaskAdvisory(parent, { ...message, body: "changed" }, message.advisoryBinding)).toBe("reject");
+		expect(admitTaskAdvisory(parent, message, { ...message.advisoryBinding, requestId: "unknown" })).toBe("reject");
+		receiveTaskAdvisory(parent, message);
+		gate.resolve({ outcome: "injected" });
+		expect((await pending).outcome).toBe("injected");
+		vi.advanceTimersByTime(600_000);
+		expect(replies).toEqual(["check"]);
+		expect(send).toHaveBeenCalledTimes(1);
+	} finally { dispose(); send.mockRestore(); vi.useRealTimers(); AgentRegistry.resetGlobalForTests(); }
 });
