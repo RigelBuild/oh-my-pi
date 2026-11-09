@@ -193,7 +193,7 @@ export class IrcBus {
 			waiter.resolve(message);
 			const recipient = this.#registry.get(message.to)?.session;
 			if (recipient && message.advisoryBinding) receiveTaskAdvisory(recipient, message);
-			if (!opts?.suppressRelay) this.#relayToMainUi(message);
+			if (!opts?.suppressRelay && !message.advisoryBinding) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
 
@@ -205,7 +205,7 @@ export class IrcBus {
 		try {
 			const delivery = await session.deliverIrcMessage(message);
 			if (message.advisoryBinding) receiveTaskAdvisory(session, message);
-			if (!opts?.suppressRelay) this.#relayToMainUi(message);
+			if (!opts?.suppressRelay && !message.advisoryBinding) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer

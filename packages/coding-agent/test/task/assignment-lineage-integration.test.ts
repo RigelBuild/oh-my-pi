@@ -98,8 +98,11 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 			{ from: "LineageManager.LineageChild", to: "LineageManager", body: "progress" },
 			{ ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId, requestId: "check-1" },
 		);
+		const privateDirect = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: "private", advisoryBinding: { ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId } });
+		expect(privateDirect.outcome).toBe("injected");
+		expect(relay).toHaveBeenCalledTimes(0);
 		expect(reply.outcome).toBe("injected");
-		expect(replies).toEqual(["check-1"]);
+		expect(replies).toEqual(["check-1", ""]);
 		expect(relay).toHaveBeenCalledTimes(0);
 		unsubscribe();
 		const ordinary = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: "ordinary nested message" });
