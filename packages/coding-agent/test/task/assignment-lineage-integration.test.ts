@@ -18,6 +18,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
+import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -100,9 +101,19 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		);
 		const privateDirect = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: "private", advisoryBinding: { ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId } });
 		expect(privateDirect.outcome).toBe("injected");
+		const secret = "SYNTHETIC_SECRET_12345";
+		child.setObfuscator(new SecretObfuscator([{ type: "plain", content: secret }]));
+		const redacted = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: secret, advisoryBinding: { ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId } });
+		expect(redacted.outcome).toBe("injected");
+		child.setObfuscator(undefined);
+		const unchanged = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: secret, advisoryBinding: { ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId } });
+		expect(unchanged.outcome).toBe("injected");
+		const advisoryBodies = manager.drainPendingIrcInboxMessages("LineageManager").map(message => message.body);
+		expect(advisoryBodies.some(body => body === secret)).toBe(true);
+		expect(advisoryBodies.some(body => body !== secret && !body.includes(secret))).toBe(true);
 		expect(relay).toHaveBeenCalledTimes(0);
 		expect(reply.outcome).toBe("injected");
-		expect(replies).toEqual(["check-1", ""]);
+		expect(replies).toEqual(["check-1", "", "", ""]);
 		expect(relay).toHaveBeenCalledTimes(0);
 		unsubscribe();
 		const ordinary = await IrcBus.global().send({ from: "LineageManager.LineageChild", to: "LineageManager", body: "ordinary nested message" });

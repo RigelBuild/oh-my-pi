@@ -75,7 +75,10 @@ export class IrcBus {
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean; noBuffer?: boolean; validate?: () => boolean }): Promise<IrcDeliveryReceipt> {
-		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		const sender = this.#registry.get(msg.from)?.session;
+		// Tool arguments are deobfuscated only when the sender has known secrets.
+		const body = msg.advisoryBinding ? sender?.obfuscator?.obfuscate(msg.body) ?? msg.body : msg.body;
+		const message: IrcMessage = { ...msg, body, id: Snowflake.next(), ts: Date.now() };
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
 			let sent = this.#lastSent.get(message.from);

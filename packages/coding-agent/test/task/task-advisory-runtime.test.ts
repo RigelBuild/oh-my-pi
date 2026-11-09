@@ -91,5 +91,7 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		vi.advanceTimersByTime(600_000);
 		expect(replies).toEqual(["check"]);
 		expect(send).toHaveBeenCalledTimes(1);
+		for (let index = 0; index < 64; index++) await advisory.remind(ref, `extra-${index}`, "request");
+		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("reject");
 	} finally { dispose(); send.mockRestore(); vi.useRealTimers(); AgentRegistry.resetGlobalForTests(); }
 });

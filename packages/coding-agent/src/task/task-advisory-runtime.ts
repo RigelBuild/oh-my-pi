@@ -42,8 +42,9 @@ class AdvisoryRuntime {
 				if (!from || !to) return { outcome: "unavailable", reason: "stale-instance" };
 				const transport = { ref, branchId: binding.branchId, senderInstanceId: binding.parentInstanceId, recipientInstanceId: binding.instanceId, requestId };
 				const key = `${ref.assignmentId}:${requestId}`;
+				const contentDigest = createHash("sha256").update(content).digest("hex");
 				const previous = this.watches.get(key);
-				if (previous) return previous.content === content && !previous.expired ? { outcome: "duplicate" } : { outcome: "unavailable", reason: "handoff-failed" };
+				if (previous) return previous.content === contentDigest && !previous.expired ? { outcome: "duplicate" } : { outcome: "unavailable", reason: "handoff-failed" };
 				const started = performance.now();
 				const timer = setInterval(() => {
 					if (!this.lineage.isCurrent(ref, binding.instanceId, binding.branchId)) {
@@ -55,7 +56,12 @@ class AdvisoryRuntime {
 					clearInterval(timer);
 					void IrcBus.global().sendBound({ from, to, body: "Please share your progress and next action.", assignmentId: ref.assignmentId, checkId: requestId }, transport).catch(() => {});
 				}, 15_000);
-				const watch = { timer, content, expired: false };
+				const watch = { timer, content: contentDigest, expired: false };
+				const assignmentKeys = [...this.watches.keys()].filter(item => item.startsWith(`${ref.assignmentId}:`));
+				if (assignmentKeys.length >= 64) {
+					const oldest = assignmentKeys[0];
+					if (oldest !== undefined) { clearInterval(this.watches.get(oldest)?.timer); this.watches.delete(oldest); }
+				}
 				this.watches.set(key, watch);
 				let receipt;
 				try {
