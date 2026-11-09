@@ -35,6 +35,7 @@ export class AssignmentLineage {
 	readonly #branches = new Map<string, string>();
 	readonly #instances = new Map<string, string>();
 	readonly #orphaned = new Set<string>();
+	readonly #parked = new Map<string, string>();
 
 	branch(sessionId: string): string {
 		let branch = this.#branches.get(sessionId);
@@ -48,9 +49,19 @@ export class AssignmentLineage {
 	navigate(sessionId: string): void {
 		this.#branches.set(sessionId, crypto.randomUUID());
 	}
+	parkSession(sessionId: string): void {
+		const instanceId = this.#instances.get(sessionId);
+		if (instanceId) this.disposeSession(sessionId, instanceId, "park");
+	}
 
-	disposeSession(sessionId: string, instanceId: string): void {
+	disposeSession(sessionId: string, instanceId: string, reason: "park" | "dispose" = "dispose"): void {
 		if (this.#instances.get(sessionId) !== instanceId) return;
+		if (reason === "park") {
+			this.#parked.set(sessionId, this.branch(sessionId));
+			this.#instances.delete(sessionId);
+			return;
+		}
+		this.#parked.delete(sessionId);
 		this.#instances.delete(sessionId);
 		this.#branches.delete(sessionId);
 		this.#assignments.delete(sessionId);
@@ -71,6 +82,17 @@ export class AssignmentLineage {
 
 	attach(sessionId: string, instanceId: string): void {
 		this.#instances.set(sessionId, instanceId);
+		const parkedBranch = this.#parked.get(sessionId);
+		if (parkedBranch !== undefined) {
+			this.#parked.delete(sessionId);
+			for (const [childId, child] of this.#assignments) {
+				if (child.ref.parentSessionId !== sessionId) continue;
+				if (this.branch(sessionId) === parkedBranch && child.branchId === parkedBranch) child.parentInstanceId = instanceId;
+				else { this.#assignments.delete(childId); this.#orphaned.add(childId); }
+			}
+			const own = this.#assignments.get(sessionId);
+			if (own) this.mint(sessionId, own.ref.parentSessionId, this.branch(own.ref.parentSessionId), own.messaging);
+		}
 		const assignment = this.#assignments.get(sessionId);
 		if (assignment) {
 			assignment.instanceId = instanceId;

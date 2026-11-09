@@ -44,6 +44,21 @@ describe("assignment lineage", () => {
 		expect(lineage.getAssignment("child")).toBeUndefined();
 	});
 
+	test("reattaches parked parent only on the same branch", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "old");
+		const ref = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		lineage.disposeSession("parent", "old", "park");
+		expect(lineage.children("parent")).toEqual([]);
+		lineage.attach("parent", "new");
+		expect(lineage.children("parent")[0]).toMatchObject({ ref, parentInstanceId: "new" });
+		lineage.disposeSession("parent", "new", "park");
+		lineage.navigate("parent");
+		lineage.attach("parent", "other");
+		expect(lineage.children("parent")).toEqual([]);
+	});
+
 	test("stale completion cannot terminalize a later assignment", () => {
 		const lineage = new AssignmentLineage();
 		lineage.attach("parent", "parent-instance");

@@ -10625,6 +10625,7 @@ export class AgentSession implements SettingsScope {
 				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
 			}
 		});
+		assignmentLineage.navigate(this.sessionManager.getSessionId());
 
 		const rewoundAt = new Date().toISOString();
 		const details = { report, startedAt: checkpointState.startedAt, rewoundAt };

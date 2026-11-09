@@ -23,6 +23,7 @@
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
+import { assignmentLineage } from "../task/assignment-lineage";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
 	type AgentRef,
@@ -326,6 +327,7 @@ export class AgentLifecycleManager {
 				park.detached = true;
 				this.#registry.detachSession(id, ref);
 				this.#registry.setStatus(id, "parked", ref);
+				assignmentLineage.parkSession(session.sessionManager.getSessionId());
 
 				try {
 					await session.dispose();
