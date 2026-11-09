@@ -1495,7 +1495,17 @@ export class ExtensionRunner {
 			switchSession: sessionPath => this.#switchSessionHandler(sessionPath),
 			reload: () => this.#reloadHandler(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-		});
+		} satisfies Pick<
+			ExtensionCommandContext,
+			| "getContextUsage"
+			| "waitForIdle"
+			| "newSession"
+			| "branch"
+			| "navigateTree"
+			| "switchSession"
+			| "reload"
+			| "compact"
+		>);
 	}
 
 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
