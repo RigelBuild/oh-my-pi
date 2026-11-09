@@ -8,6 +8,7 @@
  * - Interact with the user via UI primitives
  */
 
+import type { TaskAdvisory } from "./task-advisory";
 import {
 	type ExtensionUiComponent,
 	type ExtensionUiComponentFactory,
@@ -621,6 +622,8 @@ export type ExtensionAnnotationsFactory = (
 ) => ExtensionAnnotationsAPI;
 
 export interface ExtensionContext {
+	/** Optional task advisory transport for this session and its immediate children. */
+	taskAdvisory?: TaskAdvisory;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */

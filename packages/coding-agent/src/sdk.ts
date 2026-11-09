@@ -972,6 +972,7 @@ export type { SkillsSettings } from "./extensibility/settings";
 export type { CustomCommand, CustomCommandFactory } from "./extensibility/custom-commands/types";
 export type { CustomTool, CustomToolFactory } from "./extensibility/custom-tools/types";
 export type * from "./extensibility/extensions";
+export { TaskAdvisoryError } from "./extensibility/extensions/task-advisory";
 export type { Skill } from "./extensibility/skills";
 export type { FileSlashCommand } from "./extensibility/slash-commands";
 export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp";
