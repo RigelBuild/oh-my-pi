@@ -17,7 +17,7 @@ class AdvisoryRuntime {
 	lastSnapshot?: AdvisorySnapshot;
 	disposed = false;
 	readonly expiredIds = new Set<string>();
-	readonly watches = new Map<string, { timer: NodeJS.Timeout; content: string; reply?: string; expired: boolean }>();
+	readonly watches = new Map<string, { timer: NodeJS.Timeout; content: string; reply?: string; replyDelivered?: boolean; expired: boolean }>();
 
 	constructor(readonly session: AgentSession, readonly lineage: AssignmentLineage) {
 		this.api = {
@@ -148,7 +148,10 @@ export function receiveTaskAdvisory(session: AgentSession, message: IrcMessage):
 	const runtime = runtimes.get(session);
 	if (!runtime) return;
 	if (binding.requestId && !runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`)?.reply) return;
-	if (binding.requestId) clearInterval(runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`)?.timer);
+	if (binding.requestId) {
+		const watch = runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
+		if (watch) { clearInterval(watch.timer); watch.replyDelivered = true; }
+	}
 	for (const listener of runtime.listeners) listener({ type: "reply", ref: binding.ref, requestId: binding.requestId ?? "", senderInstanceId: binding.senderInstanceId, recipientInstanceId: binding.recipientInstanceId });
 }
 
@@ -158,7 +161,7 @@ export function admitTaskAdvisory(session: AgentSession, message: Omit<IrcMessag
 	const watch = runtimes.get(session)?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
 	if (!watch || watch.expired) return "reject";
 	const digest = createHash("sha256").update(message.body).digest("hex");
-	if (watch.reply !== undefined) return watch.reply === digest ? "duplicate" : "reject";
+	if (watch.reply !== undefined) return watch.replyDelivered && watch.reply === digest ? "duplicate" : "reject";
 	watch.reply = digest;
 	return "accept";
 }
@@ -167,7 +170,7 @@ export function rollbackTaskAdvisory(session: AgentSession, message: IrcMessage)
 	const binding = message.advisoryBinding;
 	if (!binding?.requestId || binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
 	const watch = runtimes.get(session)?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
-	if (watch) watch.reply = undefined;
+	if (watch) { watch.reply = undefined; watch.replyDelivered = false; }
 }
 
 export function createTaskAdvisoryForSessionId(id: string): TaskAdvisory | undefined {

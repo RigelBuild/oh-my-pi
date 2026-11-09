@@ -88,10 +88,11 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		const pending = advisory.remind(ref, "check", "request");
 		const message = { id: "message", ts: 0, from: "RaceChild", to: "RaceParent", body: "progress", advisoryBinding: { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "check" } };
 		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("accept");
-		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("duplicate");
+		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("reject");
 		expect(admitTaskAdvisory(parent, { ...message, body: "changed" }, message.advisoryBinding)).toBe("reject");
 		expect(admitTaskAdvisory(parent, message, { ...message.advisoryBinding, requestId: "unknown" })).toBe("reject");
 		receiveTaskAdvisory(parent, message);
+		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("duplicate");
 		gate.resolve({ outcome: "injected" });
 		expect((await pending).outcome).toBe("injected");
 		vi.advanceTimersByTime(600_000);
