@@ -15,6 +15,7 @@
 - A stored non-login API key now serves a request when every OAuth credential for the provider is blocked, instead of the selector returning a blocked OAuth account; with no unblocked key, blocked OAuth stays the last resort. The request that blocks the last OAuth account retries on the key at once, and `keys.hasUsable` reports the provider usable.
 - Anthropic "credit balance is too low" is a quota exhaustion: the credential is blocked for 30 minutes and rotated, not invalidated as an auth failure.
 - OpenAI-compatible chat completions with `finish_reason: "length"`, no visible output, and zero reported completion tokens now surface a provider-rejection error instead of a truncation.
+- Auth-gateway video failures are logged against the credential actually sent after rotation, and Codex error responses no longer trip the request watchdog while a log observer runs.
 
 - Auth-broker observed API-key usage now attributes bounded token, cost, outcome, and limit reports to the exact credential row, preserves retry data, and falls back to legacy reports only when new identity fields are rejected as unknown. Rate-limit status separates transient throttles and credit depletion from other quota classes.
 
