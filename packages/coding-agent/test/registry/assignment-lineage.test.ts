@@ -54,4 +54,14 @@ describe("assignment lineage", () => {
 		expect(lineage.getAssignment("child")?.ref).toEqual(second);
 		expect(lineage.getAssignment("child")?.phase).toBe("running");
 	});
+
+	test("rejects a child attached after its parent navigated during spawn", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "parent-instance");
+		const branch = lineage.branch("parent");
+		lineage.navigate("parent");
+		lineage.mint("child", "parent", branch);
+		lineage.attach("child", "child-instance");
+		expect(lineage.getAssignment("child")).toBeUndefined();
+	});
 });

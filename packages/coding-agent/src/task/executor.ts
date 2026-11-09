@@ -414,6 +414,7 @@ export interface ExecutorOptions {
 	index: number;
 	id: string;
 	parentSessionId?: string;
+	parentBranchId?: string;
 	parentToolCallId?: string;
 	/**
 	 * Spawn runs as a detached background job (parent turn not blocked on it).
@@ -4399,7 +4400,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
 			if (options.parentSessionId) {
 				advisorySessionId = sessionManager.getSessionId();
-				advisoryAssignmentId = assignmentLineage.mint(advisorySessionId, options.parentSessionId).assignmentId;
+				advisoryAssignmentId = assignmentLineage.mint(advisorySessionId, options.parentSessionId, options.parentBranchId).assignmentId;
 			}
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);

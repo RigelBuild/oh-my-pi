@@ -36,8 +36,7 @@ export class AssignmentLineage {
 		this.#branches.set(sessionId, crypto.randomUUID());
 	}
 
-	mint(childSessionId: string, parentSessionId: string): AssignmentRef {
-		const branchId = this.branch(parentSessionId);
+	mint(childSessionId: string, parentSessionId: string, branchId = this.branch(parentSessionId)): AssignmentRef {
 		const ref: AssignmentRef = { childSessionId, parentSessionId, parentBranchId: branchId, assignmentId: crypto.randomUUID() };
 		this.#assignments.set(childSessionId, { ref, branchId, childBranchId: this.branch(childSessionId), phase: "running" });
 		return ref;
