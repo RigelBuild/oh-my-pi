@@ -218,6 +218,57 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("fresh report bypasses a valid cache and updates it", async () => {
+		const credential = oauthRow(1, "a@example.com").credential;
+		const oldReport = makeReport("old@example.com");
+		const newReport = makeReport("new@example.com");
+		const fetch = vi
+			.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage")
+			.mockResolvedValueOnce(oldReport)
+			.mockResolvedValueOnce(newReport);
+		expect(await storage.usage.report("anthropic", credential)).toEqual(oldReport);
+		expect(await storage.usage.report("anthropic", credential)).toEqual(oldReport);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(await storage.usage.report("anthropic", credential, { fresh: true })).toEqual(newReport);
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(await storage.usage.report("anthropic", credential)).toEqual(newReport);
+	});
+
+	it("fresh report bypasses a failure cooldown", async () => {
+		const credential = oauthRow(1, "a@example.com").credential;
+		const report = makeReport("a@example.com");
+		const fetch = vi
+			.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage")
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(report);
+		expect(await storage.usage.report("anthropic", credential)).toBeNull();
+		expect(await storage.usage.report("anthropic", credential, { fresh: true })).toEqual(report);
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it("fresh failure returns null and does not create a cooldown", async () => {
+		const credential = oauthRow(1, "a@example.com").credential;
+		const report = makeReport("a@example.com");
+		const fetch = vi
+			.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage")
+			.mockResolvedValueOnce(report)
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(report);
+		expect(await storage.usage.report("anthropic", credential)).toEqual(report);
+		expect(await storage.usage.report("anthropic", credential, { fresh: true })).toBeNull();
+		expireCachePayloads(store);
+		expect(await storage.usage.report("anthropic", credential)).toEqual(report);
+		expect(fetch).toHaveBeenCalledTimes(3);
+	});
+
+	it("fresh report fails closed for a remote store", async () => {
+		const credential = oauthRow(1, "a@example.com").credential;
+		const getUsageReport = vi.fn(async () => makeReport("a@example.com"));
+		store.getUsageReport = getUsageReport;
+		expect(await storage.usage.report("anthropic", credential, { fresh: true })).toBeNull();
+		expect(getUsageReport).not.toHaveBeenCalled();
+	});
+
 	it("caches a successful report and replays it on a second poll", async () => {
 		let calls = 0;
 		const goldReport = makeReport("a@example.com");

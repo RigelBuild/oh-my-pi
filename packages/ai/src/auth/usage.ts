@@ -328,7 +328,7 @@ export class UsageService implements UsageApi {
 	/** Cache a credential report with jitter and failure cooldown. */
 	async #fetchUsageCached(
 		request: UsageRequestDescriptor,
-		options: { timeoutMs?: number } = {},
+		options: { timeoutMs?: number; fresh?: boolean } = {},
 	): Promise<UsageReport | null> {
 		const timeoutMs = options.timeoutMs;
 		const cacheKey = this.#deps.cache.reportKey(request);
@@ -336,12 +336,12 @@ export class UsageService implements UsageApi {
 		const now = Date.now();
 		const cached = this.#deps.cache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
-		if (cached && cached.expiresAt > now) {
+		if (!options.fresh && cached && cached.expiresAt > now) {
 			return cached.value;
 		}
 
 		const failure = this.#deps.cache.get<null>(failureKey);
-		if (failure && failure.expiresAt > now) {
+		if (!options.fresh && failure && failure.expiresAt > now) {
 			return this.#deps.cache.lastGood(cacheKey);
 		}
 
@@ -349,7 +349,7 @@ export class UsageService implements UsageApi {
 		// only a refresh that postdates its start (user refresh, confirmed reset)
 		// earns one successor probe.
 		const inFlight = this.#usageRequestInFlight.get(cacheKey);
-		if (inFlight) {
+		if (!options.fresh && inFlight) {
 			const report = await inFlight.promise;
 			return inFlight.refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
 				? report
@@ -380,6 +380,7 @@ export class UsageService implements UsageApi {
 				this.#recordUsageHistory(request, report);
 				return report;
 			}
+			if (options.fresh) return null;
 			// Failure: apply a short jittered cool-down so the credential doesn't
 			// re-hit the endpoint on every poll. Most providers serve the last good
 			// value through transient failures. Session-cookie providers can opt out
@@ -400,12 +401,12 @@ export class UsageService implements UsageApi {
 			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
 		})().finally(() => {
-			this.#usageRequestInFlight.delete(cacheKey);
+			if (!options.fresh) this.#usageRequestInFlight.delete(cacheKey);
 		});
 
-		this.#usageRequestInFlight.set(cacheKey, { refreshEpoch, promise });
+		if (!options.fresh) this.#usageRequestInFlight.set(cacheKey, { refreshEpoch, promise });
 		const report = await promise;
-		return refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
+		return options.fresh || refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
 			? report
 			: this.#fetchUsageCached(request, options);
 	}
@@ -715,7 +716,7 @@ export class UsageService implements UsageApi {
 	async report(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal; fresh?: boolean },
 	): Promise<UsageReport | null> {
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
@@ -726,6 +727,10 @@ export class UsageService implements UsageApi {
 		if (credential.type === "oauth") {
 			const storeHook = this.#deps.store.getUsageReport?.bind(this.#deps.store);
 			if (storeHook) {
+				if (options?.fresh) {
+					logger.debug("Fresh usage reports require the credential host", { provider });
+					return null;
+				}
 				const report = await storeHook(provider, credential, options?.signal);
 				if (report) {
 					this.#deps.blocks.reconcileRequest(oauthUsageRequest(provider, credential, options?.baseUrl), report);
@@ -741,6 +746,7 @@ export class UsageService implements UsageApi {
 		}
 		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
 			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
+			fresh: options?.fresh,
 		});
 	}
 
