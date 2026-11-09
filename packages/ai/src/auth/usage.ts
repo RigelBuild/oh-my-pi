@@ -123,7 +123,10 @@ export class UsageService implements UsageApi {
 	/** Runtime extension providers take precedence over the configured/default resolver. */
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
 	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
-	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
+	#usageRequestInFlight: Map<
+		string,
+		{ refreshEpoch: number; promise: Promise<UsageReport | null>; superseded: boolean }
+	> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	readonly fetch: typeof fetch;
@@ -207,7 +210,11 @@ export class UsageService implements UsageApi {
 	}
 
 	/** Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. */
-	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
+	async #fetchUsageUncached(
+		request: UsageRequestDescriptor,
+		timeoutMs?: number,
+		fresh?: boolean,
+	): Promise<UsageReport | null> {
 		const providerImpl = this.providerFor(request.provider);
 		if (!providerImpl) return null;
 
@@ -285,6 +292,7 @@ export class UsageService implements UsageApi {
 			const report = await providerImpl.fetchUsage(params, {
 				fetch: this.fetch,
 				logger: this.logger,
+				fresh,
 				...(previousReport ? { previousReport } : {}),
 			});
 			// Attribute the report to the credential's organization. The orgId and
@@ -358,14 +366,25 @@ export class UsageService implements UsageApi {
 		const usageCacheEpoch = this.#deps.cache.epoch;
 		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
+		const entry = {
+			refreshEpoch,
+			superseded: false,
+			get promise(): Promise<UsageReport | null> {
+				return promise;
+			},
+		};
 		const promise = (async () => {
-			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			const report = await this.#fetchUsageUncached(request, timeoutMs, options.fresh);
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
-			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch;
+			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch || (!options.fresh && entry.superseded);
 			if (report !== null) {
 				if (invalidated) return report;
+				if (options.fresh) {
+					const older = this.#usageRequestInFlight.get(cacheKey);
+					if (older) older.superseded = true;
+				}
 				this.#deps.blocks.reconcileRequest(request, report);
 				const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
 				// Success: stagger per-credential cache expiry so all accounts don't
@@ -395,7 +414,7 @@ export class UsageService implements UsageApi {
 			// cooldown even if a manual refresh or block update raced this probe.
 			// A confirmed reset is the exception: the old failure cannot suppress
 			// the first post-reset probe.
-			if (recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
+			if (!entry.superseded && recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
 				this.#deps.cache.set(failureKey, { value: null, expiresAt: coolDown });
 			}
 			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
@@ -404,7 +423,7 @@ export class UsageService implements UsageApi {
 			if (!options.fresh) this.#usageRequestInFlight.delete(cacheKey);
 		});
 
-		if (!options.fresh) this.#usageRequestInFlight.set(cacheKey, { refreshEpoch, promise });
+		if (!options.fresh) this.#usageRequestInFlight.set(cacheKey, entry);
 		const report = await promise;
 		return options.fresh || refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
 			? report

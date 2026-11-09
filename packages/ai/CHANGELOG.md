@@ -5,7 +5,6 @@
 ### Added
 
 - `AuthStorage.usage.report` accepts `fresh: true` for live reads on the credential host; remote-store requests fail closed.
-
 - `AuthStorage` option `claudeResetBanking` ranks Claude accounts that hold a spare reset clearing the weekly limit ahead of siblings and exempts them from the reserve guard, so they drain first.
 - Auth-gateway `onUsageLimit` hook runs before an account is marked reached; returning `true` resends the request on the same credential.
 - Auth-broker `/metrics` can export bounded lifetime credential counters and observed API-key limits using a live-derived credential roster capped by `maxRoster`.

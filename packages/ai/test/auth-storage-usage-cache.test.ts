@@ -234,6 +234,28 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		expect(await storage.usage.report("anthropic", credential)).toEqual(newReport);
 	});
 
+	it("fresh report supersedes an older in-flight probe", async () => {
+		const credential = oauthRow(1, "a@example.com").credential;
+		const oldReport = makeReport("old@example.com");
+		const newReport = makeReport("new@example.com");
+		let release: (report: UsageReport) => void = () => {
+			throw new Error("probe not started");
+		};
+		const pending = new Promise<UsageReport>(resolve => {
+			release = resolve;
+		});
+		const fetch = vi
+			.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage")
+			.mockImplementationOnce(() => pending)
+			.mockResolvedValueOnce(newReport);
+		const old = storage.usage.report("anthropic", credential);
+		expect(await storage.usage.report("anthropic", credential, { fresh: true })).toEqual(newReport);
+		release(oldReport);
+		expect(await old).toEqual(oldReport);
+		expect(await storage.usage.report("anthropic", credential)).toEqual(newReport);
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
 	it("fresh report bypasses a failure cooldown", async () => {
 		const credential = oauthRow(1, "a@example.com").credential;
 		const report = makeReport("a@example.com");
@@ -512,6 +534,10 @@ describe("AuthStorage usage cache: Claude saved resets", () => {
 			const second = requireAnthropicReport(await storage.usage.reports());
 			expect(second.fetchedAt).toBeGreaterThanOrEqual(first.fetchedAt);
 			expect(second.resetCredits).toMatchObject({ availableCount: 1, nextCreditId: "grant_1" });
+			const fresh = await storage.usage.report("anthropic", oauthRow(1, "a@example.com").credential, {
+				fresh: true,
+			});
+			expect(fresh?.resetCredits).toBeUndefined();
 		} finally {
 			storage.close();
 		}

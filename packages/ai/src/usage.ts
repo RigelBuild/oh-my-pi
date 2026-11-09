@@ -510,6 +510,8 @@ export interface UsageFetchContext {
 	fetch: FetchImpl;
 	logger?: UsageLogger;
 	retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	/** Whether cached fields must be excluded from this provider read. */
+	fresh?: boolean;
 	/**
 	 * Last report cached for this exact credential cache key, when one exists.
 	 * Lets a fetcher keep a field it could not re-read this time (a failed
