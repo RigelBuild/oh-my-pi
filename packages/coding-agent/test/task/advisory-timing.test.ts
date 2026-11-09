@@ -6,6 +6,7 @@ import { AssignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lin
 import {
 	admitTaskAdvisory,
 	createTaskAdvisory,
+	receiveTaskAdvisory,
 	rollbackTaskAdvisory,
 } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 
@@ -132,6 +133,92 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 		clock.mockRestore();
 		send.mockRestore();
 		current.mockRestore();
+		vi.useRealTimers();
+		AgentRegistry.resetGlobalForTests();
+	}
+});
+
+it("a voluntary report stops matching reminder watches and rollback restores them", async () => {
+	vi.useFakeTimers();
+	AgentRegistry.resetGlobalForTests();
+	const lineage = new AssignmentLineage();
+	lineage.attach("parent", "parent-instance");
+	const ref = lineage.mint("child", "parent");
+	lineage.attach("child", "child-instance");
+	let dispose = () => {};
+	const parent = {
+		sessionManager: { getSessionId: () => "parent" },
+		subscribe: () => () => {},
+		addDisposer: (fn: () => void) => {
+			dispose = fn;
+		},
+	} as unknown as AgentSession;
+	const child = { sessionManager: { getSessionId: () => "child" } } as unknown as AgentSession;
+	AgentRegistry.global().register({ id: "TimerParent", displayName: "Parent", kind: "sub", session: parent });
+	AgentRegistry.global().register({ id: "TimerChild", displayName: "Child", kind: "sub", session: child });
+	const send = spyOn(IrcBus.global(), "sendBound").mockResolvedValue({ outcome: "injected" });
+	const clock = spyOn(performance, "now").mockReturnValue(0);
+	try {
+		const advisory = createTaskAdvisory(parent, lineage);
+		const reportBody = JSON.stringify({
+			state: "progressing",
+			progress: "worked",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
+		const bindingFor = (assignmentRef: typeof ref, requestId?: string) => ({
+			ref: assignmentRef,
+			branchId: assignmentRef.parentBranchId,
+			senderInstanceId: "child-instance",
+			recipientInstanceId: "parent-instance",
+			requestId,
+		});
+		const reportFor = (assignmentRef: typeof ref, id: string, requestId?: string) => ({
+			id,
+			ts: 0,
+			from: "TimerChild",
+			to: "TimerParent",
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "worked",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+				...(requestId ? { requestId } : {}),
+			}),
+			advisoryBinding: bindingFor(assignmentRef, requestId),
+		});
+
+		await advisory.remind(ref, "voluntary", "status");
+		await advisory.remind(ref, "bound-after-voluntary", "status");
+		const voluntary = reportFor(ref, "voluntary-report");
+		expect(admitTaskAdvisory(parent, voluntary, voluntary.advisoryBinding)).toBe("accept");
+		const laterBoundReply = reportFor(ref, "later-bound-reply", "bound-after-voluntary");
+		expect(admitTaskAdvisory(parent, laterBoundReply, laterBoundReply.advisoryBinding)).toBe("accept");
+		receiveTaskAdvisory(parent, laterBoundReply);
+		receiveTaskAdvisory(parent, voluntary);
+		clock.mockReturnValue(300_000);
+		vi.advanceTimersByTime(300_000);
+		expect(send).toHaveBeenCalledTimes(2);
+
+		lineage.terminal("child", ref.assignmentId);
+		const rollbackRef = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		clock.mockReturnValue(0);
+		await advisory.remind(rollbackRef, "rollback", "status");
+		const failedDelivery = reportFor(rollbackRef, "failed-voluntary-report");
+		expect(admitTaskAdvisory(parent, failedDelivery, failedDelivery.advisoryBinding)).toBe("accept");
+		clock.mockReturnValue(290_000);
+		rollbackTaskAdvisory(parent, failedDelivery);
+		expect(vi.getTimerCount()).toBe(1);
+		clock.mockReturnValue(300_000);
+		vi.advanceTimersByTime(10_000);
+		expect(send).toHaveBeenCalledTimes(4);
+	} finally {
+		dispose();
+		clock.mockRestore();
+		send.mockRestore();
 		vi.useRealTimers();
 		AgentRegistry.resetGlobalForTests();
 	}

@@ -25,6 +25,7 @@ class AdvisoryRuntime {
 	readonly issuedIds = new Map<string, string>();
 	readonly parkedSnapshots = new Map<string, AdvisorySnapshot>();
 	readonly replyStates = new WeakMap<object, AdvisoryState>();
+	readonly voluntaryWatchKeys = new WeakMap<object, string[]>();
 	readonly watches = new Map<
 		string,
 		{
@@ -303,6 +304,7 @@ export function receiveTaskAdvisory(session: AgentSession, message: IrcMessage):
 	const state = runtime.replyStates.get(message);
 	if (!state || (binding.requestId && !runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`)?.reply))
 		return;
+	runtime.voluntaryWatchKeys.delete(message);
 	runtime.replyStates.delete(message);
 	if (binding.requestId) {
 		const watch = runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
@@ -334,6 +336,14 @@ export function admitTaskAdvisory(
 	if (!runtime) return "reject";
 	if (!binding.requestId) {
 		runtime.replyStates.set(message, report.state);
+		const prefix = `${binding.ref.assignmentId}:`;
+		const suspendedKeys: string[] = [];
+		for (const [key, watch] of runtime.watches) {
+			if (!key.startsWith(prefix) || watch.expired || watch.reply !== undefined) continue;
+			clearInterval(watch.timer);
+			suspendedKeys.push(key);
+		}
+		runtime.voluntaryWatchKeys.set(message, suspendedKeys);
 		return "accept";
 	}
 	const watch = runtime.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
@@ -350,7 +360,17 @@ export function rollbackTaskAdvisory(session: AgentSession, message: IrcMessage)
 	const binding = message.advisoryBinding;
 	const runtime = runtimes.get(session);
 	runtime?.replyStates.delete(message);
-	if (!binding?.requestId || binding.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
+	if (binding?.ref.parentSessionId !== session.sessionManager.getSessionId()) return;
+	if (!binding.requestId) {
+		const suspendedKeys = runtime?.voluntaryWatchKeys.get(message) ?? [];
+		runtime?.voluntaryWatchKeys.delete(message);
+		for (const key of suspendedKeys) {
+			const watch = runtime?.watches.get(key);
+			if (watch && !watch.expired && !watch.followUpSent && watch.reply === undefined) watch.rearm();
+		}
+		return;
+	}
+	if (!runtime) return;
 	const watch = runtime?.watches.get(`${binding.ref.assignmentId}:${binding.requestId}`);
 	if (watch) {
 		watch.reply = undefined;
