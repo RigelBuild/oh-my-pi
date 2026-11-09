@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `ChildProcess.exitReason` is set as soon as `kill(reason)` runs, before the process exits.
+- Abort signals cancel output reads started after the root exits when a descendant keeps a pipe open.
+
 ### Added
 
 - Added `postmortem.setCleanupDeadline()` so a long-lived server can let a signal-driven cleanup step (such as an HTTP drain) run past the default 10 s deadline.

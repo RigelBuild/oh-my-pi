@@ -8,6 +8,18 @@ import { AbortError, type ExecResult, exec, spawn } from "@oh-my-pi/pi-utils/ptr
 const BLOCK_FOREVER = `${JSON.stringify(process.execPath)} -e 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)'`;
 
 describe("ptree signal abort handling", () => {
+	it.skipIf(process.platform === "win32")("publishes the kill reason before the process exits", async () => {
+		using child = spawn(["sleep", "30"]);
+		const reason = new AbortError("cancelled", "");
+		try {
+			child.kill(reason, 1_000);
+			expect(child.exitCode).toBeNull();
+			expect(child.exitReason).toBe(reason);
+		} finally {
+			await child.exited.catch(() => {});
+		}
+	});
+
 	it("does not trigger unhandledRejection when spawned with a pre-aborted signal", async () => {
 		const unhandled: unknown[] = [];
 		const onUnhandled = (err: unknown) => {
@@ -17,7 +29,7 @@ describe("ptree signal abort handling", () => {
 
 		try {
 			const signal = AbortSignal.abort(new Error("pre-aborted"));
-			using child = spawn(["bun", "-e", "setInterval(() => {}, 1000)"], { signal });
+			using child = spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { signal });
 			await child.nothrow().text();
 			await child.proc.exited;
 
@@ -41,7 +53,7 @@ describe("ptree signal abort handling", () => {
 
 		try {
 			const signal = AbortSignal.abort(new Error("pre-aborted"));
-			const result = await exec(["bun", "-e", "setInterval(() => {}, 1000)"], {
+			const result = await exec([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
 				signal,
 				allowAbort: true,
 			});
@@ -67,7 +79,7 @@ describe("ptree signal abort handling", () => {
 
 		try {
 			const controller = new AbortController();
-			using child = spawn(["bun", "-e", "setInterval(() => {}, 1000)"], {
+			using child = spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
 				signal: controller.signal,
 			});
 			controller.abort(new Error("aborted mid-run"));
@@ -83,6 +95,35 @@ describe("ptree signal abort handling", () => {
 		} finally {
 			process.off("unhandledRejection", onUnhandled);
 		}
+	});
+
+	it("preserves buffered output when abort occurs after exit", async () => {
+		const controller = new AbortController();
+		using child = spawn([process.execPath, "-e", "console.log('token')"], { signal: controller.signal });
+		await child.exited;
+		await new Promise<void>(resolve => setImmediate(resolve));
+		controller.abort();
+		const result = await child.wait();
+		expect(result.stdout).toBe("token\n");
+		expect(result.exitCode).toBe(0);
+		expect(result.exitError).toBeUndefined();
+	});
+
+	it("detaches and re-arms its abort listener around output reads", async () => {
+		const controller = new AbortController();
+		const add = spyOn(controller.signal, "addEventListener");
+		const remove = spyOn(controller.signal, "removeEventListener");
+		using child = spawn([process.execPath, "-e", "console.log('token')"], { signal: controller.signal });
+		await child.exited;
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(add).toHaveBeenCalledTimes(1);
+		expect(remove).toHaveBeenCalledTimes(1);
+		const result = child.wait();
+		expect(add).toHaveBeenCalledTimes(2);
+		expect((await result).stdout).toBe("token\n");
+		expect(remove).toHaveBeenCalledTimes(2);
+		add.mockRestore();
+		remove.mockRestore();
 	});
 
 	it.skipIf(process.platform === "win32").each([false, true])(
@@ -109,7 +150,10 @@ describe("ptree signal abort handling", () => {
 				// the signal listener. The read must re-arm cancellation for inherited pipes.
 				// Without a detached group, reader cutoff alone must release wait().
 				outcome = child.wait({ allowAbort: true });
+				const kill = spyOn(child, "kill");
 				controller.abort("abort inherited output");
+				if (!detached) expect(kill).not.toHaveBeenCalled();
+				kill.mockRestore();
 				expect(child.exitReason).toBeInstanceOf(AbortError);
 
 				const result = await outcome;
@@ -152,9 +196,9 @@ describe("ptree signal abort handling", () => {
 				// Cancel while no pipe reader is active, then start wait().
 				controller.abort("abort before wait starts");
 				outcome = child.wait({ allowAbort: true });
-				expect(child.exitReason).toBeInstanceOf(AbortError);
 
 				const result = await outcome;
+				expect(child.exitReason).toBeInstanceOf(AbortError);
 				expect(result.exitError).toBeInstanceOf(AbortError);
 				expect(await orphan.waitForExit(), "the detached descendant must be terminated").toBe(true);
 			} finally {
