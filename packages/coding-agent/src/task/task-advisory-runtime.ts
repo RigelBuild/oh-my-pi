@@ -28,7 +28,7 @@ class AdvisoryRuntime {
 			subscribe: listener => { this.listeners.add(listener); return () => this.listeners.delete(listener); },
 			signal: (signal, count) => {
 				const binding = this.lineage.getAssignment(this.id);
-				if (!binding || !Number.isSafeInteger(count) || count < 0) return;
+				if (!binding || binding.phase !== "running" || !Number.isSafeInteger(count) || count < 0) return;
 				this.publish({ type: "signal", ref: binding.ref, signal, count });
 			},
 			remind: async (ref, requestId, content) => {

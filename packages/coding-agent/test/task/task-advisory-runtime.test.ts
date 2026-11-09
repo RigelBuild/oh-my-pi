@@ -55,6 +55,12 @@ it("starts a fresh baseline after reassignment", () => {
 		clock.mockReturnValue(125);
 		expect(advisory.current()).toMatchObject({ ref: second, wallMs: 25, workTokens: null });
 		expect(second.assignmentId).not.toBe(first.assignmentId);
+		let signals = 0;
+		advisory.subscribe(event => { if (event.type === "signal") signals++; });
+		advisory.signal("tool-repeat", 3);
+		lineage.terminal("child", second.assignmentId);
+		advisory.signal("tool-repeat", 3);
+		expect(signals).toBe(1);
 	} finally { clock.mockRestore(); }
 });
 
