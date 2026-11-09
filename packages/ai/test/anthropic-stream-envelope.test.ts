@@ -1721,7 +1721,13 @@ describe("anthropic stream envelope handling", () => {
 			expect(result.errorMessage).toBe(`Anthropic stream error (${type}): ${message}`);
 			expect(AIError.isStreamEnvelopeErrorText(result.errorMessage ?? "")).toBe(false);
 			expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
-			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
+			if (type === "billing_error") {
+				// Credit exhaustion is a usage limit, so it rotates credentials rather than replaying this request.
+				expect(AIError.isProviderRetryableError(new Error(result.errorMessage ?? ""))).toBe(false);
+				expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+			} else {
+				expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
+			}
 			vi.restoreAllMocks();
 		}
 	});

@@ -272,11 +272,11 @@ describe("--session-id", () => {
 });
 
 describe("restartArgv (/restart relaunch argv)", () => {
-	it("keeps configuration flags, drops positionals, and appends --resume", () => {
+	it("keeps configuration flags, drops positionals, and appends --restore", () => {
 		expect(restartArgv(["--model", "gpt-5", "fix the bug", "@notes.md"], "sid")).toEqual([
 			"--model",
 			"gpt-5",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
 	});
@@ -299,7 +299,7 @@ describe("restartArgv (/restart relaunch argv)", () => {
 				],
 				"sid",
 			),
-		).toEqual(["--resume", "sid"]);
+		).toEqual(["--restore", "sid"]);
 	});
 
 	it("keeps the value of an unknown extension flag instead of dropping it as a positional", () => {
@@ -307,12 +307,12 @@ describe("restartArgv (/restart relaunch argv)", () => {
 			"--myext-flag",
 			"val",
 			"--no-tools",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
 	});
-	it("preserves a pinned id on restart only while that id remains active", () => {
-		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "seat-1")).toEqual([
+	it("keeps a pinned ID only when there is no on-disk restore source", () => {
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], undefined)).toEqual([
 			"--model",
 			"m",
 			"--session-id",
@@ -324,10 +324,16 @@ describe("restartArgv (/restart relaunch argv)", () => {
 			"--session-id",
 			"seat-1",
 		]);
+		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "/s/seat-1.jsonl")).toEqual([
+			"--model",
+			"m",
+			"--restore",
+			"/s/seat-1.jsonl",
+		]);
 		expect(restartArgv(["--session-id", "seat-1", "--model", "m"], "seat-2")).toEqual([
 			"--model",
 			"m",
-			"--resume",
+			"--restore",
 			"seat-2",
 		]);
 	});
@@ -335,15 +341,16 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	it("treats everything after -- as prompt text and drops it", () => {
 		expect(restartArgv(["--print-thoughts", "--", "--model", "opus"], "sid")).toEqual([
 			"--print-thoughts",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
 	});
 
-	it("drops a fresh-session --goal so the resumed relaunch passes goal validation", () => {
+	it("drops a fresh-session --goal so the relaunch passes goal and restore validation", () => {
 		const relaunch = restartArgv(["--goal", "ship the release", "--model", "gpt-5"], "sid");
-		expect(relaunch).toEqual(["--model", "gpt-5", "--resume", "sid"]);
+		expect(relaunch).toEqual(["--model", "gpt-5", "--restore", "sid"]);
 		expect(() => validateGoalLaunch(parseArgs(relaunch), true)).not.toThrow();
+		expect(() => validateRestoreLaunch(parseArgs(relaunch), true)).not.toThrow();
 	});
 
 	it("drops caller-supplied overrides together with their values", () => {
@@ -356,12 +363,12 @@ describe("restartArgv (/restart relaunch argv)", () => {
 		).toEqual(["--no-tools"]);
 	});
 
-	it("omits --resume for a session that never materialized on disk", () => {
+	it("omits --restore for a session that never materialized on disk", () => {
 		expect(restartArgv(["--no-session", "hello"], undefined)).toEqual(["--no-session"]);
 	});
 });
 describe("--restore", () => {
-	it("selects its session as --resume does, and a relaunch only resumes it", () => {
+	it("selects its session as --resume does, and a relaunch restores only the current one", () => {
 		const args = parseArgs(["--restore", "/s/a.jsonl"]);
 		expect(args.resume).toBe("/s/a.jsonl");
 		expect(args.restore).toBe(true);
@@ -370,7 +377,7 @@ describe("--restore", () => {
 		expect(restartArgv(["--restore", "/s/a.jsonl", "--model", "x"], "sid")).toEqual([
 			"--model",
 			"x",
-			"--resume",
+			"--restore",
 			"sid",
 		]);
 	});

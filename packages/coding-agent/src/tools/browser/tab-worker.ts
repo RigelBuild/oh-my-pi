@@ -99,7 +99,7 @@ import {
 	readReactTree,
 } from "./react/tree";
 import { collectVitals, installVitalsObservers, type VitalsOptions, type VitalsResult } from "./react/vitals";
-import { registerSemanticQueryHandlers } from "./query-handlers";
+import { queryByRole, registerSemanticQueryHandlers } from "./query-handlers";
 import {
 	type ElementQueryHelpers,
 	enrichElementQueries,
@@ -116,7 +116,7 @@ import {
 	queryVisible,
 	waitForPageText,
 } from "./queries";
-import { DownloadManager, type BrowserDownload } from "./downloads";
+import { DownloadManager, type BrowserDownload, type DownloadManagerOptions } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
 import { applyIgnoreHttpsErrors } from "./open-options";
 import {
@@ -543,6 +543,15 @@ export function normalizeSelector(selector: string): string {
 		const name = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
 		if (name) return `aria/${name.trim()}`;
 		return `aria/${rest}`;
+	}
+	if (selector.startsWith("role/")) {
+		// The page-side handler refuses a selector it cannot fully read. Running it over no elements surfaces that
+		// before the op, so a wait fails at once instead of at its timeout.
+		try {
+			queryByRole({ querySelectorAll: () => [] } as unknown as Parameters<typeof queryByRole>[0], selector.slice(5));
+		} catch (error) {
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		}
 	}
 	return selector;
 }
@@ -1819,15 +1828,12 @@ export class WorkerCore {
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
-			this.#downloads = new DownloadManager(
-				this.#browser,
-				this.#page,
-				this.#targetId,
-				payload.downloadStagingDirectory
-					? { perTab: true, stagingDirectory: payload.downloadStagingDirectory }
-					: { perTab: false },
-			);
-			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
+			const downloadOptions: DownloadManagerOptions =
+				this.#userDriven || payload.downloadStagingDirectory === undefined
+					? { perTab: false, pageEvents: payload.mode === "attach" && payload.relay === true }
+					: { perTab: true, stagingDirectory: payload.downloadStagingDirectory };
+			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, downloadOptions);
+			await this.#downloads.start(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
 			this.#emulation = new BrowserEmulationController(
 				this.#page,
@@ -1902,9 +1908,10 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Tell the omp browser relay this worker drives the adopted page, so the
-	 * relay adds it to the per-window "omp" tab group. Best-effort: plain CDP
-	 * backends (real Chrome, cmux) reject the relay-private method.
+	 * Tell the omp browser relay this worker drives the adopted page, so the relay adds it to the per-window "omp"
+	 * tab group. The supervisor's connect URL claims it already (`?claim=`); an older relay still serving this
+	 * machine ignores that and learns of the claim only here. Best-effort: plain CDP backends (real Chrome, cmux)
+	 * reject the relay-private method.
 	 */
 	async #claimRelayTarget(page: Page): Promise<void> {
 		let session: CDPSession | undefined;

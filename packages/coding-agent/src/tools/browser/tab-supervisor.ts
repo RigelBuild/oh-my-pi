@@ -1938,7 +1938,8 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
 	return {
 		mode: "attach",
-		browserWSEndpoint,
+		browserWSEndpoint:
+			page.kind === "create" ? browserWSEndpoint : adoptEndpoint(browserWSEndpoint, browser, page.targetId),
 		safeDir,
 		uploadDir,
 		page,
@@ -1952,7 +1953,20 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		activateForScreenshot,
 		downloadStagingDirectory: downloadStagingDirectory(browser),
 		userDriven,
+		relay: browser.kind.kind === "relay",
 	};
+}
+
+/**
+ * `endpoint` of `browser` for a worker adopting `targetId`. Through the omp relay the worker claims the tab as it
+ * connects, before puppeteer sends the tab anything: only in a tab omp drives does the relay's extension empty
+ * another extension's frame (a password manager's inline menu) that makes Chrome refuse the debugger.
+ */
+function adoptEndpoint(endpoint: string, browser: PuppeteerBrowserHandle, targetId: string): string {
+	if (browser.kind.kind !== "relay") return endpoint;
+	const url = new URL(endpoint);
+	url.searchParams.set("claim", targetId);
+	return url.toString();
 }
 
 /** The tab most recently used on `browser`, for a new relay tab to open beside. */
@@ -2069,7 +2083,7 @@ function buildRecyclePayload(tab: WorkerTabSession, recover = true): WorkerInitP
 	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
 	return {
 		mode: "attach",
-		browserWSEndpoint,
+		browserWSEndpoint: adoptEndpoint(browserWSEndpoint, tab.browser, tab.targetId),
 		safeDir: getPuppeteerDir(),
 		uploadDir: tab.uploadDir,
 		page: { kind: tab.ownsPage ? "owned" : "borrowed", targetId: tab.targetId },
@@ -2081,6 +2095,7 @@ function buildRecyclePayload(tab: WorkerTabSession, recover = true): WorkerInitP
 		activateForScreenshot: tab.activateForScreenshot,
 		downloadStagingDirectory: downloadStagingDirectory(tab.browser),
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
+		relay: tab.kindTag === "relay",
 	};
 }
 
@@ -2148,12 +2163,12 @@ async function recycleTimedOutWorkerTab(
 	timeoutMs: number,
 	opts: { recover?: boolean } = {},
 ): Promise<boolean> {
+	const payload = buildRecyclePayload(tab, opts.recover ?? true);
 	// Same deadline carry-over as acquireTabImpl: the inline-fallback retry
 	// must not restart the recycle's init budget.
 	const startedAt = performance.now();
 	const oldWorker = tab.worker;
 	await oldWorker.terminate().catch(() => undefined);
-	const payload = buildRecyclePayload(tab, opts.recover ?? true);
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.
 	const publish = async (replacement: WorkerHandle, info: ReadyInfo): Promise<boolean> => {

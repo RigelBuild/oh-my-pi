@@ -33,7 +33,7 @@ const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 	},
 	{ dir: "natives", identifier: "PiNatives", rootShim: null, rootWildcard: null },
 	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts", rootWildcard: "nested" },
-	{ dir: "utils", identifier: "PiUtils", rootShim: null, rootWildcard: null },
+	{ dir: "utils", identifier: "PiUtils", rootShim: null, rootWildcard: "flat" },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";
@@ -156,8 +156,8 @@ export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR):
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
 			const rootWildcard = pattern.exportPrefix === "" || pattern.exportPrefix === "/";
-			const catalogRootWildcard = pkg.dir === "catalog" && (exportKey === "./*" || exportKey === "./*.js");
-			if (rootWildcard && (!pkg.rootWildcard || (exportKey !== "./*" && !catalogRootWildcard))) continue;
+			const jsAliasRootWildcard = exportKey === "./*.js";
+			if (rootWildcard && (!pkg.rootWildcard || (exportKey !== "./*" && !jsAliasRootWildcard))) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {

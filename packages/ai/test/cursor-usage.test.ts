@@ -680,6 +680,7 @@ describe("cursor usage provider", () => {
 				upsertAuthCredential: async () => [row],
 				async deleteAuthCredentials() {},
 				getCredentialBlock: (_id, _providerKey, blockScope) => blocks.get(blockScope),
+				peekCredentialBlock: (_id, _providerKey, blockScope) => blocks.get(blockScope),
 				upsertCredentialBlock: block => {
 					blocks.set(block.blockScope, block.blockedUntilMs);
 				},

@@ -113,6 +113,8 @@ export type WorkerInitPayload =
 			recover?: boolean;
 			/** Keep a recycled headless page focused without raising an attached window. */
 			emulateFocus?: boolean;
+			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
+			relay?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */

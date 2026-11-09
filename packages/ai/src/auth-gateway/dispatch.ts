@@ -9,7 +9,13 @@
  */
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import { markAfterSiblingWait, type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey } from "../auth-retry";
+import {
+	markAfterSiblingWait,
+	type ApiKeyResolver,
+	createOAuthProvenance,
+	NO_AUTH_SENTINEL,
+	type ResolvedApiKey,
+} from "../auth-retry";
 import { OBSERVED_MODEL_CLASS_PATTERN } from "../auth-broker/types";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -21,6 +27,7 @@ import {
 	observedLimitErrorStatus,
 } from "../error/rate-limit";
 import { emptyUsage } from "../images/shared";
+import { getProviderDefinition } from "../registry";
 import type { Api, AssistantMessage, FetchImpl, Model, StreamOptions, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
@@ -234,7 +241,8 @@ export interface GatewaySetupFailure extends GatewayErrorClassification {
  * and its OAuth identity together (refreshing through the broker when needed).
  * Keep this selection snapshot intact even if another request replaces the
  * stored token before dispatch. Storage failures map through
- * {@link classifyGatewayError}; a provider without any credential is a 401.
+ * {@link classifyGatewayError}; a provider without any credential is a 401
+ * unless its catalog policy allows keyless requests.
  */
 export async function resolveGatewayApiKey(
 	opts: AuthGatewayCredentialOptions,
@@ -258,6 +266,7 @@ export async function resolveGatewayApiKey(
 		return { ...classified, setupReason: "store_error" };
 	}
 	if (apiKey) return apiKey;
+	if (getProviderDefinition(model.provider)?.allowsMissingApiKey) return { apiKey: NO_AUTH_SENTINEL };
 	if (logContext) logGatewayRequestFailure(logContext, 401);
 	return {
 		status: 401,
@@ -389,6 +398,9 @@ export function buildGatewayApiKeyResolver(
 	const provenance = createOAuthProvenance();
 	provenance.record(initialKey);
 	return async ({ lastChance, error, signal, previousKey }) => {
+		if (initialKey.apiKey === NO_AUTH_SENTINEL && initialKey.credentialId === undefined) {
+			return error === undefined ? initialKey : undefined;
+		}
 		const sig = signal ?? requestSignal;
 		// Only the bearer the failed request actually sent names the rejected
 		// token; a caller that cannot report it keeps the previous behaviour.
