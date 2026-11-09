@@ -206,6 +206,7 @@ import {
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { assignmentLineage } from "../task/assignment-lineage";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -12401,6 +12402,7 @@ export class AgentSession implements SettingsScope {
 			} else {
 				this.sessionManager.branch(newLeafId);
 			}
+			assignmentLineage.navigate(this.sessionManager.getSessionId());
 			this.#bash.markSessionTransition(bashTransition);
 			branchTransitioned = true;
 		} finally {

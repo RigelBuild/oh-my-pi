@@ -3,6 +3,7 @@ import type { AssignmentRef } from "../extensibility/extensions/task-advisory";
 export interface AssignmentBinding {
 	ref: AssignmentRef;
 	instanceId: string;
+	parentInstanceId: string;
 	branchId: string;
 	phase: "running" | "terminal";
 }
@@ -10,6 +11,7 @@ export interface AssignmentBinding {
 interface PendingAssignment {
 	ref: AssignmentRef;
 	instanceId?: string;
+	parentInstanceId?: string;
 	branchId: string;
 	childBranchId: string;
 	phase: "running" | "terminal";
@@ -19,6 +21,7 @@ interface PendingAssignment {
 export class AssignmentLineage {
 	readonly #assignments = new Map<string, PendingAssignment>();
 	readonly #branches = new Map<string, string>();
+	readonly #instances = new Map<string, string>();
 
 	branch(sessionId: string): string {
 		let branch = this.#branches.get(sessionId);
@@ -41,8 +44,12 @@ export class AssignmentLineage {
 	}
 
 	attach(sessionId: string, instanceId: string): void {
+		this.#instances.set(sessionId, instanceId);
 		const assignment = this.#assignments.get(sessionId);
-		if (assignment) assignment.instanceId = instanceId;
+		if (assignment) {
+			assignment.instanceId = instanceId;
+			assignment.parentInstanceId = this.#instances.get(assignment.ref.parentSessionId);
+		}
 	}
 
 	terminal(sessionId: string): void {
@@ -60,8 +67,8 @@ export class AssignmentLineage {
 
 	getAssignment(sessionId: string): AssignmentBinding | undefined {
 		const assignment = this.#assignments.get(sessionId);
-		if (!assignment?.instanceId || this.branch(assignment.ref.parentSessionId) !== assignment.branchId || this.branch(sessionId) !== assignment.childBranchId) return undefined;
-		return { ref: assignment.ref, instanceId: assignment.instanceId, branchId: assignment.branchId, phase: assignment.phase };
+		if (!assignment?.instanceId || !assignment.parentInstanceId || this.#instances.get(assignment.ref.parentSessionId) !== assignment.parentInstanceId || this.branch(assignment.ref.parentSessionId) !== assignment.branchId || this.branch(sessionId) !== assignment.childBranchId) return undefined;
+		return { ref: assignment.ref, instanceId: assignment.instanceId, parentInstanceId: assignment.parentInstanceId, branchId: assignment.branchId, phase: assignment.phase };
 	}
 
 	isCurrent(ref: AssignmentRef, instanceId: string, branchId: string): boolean {
@@ -79,3 +86,5 @@ export class AssignmentLineage {
 		return children;
 	}
 }
+
+export const assignmentLineage = new AssignmentLineage();

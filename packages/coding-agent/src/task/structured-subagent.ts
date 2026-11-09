@@ -552,6 +552,7 @@ function buildExecutorOptions(
 		parentToolCallId: request.parentToolCallId,
 		detached: request.detached,
 		id,
+		parentSessionId: request.invocationKind === "task" ? session.getSessionId?.() ?? undefined : undefined,
 		taskDepth: session.taskDepth ?? 0,
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,

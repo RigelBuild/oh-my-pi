@@ -98,6 +98,7 @@ import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { assignmentLineage } from "./assignment-lineage";
 import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
@@ -412,6 +413,7 @@ export interface ExecutorOptions {
 	description?: string;
 	index: number;
 	id: string;
+	parentSessionId?: string;
 	parentToolCallId?: string;
 	/**
 	 * Spawn runs as a detached background job (parent turn not blocked on it).
@@ -3088,6 +3090,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	session.setIrcWakeTurnObserver(records => {
+		assignmentLineage.wake(session.sessionManager.getSessionId());
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
 		// and retry counters so this wake turn's guards see only its own state.
@@ -3212,6 +3215,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				providerError ??
 				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
 			turnMonitor.finish();
+			if (yielded || aborted || turnError !== undefined) assignmentLineage.terminal(session.sessionManager.getSessionId());
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
 				// turn's terminal yield is settled, so terminalize the ref here
@@ -3538,6 +3542,15 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// evaluate against its own state, not stale accumulators.
 	resetYieldTurnState(session.getToolByName("yield"));
 	const ref = AgentRegistry.global().get(id);
+	if (ref?.parentId) {
+		const parent = AgentRegistry.global().get(ref.parentId)?.session;
+		if (parent) {
+			const childSessionId = session.sessionManager.getSessionId();
+			const instanceId = assignmentLineage.getAssignment(childSessionId)?.instanceId;
+			assignmentLineage.mint(childSessionId, parent.sessionManager.getSessionId());
+			if (instanceId) assignmentLineage.attach(childSessionId, instanceId);
+		}
+	}
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
@@ -3616,6 +3629,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
+		if (ref?.parentId && AgentRegistry.global().get(ref.parentId)?.session) assignmentLineage.terminal(session.sessionManager.getSessionId());
 	}
 
 	return finalizeRunResult({
@@ -3883,6 +3897,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
+	let advisorySessionId: string | undefined;
 
 	// Check if already aborted
 	if (signal?.aborted) {
@@ -4379,6 +4394,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
+			if (options.parentSessionId) {
+				advisorySessionId = sessionManager.getSessionId();
+				assignmentLineage.mint(advisorySessionId, options.parentSessionId);
+			}
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
@@ -4753,6 +4772,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	const done = await runSubagent();
 	monitor.finish();
+	if (advisorySessionId) assignmentLineage.terminal(advisorySessionId);
 
 	const result = await finalizeRunResult({
 		monitor,

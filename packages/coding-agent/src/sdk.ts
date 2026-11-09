@@ -175,6 +175,7 @@ import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { assignmentLineage } from "./task/assignment-lineage";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -5393,6 +5394,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		) {
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
+		assignmentLineage.attach(sessionManager.getSessionId(), crypto.randomUUID());
 		hasRegistered = true;
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both

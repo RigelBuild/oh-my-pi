@@ -4,6 +4,7 @@ import { AssignmentLineage } from "../../src/task/assignment-lineage";
 describe("assignment lineage", () => {
 	test("projects only immediate children and invalidates navigation", () => {
 		const lineage = new AssignmentLineage();
+		lineage.attach("main", "main-instance");
 		lineage.mint("manager", "main");
 		lineage.attach("manager", "manager-instance");
 		const ref = lineage.mint("child", "manager");
@@ -21,6 +22,7 @@ describe("assignment lineage", () => {
 
 	test("requires attachment and replaces reassigned and terminal bindings", () => {
 		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "parent-instance");
 		const first = lineage.mint("child", "parent");
 		expect(lineage.getAssignment("child")).toBeUndefined();
 		lineage.attach("child", "instance");
@@ -35,6 +37,10 @@ describe("assignment lineage", () => {
 		expect(wake?.ref.assignmentId).not.toBe(first.assignmentId);
 		const next = lineage.mint("child", "parent");
 		expect(next.assignmentId).not.toBe(wake?.ref.assignmentId);
+		expect(lineage.getAssignment("child")).toBeUndefined();
+		lineage.attach("child", "instance");
+		expect(lineage.getAssignment("child")?.parentInstanceId).toBe("parent-instance");
+		lineage.attach("parent", "replacement-instance");
 		expect(lineage.getAssignment("child")).toBeUndefined();
 	});
 });
