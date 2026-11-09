@@ -10,6 +10,13 @@ import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+const advisoryMessage = Symbol("advisoryMessage");
+type AdvisoryRecord = AgentMessage & { [advisoryMessage]: IrcMessage };
+
+function isAdvisoryRecord(record: AgentMessage): record is AdvisoryRecord {
+	return advisoryMessage in record;
+}
+
 /** Capabilities the IRC bridge borrows from its owning session. */
 export interface IrcBridgeHost {
 	agent: Agent;
@@ -32,7 +39,6 @@ export class IrcBridge {
 	#deferredWakes: AgentMessage[] = [];
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
-	readonly #advisoryRecords = new WeakMap<AgentMessage, IrcMessage>();
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
@@ -40,8 +46,9 @@ export class IrcBridge {
 
 	/** Revalidates live-only metadata without trusting transcript contents. */
 	isCurrent(record: AgentMessage): boolean {
-		const msg = this.#advisoryRecords.get(record);
-		if (!msg?.advisoryBinding) return true;
+		if (!isAdvisoryRecord(record)) return true;
+		const msg = record[advisoryMessage];
+		if (!msg.advisoryBinding) return true;
 		const registry = AgentRegistry.global();
 		const sender = registry.get(msg.from)?.session;
 		const recipient = registry.get(msg.to)?.session;
@@ -51,6 +58,11 @@ export class IrcBridge {
 		if (!reason) return true;
 		logger.debug("Dropping stale advisory message", { reason });
 		return false;
+	}
+
+	/** Bound advisories wait for an existing turn and never cause a wake. */
+	isAdvisory(record: AgentMessage): boolean {
+		return isAdvisoryRecord(record);
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -240,8 +252,8 @@ export class IrcBridge {
 			timestamp: msg.ts,
 		};
 		if (msg.advisoryBinding) {
-			this.#advisoryRecords.set(record, msg);
-			this.queueAside([record]);
+			const boundRecord: AdvisoryRecord = { ...record, [advisoryMessage]: msg };
+			this.queueAside([boundRecord]);
 			return "injected";
 		}
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });

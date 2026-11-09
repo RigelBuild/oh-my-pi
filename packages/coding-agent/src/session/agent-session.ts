@@ -1300,10 +1300,14 @@ export class AgentSession implements SettingsScope {
 		// Parked wake records resume alongside ordinary stranded asides; they were
 		// already decided wake-intended at deferral time.
 		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
+		const advisories = records.filter(record => this.#irc.isAdvisory(record));
+		this.#irc.queueAside(advisories);
+		const wakeRecords = records.filter(record => !this.#irc.isAdvisory(record));
+		if (wakeRecords.length === 0) return;
 		if (this.#planModeState?.enabled) {
 			// Plan mode: fold stranded IRC asides into context without waking an
 			// autonomous turn. Convergence to ask/resolve stays user-driven.
-			this.#foldStrandedIrcAsidesIntoContext(records);
+			this.#foldStrandedIrcAsidesIntoContext(wakeRecords);
 			return;
 		}
 		if (this.#advisors.autoResumeSuppressed) {
@@ -1314,7 +1318,7 @@ export class AgentSession implements SettingsScope {
 			// staying user-driven until the next deliberate prompt.
 			const wake: AgentMessage[] = [];
 			const fold: AgentMessage[] = [];
-			for (const record of records) {
+			for (const record of wakeRecords) {
 				if (record.role === "custom" && record.customType === "irc:incoming") wake.push(record);
 				else fold.push(record);
 			}
@@ -1322,7 +1326,7 @@ export class AgentSession implements SettingsScope {
 			if (wake.length > 0) this.#wakeForIrc(wake);
 			return;
 		}
-		this.#wakeForIrc(records);
+		this.#wakeForIrc(wakeRecords);
 	}
 
 	/** Persist stranded IRC/extension asides into context without starting a turn — shared by the
@@ -1399,6 +1403,8 @@ export class AgentSession implements SettingsScope {
 		// the transition before building the turn from a consistent contract.
 		void this.whenWorkPoolYieldSettled()
 			.then(() => {
+				records = records.filter(record => this.#irc.isCurrent(record));
+				if (records.length === 0) return;
 				// Synchronous ownership check, atomic with the dispatch below:
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can

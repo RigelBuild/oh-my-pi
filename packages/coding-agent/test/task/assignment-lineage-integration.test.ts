@@ -7,6 +7,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -68,11 +69,19 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		expect(binding.ref.parentSessionId).toBe(managerId);
 		expect(assignmentLineage.children(mainId).map(item => item.ref.childSessionId)).toEqual([managerId]);
 		expect(assignmentLineage.children(managerId).map(item => item.ref.childSessionId)).toEqual([binding.ref.childSessionId]);
+		const bus = IrcBus.global();
+		const receipt = await bus.sendBound(
+			{ from: "LineageManager.LineageChild", to: "LineageManager", body: "nested private advisory" },
+			{ ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId },
+		);
+		expect(receipt.outcome).toBe("injected");
 		const entries = manager.sessionManager.getEntries();
 		const first = entries[0]?.id;
 		if (!first) throw new Error("manager has no navigation target");
 		await manager.navigateTree(first);
 		expect(assignmentLineage.isCurrent(binding.ref, binding.instanceId, binding.branchId)).toBe(false);
+		expect(manager.drainPendingIrcInboxMessages("LineageManager")).toEqual([]);
+		expect(JSON.stringify(main.messages)).not.toContain("nested private advisory");
 	} finally {
 		await AgentLifecycleManager.global().dispose();
 		await main?.dispose();
