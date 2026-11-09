@@ -116,6 +116,22 @@ describe("IRC", () => {
 			assignmentLineage.disposeSession(parentId, "parent-instance");
 		});
 
+		it("rejects a parked recipient without revival", async () => {
+			const parent = createRealSession();
+			sessions.push(parent.session);
+			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
+			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: null, status: "parked" });
+			const parentId = parent.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint("parked-child", parentId);
+			assignmentLineage.attach("parked-child", "child-instance");
+			const result = await bus.sendBound({ from: "Parent", to: "Child", body: "private" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "parent-instance", recipientInstanceId: "child-instance" });
+			expect(result).toEqual({ outcome: "unavailable", reason: "stale-instance" });
+			expect(bus.take("Child")).toBeUndefined();
+			assignmentLineage.disposeSession("parked-child", "child-instance");
+			assignmentLineage.disposeSession(parentId, "parent-instance");
+		});
+
 		it("send delivers to a live recipient and reports the session outcome", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });

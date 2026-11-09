@@ -90,13 +90,14 @@ export class IrcBus {
 	async sendBound(msg: Omit<IrcMessage, "id" | "ts">, binding: AdvisoryTransportBinding): Promise<AdvisoryReceipt> {
 		const validate = () => {
 			const sender = this.#registry.get(msg.from)?.session;
-			const recipient = this.#registry.get(msg.to)?.session;
-			if (!sender || !recipient) return "stale-instance" as const;
+			const recipientRef = this.#registry.get(msg.to);
+			const recipient = recipientRef?.session;
+			if (!sender || !recipient || recipientRef.status === "parked" || recipientRef.status === "aborted") return "stale-instance" as const;
 			return assignmentLineage.validateBinding(binding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId());
 		};
 		const initial = validate();
 		if (initial) return { outcome: "unavailable", reason: initial };
-		const receipt = await this.send(msg, { suppressRelay: true, noBuffer: true, validate: () => validate() === undefined });
+		const receipt = await this.send({ ...msg, advisoryBinding: binding }, { suppressRelay: true, noBuffer: true, validate: () => validate() === undefined });
 		if (receipt.outcome === "failed") return { outcome: "unavailable", reason: validate() ?? "handoff-failed" };
 		return { outcome: receipt.outcome };
 	}

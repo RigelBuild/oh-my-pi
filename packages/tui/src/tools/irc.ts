@@ -21,6 +21,13 @@ export interface IrcMessage {
 	 * ping-pong forever.
 	 */
 	wakeRelay?: boolean;
+	/** Internal live-only advisory identity, never model-authored. */
+	advisoryBinding?: {
+		ref: { childSessionId: string; assignmentId: string; parentSessionId: string; parentBranchId: string };
+		senderInstanceId: string;
+		recipientInstanceId: string;
+		branchId: string;
+	};
 }
 
 /** Delivery outcome for one peer recipient. */
