@@ -70,7 +70,7 @@ export class IrcBus {
 	 * agent directly: the main agent then already sees the body as its own
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
-	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean; noBuffer?: boolean }): Promise<IrcDeliveryReceipt> {
+	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean; noBuffer?: boolean; validate?: () => boolean }): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
@@ -94,7 +94,7 @@ export class IrcBus {
 		return ts !== undefined && ts >= sinceTs;
 	}
 
-	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean; noBuffer?: boolean }): Promise<IrcDeliveryReceipt> {
+	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean; noBuffer?: boolean; validate?: () => boolean }): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
@@ -151,6 +151,12 @@ export class IrcBus {
 				};
 			}
 		}
+		// A revival can replace the session or invalidate the sender while awaited.
+		// Bound messages must be revalidated before either waiter or session delivery.
+		if (opts?.validate && !opts.validate()) {
+			return { to: message.to, outcome: "failed", error: "Message binding is no longer valid." };
+		}
+
 
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or

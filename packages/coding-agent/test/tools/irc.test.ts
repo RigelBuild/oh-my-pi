@@ -159,6 +159,18 @@ describe("IRC", () => {
 			expect(bus.take("0-Sub")).toBeUndefined();
 		});
 
+		it("rejects a stale bound handoff before waiter or session delivery", async () => {
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			const receipt = await bus.send(
+				{ from: "Main", to: "0-Sub", body: "notice" },
+				{ suppressRelay: true, noBuffer: true, validate: () => false },
+			);
+			expect(receipt.outcome).toBe("failed");
+			expect(sub.delivered).toHaveLength(0);
+			expect(bus.take("0-Sub")).toBeUndefined();
+		});
+
 		it("send revives a parked recipient through the lifecycle manager", async () => {
 			const sub = makeFakeSession();
 			sub.setOutcome("woken");
