@@ -59,6 +59,18 @@ export class AssignmentLineage {
 		if (instanceId) this.disposeSession(sessionId, instanceId, "park");
 	}
 
+	expireParked(sessionId: string): void {
+		if (!this.#parked.delete(sessionId)) return;
+		this.#branches.delete(sessionId);
+		this.#assignments.delete(sessionId);
+		for (const [childId, assignment] of this.#assignments) {
+			if (assignment.ref.parentSessionId !== sessionId) continue;
+			for (const listener of this.#terminalListeners) listener(assignment.ref.assignmentId);
+			this.#assignments.delete(childId);
+			this.#orphaned.add(childId);
+		}
+	}
+
 	disposeSession(sessionId: string, instanceId: string, reason: "park" | "dispose" = "dispose"): void {
 		if (this.#instances.get(sessionId) !== instanceId) return;
 		if (reason === "park") {

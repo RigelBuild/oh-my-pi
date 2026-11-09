@@ -59,6 +59,18 @@ describe("assignment lineage", () => {
 		expect(lineage.children("parent")).toEqual([]);
 	});
 
+	test("expiry orphans parked children", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "old");
+		const ref = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		lineage.disposeSession("parent", "old", "park");
+		lineage.expireParked("parent");
+		lineage.attach("parent", "replacement");
+		expect(lineage.children("parent")).toEqual([]);
+		expect(lineage.isCurrent(ref, "child-instance", ref.parentBranchId)).toBe(false);
+	});
+
 	test("stale completion cannot terminalize a later assignment", () => {
 		const lineage = new AssignmentLineage();
 		lineage.attach("parent", "parent-instance");

@@ -70,6 +70,7 @@ interface AdoptedAgent {
 	revive?: AgentReviver;
 	onRelease?: () => Promise<void>;
 	timer?: NodeJS.Timeout;
+	parkedSessionId?: string;
 }
 
 interface ParkInFlight {
@@ -328,7 +329,7 @@ export class AgentLifecycleManager {
 				this.#registry.detachSession(id, ref);
 				this.#registry.setStatus(id, "parked", ref);
 				const sessionId = session.sessionManager?.getSessionId();
-				if (sessionId) assignmentLineage.parkSession(sessionId);
+				if (sessionId) { adopted.parkedSessionId = sessionId; assignmentLineage.parkSession(sessionId); }
 
 				try {
 					await session.dispose();
@@ -475,6 +476,7 @@ export class AgentLifecycleManager {
 			if (!park.detached) park.cancel();
 			await park.promise;
 		}
+		if (adopted?.parkedSessionId) assignmentLineage.expireParked(adopted.parkedSessionId);
 
 		const live = this.#registry.get(id) === ref ? ref.session : null;
 		if (options?.tombstone) {
@@ -581,6 +583,7 @@ export class AgentLifecycleManager {
 			throw new Error(`Agent "${id}" was replaced or became terminal while its persisted session was reviving.`);
 		}
 		adopted.ref = liveRef;
+		adopted.parkedSessionId = undefined;
 		// Emits status_changed → "idle", which re-arms the TTL timer below.
 		if (!this.#registry.setStatus(id, "idle", liveRef)) {
 			await session.dispose();
