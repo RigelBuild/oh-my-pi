@@ -1045,10 +1045,12 @@ interface ConvertArrayMemo {
 
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
+const advisoryScanCache = new WeakMap<AgentMessage[], { generation: number; length: number; tail: AgentMessage | undefined; found: boolean }>();
 
 /** Drop the outer-array shortcut when an owner replaces a live history in place. */
 export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void {
 	convertArrayCache.delete(messages);
+	advisoryScanCache.delete(messages);
 }
 
 registerMessageCacheInvalidator(message => {
@@ -1222,10 +1224,28 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
 function isAdvisoryBearing(message: AgentMessage): boolean {
 	return advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details));
 }
+function hasAdvisory(messages: AgentMessage[]): boolean {
+	const cached = advisoryScanCache.get(messages);
+	const length = messages.length;
+	const tail = messages[length - 1];
+	let start = 0;
+	let found = false;
+	if (cached?.generation === convertGeneration) {
+		if (cached.length === length && cached.tail === tail) return cached.found;
+		if (length > cached.length && cached.length > 0 && messages[cached.length - 1] === cached.tail) {
+			found = cached.found;
+			start = cached.length;
+		}
+	}
+	for (let index = start; !found && index < length; index++) found = isAdvisoryBearing(messages[index]);
+	advisoryScanCache.set(messages, { generation: convertGeneration, length, tail, found });
+	return found;
+}
+
 
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	// Bound records cannot use the identity cache: lineage can change without a message mutation.
-	if (messages.some(isAdvisoryBearing)) {
+	if (hasAdvisory(messages)) {
 		const safe: AgentMessage[] = [];
 		for (const message of messages) {
 			const metadata = advisoryMessage in message ? message[advisoryMessage] : message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details ? message.details[advisoryMessage] : undefined;
