@@ -14,6 +14,7 @@ export interface AdvisoryTransportBinding {
 	senderInstanceId: string;
 	recipientInstanceId: string;
 	branchId: string;
+	requestId?: string;
 }
 
 export type AdvisoryBindingFailure = "stale-assignment" | "stale-parent-branch" | "stale-instance";

@@ -42,13 +42,6 @@ export type TaskAdvisoryEvent =
 	| { type: "signal"; ref: AssignmentRef; signal: LocalSignal; count: number }
 	| { type: "reply"; ref: AssignmentRef; requestId: string; senderInstanceId: string; recipientInstanceId: string };
 
-/** Invalid or conflicting advisory input. The error never includes submitted content. */
-export class TaskAdvisoryError extends Error {
-	constructor(readonly reason: "invalid-input" | "conflict" | "stale-check") {
-		super(`Task advisory: ${reason}`);
-		this.name = "TaskAdvisoryError";
-	}
-}
 
 export interface TaskAdvisory {
 	current(): AdvisorySnapshot | undefined;
@@ -56,6 +49,4 @@ export interface TaskAdvisory {
 	subscribe(listener: (event: TaskAdvisoryEvent) => void): () => void;
 	signal(signal: LocalSignal, count: number): void;
 	remind(ref: AssignmentRef, requestId: string, content: string): Promise<AdvisoryReceipt>;
-	/** Child-only ordinary IRC report. Invalid, conflicting or stale input rejects with TaskAdvisoryError without echoing content. */
-	report(requestId: string | undefined, content: string): Promise<AdvisoryReceipt>;
 }

@@ -343,6 +343,8 @@ export interface WriteContext {
 	 * `proc://` stdin/stop/mode, `xd://` devices) require it and throw when it is absent.
 	 */
 	session?: ToolSession;
+	/** Advisory identity supplied by a peer-message write. */
+	advisory?: { assignmentId?: string; checkId?: string };
 	/** The `write` tool call dispatching this write; device dispatch (`xd://`) forwards it to the wrapped tool. */
 	toolCall?: {
 		id: string;

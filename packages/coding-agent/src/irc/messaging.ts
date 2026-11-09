@@ -8,6 +8,7 @@ import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
 import { escapeHarnessTags } from "../session/harness-tags";
+import { assignmentLineage } from "../task/assignment-lineage";
 
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
@@ -46,7 +47,7 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 /** Send a direct message or broadcast; delivery never waits for a reply. */
 export async function executeSend(
 	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string },
+	params: { to: string; message: string; assignmentId?: string; checkId?: string },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint } = deps;
 	const to = params.to.trim();
@@ -56,6 +57,22 @@ export async function executeSend(
 		return coordinationErrorResult("A non-empty message is required.", { op: "send", from: senderId });
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
+	if (params.assignmentId !== undefined || params.checkId !== undefined) {
+		const sender = registry.get(senderId)?.session;
+		const recipient = registry.get(to)?.session;
+		const childId = sender?.sessionManager.getSessionId();
+		const binding = childId ? assignmentLineage.getAssignment(childId) : undefined;
+		if (!params.assignmentId || !params.checkId || !binding || binding.ref.assignmentId !== params.assignmentId || binding.ref.parentSessionId !== recipient?.sessionManager.getSessionId()) {
+			return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
+		}
+		const receipt = await IrcBus.global().sendBound(
+			{ from: senderId, to, body: message, assignmentId: params.assignmentId, checkId: params.checkId },
+			{ ref: binding.ref, branchId: binding.branchId, senderInstanceId: binding.instanceId, recipientInstanceId: binding.parentInstanceId, requestId: params.checkId },
+		);
+		return receipt.outcome === "unavailable"
+			? coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to })
+			: { content: [{ type: "text", text: `Delivered to ${to}.` }], details: { op: "send", from: senderId, to } };
+	}
 	const isBroadcast = to === "all";
 	// Restore parked recipients only when needed; never delay delivery to a live peer.
 	if (!isBroadcast && sessionFileHint) {

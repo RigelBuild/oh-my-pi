@@ -194,6 +194,8 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 const writeSchema = type({
 	path: "string",
 	"content?": "string",
+	"assignmentId?": "string",
+	"checkId?": "string",
 });
 
 /** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
@@ -760,7 +762,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content: rawContent }: WriteParams,
+		{ path: rawPath, content: rawContent, assignmentId, checkId }: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
@@ -837,6 +839,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						sessionWriteContext(this.session, {
 							signal,
 							toolCall: { id: _toolCallId, onUpdate, context },
+							advisory: { assignmentId, checkId },
 						}),
 					);
 					if (handlerResult) {

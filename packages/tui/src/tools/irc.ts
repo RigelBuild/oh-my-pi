@@ -14,6 +14,9 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Optional advisory check identity. */
+	assignmentId?: string;
+	checkId?: string;
 	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor
 	 * `relayWakeTurnOutput`). Relays are answers, never wake sources: the
@@ -27,6 +30,7 @@ export interface IrcMessage {
 		senderInstanceId: string;
 		recipientInstanceId: string;
 		branchId: string;
+		requestId?: string;
 	};
 }
 

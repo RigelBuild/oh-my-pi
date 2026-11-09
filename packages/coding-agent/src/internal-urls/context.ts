@@ -60,7 +60,7 @@ export function sessionResolveContext(
 /** The single WriteContext builder for a tool session; replaces per-tool literal assembly. */
 export function sessionWriteContext(
 	session: ToolSession,
-	options: { signal?: AbortSignal; toolCall?: WriteContext["toolCall"] } = {},
+	options: { signal?: AbortSignal; toolCall?: WriteContext["toolCall"]; advisory?: WriteContext["advisory"] } = {},
 ): WriteContext {
 	return {
 		cwd: session.cwd,
@@ -68,5 +68,6 @@ export function sessionWriteContext(
 		localProtocolOptions: contextLocalProtocolOptions(session),
 		session,
 		toolCall: options.toolCall,
+		advisory: options.advisory,
 	};
 }
