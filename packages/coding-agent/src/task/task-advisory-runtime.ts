@@ -32,6 +32,7 @@ class AdvisoryRuntime {
 				this.publish({ type: "signal", ref: binding.ref, signal, count });
 			},
 			remind: async (ref, requestId, content) => {
+				if (!requestId || Buffer.byteLength(requestId) > 128 || Buffer.byteLength(ref.assignmentId) > 128 || Buffer.byteLength(ref.childSessionId) > 128 || Buffer.byteLength(ref.parentSessionId) > 128 || Buffer.byteLength(ref.parentBranchId) > 128 || Buffer.byteLength(content) > 4096) return { outcome: "unavailable", reason: "handoff-failed" };
 				const binding = this.lineage.getAssignment(ref.childSessionId);
 				if (!binding || ref.parentSessionId !== this.id || !this.lineage.isCurrent(ref, binding.instanceId, binding.branchId)) return { outcome: "unavailable", reason: "stale-assignment" };
 				if (binding.messaging.status !== "supported") return { outcome: "unavailable", reason: "messaging-disabled" };

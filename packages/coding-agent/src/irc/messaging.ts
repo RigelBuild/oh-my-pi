@@ -58,6 +58,7 @@ export async function executeSend(
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	if (params.assignmentId !== undefined || params.checkId !== undefined) {
+		if (!params.assignmentId || Buffer.byteLength(params.assignmentId) > 128 || (params.checkId !== undefined && (!params.checkId || Buffer.byteLength(params.checkId) > 128)) || Buffer.byteLength(message) > 4096) return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
 		const sender = registry.get(senderId)?.session;
 		const recipient = registry.get(to)?.session;
 		const childId = sender?.sessionManager.getSessionId();

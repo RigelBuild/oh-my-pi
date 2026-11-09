@@ -31,6 +31,8 @@ it("routes a tagged agent write through its live assignment binding", async () =
 			{ from: "Parent.Child", to: "Parent", body: "progress", assignmentId: ref.assignmentId, checkId: "check-1" },
 			{ ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "check-1" },
 		);
+		const oversized = await new WriteTool(toolSession).execute("write-large", { path: "agent://Parent", content: "é".repeat(2049), assignmentId: ref.assignmentId });
+		expect(oversized.isError).toBe(true);
 	} finally {
 		send.mockRestore();
 		assignmentLineage.disposeSession(childId, "child-instance");
