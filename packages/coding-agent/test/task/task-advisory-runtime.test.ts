@@ -1,9 +1,10 @@
 import { expect, it, spyOn, vi } from "bun:test";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
-import { AssignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
+import { AssignmentLineage, assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
 import { admitTaskAdvisory, createTaskAdvisory, receiveTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 
 it("emits snapshots only when their values change", () => {
@@ -104,4 +105,39 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		vi.advanceTimersByTime(600_000);
 		expect(send).toHaveBeenCalledTimes(65);
 	} finally { dispose(); send.mockRestore(); vi.useRealTimers(); AgentRegistry.resetGlobalForTests(); }
+});
+
+it("reattaches a parked parent and expires it on release", async () => {
+	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	const registry = AgentRegistry.global();
+	const lifecycle = AgentLifecycleManager.global();
+	const lineage = assignmentLineage;
+	const parentId = crypto.randomUUID();
+	const childId = crypto.randomUUID();
+	const makeParent = () => ({ sessionManager: { getSessionId: () => parentId, getUsageStatistics: () => ({ cost: 0, subagentCost: 0 }) }, subscribe: () => () => {}, addDisposer: () => {}, dispose: async () => {} }) as unknown as AgentSession;
+	const parent = makeParent();
+	const child = { sessionManager: { getSessionId: () => childId }, deliverIrcMessage: async () => "injected" } as unknown as AgentSession;
+	registry.register({ id: "ParkParent", displayName: "Parent", kind: "sub", session: parent, status: "idle" });
+	registry.register({ id: "ParkChild", displayName: "Child", kind: "sub", parentId: "ParkParent", session: child });
+	lineage.attach(parentId, "old");
+	const ref = lineage.mint(childId, parentId);
+	lineage.attach(childId, "child");
+	lifecycle.adopt("ParkParent", { idleTtlMs: 0, revive: async () => { const revived = makeParent(); lineage.attach(parentId, "new"); return revived; } });
+	try {
+		await lifecycle.park("ParkParent");
+		const revived = await lifecycle.ensureLive("ParkParent");
+		const advisory = createTaskAdvisory(revived, lineage);
+		expect((await advisory.remind(ref, "revived-check", "progress")).outcome).toBe("injected");
+		await lifecycle.park("ParkParent");
+		await lifecycle.release("ParkParent");
+		expect(lineage.children(parentId)).toEqual([]);
+		expect(await advisory.remind(ref, "expired-check", "progress")).toMatchObject({ outcome: "unavailable", reason: "stale-assignment" });
+	} finally {
+		await lifecycle.dispose();
+		lineage.disposeSession(childId, "child");
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	}
 });
