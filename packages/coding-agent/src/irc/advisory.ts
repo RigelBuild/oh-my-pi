@@ -7,14 +7,18 @@ import { assignmentLineage } from "../task/assignment-lineage";
 export const advisoryMessage = Symbol("advisoryMessage");
 const dropped = new WeakSet<IrcMessage>();
 
-export function advisoryIsCurrent(msg: IrcMessage): boolean {
-	if (!msg.advisoryBinding) return true;
+export function advisoryBindingFailure(msg: Pick<IrcMessage, "from" | "to" | "advisoryBinding">) {
+	if (!msg.advisoryBinding) return undefined;
 	const registry = AgentRegistry.global();
 	const sender = registry.get(msg.from)?.session;
 	const recipient = registry.get(msg.to)?.session;
-	const reason = sender && recipient
+	return sender && recipient
 		? assignmentLineage.validateBinding(msg.advisoryBinding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId())
 		: "stale-instance";
+}
+
+export function advisoryIsCurrent(msg: IrcMessage): boolean {
+	const reason = advisoryBindingFailure(msg);
 	if (!reason) return true;
 	if (!dropped.has(msg)) {
 		dropped.add(msg);

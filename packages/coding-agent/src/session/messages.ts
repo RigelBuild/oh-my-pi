@@ -1219,9 +1219,13 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * Owner mutations (prune/shake/strip-images) invalidate the affected message
  * through the shared registry before the next pass.
  */
+function isAdvisoryBearing(message: AgentMessage): boolean {
+	return advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details));
+}
+
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	// Bound records cannot use the identity cache: lineage can change without a message mutation.
-	if (messages.some(message => advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details)))) {
+	if (messages.some(isAdvisoryBearing)) {
 		const safe: AgentMessage[] = [];
 		for (const message of messages) {
 			const metadata = advisoryMessage in message ? message[advisoryMessage] : message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details ? message.details[advisoryMessage] : undefined;

@@ -14,10 +14,10 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AdvisoryReceipt } from "../extensibility/extensions/task-advisory";
-import { assignmentLineage, type AdvisoryTransportBinding } from "../task/assignment-lineage";
+import type { AdvisoryTransportBinding } from "../task/assignment-lineage";
 import type { CustomMessage } from "../session/messages";
 import { admitTaskAdvisory, receiveTaskAdvisory } from "../task/task-advisory-runtime";
-import { advisoryIsCurrent } from "./advisory";
+import { advisoryBindingFailure, advisoryIsCurrent } from "./advisory";
 
 interface IrcWaiter {
 	from?: string;
@@ -94,11 +94,9 @@ export class IrcBus {
 	/** Internal, non-buffered advisory handoff. */
 	async sendBound(msg: Omit<IrcMessage, "id" | "ts">, binding: AdvisoryTransportBinding): Promise<AdvisoryReceipt> {
 		const validate = () => {
-			const sender = this.#registry.get(msg.from)?.session;
 			const recipientRef = this.#registry.get(msg.to);
-			const recipient = recipientRef?.session;
-			if (!sender || !recipient || recipientRef.status === "parked" || recipientRef.status === "aborted") return "stale-instance" as const;
-			return assignmentLineage.validateBinding(binding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId());
+			if (recipientRef?.status === "parked" || recipientRef?.status === "aborted") return "stale-instance" as const;
+			return advisoryBindingFailure({ ...msg, advisoryBinding: binding });
 		};
 		const initial = validate();
 		if (initial) return { outcome: "unavailable", reason: initial };

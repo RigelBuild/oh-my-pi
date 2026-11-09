@@ -1,11 +1,10 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { advisoryIsCurrent, advisoryMessage } from "../irc/advisory";
+import { advisoryBindingFailure, advisoryIsCurrent, advisoryMessage } from "../irc/advisory";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { assignmentLineage } from "../task/assignment-lineage";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
@@ -50,7 +49,7 @@ export class IrcBridge {
 		return advisoryIsCurrent(record[advisoryMessage]);
 	}
 
-	/** Bound advisories wait for an existing turn and never cause a wake. */
+	/** Bound advisories are validated again when drained. */
 	isAdvisory(record: AgentMessage): boolean {
 		return isAdvisoryRecord(record);
 	}
@@ -201,13 +200,7 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
-		if (msg.advisoryBinding) {
-			const registry = AgentRegistry.global();
-			const sender = registry.get(msg.from)?.session;
-			const recipient = registry.get(msg.to)?.session;
-			const reason = sender && recipient ? assignmentLineage.validateBinding(msg.advisoryBinding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId()) : "stale-instance";
-			if (reason) throw new Error("Advisory binding is stale.");
-		}
+		if (msg.advisoryBinding && advisoryBindingFailure(msg)) throw new Error("Advisory binding is stale.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
