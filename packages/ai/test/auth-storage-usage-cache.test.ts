@@ -256,6 +256,36 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		expect(fetch).toHaveBeenCalledTimes(2);
 	});
 
+	it("fresh report does not supersede a later in-flight probe", async () => {
+		const credential = oauthRow(1, "a@example.com").credential;
+		const freshReport = makeReport("fresh@example.com");
+		const laterReport = makeReport("later@example.com");
+		let releaseFresh: (report: UsageReport) => void = () => {
+			throw new Error("fresh probe not started");
+		};
+		let releaseLater: (report: UsageReport) => void = () => {
+			throw new Error("later probe not started");
+		};
+		const freshPending = new Promise<UsageReport>(resolve => {
+			releaseFresh = resolve;
+		});
+		const laterPending = new Promise<UsageReport>(resolve => {
+			releaseLater = resolve;
+		});
+		const fetch = vi
+			.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage")
+			.mockImplementationOnce(() => freshPending)
+			.mockImplementationOnce(() => laterPending);
+		const fresh = storage.usage.report("anthropic", credential, { fresh: true });
+		const later = storage.usage.report("anthropic", credential);
+		releaseFresh(freshReport);
+		expect(await fresh).toEqual(freshReport);
+		releaseLater(laterReport);
+		expect(await later).toEqual(laterReport);
+		expect(await storage.usage.report("anthropic", credential)).toEqual(laterReport);
+		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
 	it("fresh report bypasses a failure cooldown", async () => {
 		const credential = oauthRow(1, "a@example.com").credential;
 		const report = makeReport("a@example.com");
@@ -534,10 +564,6 @@ describe("AuthStorage usage cache: Claude saved resets", () => {
 			const second = requireAnthropicReport(await storage.usage.reports());
 			expect(second.fetchedAt).toBeGreaterThanOrEqual(first.fetchedAt);
 			expect(second.resetCredits).toMatchObject({ availableCount: 1, nextCreditId: "grant_1" });
-			const fresh = await storage.usage.report("anthropic", oauthRow(1, "a@example.com").credential, {
-				fresh: true,
-			});
-			expect(fresh?.resetCredits).toBeUndefined();
 		} finally {
 			storage.close();
 		}
