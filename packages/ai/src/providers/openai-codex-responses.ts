@@ -4816,7 +4816,7 @@ async function openCodexSseEventStream(
 				clearPreResponseTimeout?.();
 				const controller = new AbortController();
 				let timer: NodeJS.Timeout | undefined;
-				let remainingMs = firstEventTimeoutMs;
+				let remainingMs = firstEventTimeoutMs ?? 0;
 				let deadline: number | undefined;
 				clearPreResponseTimeout = () => {
 					clearTimeout(timer);
@@ -4824,7 +4824,7 @@ async function openCodexSseEventStream(
 					deadline = undefined;
 				};
 				resumePreResponseTimeout = () => {
-					if (firstEventTimeoutMs === undefined || firstEventTimeoutMs <= 0 || remainingMs === undefined) return;
+					if (firstEventTimeoutMs === undefined || firstEventTimeoutMs <= 0) return;
 					deadline = performance.now() + remainingMs;
 					timer = setTimeout(
 						() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
