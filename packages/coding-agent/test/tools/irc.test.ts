@@ -9,6 +9,7 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
 
 interface FakeSession {
 	session: AgentSession;
@@ -96,6 +97,25 @@ describe("IRC", () => {
 	});
 
 	describe("IrcBus", () => {
+		it("rejects a stale bound handoff without buffering or relay", async () => {
+			const parent = createRealSession();
+			const child = createRealSession();
+			sessions.push(parent.session, child.session);
+			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
+			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			const parentId = parent.sessionManager.getSessionId();
+			const childId = child.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint(childId, parentId);
+			assignmentLineage.attach(childId, "child-instance");
+			assignmentLineage.navigate(parentId);
+			const result = await bus.sendBound({ from: "Parent", to: "Child", body: "private" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "parent-instance", recipientInstanceId: "child-instance" });
+			expect(result).toEqual({ outcome: "unavailable", reason: "stale-parent-branch" });
+			expect(bus.take("Child")).toBeUndefined();
+			assignmentLineage.disposeSession(childId, "child-instance");
+			assignmentLineage.disposeSession(parentId, "parent-instance");
+		});
+
 		it("send delivers to a live recipient and reports the session outcome", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });

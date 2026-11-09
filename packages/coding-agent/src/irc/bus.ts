@@ -13,6 +13,8 @@ import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { AdvisoryReceipt } from "../extensibility/extensions/task-advisory";
+import { assignmentLineage, type AdvisoryTransportBinding } from "../task/assignment-lineage";
 import type { CustomMessage } from "../session/messages";
 
 interface IrcWaiter {
@@ -82,6 +84,21 @@ export class IrcBus {
 			sent.set(message.to, message.ts);
 		}
 		return receipt;
+	}
+
+	/** Internal, non-buffered advisory handoff. */
+	async sendBound(msg: Omit<IrcMessage, "id" | "ts">, binding: AdvisoryTransportBinding): Promise<AdvisoryReceipt> {
+		const validate = () => {
+			const sender = this.#registry.get(msg.from)?.session;
+			const recipient = this.#registry.get(msg.to)?.session;
+			if (!sender || !recipient) return "stale-instance" as const;
+			return assignmentLineage.validateBinding(binding, sender.sessionManager.getSessionId(), recipient.sessionManager.getSessionId());
+		};
+		const initial = validate();
+		if (initial) return { outcome: "unavailable", reason: initial };
+		const receipt = await this.send(msg, { suppressRelay: true, noBuffer: true, validate: () => validate() === undefined });
+		if (receipt.outcome === "failed") return { outcome: "unavailable", reason: validate() ?? "handoff-failed" };
+		return { outcome: receipt.outcome };
 	}
 
 	/**
