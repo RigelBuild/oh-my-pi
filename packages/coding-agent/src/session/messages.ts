@@ -1221,13 +1221,14 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	// Bound records cannot use the identity cache: lineage can change without a message mutation.
-	if (messages.some(message => advisoryMessage in message || (message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details))) {
+	if (messages.some(message => advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details)))) {
 		const safe: AgentMessage[] = [];
 		for (const message of messages) {
 			const metadata = advisoryMessage in message ? message[advisoryMessage] : message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details ? message.details[advisoryMessage] : undefined;
 			// SAFETY: only the bridge and wait tool attach this private symbol, both with an IrcMessage.
 			const bound = metadata as IrcMessage | undefined;
-			if (bound && !advisoryIsCurrent(bound)) {
+			const marked = (message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && message.details.advisory === true;
+			if ((marked && !bound) || (bound && !advisoryIsCurrent(bound))) {
 				if (message.role === "toolResult") safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
 				continue;
 			}

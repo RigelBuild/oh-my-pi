@@ -9,6 +9,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
 
@@ -198,6 +200,46 @@ describe("IRC", () => {
 			expect(JSON.stringify(convertToLlm(messages))).toContain("wait secret");
 			assignmentLineage.navigate(parentId);
 			expect(JSON.stringify(convertToLlm(messages))).not.toContain("wait secret");
+		});
+
+		it("drops persisted advisory records after session reload", async () => {
+			using dir = TempDir.createSync("@omp-advisory-reload-");
+			const manager = SessionManager.create(dir.path(), dir.path(), new FileSessionStorage());
+			await manager.ensureOnDisk();
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("missing session file");
+			const parent = createRealSession();
+			const child = createRealSession();
+			sessions.push(parent.session, child.session);
+			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
+			registry.register({ id: "Child", displayName: "child", kind: "sub", parentId: "Parent", session: child.session });
+			const parentId = parent.sessionManager.getSessionId();
+			const childId = child.sessionManager.getSessionId();
+			assignmentLineage.attach(parentId, "parent-instance");
+			const ref = assignmentLineage.mint(childId, parentId);
+			assignmentLineage.attach(childId, "child-instance");
+			await bus.sendBound({ from: "Child", to: "Parent", body: "persisted secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
+			const queued = parent.session.drainPendingIrcInboxMessages("Parent")[0];
+			if (!queued) throw new Error("missing advisory");
+			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => false, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
+			await bridge.deliver(queued);
+			bridge.flushPending();
+			const record = parent.session.agent.state.messages.at(-1);
+			if (!record || record.role !== "custom") throw new Error("missing custom advisory record");
+			manager.appendCustomMessageEntry(record.customType, record.content, record.display, record.details, record.attribution ?? "agent");
+			const result = messageResult("Parent", queued);
+			manager.appendMessage({ role: "toolResult", toolCallId: "call", toolName: "wait", content: result.content, details: result.details, isError: false, timestamp: Date.now() });
+			await manager.close();
+			const reopened = await SessionManager.open(file, dir.path(), new FileSessionStorage());
+			const entries = reopened.getEntries();
+			const savedResult = entries.find(entry => entry.type === "message" && entry.message.role === "toolResult");
+			if (!savedResult || savedResult.type !== "message") throw new Error("missing persisted wait result");
+			expect(JSON.stringify(savedResult.message)).toContain("persisted secret");
+			expect(JSON.stringify(convertToLlm([savedResult.message]))).not.toContain("persisted secret");
+			const messages = reopened.buildSessionContext({ keepDanglingToolCalls: true }).messages;
+			expect(JSON.stringify(messages)).toContain("persisted secret");
+			expect(JSON.stringify(convertToLlm(messages))).not.toContain("persisted secret");
+			await reopened.close();
 		});
 
 		it("send delivers to a live recipient and reports the session outcome", async () => {

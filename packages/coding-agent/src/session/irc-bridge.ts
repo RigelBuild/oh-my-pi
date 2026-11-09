@@ -235,6 +235,7 @@ export class IrcBridge {
 				id: msg.id,
 				from: msg.from,
 				message: msg.body,
+				...(msg.advisoryBinding ? { advisory: true } : {}),
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
 				...(fromParent ? { fromParent: true } : {}),

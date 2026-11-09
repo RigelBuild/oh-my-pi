@@ -39,7 +39,7 @@ export function drainPendingInbox(registry: AgentRegistry, senderId: string, fro
 export function messageResult(senderId: string, waited: IrcMessage): AgentToolResult<CoordinationDetails> {
 	return {
 		content: [{ type: "text", text: formatIncoming(waited) }],
-		details: { op: "wait", from: senderId, waited, ...(waited.advisoryBinding ? { [advisoryMessage]: waited } : {}) },
+		details: { op: "wait", from: senderId, waited, ...(waited.advisoryBinding ? { advisory: true, [advisoryMessage]: waited } : {}) },
 	};
 }
 
