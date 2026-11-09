@@ -25,6 +25,12 @@ it("retains a paused snapshot when the child parks", () => {
 		lineage.parkSession("child");
 		AgentRegistry.global().detachSession("SnapshotChild");
 		expect(advisory.children()[0]?.phase).toBe("paused");
+		lineage.attach("child", "new-child-instance");
+		expect(advisory.children()).toEqual([]);
+		emit({ type: "agent_start" });
+		lineage.parkSession("child");
+		lineage.expireParked("child");
+		expect(advisory.children()).toEqual([]);
 	} finally {
 		for (const dispose of disposers) dispose();
 		AgentRegistry.resetGlobalForTests();

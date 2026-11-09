@@ -86,6 +86,7 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		expect((await advisory.remind(ref, "é".repeat(65), "request")).outcome).toBe("unavailable");
 		expect((await advisory.remind(ref, "check", "é".repeat(2049))).outcome).toBe("unavailable");
 		const pending = advisory.remind(ref, "check", "request");
+		expect((await advisory.remind(ref, "check", "changed")).outcome).toBe("unavailable");
 		const message = { id: "message", ts: 0, from: "RaceChild", to: "RaceParent", body: "progress", advisoryBinding: { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "check" } };
 		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("accept");
 		vi.advanceTimersByTime(300_000);
@@ -101,11 +102,11 @@ it("closes a reply watch before reminder delivery resolves", async () => {
 		expect(replies).toEqual(["check"]);
 		expect(send).toHaveBeenCalledTimes(1);
 		for (let index = 0; index < 64; index++) await advisory.remind(ref, `extra-${index}`, "request");
-		expect((await advisory.remind(ref, "check", "request")).outcome).toBe("duplicate");
 		expect(admitTaskAdvisory(parent, message, message.advisoryBinding)).toBe("reject");
+		expect((await advisory.remind(ref, "check", "request")).outcome).toBe("injected");
 		lineage.terminal("race-child", ref.assignmentId);
 		vi.advanceTimersByTime(600_000);
-		expect(send).toHaveBeenCalledTimes(65);
+		expect(send).toHaveBeenCalledTimes(66);
 	} finally { dispose(); send.mockRestore(); vi.useRealTimers(); AgentRegistry.resetGlobalForTests(); }
 });
 

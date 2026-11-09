@@ -38,6 +38,11 @@ export class AssignmentLineage {
 	readonly #parked = new Map<string, string>();
 	readonly #terminalListeners = new Set<(assignmentId: string) => void>();
 	readonly #parkListeners = new Set<(sessionId: string) => void>();
+	readonly #resumeListeners = new Set<(sessionId: string) => void>();
+	onResumeOrRelease(listener: (sessionId: string) => void): () => void {
+		this.#resumeListeners.add(listener);
+		return () => this.#resumeListeners.delete(listener);
+	}
 	onPark(listener: (sessionId: string) => void): () => void {
 		this.#parkListeners.add(listener);
 		return () => this.#parkListeners.delete(listener);
@@ -66,6 +71,7 @@ export class AssignmentLineage {
 
 	expireParked(sessionId: string): void {
 		if (!this.#parked.delete(sessionId)) return;
+		for (const listener of this.#resumeListeners) listener(sessionId);
 		this.#branches.delete(sessionId);
 		this.#assignments.delete(sessionId);
 		for (const [childId, assignment] of this.#assignments) {
@@ -85,6 +91,7 @@ export class AssignmentLineage {
 			return;
 		}
 		this.#parked.delete(sessionId);
+		for (const listener of this.#resumeListeners) listener(sessionId);
 		this.#instances.delete(sessionId);
 		this.#branches.delete(sessionId);
 		this.#assignments.delete(sessionId);
@@ -108,6 +115,7 @@ export class AssignmentLineage {
 		this.#instances.set(sessionId, instanceId);
 		const parkedBranch = this.#parked.get(sessionId);
 		if (parkedBranch !== undefined) {
+			for (const listener of this.#resumeListeners) listener(sessionId);
 			this.#parked.delete(sessionId);
 			for (const [childId, child] of this.#assignments) {
 				if (child.ref.parentSessionId !== sessionId) continue;

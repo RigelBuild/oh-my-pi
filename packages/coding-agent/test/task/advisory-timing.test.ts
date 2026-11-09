@@ -3,7 +3,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AssignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
-import { createTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
+import { admitTaskAdvisory, createTaskAdvisory, rollbackTaskAdvisory } from "@oh-my-pi/pi-coding-agent/task/task-advisory-runtime";
 
 it("checks every 15 seconds and sends one follow-up at 300 seconds", async () => {
 	vi.useFakeTimers();
@@ -21,7 +21,25 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 	const clock = spyOn(performance, "now").mockReturnValue(0);
 	const current = spyOn(lineage, "isCurrent");
 	try {
-		await createTaskAdvisory(parent, lineage).remind(ref, "timing", "status");
+		const advisory = createTaskAdvisory(parent, lineage);
+		send.mockResolvedValueOnce({ outcome: "unavailable", reason: "handoff-failed" });
+		expect((await advisory.remind(ref, "retry", "status")).outcome).toBe("unavailable");
+		expect((await advisory.remind(ref, "retry", "status")).outcome).toBe("injected");
+		const binding = { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance", requestId: "retry" };
+		const message = { id: "reply", ts: 0, from: "TimerChild", to: "TimerParent", body: "progress", advisoryBinding: binding };
+		expect(admitTaskAdvisory(parent, message, binding)).toBe("accept");
+		expect(vi.getTimerCount()).toBe(0);
+		clock.mockReturnValue(290_000);
+		rollbackTaskAdvisory(parent, message);
+		expect(vi.getTimerCount()).toBe(1);
+		clock.mockReturnValue(300_000);
+		vi.advanceTimersByTime(10_000);
+		expect(send).toHaveBeenCalledTimes(3);
+		lineage.terminal("child", ref.assignmentId);
+		const next = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		clock.mockReturnValue(0);
+		await advisory.remind(next, "timing", "status");
 		current.mockClear();
 		vi.advanceTimersByTime(14_999);
 		expect(current).toHaveBeenCalledTimes(0);
@@ -29,12 +47,26 @@ it("checks every 15 seconds and sends one follow-up at 300 seconds", async () =>
 		expect(current).toHaveBeenCalledTimes(1);
 		clock.mockReturnValue(299_999);
 		vi.advanceTimersByTime(284_999);
-		expect(send).toHaveBeenCalledTimes(1);
+		expect(send).toHaveBeenCalledTimes(4);
 		clock.mockReturnValue(300_000);
 		vi.advanceTimersByTime(1);
-		expect(send).toHaveBeenCalledTimes(2);
+		expect(send).toHaveBeenCalledTimes(5);
 		vi.advanceTimersByTime(300_000);
-		expect(send).toHaveBeenCalledTimes(2);
+		expect(send).toHaveBeenCalledTimes(5);
+		const expiry = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		clock.mockReturnValue(0);
+		await advisory.remind(expiry, "expiry", "status");
+		expect(vi.getTimerCount()).toBe(1);
+		lineage.navigate("parent");
+		vi.advanceTimersByTime(15_000);
+		expect(vi.getTimerCount()).toBe(0);
+		const parked = lineage.mint("child", "parent");
+		lineage.attach("child", "child-instance");
+		await advisory.remind(parked, "park", "status");
+		expect(vi.getTimerCount()).toBe(1);
+		lineage.parkSession("parent");
+		expect(vi.getTimerCount()).toBe(0);
 	} finally {
 		dispose();
 		clock.mockRestore();

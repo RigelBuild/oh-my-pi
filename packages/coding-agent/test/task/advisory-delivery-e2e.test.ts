@@ -15,7 +15,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { assignmentLineage } from "@oh-my-pi/pi-coding-agent/task/assignment-lineage";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { attachIrcWakeTurnMonitor, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -144,6 +144,9 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		assignmentLineage.attach(childId, "stranded-child");
 		const binding = assignmentLineage.getAssignment(childId);
 		if (!binding) throw new Error("child binding missing");
+		const observer = vi.spyOn(manager, "setIrcWakeTurnObserver");
+		attachIrcWakeTurnMonitor(manager, { id: "StrandedManager", agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled", spawns: "*" } });
+		expect(observer).toHaveBeenCalledTimes(1);
 		const idleBody = "IDLE_PRIVATE_ADVISORY";
 		const idleSend = vi.spyOn(IrcBus.prototype, "send");
 		const idleRelay = vi.spyOn(main, "emitIrcRelayObservation");
@@ -151,6 +154,7 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		idleSend.mockClear();
 		await manager.waitForIdle();
 		expect(contexts).toHaveLength(1);
+		await manager.waitForIrcReplies();
 		expect(contexts[0]).toContain(idleBody);
 		expect(JSON.stringify(idleSend.mock.calls)).not.toContain(idleBody);
 		expect(JSON.stringify(idleRelay.mock.calls)).not.toContain(idleBody);
