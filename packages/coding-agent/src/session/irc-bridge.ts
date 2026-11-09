@@ -1,7 +1,7 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { advisoryBindingFailure, advisoryIsCurrent, advisoryMessage } from "../irc/advisory";
+import { advisoryIsCurrent, advisoryMessage } from "../irc/advisory";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -200,7 +200,7 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
-		if (msg.advisoryBinding && advisoryBindingFailure(msg)) throw new Error("Advisory binding is stale.");
+		if (msg.advisoryBinding && !advisoryIsCurrent(msg)) throw new Error("Advisory binding is stale.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;

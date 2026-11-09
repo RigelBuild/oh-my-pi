@@ -145,9 +145,9 @@ export class AssignmentLineage {
 		return current !== undefined && current.phase === "running" && current.instanceId === instanceId && current.branchId === branchId && current.ref.assignmentId === ref.assignmentId && current.ref.parentSessionId === ref.parentSessionId && current.ref.parentBranchId === ref.parentBranchId;
 	}
 
-	validateBinding(binding: AdvisoryTransportBinding, senderSessionId: string, recipientSessionId: string): AdvisoryBindingFailure | undefined {
+	validateBinding(binding: AdvisoryTransportBinding, senderSessionId: string, recipientSessionId: string, admitted = false): AdvisoryBindingFailure | undefined {
 		const assignment = this.#assignments.get(binding.ref.childSessionId);
-		if (!assignment || assignment.phase !== "running" || assignment.ref.assignmentId !== binding.ref.assignmentId || assignment.ref.parentSessionId !== binding.ref.parentSessionId || assignment.ref.parentBranchId !== binding.ref.parentBranchId) return "stale-assignment";
+		if (!assignment || (!admitted && assignment.phase !== "running") || assignment.ref.assignmentId !== binding.ref.assignmentId || assignment.ref.parentSessionId !== binding.ref.parentSessionId || assignment.ref.parentBranchId !== binding.ref.parentBranchId) return "stale-assignment";
 		if (assignment.branchId !== binding.branchId || this.branch(binding.ref.parentSessionId) !== binding.branchId || this.branch(binding.ref.childSessionId) !== assignment.childBranchId) return "stale-parent-branch";
 		const child = assignment.instanceId;
 		const parent = assignment.parentInstanceId;

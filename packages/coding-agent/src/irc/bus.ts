@@ -17,7 +17,7 @@ import type { AdvisoryReceipt } from "../extensibility/extensions/task-advisory"
 import type { AdvisoryTransportBinding } from "../task/assignment-lineage";
 import type { CustomMessage } from "../session/messages";
 import { admitTaskAdvisory, receiveTaskAdvisory, rollbackTaskAdvisory } from "../task/task-advisory-runtime";
-import { advisoryBindingFailure, advisoryIsCurrent } from "./advisory";
+import { advisoryBindingFailure, advisoryIsCurrent, markAdvisoryAdmitted } from "./advisory";
 
 interface IrcWaiter {
 	from?: string;
@@ -184,6 +184,7 @@ export class IrcBus {
 			const admission = admitTaskAdvisory(recipient, message, message.advisoryBinding);
 			if (admission === "duplicate") return { to: message.to, outcome: "duplicate" };
 			if (admission === "reject") return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			markAdvisoryAdmitted(message);
 		}
 
 
