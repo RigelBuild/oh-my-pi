@@ -2076,7 +2076,6 @@ function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
 	}
 }
 
-
 /** Init payload that reattaches a fresh worker to `tab`'s existing page. */
 function buildRecyclePayload(tab: WorkerTabSession, recover = true): WorkerInitPayload {
 	const browserWSEndpoint = tab.browser.wsEndpoint;
@@ -2111,7 +2110,8 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 	});
 	worker.onExit(exitCode => {
 		(worker as ExitTrackedWorker)[kWorkerExited] = true;
-		if (tabs.get(tab.name) !== tab || tab.worker !== worker || tab.state !== "alive" || releaseInflight.has(tab)) return;
+		if (tabs.get(tab.name) !== tab || tab.worker !== worker || tab.state !== "alive" || releaseInflight.has(tab))
+			return;
 		const cause = lastError && (/^error: (.+)$/m.exec(lastError.message)?.[1] ?? lastError.message.split("\n", 1)[0]);
 		const exited = `Browser tab worker exited unexpectedly (exit code ${exitCode}${cause ? `, ${cause}` : ""})`;
 		logger.warn("Browser tab worker exited unexpectedly", { name: tab.name, exitCode, error: lastError?.message });

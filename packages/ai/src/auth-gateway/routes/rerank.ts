@@ -52,7 +52,11 @@ export async function handleRerank(
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`rerank\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts, model, sessionId, controller.signal, peer,
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
 		gatewayLogContext(requestId, caller, "rerank", model.provider, model.id),
 	);
 	if (controller.signal.aborted) return aborted();

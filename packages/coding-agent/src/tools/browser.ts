@@ -447,7 +447,6 @@ async function openOnKind(
 		);
 	}
 
-
 	// The requested timeout must cover the *entire* open — browser
 	// acquisition (CDP discovery/connect), queued tab acquisition, worker
 	// creation, and navigation — not only `acquireTab`. Compose one deadline

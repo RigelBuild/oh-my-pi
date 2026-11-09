@@ -332,7 +332,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-// Only absent or null tools select defaults; malformed restrictions must not widen access.
+	// Only absent or null tools select defaults; malformed restrictions must not widen access.
 	const rawTools = frontmatter.tools;
 	let tools = rawTools == null ? undefined : (parseArrayOrCSV(rawTools) ?? []);
 	if (tools?.length === 0 && !(Array.isArray(rawTools) && rawTools.length === 0)) {

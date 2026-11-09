@@ -58,7 +58,11 @@ export async function handleTranscriptions(
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`transcriptions\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts, model, sessionId, controller.signal, peer,
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
 		gatewayLogContext(requestId, caller, "transcriptions", model.provider, model.id),
 	);
 	if (controller.signal.aborted) return aborted();

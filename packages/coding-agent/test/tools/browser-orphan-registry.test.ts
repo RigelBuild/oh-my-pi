@@ -300,5 +300,3 @@ describe("orphan-registry — closeCdpTarget", () => {
 		}
 	});
 });
-
-

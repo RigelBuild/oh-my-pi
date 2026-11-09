@@ -87,7 +87,11 @@ export async function handleSystemOne(
 	const sessionId = deterministicUuid(`systemone\u0000${model.provider}/${model.id}`);
 
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts, model, sessionId, controller.signal, peer,
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
 		gatewayLogContext(requestId, caller, "systemone", model.provider, model.id),
 	);
 	if (controller.signal.aborted) return aborted();

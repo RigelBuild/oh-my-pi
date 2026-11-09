@@ -939,17 +939,17 @@ export class OAuthRefresher {
 			// A token the provider has just rejected is not a usable recent mint.
 			if (recent && recent.credential.access !== rejectedAccess) return Promise.resolve(recent.credential);
 		}
-		return this.#track(this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess)).then(
-			refreshed => {
-				if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(credential, refreshed)) {
-					throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
-						kind: "validation",
-						provider,
-					});
-				}
-				return refreshed;
-			},
-		);
+		return this.#track(
+			this.#refreshSingleFlight(provider, credential, credentialId, signal, reason, rejectedAccess),
+		).then(refreshed => {
+			if (provider === "google-antigravity" && hasOAuthAccountIdentityConflict(credential, refreshed)) {
+				throw new AIError.OAuthError("Refreshed account identity conflicts with stored account identity", {
+					kind: "validation",
+					provider,
+				});
+			}
+			return refreshed;
+		});
 	}
 
 	/** Refresh without recent-mint reuse; still shares the per-credential in-flight request. */

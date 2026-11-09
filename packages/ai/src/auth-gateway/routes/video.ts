@@ -68,7 +68,11 @@ async function resolveVideoJob(
 	}
 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts, model, sessionId, controller.signal, peer,
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
 		gatewayLogContext(requestId, caller, format, model.provider, model.id),
 	);
 	if (controller.signal.aborted) return aborted();
@@ -172,7 +176,11 @@ export async function handleVideoSubmit(
 		if (controller.signal.aborted) return aborted();
 		const tooLarge = error instanceof RequestBodyTooLargeError;
 		const message = error instanceof Error ? error.message : String(error);
-		return codedErrorResponse(tooLarge ? 413 : 400, tooLarge ? "payload_too_large" : "invalid_request_error", message);
+		return codedErrorResponse(
+			tooLarge ? 413 : 400,
+			tooLarge ? "payload_too_large" : "invalid_request_error",
+			message,
+		);
 	}
 	if (controller.signal.aborted) return aborted();
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
@@ -187,7 +195,11 @@ export async function handleVideoSubmit(
 	}
 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts, model, sessionId, controller.signal, peer,
+		bootOpts,
+		model,
+		sessionId,
+		controller.signal,
+		peer,
 		gatewayLogContext(requestId, caller, "video-submit", model.provider, model.id),
 	);
 	if (controller.signal.aborted) return aborted();
@@ -238,7 +250,8 @@ export async function handleVideoSubmit(
 		const classified = classifyGatewayError(error);
 		logGatewayRequestFailure(
 			gatewayLogContext(requestId, caller, "video-submit", model.provider, model.id),
-			classified.status, credentialId,
+			classified.status,
+			credentialId,
 		);
 		return codedErrorResponse(classified.status, classified.type, classified.message);
 	}
@@ -283,7 +296,8 @@ export async function handleVideoPoll(
 		const classified = classifyGatewayError(error);
 		logGatewayRequestFailure(
 			gatewayLogContext(requestId, caller, "video-poll", resolved.model.provider, resolved.model.id),
-			classified.status, resolved.credentialId,
+			classified.status,
+			resolved.credentialId,
 		);
 		return codedErrorResponse(classified.status, classified.type, classified.message);
 	}
@@ -323,7 +337,8 @@ export async function handleVideoContent(
 		const classified = classifyGatewayError(error);
 		logGatewayRequestFailure(
 			gatewayLogContext(requestId, caller, "video-content", resolved.model.provider, resolved.model.id),
-			classified.status, resolved.credentialId,
+			classified.status,
+			resolved.credentialId,
 		);
 		return codedErrorResponse(classified.status, classified.type, classified.message);
 	}

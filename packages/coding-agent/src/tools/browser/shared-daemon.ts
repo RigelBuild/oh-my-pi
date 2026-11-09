@@ -106,7 +106,6 @@ async function sweepDeadStaging(userDataDir: string, wsEndpoint: string): Promis
 	);
 }
 
-
 function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
 }

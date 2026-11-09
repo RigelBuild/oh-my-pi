@@ -405,9 +405,12 @@ export const observed = { role: actionBar([actionButton("Go", "go")]).p.role, li
 		await Bun.write(path.join(catalogRoot, "src", "build.js"), 'export const buildJs = "build-js";');
 		await fs.mkdir(path.join(catalogRoot, "src", "provider-models"), { recursive: true });
 		await Bun.write(path.join(catalogRoot, "src", "models.ts"), 'export const models = "models";');
-		await Bun.write(path.join(catalogRoot, "src", "build.ts"), 'export const build = "build"; export const alias = "build-alias";');
+		await Bun.write(
+			path.join(catalogRoot, "src", "build.ts"),
+			'export const build = "build"; export const alias = "build-alias";',
+		);
 		await Bun.write(path.join(catalogRoot, "src", "build-alias.ts"), 'export const alias = "build-alias";');
-		await Bun.write(path.join(catalogRoot, "src", "provider-models", "nested.ts"), 'export const nested = true;');
+		await Bun.write(path.join(catalogRoot, "src", "provider-models", "nested.ts"), "export const nested = true;");
 		for (const packageName of packageNames) {
 			const packageRoot = path.join(tempDir.path(), "node_modules", "@rigelbuild", `omp-${packageName}`);
 			await fs.mkdir(packageRoot, { recursive: true });

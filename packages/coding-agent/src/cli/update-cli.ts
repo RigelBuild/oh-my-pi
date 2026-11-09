@@ -1579,10 +1579,16 @@ function packageManagerMigrationSteps(
 				);
 				return (await $`bun ${args}`.nothrow()).exitCode;
 			}
-			const args = buildNpmInstallArgs(release.version, nativeTag, release.packages, {
-				force: true,
-				registry: release.registry,
-			}, currentVersion);
+			const args = buildNpmInstallArgs(
+				release.version,
+				nativeTag,
+				release.packages,
+				{
+					force: true,
+					registry: release.registry,
+				},
+				currentVersion,
+			);
 			return (
 				await $`npm ${args}`.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride())).nothrow()
 			).exitCode;
@@ -1684,10 +1690,16 @@ async function updateViaBun(
 	if (release.packages.pkg !== packagesForVersion(currentVersion).pkg) {
 		await migrateRenamedInstall(release, packageManagerMigrationSteps("bun", release, currentVersion));
 	} else {
-		const args = buildBunInstallArgs(release.version, currentNativeTag(), release.packages, {
-			registry: release.registry,
-			supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
-		}, currentVersion);
+		const args = buildBunInstallArgs(
+			release.version,
+			currentNativeTag(),
+			release.packages,
+			{
+				registry: release.registry,
+				supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
+			},
+			currentVersion,
+		);
 		const result = await $`bun ${args}`.nothrow();
 		if (result.exitCode !== 0) {
 			throw new Error(`bun install failed with exit code ${result.exitCode}`);
@@ -1714,9 +1726,15 @@ async function updateViaNpm(
 		await migrateRenamedInstall(release, packageManagerMigrationSteps("npm", release, currentVersion));
 		return undefined;
 	}
-	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
-		registry: release.registry,
-	}, currentVersion);
+	const args = buildNpmInstallArgs(
+		release.version,
+		currentNativeTag(),
+		release.packages,
+		{
+			registry: release.registry,
+		},
+		currentVersion,
+	);
 	const result = await $`npm ${args}`
 		.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()))
 		.nothrow();
@@ -2411,7 +2429,13 @@ async function runManagedUpdate(
 			installing();
 			await updateViaMise(release.version, request.force);
 		} else if (shouldForceBinaryUpdate(release, currentVersion)) {
-			installed = await updateToStandaloneBinary(target.method, release, request.channel, currentVersion, request.onProgress);
+			installed = await updateToStandaloneBinary(
+				target.method,
+				release,
+				request.channel,
+				currentVersion,
+				request.onProgress,
+			);
 		} else {
 			installing();
 			await updateViaManager(

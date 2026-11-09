@@ -396,7 +396,11 @@ async function prepareFormatAttempt(
 
 	// pi-ai's stream() expects its caller to resolve and pass the API key.
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts, model, sessionId, signal, peer,
+		bootOpts,
+		model,
+		sessionId,
+		signal,
+		peer,
 		gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
 	);
 	signal.throwIfAborted();
@@ -465,7 +469,11 @@ async function preparePiNativeAttempt(
 	if (kindRejection) return incompatibleAttempt(kindRejection);
 
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts, model, sessionId, signal, peer,
+		bootOpts,
+		model,
+		sessionId,
+		signal,
+		peer,
 		gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
 	);
 	signal.throwIfAborted();
@@ -1138,7 +1146,8 @@ async function handleFormatEndpoint(
 				stream: parsed.stream,
 				formatError: (status, type, message) => route.module.formatError(status, type, message),
 				encodeResponse: message => route.module.encodeResponse(message, parsed.modelId),
-				encodeStream: (events, control) => route.module.encodeStream(events, parsed.modelId, parsed.options, control),
+				encodeStream: (events, control) =>
+					route.module.encodeStream(events, parsed.modelId, parsed.options, control),
 				prepare: (candidate, signal) =>
 					prepareFormatAttempt(
 						route,
@@ -1181,7 +1190,10 @@ async function handleFormatEndpoint(
 	if (!start.ok) return route.module.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account, resolvedKey: apiKey } = start;
 	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
-		bootOpts, model, client, requestId,
+		bootOpts,
+		model,
+		client,
+		requestId,
 		gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
 	);
 
@@ -1449,7 +1461,10 @@ async function handlePiNative(
 	if (!start.ok) return piNative.formatError(start.failure.status, start.failure.type, start.failure.message);
 	const { streamOpts, lease, account, resolvedKey: apiKey } = start;
 	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
-		bootOpts, model, client, requestId,
+		bootOpts,
+		model,
+		client,
+		requestId,
 		gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
 	);
 

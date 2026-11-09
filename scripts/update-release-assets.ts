@@ -19,9 +19,7 @@ const ASSETS = {
 function run(command: readonly string[]): string {
 	const result = Bun.spawnSync([...command], { stdout: "pipe", stderr: "pipe" });
 	if (result.exitCode !== 0) {
-		throw new Error(
-			`${command[0]} exited ${result.exitCode}: ${new TextDecoder().decode(result.stderr).trim()}`,
-		);
+		throw new Error(`${command[0]} exited ${result.exitCode}: ${new TextDecoder().decode(result.stderr).trim()}`);
 	}
 	return new TextDecoder().decode(result.stdout).trim();
 }
@@ -35,7 +33,18 @@ async function main(): Promise<void> {
 	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-release-assets-"));
 	try {
 		const download = Bun.spawn(
-			["gh", "release", "download", tag, "--repo", "RigelBuild/oh-my-pi", "--pattern", "SHA256SUMS.txt", "--dir", tempDir],
+			[
+				"gh",
+				"release",
+				"download",
+				tag,
+				"--repo",
+				"RigelBuild/oh-my-pi",
+				"--pattern",
+				"SHA256SUMS.txt",
+				"--dir",
+				tempDir,
+			],
 			{ stdout: "inherit", stderr: "inherit" },
 		);
 		const downloadExit = await download.exited;

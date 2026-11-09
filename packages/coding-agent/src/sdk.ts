@@ -5659,7 +5659,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? () => {
 						ownedMcpManager.stopPeriodicToolRefresh();
 						return ownedMcpManager.disconnectAll();
-				}
+					}
 				: undefined,
 			ttsrManager,
 			obfuscator,

@@ -1,7 +1,15 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model, type ServiceTier } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type Context,
+	Effort,
+	type ImageContent,
+	type Model,
+	type ServiceTier,
+} from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";

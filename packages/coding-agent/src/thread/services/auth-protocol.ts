@@ -234,7 +234,11 @@ export type AuthStorageProtocol = {
 
 	"usage.reports": RpcMethod<[options?: WireUsageReportsOptions], UsageReport[] | null>;
 	"usage.report": RpcMethod<
-		[provider: Provider, credential: AuthCredential, options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal }],
+		[
+			provider: Provider,
+			credential: AuthCredential,
+			options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		],
 		UsageReport | null
 	>;
 	"usage.ingestHeaders": RpcMethod<

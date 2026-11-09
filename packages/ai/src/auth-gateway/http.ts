@@ -139,7 +139,10 @@ const TOKEN_ENCODER = new TextEncoder();
 
 /** The bearer token from `Authorization`, or `undefined` when none (or a blank one) is presented. */
 export function presentedBearer(req: Request): string | undefined {
-	const token = req.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1].trim();
+	const token = req.headers
+		.get("authorization")
+		?.match(/^Bearer\s+(.+)$/i)?.[1]
+		.trim();
 	return token || undefined;
 }
 
@@ -236,7 +239,6 @@ export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean
 	}
 	return ok;
 }
-
 
 /**
  * Allow-list of inbound request headers that the gateway captures and forwards

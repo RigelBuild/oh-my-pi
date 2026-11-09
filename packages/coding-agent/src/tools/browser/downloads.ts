@@ -264,7 +264,11 @@ export class DownloadManager {
 	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
 		const directory = this.#directory ?? this.#defaultDirectory;
 		const staging = this.#stagingDirectory;
-		let source = filePath ?? (staging ? path.join(staging, pending.guid) : path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename));
+		let source =
+			filePath ??
+			(staging
+				? path.join(staging, pending.guid)
+				: path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename));
 		if (filePath === undefined && this.#pageEvents) {
 			try {
 				source = await this.#savedPath(pending.guid);
