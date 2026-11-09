@@ -245,8 +245,12 @@ export class IrcBridge {
 		};
 		if (msg.advisoryBinding) {
 			const boundRecord: AdvisoryRecord = { ...record, [advisoryMessage]: msg };
-			this.queueAside([boundRecord]);
-			return "injected";
+			if (streaming || planModeIdle) {
+				this.queueAside([boundRecord]);
+				return "injected";
+			}
+			this.#host.wakeForIrc([boundRecord]);
+			return "woken";
 		}
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {

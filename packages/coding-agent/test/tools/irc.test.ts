@@ -137,6 +137,7 @@ describe("IRC", () => {
 
 		it("drops queued advisory after parent navigation without relaying to Main", async () => {
 			const parent = createRealSession();
+			Object.defineProperty(parent.session, "isStreaming", { configurable: true, get: () => true });
 			const child = createRealSession();
 			const main = makeFakeSession();
 			sessions.push(parent.session, child.session);
@@ -158,6 +159,7 @@ describe("IRC", () => {
 		});
 		it("drops a flushed advisory after navigation at provider conversion", async () => {
 			const parent = createRealSession();
+			Object.defineProperty(parent.session, "isStreaming", { configurable: true, get: () => true });
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
@@ -168,7 +170,7 @@ describe("IRC", () => {
 			const ref = assignmentLineage.mint(childId, parentId);
 			assignmentLineage.attach(childId, "child-instance");
 			await bus.sendBound({ from: "Child", to: "Parent", body: "flush secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
-			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => false, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
+			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => true, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
 			// Move the queued record into a bridge and flush it into agent context.
 			const queued = parent.session.drainPendingIrcInboxMessages("Parent")[0];
 			if (!queued) throw new Error("missing advisory");
@@ -209,6 +211,7 @@ describe("IRC", () => {
 			const file = manager.getSessionFile();
 			if (!file) throw new Error("missing session file");
 			const parent = createRealSession();
+			Object.defineProperty(parent.session, "isStreaming", { configurable: true, get: () => true });
 			const child = createRealSession();
 			sessions.push(parent.session, child.session);
 			registry.register({ id: "Parent", displayName: "parent", kind: "sub", session: parent.session });
@@ -221,7 +224,7 @@ describe("IRC", () => {
 			await bus.sendBound({ from: "Child", to: "Parent", body: "persisted secret" }, { ref, branchId: ref.parentBranchId, senderInstanceId: "child-instance", recipientInstanceId: "parent-instance" });
 			const queued = parent.session.drainPendingIrcInboxMessages("Parent")[0];
 			if (!queued) throw new Error("missing advisory");
-			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => false, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
+			const bridge = new IrcBridge({ agent: parent.session.agent, sessionManager: parent.sessionManager, isDisposed: () => false, isStreaming: () => true, planModeEnabled: () => false, emitSessionEvent: async () => {}, wakeForIrc: () => {} });
 			await bridge.deliver(queued);
 			bridge.flushPending();
 			const record = parent.session.agent.state.messages.at(-1);

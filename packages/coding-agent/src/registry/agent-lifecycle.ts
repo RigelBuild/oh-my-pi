@@ -327,7 +327,8 @@ export class AgentLifecycleManager {
 				park.detached = true;
 				this.#registry.detachSession(id, ref);
 				this.#registry.setStatus(id, "parked", ref);
-				assignmentLineage.parkSession(session.sessionManager.getSessionId());
+				const sessionId = session.sessionManager?.getSessionId();
+				if (sessionId) assignmentLineage.parkSession(sessionId);
 
 				try {
 					await session.dispose();
