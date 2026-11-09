@@ -2,8 +2,8 @@ import type { AdvisorySnapshot, WaitReason } from "../extensibility/extensions/t
 
 export type AdvisoryEvent =
 	| { kind: "ready"; at: number }
-	| { kind: "blocked-start"; at: number; reason: Exclude<WaitReason, "unknown"> }
-	| { kind: "blocked-end"; at: number }
+	| { kind: "blocked-start"; at: number; token: string; reason: Exclude<WaitReason, "unknown"> }
+	| { kind: "blocked-end"; at: number; token: string }
 	| {
 			kind: "assistant-usage";
 			id: string;
@@ -12,12 +12,12 @@ export type AdvisoryEvent =
 
 export type AdvisorySourceSnapshot = Pick<AdvisorySnapshot, "wallMs" | "unblockedMs" | "waitReasons" | "workTokens" | "usagePartial">;
 
-/** Accumulates normalized events in order. Blocked ends close the most recent start. */
+/** Accumulates normalized events in order and excludes the union of blocked intervals. */
 export class AdvisorySnapshotSource {
 	#readyAt: number | undefined;
 	#blockedAt: number | undefined;
 	#blockedMs = 0;
-	#waitReasons: Exclude<WaitReason, "unknown">[] = [];
+	#blocked = new Map<string, Exclude<WaitReason, "unknown">>();
 	#ids = new Set<string>();
 	#workTokens = 0;
 	#usageKnown = false;
@@ -32,13 +32,13 @@ export class AdvisorySnapshotSource {
 		if (this.#readyAt === undefined) return;
 		switch (event.kind) {
 			case "blocked-start":
-				if (this.#waitReasons.length === 0) this.#blockedAt = event.at;
-				this.#waitReasons.push(event.reason);
+				if (this.#blocked.has(event.token)) break;
+				if (this.#blocked.size === 0) this.#blockedAt = event.at;
+				this.#blocked.set(event.token, event.reason);
 				break;
 			case "blocked-end":
-				if (this.#waitReasons.length === 0) break;
-				this.#waitReasons.pop();
-				if (this.#waitReasons.length === 0 && this.#blockedAt !== undefined) {
+				if (!this.#blocked.delete(event.token)) break;
+				if (this.#blocked.size === 0 && this.#blockedAt !== undefined) {
 					this.#blockedMs += event.at - this.#blockedAt;
 					this.#blockedAt = undefined;
 				}
@@ -65,7 +65,7 @@ export class AdvisorySnapshotSource {
 		this.#blockedAt = undefined;
 		this.#blockedMs = 0;
 		this.#usageKnown = false;
-		this.#waitReasons = [];
+		this.#blocked.clear();
 		this.#ids.clear();
 		this.#workTokens = 0;
 		this.#usagePartial = false;
@@ -80,7 +80,7 @@ export class AdvisorySnapshotSource {
 		return {
 			wallMs,
 			unblockedMs: wallMs - blockedMs,
-			waitReasons: [...new Set(this.#waitReasons)],
+			waitReasons: [...new Set(this.#blocked.values())],
 			workTokens: this.#usageDisabled || !this.#usageKnown ? null : this.#workTokens,
 			usagePartial: this.#usagePartial || this.#usageDisabled || !this.#usageKnown,
 		};

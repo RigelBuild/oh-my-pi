@@ -4,15 +4,15 @@ import { AdvisorySnapshotSource, type AdvisoryEvent } from "../../src/task/advis
 describe("advisory snapshot source", () => {
 	test("starts at readiness and excludes overlapping blocked periods", () => {
 		const source = new AdvisorySnapshotSource();
-		source.accept({ kind: "blocked-start", at: 0, reason: "tool" });
+		source.accept({ kind: "blocked-start", at: 0, token: "early", reason: "tool" });
 		source.accept({ kind: "assistant-usage", id: "early", usage: { input: 99 } });
 		expect(source.snapshot(90)).toBeUndefined();
 		source.accept({ kind: "ready", at: 100 });
-		source.accept({ kind: "blocked-start", at: 150, reason: "tool" });
-		source.accept({ kind: "blocked-start", at: 170, reason: "approval" });
-		source.accept({ kind: "blocked-end", at: 200 });
-		expect(source.snapshot(230)).toMatchObject({ wallMs: 130, unblockedMs: 50, waitReasons: ["tool"], workTokens: null });
-		source.accept({ kind: "blocked-end", at: 230 });
+		source.accept({ kind: "blocked-start", at: 150, token: "tool", reason: "tool" });
+		source.accept({ kind: "blocked-start", at: 170, token: "approval", reason: "approval" });
+		source.accept({ kind: "blocked-end", at: 200, token: "tool" });
+		expect(source.snapshot(230)).toMatchObject({ wallMs: 130, unblockedMs: 50, waitReasons: ["approval"], workTokens: null });
+		source.accept({ kind: "blocked-end", at: 230, token: "approval" });
 		expect(source.snapshot(250)).toMatchObject({ wallMs: 150, unblockedMs: 70, waitReasons: [] });
 	});
 
@@ -21,8 +21,8 @@ describe("advisory snapshot source", () => {
 			{ kind: "ready", at: 100 },
 			{ kind: "assistant-usage", id: "one", usage: { input: 10, output: 3, cacheWrite: 2, cacheRead: 999 } },
 			{ kind: "assistant-usage", id: "one", usage: { input: 10, output: 3, cacheWrite: 2, cacheRead: 999 } },
-			{ kind: "blocked-start", at: 120, reason: "wait" },
-			{ kind: "blocked-end", at: 140 },
+			{ kind: "blocked-start", at: 120, token: "wait", reason: "wait" },
+			{ kind: "blocked-end", at: 140, token: "wait" },
 			{ kind: "assistant-usage", id: "two", usage: { input: 2, output: 1, cacheWrite: 0 } },
 		];
 		const live = new AdvisorySnapshotSource();

@@ -1,5 +1,5 @@
 import type { AdvisoryReceipt, AssignmentRef, LocalSignal } from "../extensibility/extensions/task-advisory";
-import type { AdvisorySourceSnapshot } from "./advisory-snapshot-source";
+import type { AdvisorySnapshotSource, AdvisorySourceSnapshot } from "./advisory-snapshot-source";
 
 export type AdvisoryCheckPolicy = {
 	wallMs: number;
@@ -38,7 +38,26 @@ const followUp = "Please share your progress and next action.";
 /** One host tracks immediate children; inputs are already normalized by the snapshot source. */
 export class AdvisoryCheckHost {
 	readonly #children = new Map<string, Child>();
+	readonly #ticks = new Map<string, () => void>();
 	constructor(readonly deps: Dependencies) {}
+
+	/** Call once when the child source becomes ready. */
+	watch(ref: AssignmentRef, source: AdvisorySnapshotSource, state: () => { local: Readonly<Partial<Record<LocalSignal, number>>>; messagingSupported: boolean }): void {
+		this.#ticks.get(ref.childSessionId)?.();
+		const tick = () => {
+			if (!this.deps.isCurrent(ref.assignmentId)) {
+				this.#ticks.delete(ref.childSessionId);
+				return;
+			}
+			const snapshot = source.snapshot(this.deps.now());
+			if (snapshot) {
+				const current = state();
+				this.observe(ref, snapshot, current.local, current.messagingSupported);
+			}
+			this.#ticks.set(ref.childSessionId, this.deps.schedule(tick, this.deps.policy.pollMs));
+		};
+		this.#ticks.set(ref.childSessionId, this.deps.schedule(tick, this.deps.policy.pollMs));
+	}
 
 	observe(ref: AssignmentRef, snapshot: AdvisorySourceSnapshot, local: Readonly<Partial<Record<LocalSignal, number>>>, messagingSupported: boolean): string | undefined {
 		if (!this.deps.isCurrent(ref.assignmentId)) return undefined;
@@ -130,6 +149,8 @@ export class AdvisoryCheckHost {
 	}
 
 	dispose(): void {
+		for (const cancel of this.#ticks.values()) cancel();
+		this.#ticks.clear();
 		for (const child of this.#children.values()) child.cancelTimer?.();
 		this.#children.clear();
 	}

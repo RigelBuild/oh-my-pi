@@ -51,6 +51,18 @@ function fixture() {
 }
 
 describe("advisory check host", () => {
+	test("observes wall crossings while the child is silent", () => {
+		const f = fixture();
+		f.host.watch(ref, f.source, () => ({ local: {}, messagingSupported: true }));
+		f.advance(1_799_999);
+		expect(f.sent).toHaveLength(0);
+		f.advance(1);
+		expect(f.sent).toHaveLength(1);
+		f.host.dispose();
+		f.advance(1_800_000);
+		expect(f.sent).toHaveLength(1);
+	});
+
 	test("coalesces crossings and sends one follow-up at five minutes", async () => {
 		const f = fixture();
 		f.source.accept({ kind: "assistant-usage", id: "usage", usage: { input: 100_000 } });
