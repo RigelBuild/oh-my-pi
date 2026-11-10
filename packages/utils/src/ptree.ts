@@ -260,7 +260,6 @@ export class ChildProcess<In extends InMask = InMask> {
 			.then(async exitCode => {
 				this.#syncAbortListeners();
 				if (this.#exitReasonPending) {
-					this.#exitReason = this.#exitReasonPending;
 					reject(this.#exitReasonPending);
 					return;
 				}
@@ -271,11 +270,9 @@ export class ChildProcess<In extends InMask = InMask> {
 
 				await this.#stderrDone;
 				if (this.#exitReasonPending) {
-					this.#exitReason = this.#exitReasonPending;
 					reject(this.#exitReasonPending);
 					return;
 				}
-
 				if (exitCode !== null) {
 					this.#exitReason = new NonZeroExitError(exitCode, this.#stderrTail);
 					resolve(exitCode);
@@ -342,9 +339,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	kill(reason?: Exception, gracefulMs?: number) {
 		if (reason && !this.#exitReasonPending) {
 			this.#exitReasonPending = reason;
-			// The normalized exit promise may already have resolved from a dead
-			// group leader; wait() still needs to report the later deadline.
-			if (this.proc.exitCode !== null) this.#exitReason = reason;
+			this.#exitReason = reason;
 		}
 		// A command under the Linux subreaper is stopped without ever signalling
 		// the subreaper politely: SIGTERM would end it, its orphaned descendants
@@ -666,20 +661,30 @@ export class ChildProcess<In extends InMask = InMask> {
 		this.#exited.catch(() => {});
 		let attached = false;
 		const onAbort = () => {
-			// The { once: true } listener has removed itself at this point.
 			attached = false;
-			const rootRunning = this.proc.exitCode === null && this.proc.signalCode === null;
-			if (rootRunning || this.#openPipeReaders > 0) {
-				this.#abortRegistrations?.delete(sync);
+			this.#abortRegistrations?.delete(sync);
+			const reason = new AbortError(signal.reason, "<cancelled>");
+			if (
+				(this.proc.exitCode === null && this.proc.signalCode === null) ||
+				(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
+			) {
+				this.kill(reason);
+			} else if (!this.#exitReasonPending) {
+				this.#exitReasonPending = reason;
+				this.#exitReason = reason;
 			}
-			this.kill(new AbortError(signal.reason, "<cancelled>"));
 			this.#cutoffOutput();
 		};
 		const sync = () => {
 			const rootRunning = this.proc.exitCode === null && this.proc.signalCode === null;
 			const active = rootRunning || this.#openPipeReaders > 0;
 			if (signal.aborted) {
-				if (active) onAbort();
+				if (active) {
+					this.#abortRegistrations?.delete(sync);
+					setImmediate(() => {
+						if (this.#openPipeReaders > 0) onAbort();
+					});
+				}
 				return;
 			}
 			if (active === attached) return;
