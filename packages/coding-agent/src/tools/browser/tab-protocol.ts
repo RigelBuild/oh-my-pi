@@ -42,11 +42,25 @@ export interface SessionSnapshot {
 	excludeWebP?: boolean;
 }
 
+/**
+ * The page an attach worker drives. `create`: open and own a background tab in a
+ * spawned browser or relay; `nearTargetId` selects the relay browser when given.
+ * `owned`: an omp tab adopted after recycle. `borrowed`: a user's page, never closed.
+ */
+export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
+
+/** omp created the payload's page: closing the tab closes the page. */
+export function ownsPage(payload: WorkerInitPayload): boolean {
+	return payload.mode === "headless" || payload.page.kind !== "borrowed";
+}
+
 export type WorkerInitPayload =
 	| {
 			mode: "headless";
 			browserWSEndpoint: string;
 			safeDir: string;
+			/** The tab's upload staging folder, which outlives a recycled worker; see `UploadStaging`. */
+			uploadDir: string;
 			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
 			emulateViewport?: boolean;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
@@ -68,7 +82,10 @@ export type WorkerInitPayload =
 			mode: "attach";
 			browserWSEndpoint: string;
 			safeDir: string;
-			targetId: string;
+			/** The tab's upload staging folder, which outlives a recycled worker; see `UploadStaging`. */
+			uploadDir: string;
+			page: AttachPage;
+			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];
@@ -81,14 +98,6 @@ export type WorkerInitPayload =
 			/** Ignore invalid HTTPS certificates for this page. */
 			ignoreHttpsErrors?: boolean;
 			/**
-			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
-			 * stop a pending navigation so a blocked target cannot stall worker init (which
-			 * previously force-killed the tab). Never set for first-time Electron attach.
-			 */
-			recover?: boolean;
-			/** Restore focus emulation when recycling an OMP-owned tab, never a borrowed user tab. */
-			emulateFocus?: boolean;
-			/**
 			 * Whether the worker may raise this tab before capturing a screenshot. Unset
 			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
 			 */
@@ -98,6 +107,14 @@ export type WorkerInitPayload =
 			 * relay): downloads keep its one browser-wide folder and real file names, since the user's own downloads land there too.
 			 */
 			downloadStagingDirectory?: string;
+			/** The browser is user-driven, so preserve browser-wide download behavior. */
+			userDriven?: boolean;
+			/** Recover a stalled attached target before adopting it in a replacement worker. */
+			recover?: boolean;
+			/** Keep a recycled headless page focused without raising an attached window. */
+			emulateFocus?: boolean;
+			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
+			relay?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
@@ -108,7 +125,8 @@ export type WorkerInbound =
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
 	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
-	| { type: "close" };
+	/** `keepPage` leaves a page omp created open in its browser; only the worker's hold on it goes. */
+	| { type: "close"; keepPage?: boolean };
 
 export interface ReadyInfo {
 	url: string;
@@ -137,6 +155,12 @@ export interface RunErrorPayload {
 	navigationTimeout?: boolean;
 	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */
 	rendererCrashed?: boolean;
+	/**
+	 * Chrome ended the debugger attachment the page is driven through (omp browser relay) `during` this run, after
+	 * its code started, or `before` it, so nothing ran; the worker runs nothing more. `reason` is Chrome's
+	 * (`target_closed`, `canceled_by_user`): after a user cancel the relay hides the tab, otherwise it is re-adopted.
+	 */
+	debuggerDetached?: { when: "during" | "before"; reason: string };
 }
 
 export type WorkerOutbound =

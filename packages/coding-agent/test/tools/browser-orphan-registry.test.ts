@@ -12,7 +12,7 @@
  *  - confirmed closures are removed, while transient failures remain durable
  *    and are retried on the next reap.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
@@ -50,26 +50,32 @@ async function writeOwnershipFile(
 
 /** A pid that has been spawned and reaped, so `kill(pid, 0)` reports ESRCH. */
 async function deadPid(): Promise<number> {
-	const proc = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
+	// Bun's own executable is the only binary guaranteed on every platform (`true` is absent on Windows).
+	const proc = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
 	await proc.exited;
 	return proc.pid;
 }
 
 /** Minimal puppeteer Browser stub recording closes and optionally failing selected targets. */
 function makeBrowser(closed: string[], failTargets: ReadonlySet<string> = new Set()): Browser {
+	const destroyedHandlers = new Set<(event: { targetId: string }) => void>();
 	const session = {
 		send: async (method: string, params?: { targetId: string }) => {
-			if (method === "Target.setDiscoverTargets") return {};
 			if (method === "Target.getTargets") {
 				return { targetInfos: [...failTargets].map(targetId => ({ targetId })) };
 			}
+			if (method === "Target.setDiscoverTargets") return {};
 			if (!params) throw new Error(`Missing params for ${method}`);
 			if (failTargets.has(params.targetId)) throw new Error("transient CDP failure");
 			closed.push(params.targetId);
+			const { targetId } = params;
+			queueMicrotask(() => {
+				for (const handler of destroyedHandlers) handler({ targetId });
+			});
 			return { success: true };
 		},
-		on: () => undefined,
-		off: () => undefined,
+		on: (_event: string, handler: (event: { targetId: string }) => void) => destroyedHandlers.add(handler),
+		off: (_event: string, handler: (event: { targetId: string }) => void) => destroyedHandlers.delete(handler),
 		detach: async () => undefined,
 	};
 	return {
@@ -227,14 +233,14 @@ describe("orphan-registry — reap", () => {
  */
 function makeLaggingCloseBrowser(targetId: string) {
 	const listeners = new Set<(event: { targetId: string }) => void>();
+	const closeRequest = Promise.withResolvers<void>();
 	let listed = true;
 	let discovering = false;
-	let closeRequested = false;
 	const session = {
 		send: async (method: string, params?: { discover?: boolean }) => {
 			if (method === "Target.setDiscoverTargets") discovering = params?.discover === true;
 			if (method === "Target.closeTarget") {
-				closeRequested = true;
+				closeRequest.resolve();
 				return { success: true };
 			}
 			if (method === "Target.getTargets") return { targetInfos: listed ? [{ targetId }] : [] };
@@ -254,33 +260,43 @@ function makeLaggingCloseBrowser(targetId: string) {
 		if (!discovering) return;
 		for (const listener of listeners) listener({ targetId });
 	};
-	return { browser, destroy, listenerCount: () => listeners.size, closeRequested: () => closeRequested };
-}
-
-async function settleState<T>(promise: Promise<T>): Promise<"pending" | T> {
-	return await Promise.race([promise, Bun.sleep(5).then(() => "pending" as const)]);
+	return { browser, destroy, listenerCount: () => listeners.size, waitForCloseRequest: () => closeRequest.promise };
 }
 
 describe("orphan-registry — closeCdpTarget", () => {
 	it("reports a close as soon as Chromium removes the target, without waiting for the timeout", async () => {
-		const { browser, destroy, listenerCount, closeRequested } = makeLaggingCloseBrowser("lagging");
-		// Far past the test's own timeout: only the targetDestroyed event can settle this close in time.
-		const closing = closeCdpTarget(browser, "lagging", { confirmTimeoutMs: 60_000 });
-		while (!closeRequested()) await Bun.sleep(1);
-		// Chromium answers closeTarget before it removes the target; the close is not done yet.
-		expect(await settleState(closing)).toBe("pending");
+		const { browser, destroy, listenerCount, waitForCloseRequest } = makeLaggingCloseBrowser("lagging");
+		const closing = closeCdpTarget(browser, "lagging", 60_000);
+		await waitForCloseRequest();
+		let settled = false;
+		void closing.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await Promise.resolve();
+		expect(settled).toBe(false);
 		destroy();
 		expect(await closing).toBe(true);
 		expect(listenerCount()).toBe(0);
 	});
 
 	it("waits the confirm timeout, then reports a target that is never removed as not closed", async () => {
-		const { browser, listenerCount } = makeLaggingCloseBrowser("stuck");
-		const started = performance.now();
-		const closing = closeCdpTarget(browser, "stuck", { confirmTimeoutMs: 200 });
-		expect(await settleState(closing)).toBe("pending");
-		expect(await closing).toBe(false);
-		expect(performance.now() - started).toBeGreaterThanOrEqual(190);
-		expect(listenerCount()).toBe(0);
+		vi.useFakeTimers();
+		try {
+			const { browser, listenerCount, waitForCloseRequest } = makeLaggingCloseBrowser("stuck");
+			const closing = closeCdpTarget(browser, "stuck");
+			await waitForCloseRequest();
+			await Promise.resolve();
+			await Promise.resolve();
+			vi.advanceTimersByTime(5_000);
+			await expect(closing).resolves.toBe(false);
+			expect(listenerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

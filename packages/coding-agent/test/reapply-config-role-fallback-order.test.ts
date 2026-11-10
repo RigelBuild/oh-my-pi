@@ -212,7 +212,7 @@ describe("--reapply-config configured default fallback order", () => {
 	}
 
 	it("resumes on the first configured candidate once its extension provider registers", async () => {
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const laterCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -233,7 +233,7 @@ describe("--reapply-config configured default fallback order", () => {
 		// Guards the re-resolution against regressing the ordinary case: when the
 		// early pass already matched index 0 there is nothing to re-resolve, and
 		// the adopted model must stay put.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const firstCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -247,7 +247,7 @@ describe("--reapply-config configured default fallback order", () => {
 
 	it("retains the session model when every fallback candidate is a self alias", async () => {
 		// A list of only self aliases is not a configured default; keep the session model.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
 		const settings = await loadOverlay("*,@default");
@@ -261,7 +261,7 @@ describe("--reapply-config configured default fallback order", () => {
 	it("still adopts a list that mixes a self alias with a real candidate", async () => {
 		// One real pattern makes the list a configured default. The alias sits last
 		// because a leading `*` stalls the role resolver on its own circularity.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const realCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -276,7 +276,7 @@ describe("--reapply-config configured default fallback order", () => {
 	it("adopts a self-alias-only list that still resolved to a model", async () => {
 		// Classify by resolution, not spelling: `default,@default` resolves to the
 		// bundled `cursor/default` once Cursor credentials exist.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
 		const settings = await loadOverlay("default,@default");
@@ -298,7 +298,7 @@ describe("--reapply-config configured default fallback order", () => {
 		// BARE `*` is the fallback reached — and it names no thinking knob, so the
 		// session keeps its own level. Scanning for the first pattern that carries
 		// a suffix skipped it and applied `low` from a fallback never reached.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
 		const settings = await loadOverlay("missing/model,*,*:low");
@@ -313,7 +313,7 @@ describe("--reapply-config configured default fallback order", () => {
 		// to nothing, so `*:low` is the fallback actually reached and its `low` is
 		// the live knob. Gating on "was a concrete pattern configured" suppressed
 		// it, leaving a fresh session on the arbitrary fallback model's default.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
 		const settings = await loadOverlay("missing/model,*:low");
@@ -326,7 +326,7 @@ describe("--reapply-config configured default fallback order", () => {
 	it("stops at a reached self alias ahead of a later resolvable model", async () => {
 		// The first reached entry is `*:low`, so keep the session model at low even
 		// though a later concrete model resolves.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const later = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -358,7 +358,7 @@ describe("--reapply-config configured default fallback order", () => {
 		// an earlier saved model resolves. Treating every nonnegative restore index
 		// as "kept the session's model" claimed nothing changed while the resume
 		// had in fact moved off the active model.
-		const earlier = anthropicModel("claude-opus-4-1");
+		const earlier = anthropicModel("claude-sonnet-4-6");
 		const sessionFile = await writeTwoModelSession(modelValue(earlier), "anthropic/definitely-not-a-model:low");
 
 		const settings = await loadOverlay("missing/model");
@@ -375,7 +375,7 @@ describe("--reapply-config configured default fallback order", () => {
 		// `"anthropic/...,*:low"`: the concrete entry resolves, so the `low` belongs
 		// to a fallback that was never selected. Scanning every pattern for a
 		// suffix ran the CHOSEN model at the loser's level.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const winner = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -390,7 +390,7 @@ describe("--reapply-config configured default fallback order", () => {
 	it("keeps the baked session model on a bare resume even when a later candidate matched first", async () => {
 		// Without the flag the session's own model wins regardless of how the
 		// configured role resolved, so the re-resolution must not reach this path.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const laterCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -403,7 +403,7 @@ describe("--reapply-config configured default fallback order", () => {
 
 	it("compares the winning candidate's position in the configured pattern space", async () => {
 		// Positions must use the configured pattern list, not the alias-expanded one.
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const winner = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 

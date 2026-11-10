@@ -8,6 +8,8 @@ import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { generateImage } from "@oh-my-pi/pi-ai/images";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
+import { toDataUrl } from "../src/images/shared";
+import { factoryModel } from "./helpers/factory-droid";
 
 import type { GatewayUsageEvent } from "@oh-my-pi/pi-ai/auth-gateway";
 
@@ -33,16 +35,20 @@ async function withGateway(
 	models: Model<Api>[],
 	fetchImpl: FetchImpl,
 	test: (url: string, storage: AuthStorage) => Promise<void>,
-	onUsage?: (event: GatewayUsageEvent) => void,
-	apiKeys?: readonly string[],
+	options: {
+		seedCredentials?: boolean;
+		onUsage?: (event: GatewayUsageEvent) => void;
+		apiKeys?: readonly string[];
+	} = {},
 ): Promise<void> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gateway-images-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	for (const model of models) {
-		if (apiKeys && model.provider === "openrouter") {
+		if (options.seedCredentials === false) continue;
+		if (options.apiKeys && model.provider === "openrouter") {
 			await storage.credentials.set(
 				model.provider,
-				apiKeys.map(key => ({ type: "api_key", key })),
+				options.apiKeys.map(key => ({ type: "api_key", key })),
 			);
 		} else {
 			storage.keys.setRuntime(model.provider, `key-${model.provider}`);
@@ -56,7 +62,7 @@ async function withGateway(
 			models.find(model => requested === model.id || requested === `${model.provider}/${model.id}`),
 		version: "test",
 		fetch: fetchImpl,
-		onUsage,
+		onUsage: options.onUsage,
 	});
 	try {
 		await test(handle.url, storage);
@@ -85,6 +91,23 @@ function gatewayRequest(
 }
 
 describe("auth gateway images", () => {
+	it("serves Factory Droid image models through the Factory Images route", async () => {
+		const model = factoryModel("gpt-image-2.5-flare");
+		const urls: string[] = [];
+		const fetchStub: FetchImpl = async input => {
+			urls.push(input.toString());
+			return Response.json({ data: [{ b64_json: IMAGE_DATA }], usage: { input_tokens: 3, output_tokens: 4 } });
+		};
+		await withGateway([model], fetchStub, async url => {
+			const response = await gatewayRequest(url, "/v1/images/generations", {
+				model: "factory-droid/gpt-image-2.5-flare",
+				prompt: "paint a lighthouse",
+			});
+			expect(response.status).toBe(200);
+			expect(urls).toEqual(["https://api.factory.ai/api/llm/o/v1/images/generations"]);
+		});
+	});
+
 	it("translates OpenAI generations and returns the OpenAI image wire response", async () => {
 		const model = imageModel("openai", "gpt-image-test", "openai-images");
 		let upstream: { url: string; authorization: string | null; body: unknown } | undefined;
@@ -119,7 +142,6 @@ describe("auth gateway images", () => {
 					model: "gpt-image-test",
 					prompt: "paint a lighthouse",
 					n: 2,
-					response_format: "b64_json",
 					size: "1536x1024",
 				},
 			});
@@ -271,7 +293,7 @@ describe("auth gateway images", () => {
 				expect(recorded).toHaveLength(1);
 				expect(recorded[0]).toMatchObject({ usage: { input: 0, output: 0 }, costUsd: 0.42 });
 			},
-			event => events.push(event),
+			{ onUsage: event => events.push(event) },
 		);
 	});
 
@@ -279,6 +301,7 @@ describe("auth gateway images", () => {
 		const model = imageModel("openrouter", "rotated-image", "openrouter-images");
 		const events: GatewayUsageEvent[] = [];
 		const attempts: Array<string | null> = [];
+		let secondCredentialId: number | undefined;
 		const fetchStub: FetchImpl = async (_input, init) => {
 			const authorization = new Headers(init?.headers).get("authorization");
 			attempts.push(authorization);
@@ -292,7 +315,11 @@ describe("auth gateway images", () => {
 		await withGateway(
 			[model],
 			fetchStub,
-			async url => {
+			async (url, storage) => {
+				secondCredentialId = storage.credentials
+					.list("openrouter")
+					.find(row => row.credential.type === "api_key" && row.credential.key === "key-two")?.id;
+				expect(secondCredentialId).toBeNumber();
 				const response = await gatewayRequest(url, "/v1/images", {
 					model: model.id,
 					prompt: "rotate key",
@@ -302,11 +329,79 @@ describe("auth gateway images", () => {
 				expect(response.status).toBe(200);
 				expect(attempts).toEqual(["Bearer key-one", "Bearer key-two"]);
 				expect(events).toHaveLength(1);
-				expect(events[0]?.account).toBe(`key:${Bun.hash("key-two").toString(36)}`);
+				expect(events[0]?.account).toBe(`credential:${secondCredentialId}`);
 			},
-			event => events.push(event),
-			["key-one", "key-two"],
+			{
+				onUsage: event => events.push(event),
+				apiKeys: ["key-one", "key-two"],
+			},
 		);
+	});
+
+	it("rejects invalid input images before resolving provider credentials", async () => {
+		const model = imageModel("openai", "gpt-image-test", "openai-images");
+		let upstreamCalls = 0;
+		const fetchStub: FetchImpl = async () => {
+			upstreamCalls++;
+			throw new Error("unexpected upstream call");
+		};
+		for (const seedCredentials of [false, true]) {
+			await withGateway(
+				[model],
+				fetchStub,
+				async (url, storage) => {
+					const credentialResolution = vi.spyOn(storage.keys, "getWithCredential");
+					try {
+						for (const reference of ["data:image/png;base64,Y", `data:image/x#test;base64,${IMAGE_DATA}`]) {
+							const response = await gatewayRequest(url, "/v1/images/generations", {
+								model: "gpt-image-test",
+								prompt: "paint",
+								input_references: [{ url: reference }],
+							});
+							expect(response.status).toBe(400);
+							expect(await response.json()).toMatchObject({
+								error: { code: 400, type: "invalid_request_error" },
+							});
+						}
+						expect(credentialResolution).not.toHaveBeenCalled();
+					} finally {
+						credentialResolution.mockRestore();
+					}
+				},
+				{ seedCredentials },
+			);
+		}
+		expect(upstreamCalls).toBe(0);
+	});
+
+	it("preserves legal MIME punctuation through gateway edits", async () => {
+		const model = imageModel("openai", "gpt-image-mime-test", "openai-images");
+		const mimeType = "image/x!$&^_.+-test";
+		const inlineImage = toDataUrl({ data: IMAGE_DATA, mimeType });
+		let upstreamCalls = 0;
+		let upstreamImage: File | undefined;
+		const fetchStub: FetchImpl = async (_input, init) => {
+			upstreamCalls++;
+			if (!(init?.body instanceof FormData)) throw new Error("Expected multipart upstream body");
+			const image = init.body.get("image");
+			if (!(image instanceof File)) throw new Error("Expected upstream image file");
+			upstreamImage = image;
+			return new Response(JSON.stringify({ data: [{ b64_json: IMAGE_DATA }] }), {
+				headers: { "content-type": "application/json" },
+			});
+		};
+		await withGateway([model], fetchStub, async url => {
+			const response = await gatewayRequest(url, "/v1/images/generations", {
+				model: model.id,
+				prompt: "paint",
+				input_references: [{ type: "image_url", url: inlineImage }],
+			});
+			expect(response.status).toBe(200);
+			expect(upstreamCalls).toBe(1);
+			if (!(upstreamImage instanceof File)) throw new Error("Expected upstream image file");
+			expect(upstreamImage.type).toBe(mimeType);
+			expect(new Uint8Array(await upstreamImage.arrayBuffer())).toEqual(Buffer.from(IMAGE_DATA, "base64"));
+		});
 	});
 
 	it("rejects URL responses before dispatch and reports unknown models", async () => {

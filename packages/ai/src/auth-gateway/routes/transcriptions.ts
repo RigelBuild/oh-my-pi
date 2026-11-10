@@ -7,13 +7,14 @@ import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	gatewayAttemptOutcomes,
+	gatewayRequestLogFields,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
 	resolveGatewayModel,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import { gatewayResponseHeaders, json, resolveClientIdentity, codedErrorResponse } from "../http";
 import { gatewayLogContext, logGatewayRequestFailure } from "../logging";
 import type { CallerIdentity } from "../types";
 
@@ -27,7 +28,7 @@ export async function handleTranscriptions(
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
-	const aborted = (): Response => transcriptions.formatError(499, "request_aborted", "client closed request");
+	const aborted = (): Response => codedErrorResponse(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
 	let parsed: transcriptions.TranscriptionParsedRequest;
@@ -37,27 +38,27 @@ export async function handleTranscriptions(
 		if (controller.signal.aborted) return aborted();
 		const message = error instanceof Error ? error.message : String(error);
 		const status = error instanceof transcriptions.TranscriptionWireError ? error.status : 400;
-		return transcriptions.formatError(status, "invalid_request_error", message);
+		return codedErrorResponse(status, "invalid_request_error", message);
 	}
 	if (controller.signal.aborted) return aborted();
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
 	if (controller.signal.aborted) return aborted();
 	if (!model) {
-		return transcriptions.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+		return codedErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
 	if (model.api !== "openai-transcriptions") {
 		const detail =
 			model.api === "local-inference"
 				? `Model ${parsed.modelId} runs on-device only and cannot be served by the auth gateway`
 				: `Model ${parsed.modelId} does not support audio transcription`;
-		return transcriptions.formatError(400, "invalid_request_error", detail);
+		return codedErrorResponse(400, "invalid_request_error", detail);
 	}
 
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`transcriptions\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		controller.signal,
@@ -66,9 +67,9 @@ export async function handleTranscriptions(
 	);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) {
-		return transcriptions.formatError(apiKey.status, apiKey.type, apiKey.message);
+		return codedErrorResponse(apiKey.status, apiKey.type, apiKey.message);
 	}
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let account = resolveGatewayAccount(apiKey);
 	let credentialId = apiKey.credentialId;
 
 	logger.info("auth-gateway request", {
@@ -79,22 +80,23 @@ export async function handleTranscriptions(
 		resolvedModel: model.id,
 		stream: false,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await transcribeAudio(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
-				bootOpts.storage,
+				bootOpts,
 				model,
 				sessionId,
 				apiKey,
 				controller.signal,
 				"transcriptions",
 				peer,
-				(resolvedKey, resolvedCredentialId) => {
-					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
-					credentialId = resolvedCredentialId;
+				resolved => {
+					account = resolveGatewayAccount(resolved);
+					credentialId = resolved.credentialId;
 				},
 				bootOpts.onUsageLimit,
 				outcomes.onAttemptFailed,
@@ -118,6 +120,6 @@ export async function handleTranscriptions(
 			classified.status,
 			credentialId,
 		);
-		return transcriptions.formatError(classified.status, classified.type, classified.message);
+		return codedErrorResponse(classified.status, classified.type, classified.message);
 	}
 }

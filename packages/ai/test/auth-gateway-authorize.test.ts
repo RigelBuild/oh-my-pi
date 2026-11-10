@@ -11,6 +11,7 @@ import {
 	bearerTokenAuthorizer,
 	type CallerIdentity,
 	ModelResolverUnavailableError,
+	type ModelResolveContext,
 	resolveGatewayModel,
 	SHARED_TOKEN_CALLER,
 	startAuthGateway,
@@ -23,7 +24,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 interface ResolverCall {
 	modelId: string;
-	caller: CallerIdentity;
+	caller: ModelResolveContext;
 }
 
 interface Harness {
@@ -389,7 +390,7 @@ describe("auth-gateway authorize seam", () => {
 		});
 		expect(embeddingResponse.status).toBe(200);
 		expect(harness.resolverCalls).toEqual([
-			{ modelId: "mock/authorize", caller: { kind: "agent", agentAccountId: "agent-a" } },
+			{ modelId: "mock/authorize", caller: { kind: "agent", agentAccountId: "agent-a", api: "openai-completions" } },
 			{ modelId: "text-embedding-3-small", caller: { kind: "agent", agentAccountId: "agent-b" } },
 		]);
 	});

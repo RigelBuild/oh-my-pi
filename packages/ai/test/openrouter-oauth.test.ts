@@ -5,6 +5,17 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 
 const KEY_EXCHANGE_URL = "https://openrouter.ai/api/v1/auth/keys";
+const REGISTERED_PORT = 54549;
+
+/** Windows reserves dynamic port ranges (WinNAT/Hyper-V) that can cover the registered port. */
+function canBind(port: number): boolean {
+	try {
+		Bun.serve({ port, hostname: "localhost", fetch: () => new Response() }).stop(true);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 interface RecordedRequest {
 	url: string;
@@ -50,8 +61,11 @@ describe("OpenRouter OAuth flow", () => {
 
 		const parsed = new URL(authUrl);
 		expect(parsed.origin + parsed.pathname).toBe("https://openrouter.ai/auth");
-		// The flow falls back to a random port when 54549 is taken, so only the loopback shape is fixed.
-		expect(parsed.searchParams.get("callback_url")).toMatch(/^http:\/\/localhost:\d+\/callback$/);
+		const callback = new URL(parsed.searchParams.get("callback_url") ?? "");
+		expect(callback.origin).toStartWith("http://localhost:");
+		expect(callback.pathname).toBe("/callback");
+		// The registered port wins when bindable; otherwise the flow falls back to a random one.
+		if (canBind(REGISTERED_PORT)) expect(callback.port).toBe(String(REGISTERED_PORT));
 		expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
 		expect(parsed.searchParams.has("state")).toBe(false);
 		expect(credentials).toBe("sk-or-v1-minted");

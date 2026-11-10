@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { expandTilde } from "../tools/path-utils";
 
 import {
 	cfgMnemopiAutoRecall,
@@ -71,7 +72,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const cwd = settings.getCwd();
 	const scoping = cfgMnemopiScoping.get(settings);
 	const dbPath = configuredDbPath?.trim()
-		? configuredDbPath
+		? expandTilde(configuredDbPath.trim())
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
 	const scope = computeMnemopiBankScope(cfgMnemopiBank.get(settings), cwd, scoping);
 	const recallBanks =
@@ -259,14 +260,13 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 		db = new Database(dbPath, { readonly: true });
 		// "Safe" = no row with a different/missing cwd AND at least one matching row. Both probes stop at
 		// the first hit, and CASE skips the matching probe once an unsafe row disqualifies the bank.
-		const row = db
-			.prepare<{ safe: number }, [string]>(`
+		using statement = db.prepare<{ safe: number }, [string]>(`
 				SELECT CASE
 					WHEN EXISTS(SELECT 1 FROM working_memory WHERE json_extract(metadata_json, '$.cwd') IS NOT ?1) THEN 0
 					ELSE EXISTS(SELECT 1 FROM working_memory WHERE json_extract(metadata_json, '$.cwd') = ?1)
 				END AS safe
-			`)
-			.get(cwd);
+		`);
+		const row = statement.get(cwd);
 		return row?.safe === 1;
 	} catch (error) {
 		logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });

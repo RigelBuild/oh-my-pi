@@ -1,12 +1,6 @@
 name: "Compose bazel cache config"
 description: >
-   Uses the omp-kata cluster remote cache when credentials are available.
-   GitHub-hosted jobs restore and save a scope-keyed disk and repository cache.
-
-inputs:
-   scope:
-      description: Disk-cache key discriminator shared by compatible consumers
-      required: true
+   Uses the cluster remote cache when credentials are available. GitHub-hosted jobs restore and save a scope-keyed disk and repository cache.
 
 outputs:
    rc:
@@ -89,7 +83,6 @@ runs:
            if [ "$REMOTE" != "true" ] && [ "$RESTORE_HIT" != "true" ]; then
              save_needed=true
            fi
-
            rc="$RUNNER_TEMP/bazel-cache.rc"
            if [ "$REMOTE" = "true" ]; then
              # Mask the derived credential BEFORE writing the rc: config=ci

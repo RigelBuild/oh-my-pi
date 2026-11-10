@@ -240,7 +240,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	it("discovers the first configured candidate instead of keeping the later one it matched early", async () => {
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const laterCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -256,7 +256,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	it("expands a legacy role alias before filtering discovery, so a cold role model still discovers", async () => {
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const laterCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -274,7 +274,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	it("discovers a cold FIRST link of the matched alias's own chain, not the later link it matched", async () => {
-		const bakedModel = anthropicModel("claude-opus-4-1");
+		const bakedModel = anthropicModel("claude-sonnet-4-6");
 		const laterCandidate = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(bakedModel));
 
@@ -324,7 +324,7 @@ describe("--reapply-config cold-discovery configured default", () => {
 	});
 
 	it("skips a saved model excluded by the path-scoped enabledModels list", async () => {
-		const forbiddenModel = anthropicModel("claude-opus-4-1");
+		const forbiddenModel = anthropicModel("claude-sonnet-4-6");
 		const allowedModel = anthropicModel("claude-sonnet-4-5");
 		const sessionFile = await writeBakedSession(modelValue(forbiddenModel));
 		const settings = await loadOverlay("static-only/not-discovered", [modelValue(allowedModel)]);

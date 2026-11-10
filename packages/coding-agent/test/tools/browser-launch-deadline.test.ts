@@ -71,7 +71,7 @@ async function withFakeBrowser(run: (pidFile: string) => Promise<void>, mode = "
 	const previousExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
 	const previousPidFile = process.env.OMP_BROWSER_STALLED_PID_FILE;
 	const previousMode = process.env.OMP_BROWSER_STALLED_MODE;
-	await Bun.write(executable, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}\n`);
+	await Bun.write(executable, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)} "$@"\n`);
 	fs.chmodSync(executable, 0o755);
 	process.env.PUPPETEER_EXECUTABLE_PATH = executable;
 	process.env.OMP_BROWSER_STALLED_PID_FILE = pidFile;

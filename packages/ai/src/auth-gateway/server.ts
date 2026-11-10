@@ -29,6 +29,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -42,12 +43,14 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
+import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "../types";
+import type { ResolvedApiKey } from "../auth-retry";
 import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
-import { AssistantMessageEventStream } from "../utils/event-stream";
-import { parseBind } from "../utils/parse-bind";
+import { isLoopbackHost, parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
+import { type AuthGatewayClientScope, AuthGatewayClientTable } from "./clients";
 import {
 	type AuthGatewayBootOptions,
 	type AuthGatewayRouteOptions,
@@ -62,11 +65,12 @@ import {
 	observeAttemptLimitStatus,
 	gatewayUsageOutcome,
 	resolveGatewayModel,
+	gatewayRequestLogFields,
+	resolveGatewayAccount,
+	resolveGatewayApiKey,
 	mirrorRequestAbort,
 	normalizeClientSessionKey,
 	recordGatewayUsage,
-	resolveGatewayAccount,
-	resolveGatewayApiKey,
 } from "./dispatch";
 import { gatewayLogContext, logGatewayProviderResponse, logGatewayRequestFailure } from "./logging";
 import {
@@ -86,9 +90,12 @@ import {
 	hasMisplacedBearer,
 	isCallerIdentity,
 	json,
+	noStoreErrorResponse,
 	presentedBearer,
 	resolveClientIdentity,
+	SHARED_TOKEN_CALLER,
 	UNAUTHENTICATED_CALLER,
+	bearerTokenAuthorizer,
 	withCors,
 } from "./http";
 import { handleEmbeddings } from "./routes/embeddings";
@@ -112,10 +119,17 @@ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
-const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
-	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
-	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
-	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
+/** A foreign chat wire the gateway translates: its codec, log label, and the pi-ai api it speaks natively. */
+interface FormatRoute {
+	module: FormatModule;
+	label: string;
+	api: Api;
+}
+
+const FORMAT_ROUTES: Record<string, FormatRoute> = {
+	"/v1/chat/completions": { module: openaiChat, label: "openai-chat", api: "openai-completions" },
+	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages", api: "anthropic-messages" },
+	"/v1/responses": { module: openaiResponses, label: "openai-responses", api: "openai-responses" },
 };
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
@@ -178,23 +192,57 @@ function serializeTools(context: Context): string | undefined {
 	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
 }
 
-function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
+/**
+ * Fit a client-requested effort to the resolved model. Clients speak their own
+ * effort vocabulary: omp's `lowest-effort` reasoning-off sends `minimal` to a
+ * generic OpenAI-compatible endpoint, and Claude ladders have no `minimal`.
+ * `streamSimple` throws on an effort the model cannot serve, so clamp it to the
+ * nearest supported tier as in-process callers do. Efforts the model maps onto
+ * its wire values, and models without an effort ladder, pass through unchanged.
+ * Carry the requested tier's budget with a clamp unless the destination tier
+ * already has an explicit budget (including zero).
+ */
+function normalizeGatewayThinking(model: Model<Api>, options: SimpleStreamOptions): void {
+	const requested = options.reasoning;
+	if (requested === undefined) return;
+	const efforts = getSupportedEfforts(model);
+	if (efforts.length === 0 || efforts.includes(requested)) return;
+	if (model.thinking?.effortMap?.[requested] !== undefined) return;
+	if (
+		model.compat &&
+		"reasoningEffortMap" in model.compat &&
+		model.compat.reasoningEffortMap[requested] !== undefined
+	) {
+		return;
+	}
+	const reasoning = clampThinkingLevelForModel(model, requested) ?? requested;
+	options.reasoning = reasoning;
+	const budgets = options.thinkingBudgets;
+	if (reasoning !== requested && budgets?.[requested] !== undefined && budgets[reasoning] === undefined) {
+		options.thinkingBudgets = { ...budgets, [reasoning]: budgets[requested] };
+	}
+}
+
+function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
-	// Codex backend rejects every sampling control with
-	// `Unsupported parameter: …` (#3117). Strip the full set for that one
-	// provider; everything else is harmless to forward — `streamSimple` ignores
-	// what the underlying provider doesn't honour.
-	const isCodex = api === "openai-codex-responses";
+	// Backends that reject sampling controls (Codex: `Unsupported parameter: …`, #3117)
+	// get the full set stripped; everything else is harmless to forward —
+	// `streamSimple` ignores what the underlying provider doesn't honour.
+	const sampling = !(
+		model.compat &&
+		"supportsSamplingParams" in model.compat &&
+		model.compat.supportsSamplingParams === false
+	);
 	if (options.maxOutputTokens !== undefined) opts.maxTokens = options.maxOutputTokens;
-	if (options.temperature !== undefined && !isCodex) opts.temperature = options.temperature;
-	if (options.topP !== undefined && !isCodex) opts.topP = options.topP;
-	if (options.topK !== undefined && !isCodex) opts.topK = options.topK;
-	if (options.minP !== undefined && !isCodex) opts.minP = options.minP;
-	if (options.stopSequences !== undefined && !isCodex) opts.stopSequences = options.stopSequences;
-	if (options.presencePenalty !== undefined && !isCodex) opts.presencePenalty = options.presencePenalty;
-	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
-	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
+	if (options.temperature !== undefined && sampling) opts.temperature = options.temperature;
+	if (options.topP !== undefined && sampling) opts.topP = options.topP;
+	if (options.topK !== undefined && sampling) opts.topK = options.topK;
+	if (options.minP !== undefined && sampling) opts.minP = options.minP;
+	if (options.stopSequences !== undefined && sampling) opts.stopSequences = options.stopSequences;
+	if (options.presencePenalty !== undefined && sampling) opts.presencePenalty = options.presencePenalty;
+	if (options.frequencyPenalty !== undefined && sampling) opts.frequencyPenalty = options.frequencyPenalty;
+	if (options.repetitionPenalty !== undefined && sampling) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
 	if (options.userProfileId !== undefined) opts.userProfileId = options.userProfileId;
 	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
@@ -230,12 +278,13 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.thinkingBudgets) {
 		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
+	normalizeGatewayThinking(model, opts);
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
 		// whichever effort the client requested (or High when unspecified) and
 		// ALSO sets the effort so providers that gate on `reasoning` actually
 		// surface the budget.
-		const effort = options.reasoning ?? Effort.High;
+		const effort = opts.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
 			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
@@ -256,7 +305,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		options.responseFormat !== undefined
 	) {
 		logger.debug("auth-gateway dropped unsupported typed options", {
-			api,
+			api: model.api,
 			hasLogitBias: options.logitBias !== undefined,
 			hasResponseFormat: options.responseFormat !== undefined,
 		});
@@ -299,6 +348,7 @@ type AttemptStart =
 			readonly streamOpts: SimpleStreamOptions;
 			readonly lease: AuthGatewaySessionStateLease;
 			readonly account: () => string;
+			readonly resolvedKey: ResolvedApiKey;
 	  };
 
 function incompatibleAttempt(message: string): AttemptStart {
@@ -344,12 +394,9 @@ async function prepareFormatAttempt(
 		return incompatibleAttempt("OpenAI image file IDs in tool outputs require a Responses-compatible upstream model");
 	}
 
-	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
-	// expected to resolve the credential and pass it as `options.apiKey`.
-	// For OAuth providers this returns the access token (refreshed via the
-	// broker override on AuthStorage when needed).
+	// pi-ai's stream() expects its caller to resolve and pass the API key.
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		signal,
@@ -359,7 +406,7 @@ async function prepareFormatAttempt(
 	signal.throwIfAborted();
 	if ("status" in apiKey) return { ok: false, reason: apiKey.setupReason, failure: apiKey };
 
-	const streamOpts = buildStreamOptions(parsed, model.api, signal);
+	const streamOpts = buildStreamOptions(parsed, model, signal);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	const logContext = gatewayLogContext(requestId, caller, route.label, model.provider, model.id);
 	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model, logContext);
@@ -369,13 +416,7 @@ async function prepareFormatAttempt(
 		limitObserver?.(response, responseModel, responseSignal);
 		return callerOnResponse?.(response, responseModel, responseSignal);
 	};
-	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
-	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
-	// map is non-serializable, so no client can supply it and every turn would
-	// otherwise re-learn each lesson from a fresh upstream rejection. The lease
-	// keeps the entry out of reach of eviction until this request is done with
-	// it, so the caller MUST release it on every exit path.
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let account = resolveGatewayAccount(apiKey);
 	const lease = sessionStates.acquire({
 		clientKey,
 		agentAccountId: caller.agentAccountId,
@@ -383,10 +424,11 @@ async function prepareFormatAttempt(
 		context: parsed.context,
 		toolsJson,
 		account,
+		client: bootOpts.client?.name,
 	});
 	streamOpts.providerSessionState = lease.states;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		apiKey,
@@ -394,14 +436,14 @@ async function prepareFormatAttempt(
 		route.label,
 		peer,
 		resolvedKey => {
-			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			account = resolveGatewayAccount(resolvedKey);
 			lease.updateAccount(account);
 		},
 		bootOpts.onUsageLimit,
 		undefined,
 		logContext,
 	);
-	return { ok: true, streamOpts, lease, account: () => account };
+	return { ok: true, streamOpts, lease, account: () => account, resolvedKey: apiKey };
 }
 
 /**
@@ -427,7 +469,7 @@ async function preparePiNativeAttempt(
 	if (kindRejection) return incompatibleAttempt(kindRejection);
 
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		signal,
@@ -437,12 +479,7 @@ async function preparePiNativeAttempt(
 	signal.throwIfAborted();
 	if ("status" in apiKey) return { ok: false, reason: apiKey.setupReason, failure: apiKey };
 
-	// Per-session provider learning, owned by this gateway instance. The map is
-	// non-serializable, so `parseRequest` cannot accept one from the wire and
-	// every turn would otherwise re-learn each lesson from a fresh upstream
-	// rejection. The lease keeps the entry out of reach of eviction until this
-	// request is done with it, so the caller MUST release it on every exit path.
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	let account = resolveGatewayAccount(apiKey);
 	const lease = sessionStates.acquire({
 		clientKey,
 		agentAccountId: caller.agentAccountId,
@@ -450,15 +487,15 @@ async function preparePiNativeAttempt(
 		context: parsed.context,
 		toolsJson,
 		account,
+		client: bootOpts.client?.name,
 	});
-	// The codex sampling strip mirrors `buildStreamOptions` — Codex rejects
-	// every one with a 400 (#3117).
 	const streamOpts: SimpleStreamOptions = {
 		...parsed.options,
 		signal,
 		cursorExternalToolExecutor: true,
 		providerSessionState: lease.states,
 	};
+	normalizeGatewayThinking(model, streamOpts);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	const logContext = gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id);
 	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model, logContext);
@@ -469,7 +506,7 @@ async function preparePiNativeAttempt(
 		return callerOnResponse?.(response, responseModel, responseSignal);
 	};
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		apiKey,
@@ -477,14 +514,14 @@ async function preparePiNativeAttempt(
 		"pi-native",
 		peer,
 		resolvedKey => {
-			account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			account = resolveGatewayAccount(resolvedKey);
 			lease.updateAccount(account);
 		},
 		bootOpts.onUsageLimit,
 		undefined,
 		logContext,
 	);
-	if (model.api === "openai-codex-responses") {
+	if (model.compat && "supportsSamplingParams" in model.compat && model.compat.supportsSamplingParams === false) {
 		delete streamOpts.temperature;
 		delete streamOpts.topP;
 		delete streamOpts.topK;
@@ -494,12 +531,10 @@ async function preparePiNativeAttempt(
 		delete streamOpts.frequencyPenalty;
 		delete streamOpts.repetitionPenalty;
 	}
-	// Merge gateway-captured passthrough headers under the client's own
-	// headers — the client's values win when they collide.
 	const captured = captureRequestHeaders(req.headers);
 	streamOpts.headers = { ...captured, ...streamOpts.headers };
 	streamOpts.sessionId = sessionId;
-	return { ok: true, streamOpts, lease, account: () => account };
+	return { ok: true, streamOpts, lease, account: () => account, resolvedKey: apiKey };
 }
 
 const DEFAULT_FAILOVER_DEADLINE_MS = 120_000;
@@ -1008,7 +1043,7 @@ async function runFailoverLoop(
 // (handlePassthrough removed — see note above.)
 
 async function handleFormatEndpoint(
-	route: { module: FormatModule; label: string },
+	route: FormatRoute,
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
@@ -1040,7 +1075,7 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
 
-	const model = await resolveGatewayModel(bootOpts.resolveModel, modelId, caller);
+	const model = await resolveGatewayModel(bootOpts.resolveModel, modelId, caller, { api: route.api });
 	if (controller.signal.aborted) return clientClosedResponse(route);
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
@@ -1060,6 +1095,7 @@ async function handleFormatEndpoint(
 	let parsed: ParsedFormatRequest;
 	try {
 		parsed = route.module.parseRequest(body, req.headers);
+		if (route.module === openaiChat) openaiChat.adoptReplayedGeminiSignatures(parsed.context, model);
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const message = error instanceof Error ? error.message : String(error);
@@ -1152,7 +1188,7 @@ async function handleFormatEndpoint(
 		throw error;
 	}
 	if (!start.ok) return route.module.formatError(start.failure.status, start.failure.type, start.failure.message);
-	const { streamOpts, lease, account } = start;
+	const { streamOpts, lease, account, resolvedKey: apiKey } = start;
 	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
 		bootOpts,
 		model,
@@ -1169,6 +1205,7 @@ async function handleFormatEndpoint(
 		resolvedModel: model.id,
 		stream: parsed.stream,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	if (!parsed.stream) {
@@ -1224,9 +1261,15 @@ async function handleFormatEndpoint(
 		}
 	}
 
-	// A streamed turn outlives this function, so the lease travels with the
-	// event stream and is released when the turn settles. Until that handoff
-	// happens, the `finally` below owns it.
+	// A streamed turn outlives this function, so the lease, and a scoped
+	// client's hold on its account restriction, travel with the event stream and
+	// are released when the turn settles. Until that handoff happens, the
+	// `finally` below owns them.
+	const clientHold = bootOpts.client?.retain();
+	const settle = (): void => {
+		lease.release();
+		clientHold?.();
+	};
 	let streamOwnsLease = false;
 	try {
 		let events: AssistantMessageEventStream;
@@ -1261,7 +1304,7 @@ async function handleFormatEndpoint(
 				});
 			})
 			.catch(() => {})
-			.finally(() => lease.release());
+			.finally(settle);
 		streamOwnsLease = true;
 
 		const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
@@ -1286,7 +1329,7 @@ async function handleFormatEndpoint(
 			},
 		});
 	} finally {
-		if (!streamOwnsLease) lease.release();
+		if (!streamOwnsLease) settle();
 	}
 }
 
@@ -1314,7 +1357,7 @@ async function handlePiNative(
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
-	const aborted = (): Response => piNative.formatError(499, "request_aborted", "client closed request");
+	const aborted = (): Response => noStoreErrorResponse(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
 	let body: unknown;
@@ -1322,7 +1365,7 @@ async function handlePiNative(
 		body = await req.json();
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
-		return piNative.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
+		return noStoreErrorResponse(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
 
@@ -1332,14 +1375,16 @@ async function handlePiNative(
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		const message = error instanceof Error ? error.message : String(error);
-		return piNative.formatError(400, "invalid_request_error", message);
+		return noStoreErrorResponse(400, "invalid_request_error", message);
 	}
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
 	if (controller.signal.aborted) return aborted();
 	if (!model) {
-		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+		return noStoreErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
+	const kindRejection = chatRouteRejection(model);
+	if (kindRejection) return noStoreErrorResponse(400, "invalid_request_error", kindRejection);
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -1414,7 +1459,7 @@ async function handlePiNative(
 		throw error;
 	}
 	if (!start.ok) return piNative.formatError(start.failure.status, start.failure.type, start.failure.message);
-	const { streamOpts, lease, account } = start;
+	const { streamOpts, lease, account, resolvedKey: apiKey } = start;
 	streamOpts.onDroppedAttempt = gatewayDroppedAttemptRecorder(
 		bootOpts,
 		model,
@@ -1431,6 +1476,7 @@ async function handlePiNative(
 		resolvedModel: model.id,
 		stream: parsed.stream,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	if (!parsed.stream) {
@@ -1461,10 +1507,10 @@ async function handlePiNative(
 					message.credentialId,
 				);
 				if (message.stopReason === "aborted") {
-					return piNative.formatError(499, "request_aborted", errorMessage);
+					return noStoreErrorResponse(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-				return piNative.formatError(classified.status, classified.type, errorMessage);
+				return noStoreErrorResponse(classified.status, classified.type, errorMessage);
 			}
 			return json(
 				200,
@@ -1478,7 +1524,7 @@ async function handlePiNative(
 				gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
 				classified.status,
 			);
-			return piNative.formatError(classified.status, classified.type, classified.message);
+			return noStoreErrorResponse(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
 			// client gone — is done with the provider state here.
@@ -1486,9 +1532,15 @@ async function handlePiNative(
 		}
 	}
 
-	// A streamed turn outlives this function, so the lease travels with the
-	// event stream and is released when the turn settles. Until that handoff
-	// happens, the `finally` below owns it.
+	// A streamed turn outlives this function, so the lease, and a scoped
+	// client's hold on its account restriction, travel with the event stream and
+	// are released when the turn settles. Until that handoff happens, the
+	// `finally` below owns them.
+	const clientHold = bootOpts.client?.retain();
+	const settle = (): void => {
+		lease.release();
+		clientHold?.();
+	};
 	let streamOwnsLease = false;
 	try {
 		let events: AssistantMessageEventStream;
@@ -1501,7 +1553,7 @@ async function handlePiNative(
 				gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
 				classified.status,
 			);
-			return piNative.formatError(classified.status, classified.type, classified.message);
+			return noStoreErrorResponse(classified.status, classified.type, classified.message);
 		}
 		if (controller.signal.aborted) return aborted();
 		void events
@@ -1523,7 +1575,7 @@ async function handlePiNative(
 				});
 			})
 			.catch(() => {})
-			.finally(() => lease.release());
+			.finally(settle);
 		streamOwnsLease = true;
 
 		const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
@@ -1545,7 +1597,7 @@ async function handlePiNative(
 			},
 		});
 	} finally {
-		if (!streamOwnsLease) lease.release();
+		if (!streamOwnsLease) settle();
 	}
 }
 
@@ -1670,38 +1722,53 @@ function errorName(error: unknown): string {
 	return error instanceof Error ? error.name : typeof error;
 }
 
-/** The gateway's `/v1/*` routes, for a transport that has already admitted the caller. */
+/** The gateway's `/v1/*` routes, for a transport that has admitted the caller. */
 export interface AuthGatewayRouter {
-	/**
-	 * Answers one request; `peer` names the caller in logs and `caller` selects
-	 * the credential pool. Never rejects: a crashed route answers 500.
-	 */
-	route(req: Request, peer: string, caller: AgentCaller): Promise<Response>;
-	/**
-	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
-	 * workflows), whose sockets and timers would otherwise keep the process alive.
-	 */
+	/** Route one admitted request with its agent and optional scoped client. */
+	route(req: Request, peer: string, caller: AgentCaller, client?: AuthGatewayClientScope): Promise<Response>;
+	/** Close retained provider session state owned by the router. */
 	close(): void;
 }
 
+/** Why scoped clients cannot read gateway-wide account data. */
+const GATEWAY_WIDE_ROUTE = "client tokens cannot read gateway-wide usage or credential health";
+
+/** Narrow model resolution and listings to one admitted client. */
+function scopeRouteOptions(opts: AuthGatewayRouteOptions, client: AuthGatewayClientScope): AuthGatewayRouteOptions {
+	if (!client.limitsModels) return { ...opts, client };
+	const { resolveModel, listModels, listAliases } = opts;
+	return {
+		...opts,
+		client,
+		resolveModel: async (id, options) => {
+			const accepts = (model: Model<Api>): boolean => client.allows(model) && (options?.accepts?.(model) ?? true);
+			const model = await resolveModel(id, { ...options, accepts });
+			return model && accepts(model) ? model : undefined;
+		},
+		listModels: listModels && (() => [...listModels()].filter(model => client.allows(model))),
+		listAliases: listAliases && (() => [...listAliases()].filter(alias => client.allows(alias.model))),
+	};
+}
 /**
- * The gateway's routes over `opts`, owning their per-session provider state:
- * two routers in one process never share (or tear down) each other's.
+ * The gateway's routes over host options, owning their per-session provider state.
  */
-export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
-	assertApiKeyLimitModelClasses(opts.apiKeyLimitModelClasses);
+export function createAuthGatewayRouter(hostOpts: AuthGatewayRouteOptions): AuthGatewayRouter {
+	assertApiKeyLimitModelClasses(hostOpts.apiKeyLimitModelClasses);
 	const sessionStates = new AuthGatewaySessionStateStore();
-	const route = async (req: Request, peer: string, caller: AgentCaller): Promise<Response> => {
+	const route = async (
+		req: Request,
+		peer: string,
+		caller: AgentCaller,
+		client?: AuthGatewayClientScope,
+	): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
 		const body = async (): Promise<Response> => {
-			// The model catalog touches no credentials, so it skips the pool lookup.
-			if (req.method === "GET" && pathname === "/v1/models") {
-				return handleModelsList(opts);
-			}
+			const opts = client ? scopeRouteOptions(hostOpts, client) : hostOpts;
+			if (req.method === "GET" && pathname === "/v1/models") return handleModelsList(opts);
 			let scoped = opts;
-			if (opts.resolveStorage) {
+			if (hostOpts.resolveStorage) {
 				try {
-					scoped = { ...opts, storage: await opts.resolveStorage(caller) };
+					scoped = { ...opts, storage: await hostOpts.resolveStorage(caller) };
 				} catch (error) {
 					logger.warn("auth-gateway credential pool unavailable", {
 						path: loggablePath(pathname),
@@ -1712,87 +1779,55 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 				}
 				if (req.signal.aborted) return new Response(null, { status: 499 });
 			}
-			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
-			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
-			// same client struct.
 			if (req.method === "GET" && pathname === "/v1/usage") {
-				return await handleUsage(scoped, req.signal);
+				if (client) return json(403, { error: GATEWAY_WIDE_ROUTE });
+				return handleUsage(scoped, req.signal);
 			}
-
-			// Per-credential auth probe — diagnoses which row in a multi-account
-			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
-			// credentials, so we need a separate endpoint that captures errors.
 			if (req.method === "GET" && pathname === "/v1/credentials/check") {
-				return await handleCredentialsCheck(scoped, req.signal);
+				if (client) return json(403, { error: GATEWAY_WIDE_ROUTE });
+				return handleCredentialsCheck(scoped, req.signal);
 			}
-
-			// Provider-format dispatch.
 			const formatRoute = FORMAT_ROUTES[pathname];
 			if (formatRoute && req.method === "POST") {
-				return await handleFormatEndpoint(formatRoute, scoped, req, peer, sessionStates, caller);
+				return handleFormatEndpoint(formatRoute, scoped, req, peer, sessionStates, caller);
 			}
-
-			// Pi-native fast path. Same auth + provider plumbing as the
-			// foreign-wire routes, just without the wire-format translation.
 			if (req.method === "POST" && pathname === "/v1/pi/stream") {
-				return await handlePiNative(scoped, req, peer, sessionStates, caller);
+				return handlePiNative(scoped, req, peer, sessionStates, caller);
 			}
-
-			// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
-			// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
-			// reach the same handler through their Decisions path.
 			if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
-				return await handleSystemOne(scoped, req, peer, caller);
+				return handleSystemOne(scoped, req, peer, caller);
 			}
-
-			// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
-			// (JSON), and OpenAI multipart / OpenRouter JSON edits.
 			if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
-				return await handleImageGenerations(scoped, req, peer, caller);
+				return handleImageGenerations(scoped, req, peer, caller);
 			}
 			if (req.method === "POST" && pathname === "/v1/images/edits") {
-				return await handleImageEdits(scoped, req, peer, caller);
+				return handleImageEdits(scoped, req, peer, caller);
 			}
-
-			// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
 			if (req.method === "POST" && pathname === "/v1/audio/speech") {
-				return await handleSpeech(scoped, req, peer, caller);
+				return handleSpeech(scoped, req, peer, caller);
 			}
-
-			// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
 			if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
-				return await handleTranscriptions(scoped, req, peer, caller);
+				return handleTranscriptions(scoped, req, peer, caller);
 			}
-
-			// Embeddings, OpenAI wire (OpenRouter is compatible).
 			if (req.method === "POST" && pathname === "/v1/embeddings") {
-				return await handleEmbeddings(scoped, req, peer, caller);
+				return handleEmbeddings(scoped, req, peer, caller);
 			}
-
-			// Rerank, OpenRouter wire.
 			if (req.method === "POST" && pathname === "/v1/rerank") {
-				return await handleRerank(scoped, req, peer, caller);
+				return handleRerank(scoped, req, peer, caller);
 			}
-
-			// Video generation, OpenRouter's asynchronous wire: submit, then poll
-			// and download by the gateway-issued job id (stateless — the id
-			// encodes provider, model, and upstream job).
 			if (req.method === "POST" && pathname === "/v1/videos") {
-				return await handleVideoSubmit(scoped, req, peer, caller);
+				return handleVideoSubmit(scoped, req, peer, caller);
 			}
 			const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
 			if (videoJob) {
 				const gatewayId = decodeURIComponent(videoJob[1]);
 				const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
-				return await handler(scoped, req, peer, gatewayId, caller);
+				return handler(scoped, req, peer, gatewayId, caller);
 			}
-
-			// Route-table miss: no format module to defer to, so we emit a
-			// plain JSON 404 rather than guessing at a protocol-specific envelope.
 			return json(404, { error: `No route: ${req.method} ${pathname}` });
 		};
 		try {
-			return opts.routeScope ? await opts.routeScope(req, body) : await body();
+			return hostOpts.routeScope ? await hostOpts.routeScope(req, body) : await body();
 		} catch (error) {
 			if (error instanceof ModelResolverUnavailableError) {
 				logger.warn("auth-gateway model resolver unavailable", {
@@ -1829,9 +1864,21 @@ async function enrollRoute(
 
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
-	const authorize = opts.authorize;
+	const tokens = new Set<string>(opts.bearerTokens ?? []);
+	const authorize = opts.authorize ?? bearerTokenAuthorizer(tokens);
+	if (
+		opts.authorize === undefined &&
+		tokens.size === 0 &&
+		opts.clients === undefined &&
+		!isLoopbackHost(bind.hostname)
+	) {
+		throw new Error("auth-gateway: empty bearer token set is allowed only on a loopback bind");
+	}
+	const clients = new AuthGatewayClientTable(opts.storage.sessions, tokens);
+	if (opts.clients) clients.set(opts.clients);
 	const version = opts.version;
 	const router = createAuthGatewayRouter(opts);
+	let requireBearer = opts.clients !== undefined;
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -1840,20 +1887,18 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			const url = new URL(req.url);
 			const pathname = url.pathname;
 			const socketPeer = server.requestIP(req)?.address ?? "unknown";
-			// CORS preflight is always answered without auth — browsers send
-			// preflights pre-authentication and a 401 here breaks the actual
-			// request before the bearer is ever attached.
-			if (req.method === "OPTIONS") {
-				return new Response(null, { status: 204, headers: corsHeaders(req) });
-			}
+			if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(req) });
 			if (req.method === "GET" && pathname === "/healthz") {
 				return withCors(json(200, { ok: true, version }), req);
 			}
+
+			const bearer = presentedBearer(req);
 			let admitted: unknown;
+			let client: AuthGatewayClientScope | undefined;
 			try {
-				admitted = await authorize(req);
+				client = bearer === undefined ? undefined : clients.authenticate(bearer);
+				admitted = client ? SHARED_TOKEN_CALLER : await authorize(req);
 			} catch (error) {
-				// The error text may echo the presented credential, so only its class is logged.
 				logger.warn("auth-gateway authorizer failed", {
 					method: req.method,
 					path: loggablePath(pathname),
@@ -1862,12 +1907,10 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				});
 				return withCors(json(503, { error: "authorization unavailable" }), req);
 			}
-			const bearer = admitted === UNAUTHENTICATED_CALLER ? undefined : presentedBearer(req);
-			// Only an `Authorization: Bearer` admission can be confined, so any other is refused.
-			// Each class reaches only its own surface: enroll callers `/internal/enroll/*`, agents the rest.
 			if (
 				!isCallerIdentity(admitted) ||
 				(bearer === undefined && admitted !== UNAUTHENTICATED_CALLER) ||
+				(requireBearer && admitted === UNAUTHENTICATED_CALLER) ||
 				(admitted.kind === "enroll") !== pathname.startsWith(ENROLL_PATH_PREFIX)
 			) {
 				logger.info("auth-gateway request unauthorized", {
@@ -1877,17 +1920,31 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				});
 				return withCors(json(401, { error: "unauthorized" }), req);
 			}
-			if (bearer !== undefined && hasMisplacedBearer(req, url, bearer)) {
+			let misplacedBearer = bearer !== undefined && hasMisplacedBearer(req, url, bearer);
+			if (!misplacedBearer) {
+				for (const token of tokens) {
+					if (token !== bearer && hasMisplacedBearer(req, url, token)) {
+						misplacedBearer = true;
+						break;
+					}
+				}
+			}
+			if (misplacedBearer) {
 				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
 			}
 			if (req.signal.aborted) return new Response(null, { status: 499 });
-			// Server-to-server only: enroll responses carry live credentials, so no browser CORS grant.
-			if (admitted.kind === "enroll") return await enrollRoute(req, pathname, opts.fetch);
+			if (admitted.kind === "enroll") return enrollRoute(req, pathname, opts.fetch);
 			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
+			if (client) {
+				const release = client.retain();
+				try {
+					return withCors(await router.route(req, peer, admitted, client), req);
+				} finally {
+					release();
+				}
+			}
 			return withCors(await router.route(req, peer, admitted), req);
 		},
-		// Max-out Bun's idle timeout. Long thinking-budget calls can sit idle
-		// for minutes before the first token arrives; the default kills them.
 		idleTimeout: 255,
 	});
 
@@ -1915,9 +1972,12 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 					clearTimeout(deadline);
 				}
 			}
-			// Retained provider sessions own sockets and timers; close them after
-			// requests complete or the listener force-stops.
 			router.close();
+			clients.close();
+		},
+		setClients: list => {
+			clients.set(list);
+			requireBearer = true;
 		},
 	};
 }

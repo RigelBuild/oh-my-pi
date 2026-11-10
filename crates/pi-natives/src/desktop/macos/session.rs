@@ -22,7 +22,7 @@ const MAX_ONLINE_DISPLAYS: u32 = 32;
 pub(in super::super) fn screen_state(selector: &DisplaySelector) -> ScreenState {
 	ScreenState {
 		locked:         screen_locked(),
-		display_asleep: displays_asleep(selector, &online_displays(), |id| CGDisplayIsAsleep(id)),
+		display_asleep: displays_asleep(selector, &online_displays(), CGDisplayIsAsleep),
 	}
 }
 
@@ -68,23 +68,11 @@ fn screen_locked() -> bool {
 		.is_some_and(CFBoolean::value)
 }
 
-/// Prevent-idle-display-sleep assertion, held while `Some`.
-#[derive(Default)]
-pub(super) struct DisplayAwake(Option<AssertionInner>);
-
-impl DisplayAwake {
-	pub(super) fn set(&mut self, awake: bool) {
-		match (awake, self.0.is_some()) {
-			(true, false) => {
-				// A refused assertion only means the display may sleep as it
-				// would without the agent; screen-state reporting covers that.
-				self.0 =
-					AssertionInner::start(AssertionKind::PreventDisplaySleep, DISPLAY_AWAKE_REASON).ok();
-			},
-			(false, true) => self.0 = None,
-			_ => {},
-		}
-	}
+/// Starts the prevent-idle-display-sleep assertion, held until the returned
+/// value drops. A refused assertion only means the display may sleep as it
+/// would without the agent; screen-state reporting covers that.
+pub(super) fn hold_display_awake() -> Option<AssertionInner> {
+	AssertionInner::start(AssertionKind::PreventDisplaySleep, DISPLAY_AWAKE_REASON).ok()
 }
 
 #[cfg(test)]

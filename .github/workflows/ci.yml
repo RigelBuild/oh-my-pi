@@ -10,6 +10,8 @@ on:
          - "packages/**"
          - "crates/**"
          - "scripts/**"
+         - ".omp/tools/**"
+         - ".omp/tests/**"
          - "bazel/**"
          - "MODULE.bazel"
          - "MODULE.bazel.lock"
@@ -22,7 +24,6 @@ on:
          - "deny.toml"
          - "about.toml"
          - "LICENSE"
-         - "THIRD-PARTY-NOTICES.txt"
          - "rust-toolchain.toml"
          - "rustfmt.toml"
          # A root dependency change (lockfile/catalog/patches) affects every
@@ -74,6 +75,9 @@ jobs:
    # resolves the tag once so downstream jobs switch on `is-release`.
    release_metadata:
       name: Resolve release metadata
+      # Hosted, not vmon: this ~20 s git-tag probe gates the whole release
+      # chain and needs no toolchain, so it should not wait on a vmon sandbox
+      # (team capacity, snapshot fork) on the release critical path.
       runs-on: ubuntu-22.04
       outputs:
          is-release: ${{ steps.detect.outputs.is-release }}
@@ -140,11 +144,21 @@ jobs:
                 *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
               esac
               name="cargo-deny-$ver-$arch-unknown-linux-musl"
-              curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/$ver/$name.tar.gz"
-              echo "$sha  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
-              tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
-              mkdir -p "$HOME/.cargo/bin"
-              install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+              # vmon's omp-ci template keeps the binary a previous run of this
+              # step installed. GitHub release assets go through outages;
+              # crates.io keeps the job independent of them at the cost of a
+              # source build.
+              if [ "$(cargo-deny --version 2>/dev/null)" = "cargo-deny $ver" ]; then
+                echo "cargo-deny $ver already installed"
+              elif curl -fsSL --retry 5 --retry-max-time 60 -o "$RUNNER_TEMP/$name.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/$ver/$name.tar.gz"; then
+                echo "$sha  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+                tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+                mkdir -p "$HOME/.cargo/bin"
+                install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+              else
+                echo "::warning::cargo-deny release download failed; building $ver from crates.io"
+                cargo install --locked --force cargo-deny --version "$ver"
+              fi
               # `--offline` needs every workspace crate already in the registry
               # cache. Hosted runners start with no prior cargo work, so nothing
               # populates the index for our own graph. Fetch first.
@@ -170,6 +184,8 @@ jobs:
       steps:
          - uses: actions/checkout@v4
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
          - name: Check crate_universe entry
            run: bun scripts/gen-bazel-lock.ts --check
          - name: Refresh MODULE.bazel.lock
@@ -207,18 +223,17 @@ jobs:
               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test //crates/...
          # Clippy scope mirrors `cargo clippy --workspace` (libraries only, no
          # test targets) plus the strict/default split: crates with
-         # `[lints] workspace = true` get the workspace policy, except
-         # brush-core (a vendored fork excluded from the Cargo task too).
+         # `[lints] workspace = true` get the workspace policy.
          # pi-builtins allows every clippy group in its own manifest (ported
-         # brush/uutils/jaq code) but is still held to zero rustc warnings;
+         # uutils/jaq code) but is still held to zero rustc warnings;
          # Cargo honors that via `[lints]`, Bazel via the clippy-ported config.
          - name: Clippy (workspace lint policy on opted-in crates)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-strict --
          - name: Clippy (default lints elsewhere)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/... - //crates/vendor/brush-core/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy --
          - name: Clippy (manifest allows on ported pi-builtins)
            run: |
@@ -406,11 +421,24 @@ jobs:
          # The three steps below run only on rigel-release (never exercised by PR or
          # branch runs) and are pure optimization for later PRs: a failure
          # must never fail native_addons and with it every test job.
+         # PR runs restore this entry on GitHub-hosted runners, which read
+         # GitHub's cache; on vmon runners actions/cache goes to the node's
+         # local cache. The vmon runner hands GitHub's results URL to node
+         # actions (not run steps) as ACTIONS_RESULTS_ORL, so a script action
+         # looks it up and the probe and save below talk to GitHub.
+         - name: Locate GitHub's cache service
+           id: gh-results
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+           with:
+              script: core.setOutput("url", process.env.ACTIONS_RESULTS_ORL || process.env.ACTIONS_RESULTS_URL)
          - name: Probe native addon cache entry
            id: natives-cache-probe
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release'
            continue-on-error: true
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           env:
+              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
@@ -419,6 +447,8 @@ jobs:
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/rigel-release' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           env:
+              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
@@ -558,7 +588,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent native/unit bucket
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -577,7 +606,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test workspace packages and repo scripts (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -586,7 +614,7 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/release-tag.test.ts scripts/ci-release-gates.test.ts scripts/ci-release-publish.test.ts scripts/ci-release-notes.test.ts
+              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts scripts/release-tag.test.ts scripts/ci-release-gates.test.ts scripts/ci-release-publish.test.ts scripts/ci-release-notes.test.ts scripts/ci-build-upload.test.ts scripts/run-rs-task.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
@@ -600,7 +628,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent singleton/global-state bucket
            # Keep global Settings/env/fake-timer tests serial; native addon
            # artifacts are still available like every other coding-agent bucket.
@@ -618,7 +645,8 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
+         - name: Install project-local TUI debug tool dependencies
+           run: bun install --cwd .omp/tools --frozen-lockfile
          - name: Test native/TUI/browser-ish packages (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
@@ -636,7 +664,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent UI/TUI bucket
            env:
               OMP_TEST_CONCURRENCY: "2"
@@ -654,7 +681,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Test coding-agent runtime bucket
            # Runtime/session tests import native-backed barrels too; keep this
            # separate for concurrency, not as a native-free guardrail.
@@ -674,7 +700,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: CLI smoke test
            run: bun run ci:test:smoke
 
@@ -689,7 +714,6 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-              stash: ${{ needs.native_addons.outputs.stash }}
          - name: Install method smoke tests
            env:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
@@ -818,6 +842,8 @@ jobs:
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
          - name: Restore bun store
            id: bun-cache
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -853,6 +879,15 @@ jobs:
            with:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
+         # All targets pin the committed viewer manifest. Publish the exact
+         # generated bytes from one binary build rather than rebuilding them.
+         - name: Upload shared export viewer artifact
+           if: matrix.target_id == 'linux-x64'
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: omp-export-viewer
+              path: packages/coding-agent/export-assets/*.js
+              if-no-files-found: error
          # rigel-release-only save, after the build so it is off the leg's critical
          # path: caches saved on a tag or branch are readable only by that ref
          # yet count against the shared 10 GB repo cache quota.
@@ -984,6 +1019,8 @@ jobs:
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
          - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
            with:
               node-version: "24"
@@ -1068,6 +1105,8 @@ jobs:
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
          - name: Generate release notes from CHANGELOGs
            env:
               # `gh release list` (used to find the latest published GitHub
@@ -1095,8 +1134,7 @@ jobs:
               bun run ci:release:checksums SHA256SUMS.txt \
                 packages/coding-agent/binaries/omp-* \
                 packages/browser-relay/dist/omp-browser-relay-extension.zip \
-                LICENSE \
-                THIRD-PARTY-NOTICES.txt
+                LICENSE
          - name: Create GitHub Release
            uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
            with:
@@ -1106,7 +1144,6 @@ jobs:
                  packages/coding-agent/binaries/omp-*
                  packages/browser-relay/dist/omp-browser-relay-extension.zip
                  LICENSE
-                 THIRD-PARTY-NOTICES.txt
                  SHA256SUMS.txt
               body_path: release-notes.md
               generate_release_notes: true
@@ -1114,8 +1151,9 @@ jobs:
    # Publishes the release binaries to build.stencil.so, which serves them
    # (with binary patches between releases) to `omp update`, the install
    # scripts' binary mode, and the Homebrew formula. Canary tags upload to the
-   # canary channel (derived script-side). Not gated on skip_npm: binary
-   # clients never read npm.
+   # canary channel (derived script-side). Also publishes the integrity-pinned
+   # shared HTML export viewer before npm consumers can reference its URL.
+   # Not gated on skip_npm: binary clients never read npm.
    release_build:
       name: Publish to build.stencil.so
       # build.stencil.so trusts only upstream's OIDC subject and has no rigel channel; those skip it, and so release_brew.
@@ -1135,12 +1173,19 @@ jobs:
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
          - name: Download release binaries
            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
            with:
               pattern: omp-binary-*
               path: packages/coding-agent/binaries
               merge-multiple: true
+         - name: Download shared export viewer
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: omp-export-viewer
+              path: packages/coding-agent/export-assets
          # Dependency-free script (bun APIs + curl), so no `bun install`.
          - name: Publish to build.stencil.so
            run: bun scripts/ci-build-upload.ts "${{ needs.release_metadata.outputs.release-tag }}" packages/coding-agent/binaries/omp-*
@@ -1173,6 +1218,8 @@ jobs:
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
          - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
            with:
               node-version: "24"
@@ -1230,6 +1277,8 @@ jobs:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
            if: env.HAS_TAP_KEY == 'true'
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
            if: env.HAS_TAP_KEY == 'true'
          - name: Check out the Homebrew tap
            if: env.HAS_TAP_KEY == 'true'

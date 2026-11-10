@@ -6,8 +6,9 @@
  */
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import * as os from "node:os";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getInstallId } from "@oh-my-pi/pi-utils";
-import type { Api, Model } from "../types";
+import type { Api, Model, ServiceTier } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import type { ClientUsageIdentity } from "../usage";
 import type { AgentCaller, AuthGatewayAuthorizer, CallerIdentity, EnrollCaller } from "./types";
@@ -21,6 +22,32 @@ export function json(status: number, body: unknown, headers?: Record<string, str
 	return new Response(JSON.stringify(body) ?? "null", {
 		status,
 		headers: headers ? { ...JSON_HEADERS, ...headers } : JSON_HEADERS,
+	});
+}
+
+const NO_STORE_JSON_HEADERS = {
+	"Content-Type": "application/json; charset=utf-8",
+	"Cache-Control": "no-store",
+} as const;
+
+/** Error body of the media routes (embeddings, images, rerank, speech, transcriptions, video): `{ error: { code, type, message } }`. */
+export function codedErrorResponse(status: number, type: string, message: string): Response {
+	return new Response(JSON.stringify({ error: { code: status, type, message } }), {
+		status,
+		headers: NO_STORE_JSON_HEADERS,
+	});
+}
+
+/** Error body of the pi-native and SystemOne routes: `{ error: { type, message } }`. */
+export function noStoreErrorResponse(status: number, type: string, message: string): Response {
+	return new Response(JSON.stringify({ error: { type, message } }), { status, headers: NO_STORE_JSON_HEADERS });
+}
+
+/** OpenAI wire error body: `{ error: { message, type } }`. */
+export function openAIErrorResponse(status: number, type: string, message: string): Response {
+	return new Response(JSON.stringify({ error: { message, type } }), {
+		status,
+		headers: { "Content-Type": "application/json" },
 	});
 }
 
@@ -116,7 +143,12 @@ export function presentedBearer(req: Request): string | undefined {
 		.get("authorization")
 		?.match(/^Bearer\s+(.+)$/i)?.[1]
 		.trim();
-	return token ? token : undefined;
+	return token || undefined;
+}
+
+/** The token spelling used by upstream callers of the standalone bearer helper. */
+export function readBearerToken(req: Request): string | undefined {
+	return presentedBearer(req);
 }
 
 /**
@@ -165,7 +197,6 @@ export function callerSessionId(caller: AgentCaller, sessionId: string): string 
  * request to `authorize`. The compare is timing-safe, including across lengths.
  */
 export function withEnrollToken(enrollToken: string, authorize: AuthGatewayAuthorizer): AuthGatewayAuthorizer {
-	// A presented bearer is trimmed, so a padded token could never match: refuse it here, not as a silent 401.
 	if (!enrollToken || enrollToken.trim() !== enrollToken) {
 		throw new Error("enroll token must be non-empty with no surrounding whitespace");
 	}
@@ -188,13 +219,25 @@ export function bearerTokenAuthorizer(tokens: Iterable<string>): AuthGatewayAuth
 		const bearer = presentedBearer(req);
 		if (bearer === undefined) return null;
 		const presented = TOKEN_ENCODER.encode(bearer);
-		// Compare against every token so timing doesn't reveal which one matched.
 		let ok = false;
 		for (const expected of allowed) {
 			if (timingSafeEqual(presented, expected)) ok = true;
 		}
 		return ok ? SHARED_TOKEN_CALLER : null;
 	};
+}
+
+/** Legacy synchronous check for callers of the static bearer helper. */
+export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
+	if (tokens.size === 0) return true;
+	const token = readBearerToken(req);
+	if (token === undefined) return false;
+	const presented = TOKEN_ENCODER.encode(token);
+	let ok = false;
+	for (const allowed of tokens) {
+		if (timingSafeEqual(presented, TOKEN_ENCODER.encode(allowed))) ok = true;
+	}
+	return ok;
 }
 
 /**
@@ -318,6 +361,23 @@ export function resolvePromptCacheKey(body: unknown, headers?: Headers): string 
 		if (v && v.length > 0) return v;
 	}
 	return undefined;
+}
+
+/** OpenAI-wire `reasoning_effort` / `reasoning.effort` values the gateway forwards. */
+export function isOpenAIReasoningEffort(value: unknown): value is Effort {
+	return (
+		value === "minimal" ||
+		value === "low" ||
+		value === "medium" ||
+		value === "high" ||
+		value === "xhigh" ||
+		value === "max"
+	);
+}
+
+/** OpenAI-wire `service_tier` values the gateway forwards. */
+export function isOpenAIServiceTier(value: unknown): value is ServiceTier {
+	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
 }
 
 const CORS_HEADERS: Record<string, string> = {
