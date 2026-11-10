@@ -463,12 +463,19 @@ mod tests {
 	use std::{
 		fs,
 		path::{Path, PathBuf},
-		sync::atomic::{AtomicU64, Ordering},
+		sync::{
+			Mutex, PoisonError,
+			atomic::{AtomicU64, Ordering},
+		},
 		time::{SystemTime, UNIX_EPOCH},
 	};
 
 	use super::*;
 
+	/// A concurrent test's fork can inherit a stub's write fd and make exec fail
+	/// with ETXTBSY; serialize the tests that write and run stubs.
+	#[cfg(unix)]
+	static STUB_LOCK: Mutex<()> = Mutex::new(());
 	/// The non-git `start` path mirrors file and directory mtimes, including
 	/// on readonly files, so the mtime-skipping diff stays fast.
 	#[cfg(unix)]
@@ -567,14 +574,23 @@ mod tests {
 		use std::os::unix::fs::PermissionsExt as _;
 
 		let path = root.path().join("git");
-		fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write stub git");
-		fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("make stub executable");
+		let temp = root.path().join("git.tmp");
+		let mut file = fs::File::create(&temp).expect("create stub git");
+		use std::io::Write as _;
+		file
+			.write_all(format!("#!/bin/sh\n{script}\n").as_bytes())
+			.expect("write stub git");
+		file.sync_all().expect("sync stub git");
+		drop(file);
+		fs::set_permissions(&temp, fs::Permissions::from_mode(0o755)).expect("make stub executable");
+		fs::rename(&temp, &path).expect("publish stub git");
 		path
 	}
 
 	#[cfg(unix)]
 	#[test]
 	fn run_program_drains_stderr_while_writing_stdin() {
+		let _lock = STUB_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 		let root = TempDirGuard::new();
 		let git = stub(
 			&root,
@@ -597,6 +613,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn run_program_kills_a_child_that_never_exits() {
+		let _lock = STUB_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 		let root = TempDirGuard::new();
 		let git = stub(&root, "exec sleep 30");
 		let limits = Limits { exit: Duration::from_millis(200), drain: Duration::from_secs(5) };
@@ -613,6 +630,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn run_program_returns_when_pipes_outlive_the_child() {
+		let _lock = STUB_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 		let root = TempDirGuard::new();
 		let pid_file = root.path().join("holder.pid");
 		let git = stub(
