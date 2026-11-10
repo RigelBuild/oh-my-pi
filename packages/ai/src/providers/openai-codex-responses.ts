@@ -66,7 +66,6 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
-	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
@@ -2293,10 +2292,7 @@ class CodexStreamProcessor {
 
 		if (eventType === "response.function_call_arguments.delta") {
 			const interruption = this.runtime.handleToolCallArgumentsDelta(rawEvent, stream, output);
-			if (interruption) {
-				this.runtime.websocketState?.connection?.close("degenerate-tool-call");
-				throw new CodexWhitespaceToolCallLoopError(interruption.message);
-			}
+			this.#interruptWhitespaceToolCallLoop(interruption);
 			return firstTokenTime;
 		}
 
@@ -2308,10 +2304,7 @@ class CodexStreamProcessor {
 
 		if (eventType === "response.custom_tool_call_input.delta") {
 			const interruption = this.runtime.handleCustomToolCallInputDelta(rawEvent, stream, output);
-			if (interruption) {
-				this.runtime.websocketState?.connection?.close("degenerate-tool-call");
-				throw new CodexWhitespaceToolCallLoopError(interruption.message);
-			}
+			this.#interruptWhitespaceToolCallLoop(interruption);
 			return firstTokenTime;
 		}
 
@@ -2359,6 +2352,13 @@ class CodexStreamProcessor {
 		}
 
 		return firstTokenTime;
+	}
+
+	#interruptWhitespaceToolCallLoop(interruption: CodexWhitespaceToolCallArgumentsDeltaInterruption | undefined): void {
+		if (interruption) {
+			this.runtime.websocketState?.connection?.close("degenerate-tool-call");
+			throw new CodexWhitespaceToolCallLoopError(interruption.message);
+		}
 	}
 
 	/** The server-side turn lane this request runs on: what the endpoint sees, not the local model entry. */
@@ -4091,20 +4091,19 @@ async function openCodexSseEventStream(
 	// the retry loop's base signal remains reserved for caller cancellation, so
 	// an internal timeout stays retryable while an explicit abort fails fast.
 	let clearPreResponseTimeout: (() => void) | undefined;
+	let resumePreResponseTimeout: (() => void) | undefined;
 	const fetchAttempt: FetchImpl = async (input, init) => {
 		let response: Response | undefined;
 		try {
 			response = await (fetchOverride ?? fetch)(input, init);
-			if (response.ok) {
-				clearPreResponseTimeout?.();
-				clearPreResponseTimeout = undefined;
-			}
+			clearPreResponseTimeout?.();
 			try {
 				await onResponse?.(response);
 			} catch {
 				// Observation must not turn accepted headers into a retryable transport failure.
 				logger.warn("[codex] response observer failed");
 			}
+			if (!response.ok) resumePreResponseTimeout?.();
 			return response;
 		} finally {
 			// A successful streaming body is governed by the iterator-level idle
@@ -4140,9 +4139,26 @@ async function openCodexSseEventStream(
 				// A retried non-2xx attempt leaves its guard armed for the retry-status
 				// body read; disarm it before arming the next attempt's guard.
 				clearPreResponseTimeout?.();
-				const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
-				clearPreResponseTimeout = watchdog.clear;
-				return { signal: watchdog.signal };
+				const controller = new AbortController();
+				let timer: NodeJS.Timeout | undefined;
+				let remainingMs = firstEventTimeoutMs;
+				let deadline: number | undefined;
+				clearPreResponseTimeout = () => {
+					clearTimeout(timer);
+					if (deadline !== undefined) remainingMs = Math.max(0, deadline - performance.now());
+					deadline = undefined;
+				};
+				resumePreResponseTimeout = () => {
+					if (firstEventTimeoutMs === undefined || firstEventTimeoutMs <= 0 || remainingMs === undefined) return;
+					deadline = performance.now() + remainingMs;
+					timer = setTimeout(
+						() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
+						remainingMs,
+					);
+					timer.unref?.();
+				};
+				resumePreResponseTimeout();
+				return { signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal };
 			},
 			maxAttempts: resolveCodexSseMaxAttempts(codexSseMaxAttempts),
 			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),

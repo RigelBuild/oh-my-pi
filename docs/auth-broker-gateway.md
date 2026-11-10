@@ -209,11 +209,13 @@ omp auth-gateway check   [--strict] [--json]
 
 The gateway uses the existing logger and configured transports. Fixed selection, provider-response, quota-observation, retry-failure and recovery-failure events carry the gateway-generated `requestId`, admitted `pool` (`ownerUserId`, otherwise `agentAccountId`), route format, resolved provider/model and exact stored `credentialId` when known. Runtime or environment keys without row provenance omit `credentialId`. Retry failures bind to the bearer that failed, not a later session selection; delayed responses retain their own attempt's row.
 
+When distinct credential rows resolve to the same bearer, retry-failure events omit ambiguous row identity. Video terminal failures attribute the credential actually sent, including after rotation; ambiguous bearers omit row identity.
+
 Only projected primitive fields reach logger arguments and registered sinks. Provider errors, stacks, causes, request/response bodies, raw headers, tokens and arbitrary provider metadata are not logged on these paths. Usage and recovery callback failures use fixed messages without their thrown values.
 
 HTTP response observations include status and finite header-derived `retryAfterMs` (including explicit zero). Codex SSE observes successful and rejected HTTP attempts, with `primary`/`secondary` windows; Anthropic observes successful responses and SDK acquisition failures with headers, with `5h`, `7d` and `7d_oi` OAuth windows. Mapped Anthropic API-key models also expose `requests`, `input-tokens` and `output-tokens` observations. Window fields are numeric `durationMs`, epoch-millisecond `resetAtMs`, `usedPercent`, `limit` and `remaining`, only when observed and valid. Unknown windows remain absent. A 429, policy backoff or prepaid-credit depletion does not manufacture a reset or identify an exhausted window. Codex WebSocket handshakes do not provide this HTTP observation coverage.
 
-Response observation cannot retransmit an accepted Codex request or replace an Anthropic acquisition error used for recovery. Codex clears its successful-header deadline before calling an observer. Anthropic ends its acquisition deadline before awaiting a failure observer. Observer-failure warnings are fixed messages.
+Response observation cannot retransmit an accepted Codex request or replace an Anthropic acquisition error used for recovery. Codex pauses its header deadline during observation and resumes the remaining time for rejected response bodies. Anthropic ends its acquisition deadline before awaiting a failure observer. Observer-failure warnings are fixed messages.
 
 ### Client tokens
 
