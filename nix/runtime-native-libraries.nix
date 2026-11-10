@@ -1,8 +1,10 @@
 {
   addDriverRunpath,
+  alsa-lib ? null,
   cudaPackages_13 ? null,
   cudaSupport,
   lib,
+  libpulseaudio ? null,
   stdenv,
 }:
 let
@@ -34,6 +36,9 @@ let
     );
 in
 lib.optionals stdenv.hostPlatform.isLinux (
-  [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
+  [ stdenv.cc.cc.lib ]
+  ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
+  ++ lib.optional (libpulseaudio != null) libpulseaudio
+  ++ lib.optional (alsa-lib != null) alsa-lib
 )
 ++ cudaRuntimeLibraries

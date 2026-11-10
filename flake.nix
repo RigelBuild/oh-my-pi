@@ -98,19 +98,25 @@
           craneLib = (crane.mkLib pkgs).overrideToolchain localPkgs.rustToolchain;
         };
       packageBinFor =
+        pkgs:
+        args:
+        pkgs.callPackage ./nix/package-bin.nix args;
+      packageBinForSystem =
         system:
         let
           pkgs = pkgsFor system;
           localPkgs = localPackagesFor system;
         in
-        pkgs.callPackage ./nix/package-bin.nix { inherit (localPkgs) bun; };
+        packageBinFor pkgs { inherit (localPkgs) bun; };
     in
     {
+      lib.ompBinFor = packageBinFor;
+
       packages = forAllSystems (
         system:
         let
           omp = packageFor system;
-          omp-bin = packageBinFor system;
+          omp-bin = packageBinForSystem system;
         in
         {
           inherit omp omp-bin;
@@ -196,10 +202,9 @@
           '';
           modules = modulesEvaluate;
           omp = self.packages.${system}.default;
+          omp-bin = self.packages.${system}.omp-bin;
         }
       );
-
-      formatter = forAllSystems (system: (pkgsFor system).nixfmt);
 
       overlays.default = _final: previous: {
         omp = self.packages.${previous.stdenv.hostPlatform.system}.default;

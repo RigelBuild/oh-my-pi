@@ -1,11 +1,13 @@
 {
   addDriverRunpath,
+  alsa-lib,
   autoPatchelfHook,
   bun,
   config,
   cudaPackages_13 ? null,
   fetchurl,
   lib,
+  libpulseaudio,
   makeBinaryWrapper,
   stdenv,
   cudaSupport ? config.cudaSupport,
@@ -15,6 +17,10 @@ let
   asset = release.assets.${stdenv.hostPlatform.system};
   runtimeNativeLibraries = import ./runtime-native-libraries.nix {
     inherit addDriverRunpath cudaPackages_13 cudaSupport lib stdenv;
+  } ++ lib.optionals stdenv.hostPlatform.isLinux [ libpulseaudio alsa-lib ];
+  linuxLoaderFixup = import ./linux-loader-fixup.nix {
+    inherit bun cudaPackages_13 cudaSupport lib runtimeNativeLibraries stdenv;
+    runtimeLDLibraryPath = [ libpulseaudio alsa-lib ];
   };
 in
 stdenv.mkDerivation {
@@ -41,38 +47,16 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
 
-  # Keep libstdc++ loaded for direct dlopen; scope advertised libraries to workers, not child commands.
-  postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
-    patchelf --add-needed libstdc++.so.6 "$out/bin/omp"
-    wrapProgram "$out/bin/omp" \
-      --set-default OMP_NATIVE_LIBRARY_PATH "${lib.makeLibraryPath runtimeNativeLibraries}"
-  '';
-
-  # patchelf can stale DT_VERDEF as it grows .dynamic, causing glibc to crash before main.
-  # Run after the autoPatchelfHook fixup and repair wrapProgram's .omp-wrapped ELF.
-  preInstallCheck = lib.optionalString stdenv.hostPlatform.isLinux ''
-    bun ${../scripts/fix-dt-verdef.ts} "$out/bin/.omp-wrapped"
-  '';
+  inherit (linuxLoaderFixup) postFixup preInstallCheck;
 
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    # Capture output so errexit reports omp's real status and stderr if it crashes.
     versionOutput="$(HOME="$TMPDIR" "$out/bin/omp" --version)"
     test "$versionOutput" = "omp/${release.version}"
     smokeOutput="$(HOME="$TMPDIR" "$out/bin/omp" --smoke-test)"
     grep -q "smoke-test: ok" <<<"$smokeOutput"
-    ${lib.optionalString stdenv.hostPlatform.isLinux ''
-      # Verify the paths advertised to dlopen really resolve both C++ runtimes.
-      env -u LD_LIBRARY_PATH BUN_BE_BUN=1 "$out/bin/omp" -e \
-        'const {dlopen}=require("bun:ffi");const dirs=(process.env.OMP_NATIVE_LIBRARY_PATH||"").split(":").filter(Boolean);const need={"libstdc++.so.6":{__cxa_demangle:{args:["ptr","ptr","ptr","ptr"],returns:"ptr"}},"libgcc_s.so.1":{_Unwind_Backtrace:{args:["ptr","ptr"],returns:"i32"}}};for(const lib of Object.keys(need)){let ok=false;for(const d of dirs){try{dlopen(d+"/"+lib,need[lib]);ok=true;break}catch(e){}}if(!ok){console.error("unresolved: "+lib);process.exit(1)}}'
-      # The libstdc++ preload is required for addons dlopen'd by omp itself.
-      patchelf --print-needed "$out/bin/.omp-wrapped" | grep -q '^libstdc++\.so\.6$'
-    ''}
-    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
-      # Verify rather than re-sign; Darwin fixup tooling would rewrite the release Mach-O.
-      codesign --verify --strict "$out/bin/omp"
-    ''}
+    ${linuxLoaderFixup.installCheck}
     runHook postInstallCheck
   '';
 

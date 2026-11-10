@@ -7,7 +7,7 @@
     };
     aarch64-linux = {
       name = "omp-linux-arm64";
-      hash = "sha256-tbhRb2tOfb1QZEaRV8W92NsWwii782OeCt6YwC05VdQ=";
+      hash = "sha256-tbhRb2tOfb1QZEaRV8W92NsWwii782OeCt6YwC05VdU=";
     };
     aarch64-darwin = {
       name = "omp-darwin-arm64";
