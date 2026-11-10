@@ -1,0 +1,14 @@
+// Git hooks managed by hk (https://hk.jdx.dev).
+amends "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Config.pkl"
+
+default_branch = "rigel-release"
+
+hooks {
+    ["pre-push"] {
+        steps {
+            ["ci"] = new Step {
+                check = "bun install --frozen-lockfile && bun run ci:check:full"
+            }
+        }
+    }
+}
