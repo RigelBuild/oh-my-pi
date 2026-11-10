@@ -13,20 +13,22 @@
  */
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as AIError from "../../error";
 import { classifyGatewayError } from "../../error/gateway";
-import { createNativeJudge, isJudgmentApi } from "../../judgment/native";
+import { checkNativeJudgmentImages, createNativeJudge, isJudgmentApi } from "../../judgment/native";
 import * as systemOne from "../../providers/systemone-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
+	gatewayRequestLogFields,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
 	resolveGatewayModel,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import { gatewayResponseHeaders, json, noStoreErrorResponse, resolveClientIdentity } from "../http";
 import { gatewayLogContext, logGatewayRequestFailure } from "../logging";
 import type { CallerIdentity } from "../types";
 
@@ -39,7 +41,7 @@ export async function handleSystemOne(
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
-	const aborted = (): Response => systemOne.formatError(499, "request_aborted", "client closed request");
+	const aborted = (): Response => noStoreErrorResponse(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
 	let body: unknown;
@@ -47,7 +49,7 @@ export async function handleSystemOne(
 		body = await req.json();
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
-		return systemOne.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
+		return noStoreErrorResponse(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
 
@@ -57,20 +59,26 @@ export async function handleSystemOne(
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		// TypeSafe answers body validation failures with 422.
-		return systemOne.formatError(422, "invalid_request_error", message);
+		return noStoreErrorResponse(422, "invalid_request_error", message);
 	}
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
 	if (controller.signal.aborted) return aborted();
 	if (!model) {
-		return systemOne.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+		return noStoreErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
 	if (!isJudgmentApi(model.api)) {
-		return systemOne.formatError(
+		return noStoreErrorResponse(
 			422,
 			"invalid_request_error",
 			`Model ${parsed.modelId} does not answer System One judgments`,
 		);
+	}
+	// Model capability and dialect caps are known locally: reject before credential lookup or refresh.
+	try {
+		checkNativeJudgmentImages(model, parsed.request, parsed.imageAssets);
+	} catch (error) {
+		return noStoreErrorResponse(422, "invalid_request_error", error instanceof Error ? error.message : String(error));
 	}
 	const client = resolveClientIdentity(req.headers);
 	// Judgments carry no conversation to derive a session from. One sticky
@@ -79,7 +87,7 @@ export async function handleSystemOne(
 	const sessionId = deterministicUuid(`systemone\u0000${model.provider}/${model.id}`);
 
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		controller.signal,
@@ -87,20 +95,22 @@ export async function handleSystemOne(
 		gatewayLogContext(requestId, caller, "systemone", model.provider, model.id),
 	);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	if ("status" in apiKey) return noStoreErrorResponse(apiKey.status, apiKey.type, apiKey.message);
+	let account = resolveGatewayAccount(apiKey);
+	let credentialId = apiKey.credentialId;
 
 	const judge = createNativeJudge(model, {
 		apiKey: buildGatewayApiKeyResolver(
-			bootOpts.storage,
+			bootOpts,
 			model,
 			sessionId,
 			apiKey,
 			controller.signal,
 			"systemone",
 			peer,
-			resolvedKey => {
-				account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
+			resolved => {
+				account = resolveGatewayAccount(resolved);
+				credentialId = resolved.credentialId;
 			},
 			bootOpts.onUsageLimit,
 			undefined,
@@ -117,15 +127,17 @@ export async function handleSystemOne(
 		resolvedModel: model.id,
 		stream: false,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	try {
 		const result = await judge.judge(parsed.request, {
 			signal: controller.signal,
+			imageAssets: parsed.imageAssets,
 			// A split judgment that fails still billed the chunks that succeeded.
 			onPartialUsage: usage => {
 				if (usage.cost.total === 0) calculateCost(model, usage);
-				recordGatewayUsage(bootOpts, model, client, usage, { requestId, outcome: "ok", account });
+				recordGatewayUsage(bootOpts, model, client, usage, { requestId, outcome: "ok", account, credentialId });
 			},
 		});
 		// Encode before pricing: the body's `cost` means "upstream billed this"
@@ -133,15 +145,19 @@ export async function handleSystemOne(
 		// when the upstream reported tokens only (TypeSafe).
 		const body = systemOne.encodeResponse(result);
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account, credentialId });
 		return json(200, body, gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }));
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
-		const classified = classifyGatewayError(error);
+		const message = error instanceof Error ? error.message : String(error);
+		const classified =
+			error instanceof AIError.ValidationError
+				? { status: 422, type: "invalid_request_error", message }
+				: classifyGatewayError(error);
 		logGatewayRequestFailure(
 			gatewayLogContext(requestId, caller, "systemone", model.provider, model.id),
 			classified.status,
 		);
-		return systemOne.formatError(classified.status, classified.type, classified.message);
+		return noStoreErrorResponse(classified.status, classified.type, classified.message);
 	}
 }

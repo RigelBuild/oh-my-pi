@@ -1,18 +1,3 @@
-/**
- * Replay-safe retries for provider streams.
- *
- * A provider attempt can be discarded only until meaningful assistant output is
- * emitted. Pre-output markers are buffered so transient transport failures and
- * benign empty completions can re-issue a fresh request without duplicating
- * content; the first text, thinking, image, or tool-call-delta event commits
- * the attempt and restores live streaming. `toolcall_start` and `toolcall_end`
- * markers alone do not commit — if the stream dies before any argument content
- * arrives, the buffered markers are discarded and the attempt retried.
- *
- * Empty-completion retries remain opt-in because a normal empty stop can be a
- * valid provider result. Transient-error retries use the shared provider error
- * classifier and are separately bounded by the caller's policy.
- */
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
@@ -68,7 +53,7 @@ interface StreamRetryOptions {
 /** Controls which replay-safe provider results may issue a fresh request. */
 export interface ReplaySafeStreamRetryPolicy {
 	/** Retry benign terminal stops that contain no visible output. */
-	retryEmptyCompletion?: boolean;
+	retryEmptyCompletion?: boolean | (() => boolean);
 	/** Retry transient provider errors before output is committed. */
 	retryProviderErrors?: boolean;
 	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
@@ -112,9 +97,6 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			};
 			let inner: AssistantMessageEventStream;
 			try {
-				// The attempt factory can throw synchronously (e.g. a config error
-				// raised before it creates its stream); surface it on the outer stream
-				// rather than leaking an unhandled rejection that never settles.
 				inner = attempt(model, context, options);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
@@ -138,7 +120,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
 			const eligibleEmpty =
-				policy.retryEmptyCompletion === true &&
+				(typeof policy.retryEmptyCompletion === "function"
+					? policy.retryEmptyCompletion()
+					: policy.retryEmptyCompletion === true) &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
 				completedMessage !== undefined &&

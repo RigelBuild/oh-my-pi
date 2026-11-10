@@ -1,4 +1,5 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { AuthGatewayClient } from "./clients";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
@@ -177,18 +178,28 @@ export type AuthGatewayAuthorizer = (req: Request) => CallerIdentity | null | Pr
 export interface AuthGatewayServerOptions {
 	/** Listen address. Default `127.0.0.1:4000`. */
 	bind?: string;
-	/** Inbound auth. `bearerTokenAuthorizer` gives the static shared-token behavior. */
-	authorize: AuthGatewayAuthorizer;
+	/** Inbound auth. Provide this or `bearerTokens`; an injected authorizer takes precedence. */
+	authorize?: AuthGatewayAuthorizer;
+	/** Static gateway bearer tokens used when `authorize` is omitted. */
+	bearerTokens?: readonly string[];
+	/** Scoped clients, each admitted by its own bearer and limited to its models and accounts. */
+	clients?: readonly AuthGatewayClient[];
 	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
 	trustProxyHeaders?: boolean;
 	/** Version surfaced on `/healthz`. */
 	version?: string;
 }
-
 export interface AuthGatewayServerHandle {
 	url: string;
 	port: number;
 	hostname: string;
 	/** Drain active responses for at most this long; omitted means immediate close. */
 	close(drainMs?: number): Promise<void>;
+	/**
+	 * Replace the scoped clients. A removed or changed token is refused from
+	 * the next request on; a request already in flight keeps the models and
+	 * accounts it was admitted with, retries included, until it finishes.
+	 * Throws, changing nothing, when the table is invalid. Turns bearer auth on.
+	 */
+	setClients(clients: readonly AuthGatewayClient[]): void;
 }

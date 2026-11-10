@@ -22,8 +22,8 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import type { Browser } from "puppeteer-core";
+import { isEnoent, isPidAlive, logger } from "@oh-my-pi/pi-utils";
+import type { Browser, CDPSession } from "puppeteer-core";
 import { daemonRuntimeDir } from "../../launch/paths";
 
 /** Identifies one shared-browser daemon's target registry. */
@@ -133,16 +133,6 @@ export async function forgetSharedTargets(scope: SharedTargetScope): Promise<voi
 	);
 }
 
-/** True when `pid` names a live process; non-`ESRCH` probe failures are treated as alive (safe direction). */
-function isPidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-}
-
 /** Options for {@link collectOrphanTargets}; the defaults hit the real registry, the seams are for tests. */
 export interface CollectOrphanOptions {
 	/** Wall clock; injectable for deterministic grace-window tests. */
@@ -213,55 +203,87 @@ export async function collectOrphanTargets(
 }
 
 /**
+ * How long {@link closeCdpTarget} waits by default for Chromium to destroy a target whose close it accepted.
+ * Past it the close counts as unconfirmed, as a failed one does.
+ */
+const CLOSE_CONFIRM_TIMEOUT_MS = 5_000;
+
+/**
  * Close a page target by id through a fresh CDP session. Returns true only
- * when the target has left `Target.getTargets`; a dropped connection, a
- * transient protocol failure, or a target still listed after
- * `confirmTimeoutMs` returns false so durable ownership remains available for
- * a later retry.
+ * when CDP reports the target destroyed or confirms it no longer exists; a
+ * dropped connection or transient protocol failure returns false so durable
+ * ownership remains available for a later retry.
+ *
+ * `Target.closeTarget` answers `success` once Chromium has started closing the
+ * page, not once it is gone: the target stays listed until its renderer has
+ * unloaded it. Its `Target.targetDestroyed` confirms the close instead, as it
+ * does for Puppeteer's own `page.close()`.
+ *
+ * A caller that bounds the whole close MUST pass a `confirmTimeoutMs` well below
+ * its budget, so a missed `targetDestroyed` still leaves time for the
+ * `Target.getTargets` absence check to decide the result.
  */
 export async function closeCdpTarget(
 	browser: Browser,
 	targetId: string,
-	{ confirmTimeoutMs = 2_000 }: { confirmTimeoutMs?: number } = {},
+	confirmTimeoutMs = CLOSE_CONFIRM_TIMEOUT_MS,
 ): Promise<boolean> {
 	const session = await browser
 		.target()
 		.createCDPSession()
 		.catch(() => null);
 	if (!session) return false;
-	const { promise: destroyed, resolve } = Promise.withResolvers<void>();
-	const onDestroyed = (event: { targetId: string }) => {
-		if (event.targetId === targetId) resolve();
+	const destroyed = Promise.withResolvers<boolean>();
+	const onDestroyed = (event: { targetId: string }): void => {
+		if (event.targetId === targetId) destroyed.resolve(true);
 	};
 	session.on("Target.targetDestroyed", onDestroyed);
-	const isListed = async () => {
-		const { targetInfos } = await session.send("Target.getTargets");
-		return targetInfos.some(info => info.targetId === targetId);
-	};
+	let timer: NodeJS.Timeout | undefined;
 	try {
-		// A fresh session receives targetDestroyed only with discovery on.
-		await session.send("Target.setDiscoverTargets", { discover: true }).catch(() => undefined);
 		try {
+			// Discovery is on before the close, so its `targetDestroyed` cannot be missed.
+			await session.send("Target.setDiscoverTargets", { discover: true });
 			const result = await session.send("Target.closeTarget", { targetId });
-			if (!result.success) return false;
+			if (result.success) {
+				timer = setTimeout(() => destroyed.resolve(false), confirmTimeoutMs);
+				if (await destroyed.promise) return true;
+			}
 		} catch {
 			// A concurrent reaper or the page itself may already have closed the
 			// target. Confirm absence before treating the cleanup as complete.
-			return !(await isListed().catch(() => true));
 		}
-		// Chromium answers closeTarget before it drops the target from getTargets.
-		if (!(await isListed().catch(() => true))) return true;
-		const timer = Promise.withResolvers<void>();
-		const handle = setTimeout(timer.resolve, confirmTimeoutMs);
 		try {
-			await Promise.race([destroyed, timer.promise]);
-		} finally {
-			clearTimeout(handle);
+			const { targetInfos } = await session.send("Target.getTargets");
+			return !targetInfos.some(info => info.targetId === targetId);
+		} catch {
+			return false;
 		}
-		return !(await isListed().catch(() => true));
 	} finally {
+		clearTimeout(timer);
 		session.off("Target.targetDestroyed", onDestroyed);
 		await session.detach().catch(() => undefined);
+	}
+}
+
+/**
+ * {@link closeCdpTarget} for the omp relay, over a channel that answers browser-level `Target.*`
+ * commands. The relay's `Target.getTargets` lists only tabs it can drive right now, not those of a
+ * disconnected browser or with a dismissed debugger, so absence is read from `Target.getTargetInfo`:
+ * it looks the id up among every tab the extensions reported, and answers an unknown id with the
+ * browser target.
+ */
+export async function closeRelayTarget(channel: Pick<CDPSession, "send">, targetId: string): Promise<boolean> {
+	try {
+		const result = await channel.send("Target.closeTarget", { targetId });
+		if (result.success) return true;
+	} catch {
+		// Closed already (the worker's own close), or the extension cannot answer.
+	}
+	try {
+		const { targetInfo } = await channel.send("Target.getTargetInfo", { targetId });
+		return targetInfo.targetId !== targetId;
+	} catch {
+		return false;
 	}
 }
 

@@ -39,7 +39,7 @@ afterEach(async () => {
 describe("resolveGatewayApiKey setup failures", () => {
 	it("tags an empty pool as no_credential", async () => {
 		await withEnv({ OPENAI_API_KEY: undefined }, async () => {
-			const result = await resolveGatewayApiKey(storage, mock, "session", new AbortController().signal, "peer");
+			const result = await resolveGatewayApiKey({ storage }, mock, "session", new AbortController().signal, "peer");
 			expect(result).toEqual({
 				status: 401,
 				type: "authentication_error",
@@ -51,7 +51,7 @@ describe("resolveGatewayApiKey setup failures", () => {
 
 	it("tags a throwing store as store_error", async () => {
 		vi.spyOn(storage.keys, "getWithCredential").mockRejectedValue(new Error(STORE_DOWN));
-		const result = await resolveGatewayApiKey(storage, mock, "session", new AbortController().signal, "peer");
+		const result = await resolveGatewayApiKey({ storage }, mock, "session", new AbortController().signal, "peer");
 		expect(result).toMatchObject({ status: 503, setupReason: "store_error" });
 	});
 });

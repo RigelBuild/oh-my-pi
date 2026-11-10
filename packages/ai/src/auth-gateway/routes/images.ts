@@ -2,19 +2,21 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
 import { generateImage } from "../../images";
+import { validateImageInput } from "../../images/shared";
 import * as imagesServer from "../../providers/images-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	gatewayAttemptOutcomes,
+	gatewayRequestLogFields,
 	mirrorRequestAbort,
 	recordGatewayUsage,
 	resolveGatewayAccount,
 	resolveGatewayApiKey,
 	resolveGatewayModel,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
+import { gatewayResponseHeaders, json, resolveClientIdentity, codedErrorResponse } from "../http";
 import { gatewayLogContext, logGatewayRequestFailure } from "../logging";
 import type { CallerIdentity } from "../types";
 import { readBoundedRequestBody, RequestBodyTooLargeError } from "../bounded-body";
@@ -63,7 +65,8 @@ function isGatewayImageApi(api: string): boolean {
 		api === "openai-images" ||
 		api === "openrouter-images" ||
 		api === "google-generative-ai" ||
-		api === "google-gemini-cli"
+		api === "google-gemini-cli" ||
+		api === "factory-droid-agent"
 	);
 }
 
@@ -77,7 +80,7 @@ async function handleImages(
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
-	const aborted = (): Response => imagesServer.formatError(499, "request_aborted", "client closed request");
+	const aborted = (): Response => codedErrorResponse(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
 	let body: unknown | FormData;
@@ -121,34 +124,35 @@ async function handleImages(
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		if (error instanceof RequestBodyTooLargeError) {
-			return imagesServer.formatError(413, "payload_too_large", error.message);
+			return codedErrorResponse(413, "payload_too_large", error.message);
 		}
-		return imagesServer.formatError(400, "invalid_request_error", `Invalid request body: ${String(error)}`);
+		return codedErrorResponse(400, "invalid_request_error", `Invalid request body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return aborted();
 
 	let parsed: imagesServer.ImagesParsedRequest;
 	try {
 		parsed = await imagesServer.parseRequest(body, kind);
+		for (const image of parsed.request.inputImages ?? []) validateImageInput(image);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		return imagesServer.formatError(400, "invalid_request_error", message);
+		return codedErrorResponse(400, "invalid_request_error", message);
 	}
 
 	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
 	if (controller.signal.aborted) return aborted();
 	if (!model) {
-		return imagesServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+		return codedErrorResponse(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
 	if (model.api === "openai-responses" || model.api === "openai-codex-responses") {
-		return imagesServer.formatError(
+		return codedErrorResponse(
 			400,
 			"invalid_request_error",
 			`Model ${parsed.modelId} requires a hosted image carrier, which the auth gateway cannot resolve`,
 		);
 	}
 	if (!isGatewayImageApi(model.api)) {
-		return imagesServer.formatError(
+		return codedErrorResponse(
 			400,
 			"invalid_request_error",
 			`Model ${parsed.modelId} does not support image generation`,
@@ -158,7 +162,7 @@ async function handleImages(
 	const client = resolveClientIdentity(req.headers);
 	const sessionId = deterministicUuid(`images\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(
-		bootOpts.storage,
+		bootOpts,
 		model,
 		sessionId,
 		controller.signal,
@@ -166,8 +170,8 @@ async function handleImages(
 		gatewayLogContext(requestId, caller, "images", model.provider, model.id),
 	);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
+	if ("status" in apiKey) return codedErrorResponse(apiKey.status, apiKey.type, apiKey.message);
+	let account = resolveGatewayAccount(apiKey);
 	let credentialId = apiKey.credentialId;
 
 	logger.info("auth-gateway request", {
@@ -178,22 +182,23 @@ async function handleImages(
 		resolvedModel: model.id,
 		stream: false,
 		peer,
+		...gatewayRequestLogFields(bootOpts, apiKey),
 	});
 
 	const outcomes = gatewayAttemptOutcomes(bootOpts, model, client, requestId);
 	try {
 		const result = await generateImage(model, parsed.request, {
 			apiKey: buildGatewayApiKeyResolver(
-				bootOpts.storage,
+				bootOpts,
 				model,
 				sessionId,
 				apiKey,
 				controller.signal,
 				"images",
 				peer,
-				(resolvedKey, resolvedCredentialId) => {
-					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
-					credentialId = resolvedCredentialId;
+				resolved => {
+					account = resolveGatewayAccount(resolved);
+					credentialId = resolved.credentialId;
 				},
 				bootOpts.onUsageLimit,
 				outcomes.onAttemptFailed,
@@ -218,7 +223,7 @@ async function handleImages(
 			classified.status,
 			credentialId,
 		);
-		return imagesServer.formatError(classified.status, classified.type, classified.message);
+		return codedErrorResponse(classified.status, classified.type, classified.message);
 	}
 }
 

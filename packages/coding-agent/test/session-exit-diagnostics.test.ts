@@ -14,6 +14,7 @@ import {
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
 	describePendingToolCalls,
+	hasRestorableTurn,
 	SESSION_EXIT_CUSTOM_TYPE,
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
 	type ToolExecutionStartData,
@@ -322,6 +323,33 @@ describe("session exit diagnostics", () => {
 		).toBe(true);
 	});
 
+	it("closes a turn cut off without an exit record only when --restore assumes the exit, until a normal exit follows", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage(pendingAssistant);
+		// SIGKILL or power loss: no session_exit was written.
+		const crashed = sessionManager.getBranch();
+		expect(createInterruptedTurnAbortMessage(crashed)).toBeUndefined();
+		expect(hasRestorableTurn(crashed)).toBe(true);
+
+		const closed = createInterruptedTurnAbortMessage(crashed, undefined, { assumeExit: true });
+		expect(closed).toMatchObject({ role: "assistant", stopReason: "aborted", model: pendingAssistant.model });
+		for (const result of createInterruptedToolResults(crashed)) sessionManager.appendMessage(result);
+		sessionManager.appendMessage(closed!);
+		expect(
+			createInterruptedTurnAbortMessage(sessionManager.getBranch(), undefined, { assumeExit: true }),
+		).toBeUndefined();
+		// Closed but never retried: a later restore still goes on with it…
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(true);
+		// …unless the user quit normally after seeing it interrupted.
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "manual exit",
+			kind: "normal",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
+	});
+
 	it("reconstructs a normal exit that reports pending tool calls", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
@@ -375,7 +403,9 @@ describe("session exit diagnostics", () => {
 
 	it("keeps an interrupted ask question in resumed model context without replaying completed calls", () => {
 		const sessionManager = SessionManager.inMemory();
-		const question = { questions: [{ question: "Deploy now?", options: ["Yes", "No"], recommended: "Yes" }] };
+		const question = {
+			html: '<form><p>Deploy now?</p><label><input type="radio" name="deploy" value="yes" checked> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
+		};
 		sessionManager.appendMessage({ role: "user", content: "prepare deployment", timestamp: Date.now() });
 		sessionManager.appendMessage({
 			...pendingAssistant,

@@ -31,6 +31,9 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { parseMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
+import { parseMotionMode } from "../config/motion-presets";
+import { parseSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
@@ -85,6 +88,12 @@ const setResume: OptionalSetter = (result, value) => {
 	result.resume = value !== undefined ? value : true;
 };
 
+/** `--restore` selects its session exactly as `--resume` does, then goes on with it. */
+const setRestore: OptionalSetter = (result, value) => {
+	setResume(result, value);
+	result.restore = true;
+};
+
 const MAX_TIME_DURATION_RE = /^(\d+(?:\.\d+)?)([smh])$/;
 
 function maxTimeMultiplier(unit: string | undefined): number {
@@ -100,6 +109,14 @@ function parseMaxTimeSeconds(value: string): number {
 	if (Number.isFinite(seconds) && seconds > 0) return seconds;
 	throw new CliUsageError(
 		`Invalid --max-time value: ${JSON.stringify(value)}. Expected a positive number of seconds or duration like "5s", "10m", "1h".`,
+	);
+}
+
+function parseCostUsd(flag: string, value: string): number {
+	const usd = Number(value.trim());
+	if (Number.isFinite(usd) && usd > 0) return usd;
+	throw new CliUsageError(
+		`Invalid ${flag} value: ${JSON.stringify(value)}. Expected a positive USD amount, e.g. 0.50.`,
 	);
 }
 
@@ -162,6 +179,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},
+	"--warn-cost": (result, value) => {
+		result.warnCost = parseCostUsd("--warn-cost", value);
+	},
+	"--max-cost": (result, value) => {
+		result.maxCost = parseCostUsd("--max-cost", value);
+	},
 	"--service-tier": (result, value) => {
 		if (!isServiceTierOpenAISettingValue(value)) {
 			throw new CliUsageError(
@@ -169,6 +192,27 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			);
 		}
 		result.serviceTier = value;
+	},
+	"--spinner-interval": (result, value) => {
+		try {
+			result.spinnerInterval = parseSpinnerInterval(value);
+		} catch (error) {
+			throw new CliUsageError(`--spinner-interval: ${(error as Error).message}`);
+		}
+	},
+	"--max-fps": (result, value) => {
+		try {
+			result.maxFps = parseMaxFps(value);
+		} catch (error) {
+			throw new CliUsageError(`--max-fps: ${(error as Error).message}`);
+		}
+	},
+	"--motion": (result, value) => {
+		try {
+			result.motion = parseMotionMode(value);
+		} catch (error) {
+			throw new CliUsageError(`--motion: ${(error as Error).message}`);
+		}
 	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;
@@ -236,13 +280,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.skills = value.split(",").map(s => s.trim());
 	},
 	"--approval-mode": (result, value) => {
-		if (value !== "always-ask" && value !== "write" && value !== "yolo") {
+		// The values mirror `ApprovalMode` in ../tools/approval, which this module
+		// may only import as a type: that module reaches pi-utils at runtime.
+		if (value === "always-ask" || value === "always-ask-cached" || value === "write" || value === "yolo") {
+			result.approvalMode = value;
+		} else {
 			result.invalidFlagValues.push(
-				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, write, yolo.`,
+				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, always-ask-cached, write, yolo.`,
 			);
-			return;
 		}
-		result.approvalMode = value;
 	},
 };
 
@@ -256,6 +302,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 export const OPTIONAL_FLAGS: Record<string, OptionalFlagConfig> = {
 	"--resume": { set: setResume, rejectEmpty: true },
 	"-r": { set: setResume, rejectEmpty: true },
+	"--restore": { set: setRestore, rejectEmpty: true },
 	"--session": { set: setResume, rejectEmpty: true },
 };
 
@@ -314,6 +361,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-pty",
 	"--hide-thinking",
 	"--advisor",
+	"--wait-async",
 	"--external-thinking",
 	"--prewalk",
 	"--no-prewalk",
@@ -324,6 +372,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-extensions",
 	"--no-skills",
 	"--no-rules",
+	"--no-context-files",
 	"--no-title",
 	"--no-ui",
 	"--auto-approve",
@@ -383,6 +432,7 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
 const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 	"--resume": true,
 	"-r": true,
+	"--restore": true,
 	"--session": true,
 	"--continue": true,
 	"-c": true,
@@ -395,11 +445,11 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 
 /**
  * Rewrite the launch argv for a relaunch of this session (`/restart`, and
- * `/fork pane|window` with `resumeSessionId` undefined).
+ * `/fork pane|window` with `restoreSessionSource` undefined).
  *
  * Keeps every configuration flag as launched, but drops:
  * - one-shot selectors ({@link ONE_SHOT_LAUNCH_FLAGS}, including inline
- *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ *   `--resume=<source>` forms) - the relaunch restores `restoreSessionSource` instead;
  * - flags in `drop`, which the caller re-supplies with current values;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
@@ -407,14 +457,16 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
  *
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
- * `resumeSessionId` is omitted for a session that never materialized on disk;
- * the relaunch then starts fresh with the same configuration. A launch pinned
- * with `--session-id` re-pins that id while it is still the active session
- * (even before the first write), where `--resume` would prefix-match.
+ * `restoreSessionSource` is a session ID or file path, omitted for a session that
+ * never materialized on disk; the relaunch then starts fresh with the same configuration.
+ * A launch pinned with `--session-id` re-pins that id while it is still the active
+ * session (even before the first write), where `--resume` would prefix-match.
+ * The session is reopened with `--restore`, so the subagent turns the relaunch cut
+ * off go on (see `task/restore.ts`).
  */
 export function restartArgv(
 	argv: string[],
-	resumeSessionId: string | undefined,
+	restoreSessionSource: string | undefined,
 	drop?: Readonly<Record<string, true>>,
 ): string[] {
 	let pinnedSessionId: string | undefined;
@@ -436,10 +488,7 @@ export function restartArgv(
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	if (pinnedSessionId !== undefined && (resumeSessionId === undefined || resumeSessionId === pinnedSessionId)) {
-		kept.push("--session-id", pinnedSessionId);
-	} else if (resumeSessionId !== undefined) {
-		kept.push("--resume", resumeSessionId);
-	}
+	if (restoreSessionSource !== undefined) kept.push("--restore", restoreSessionSource);
+	else if (pinnedSessionId !== undefined) kept.push("--session-id", pinnedSessionId);
 	return kept;
 }

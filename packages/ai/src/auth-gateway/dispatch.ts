@@ -9,7 +9,13 @@
  */
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import { markAfterSiblingWait, type ApiKeyResolver, type ResolvedApiKey } from "../auth-retry";
+import {
+	markAfterSiblingWait,
+	type ApiKeyResolver,
+	createOAuthProvenance,
+	NO_AUTH_SENTINEL,
+	type ResolvedApiKey,
+} from "../auth-retry";
 import { OBSERVED_MODEL_CLASS_PATTERN } from "../auth-broker/types";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -21,10 +27,12 @@ import {
 	observedLimitErrorStatus,
 } from "../error/rate-limit";
 import { emptyUsage } from "../images/shared";
+import { getProviderDefinition } from "../registry";
 import type { Api, AssistantMessage, FetchImpl, Model, StreamOptions, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
 import { extractProviderRetryHint } from "../utils/retry-after";
+import type { AuthGatewayClientScope } from "./clients";
 import {
 	logGatewayApiKeyQuota,
 	logGatewayAttemptFailure,
@@ -35,10 +43,21 @@ import {
 } from "./logging";
 import type { AgentCaller, AuthGatewayServerOptions, CallerIdentity } from "./types";
 
+/** Route preferences and policy applied while resolving a request's model. */
+export interface ModelResolveOptions {
+	/** Prefer a model whose wire API matches the route. */
+	api?: Api;
+	/** Models admitted by the scoped client, when one is present. */
+	accepts?: (model: Model<Api>) => boolean;
+}
+
+/** The admitted caller plus route-level resolution preferences. */
+export type ModelResolveContext = CallerIdentity & ModelResolveOptions;
+
+/** Resolve the requested model for this caller; implementations may load caller-owned state. */
 export type ModelResolver = (
 	modelId: string,
-	/** The admitted request identity used to resolve against the caller's credential pool. */
-	caller: CallerIdentity,
+	context: ModelResolveContext,
 ) => Model<Api> | undefined | Promise<Model<Api> | undefined>;
 
 export class ModelResolverUnavailableError extends Error {
@@ -52,9 +71,10 @@ export async function resolveGatewayModel(
 	resolver: ModelResolver,
 	modelId: string,
 	caller: CallerIdentity,
+	options?: ModelResolveOptions,
 ): Promise<Model<Api> | undefined> {
 	try {
-		return await resolver(modelId, caller);
+		return await resolver(modelId, { ...caller, ...options });
 	} catch (cause) {
 		throw new ModelResolverUnavailableError({ cause });
 	}
@@ -157,7 +177,15 @@ export interface AuthGatewayRouteOptions {
 	 * each a lowercase label matching {@link OBSERVED_MODEL_CLASS_PATTERN}.
 	 */
 	apiKeyLimitModelClasses?: Readonly<Record<string, string>>;
+	/**
+	 * The scoped client that sent this request. It narrows model listings and
+	 * keeps each credential lookup inside its admitted account pool.
+	 */
+	client?: AuthGatewayClientScope;
 }
+
+/** The route options a request's credential lookups read. */
+export type AuthGatewayCredentialOptions = Pick<AuthGatewayRouteOptions, "storage" | "client">;
 
 /** The HTTP server's options: the routes' plus its listener and inbound auth. */
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions, AuthGatewayRouteOptions {}
@@ -177,28 +205,28 @@ export function normalizeClientSessionKey(clientKey: string | undefined): string
  *
  * `markUsageLimitReached` and the auth-retry resolver switch a session to a
  * sibling credential, so the provider state retained for that session can
- * outlive the account that taught it. OAuth rows expose an account id / email
- * that survives token refresh — fingerprinting the bearer instead would look
+ * outlive the account that taught it. A stored credential keeps its durable
+ * row id across token refreshes — fingerprinting the bearer instead would look
  * like a rotation every time a token refreshes and discard the retained
- * lessons for nothing. Key-based rows fall back to a hash of the key, never
- * the key itself: this value is held for the lifetime of the entry.
+ * lessons for nothing. The id comes from the selection itself, not the
+ * session's current pin, which a concurrent request on the same session may
+ * have moved. Unstored keys fall back to a hash of the key, never the key
+ * itself: this value is held for the lifetime of the entry.
  */
-export function resolveGatewayAccount(
-	storage: AuthStorage,
-	provider: string,
-	sessionId: string,
-	apiKey: string,
-): string {
-	const identity = storage.oauth.identity(provider, sessionId);
-	if (identity) {
-		return `oauth:${JSON.stringify([
-			identity.accountId ?? "",
-			identity.email ?? "",
-			identity.projectId ?? "",
-			identity.orgId ?? "",
-		])}`;
-	}
-	return `key:${Bun.hash(apiKey).toString(36)}`;
+export function resolveGatewayAccount(resolved: ResolvedApiKey): string {
+	if (resolved.credentialId !== undefined) return `credential:${resolved.credentialId}`;
+	return `key:${Bun.hash(resolved.apiKey).toString(36)}`;
+}
+
+/** Who sent a request and which stored credential it started on, for the `auth-gateway request` log line. */
+export function gatewayRequestLogFields(
+	opts: AuthGatewayCredentialOptions,
+	resolved: ResolvedApiKey,
+): { client?: string; credentialId?: number } {
+	const fields: { client?: string; credentialId?: number } = {};
+	if (opts.client) fields.client = opts.client.name;
+	if (resolved.credentialId !== undefined) fields.credentialId = resolved.credentialId;
+	return fields;
 }
 
 /** A credential setup failure, tagged so a caller can tell a missing credential from a broken store. */
@@ -213,10 +241,11 @@ export interface GatewaySetupFailure extends GatewayErrorClassification {
  * and its OAuth identity together (refreshing through the broker when needed).
  * Keep this selection snapshot intact even if another request replaces the
  * stored token before dispatch. Storage failures map through
- * {@link classifyGatewayError}; a provider without any credential is a 401.
+ * {@link classifyGatewayError}; a provider without any credential is a 401
+ * unless its catalog policy allows keyless requests.
  */
 export async function resolveGatewayApiKey(
-	storage: AuthStorage,
+	opts: AuthGatewayCredentialOptions,
 	model: Model<Api>,
 	sessionId: string,
 	signal: AbortSignal,
@@ -225,7 +254,11 @@ export async function resolveGatewayApiKey(
 ): Promise<ResolvedApiKey | GatewaySetupFailure> {
 	let apiKey: ResolvedApiKey | undefined;
 	try {
-		apiKey = await storage.keys.getWithCredential(model.provider, sessionId, modelKeyOptions(model, signal));
+		apiKey = await opts.storage.keys.getWithCredential(
+			model.provider,
+			gatewayCredentialSessionId(opts, model, sessionId),
+			modelKeyOptions(model, signal),
+		);
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		if (logContext) logGatewayRequestFailure(logContext, classified.status);
@@ -233,6 +266,7 @@ export async function resolveGatewayApiKey(
 		return { ...classified, setupReason: "store_error" };
 	}
 	if (apiKey) return apiKey;
+	if (getProviderDefinition(model.provider)?.allowsMissingApiKey) return { apiKey: NO_AUTH_SENTINEL };
 	if (logContext) logGatewayRequestFailure(logContext, 401);
 	return {
 		status: 401,
@@ -309,6 +343,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			apiKey: oldKey,
 			signal,
 		});
+
 		if (!switched) return undefined;
 		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
 	}
@@ -334,29 +369,42 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  * `lastKey` tracks the most recent bearer so the switch step invalidates the
  * credential that actually failed; a retry context's `previousKey` wins, since
  * concurrent operations sharing one resolver (split judgment chunks) each know
- * the bearer they sent. `onResolvedKey` observes every rotation so the route
- * can re-key its account lease or usage attribution. `onAttemptFailed` observes
- * every retry step with the row of the bearer whose attempt just failed; one
- * failure can drive two steps (refresh, then rotate), so callers dedupe on the error.
+ * the bearer they sent. Every step resolves under the scoped client's
+ * credential session when `opts.client` binds the provider, so refresh,
+ * blocking and sibling rotation stay inside its accounts. `onResolvedKey`
+ * observes every rotation so the route can re-key its account lease or usage
+ * attribution. `onAttemptFailed` observes every retry step with the row of the
+ * bearer whose attempt just failed; one failure can drive two steps (refresh,
+ * then rotate), so callers dedupe on the error.
  */
 export function buildGatewayApiKeyResolver(
-	storage: AuthStorage,
+	opts: AuthGatewayCredentialOptions,
 	model: Model<Api>,
 	sessionId: string,
 	initialKey: ResolvedApiKey,
 	requestSignal: AbortSignal,
 	_format: string,
 	_peer: string,
-	onResolvedKey?: (apiKey: string, credentialId: number | undefined) => void,
+	onResolvedKey?: (resolved: ResolvedApiKey) => void,
 	onUsageLimit?: AuthGatewayRouteOptions["onUsageLimit"],
 	onAttemptFailed?: (credentialId: number | undefined, error: unknown) => void,
 	logContext?: GatewayLogContext,
 ): ApiKeyResolver {
+	const { storage } = opts;
 	let lastKey = initialKey.apiKey;
 	const credentialIdsByBearer = new Map<string, number | undefined>([[initialKey.apiKey, initialKey.credentialId]]);
 	if (logContext) logGatewaySelection(logContext, initialKey.credentialId);
+	// Track the token rejected by each request even when attempts fail out of order.
+	const provenance = createOAuthProvenance();
+	provenance.record(initialKey);
 	return async ({ lastChance, error, signal, previousKey }) => {
+		if (initialKey.apiKey === NO_AUTH_SENTINEL && initialKey.credentialId === undefined) {
+			return error === undefined ? initialKey : undefined;
+		}
 		const sig = signal ?? requestSignal;
+		// Only the bearer the failed request actually sent names the rejected
+		// token; a caller that cannot report it keeps the previous behaviour.
+		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
 			return initialKey;
@@ -368,15 +416,21 @@ export function buildGatewayApiKeyResolver(
 		if (logContext)
 			logGatewayAttemptFailure(logContext, failedCredentialId, error, lastChance ? "rotation" : "refresh");
 		if (!lastChance) {
-			const refreshed = await storage.keys.getWithCredential(model.provider, sessionId, {
-				...modelKeyOptions(model, sig),
-				forceRefresh: true,
-				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
-			});
+			const refreshed = await storage.keys.getWithCredential(
+				model.provider,
+				gatewayCredentialSessionId(opts, model, sessionId),
+				{
+					...modelKeyOptions(model, sig),
+					forceRefresh: true,
+					refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
+					rejectedAccessToken,
+				},
+			);
+			provenance.record(refreshed);
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) {
 				credentialIdsByBearer.set(refreshed.apiKey, refreshed.credentialId);
-				onResolvedKey?.(refreshed.apiKey, refreshed.credentialId);
+				onResolvedKey?.(refreshed);
 				if (logContext) logGatewaySelection(logContext, refreshed.credentialId);
 			}
 			return refreshed;
@@ -384,7 +438,7 @@ export function buildGatewayApiKeyResolver(
 		const next = await refreshGatewayApiKeyAfterAuthError(
 			storage,
 			model,
-			sessionId,
+			gatewayCredentialSessionId(opts, model, sessionId),
 			model.provider,
 			failedKey,
 			failedCredentialId,
@@ -393,11 +447,13 @@ export function buildGatewayApiKeyResolver(
 			logContext,
 			onUsageLimit,
 		);
+		provenance.record(next);
+		lastKey = next?.apiKey ?? lastKey;
 		if (next) {
 			lastKey = next.apiKey;
 			credentialIdsByBearer.set(next.apiKey, next.credentialId);
 			if (logContext) logGatewaySelection(logContext, next.credentialId);
-			onResolvedKey?.(next.apiKey, next.credentialId);
+			onResolvedKey?.(next);
 		}
 		return next;
 	};
@@ -460,6 +516,16 @@ export function gatewayApiKeyLimitObserver(
 			{ at: Date.now(), provider: model.provider, credentialId, modelClass, limits },
 		]);
 	};
+}
+
+/**
+ * The session a request's credential lookup resolves under: a scoped client's
+ * own restricted session for a provider it binds. Asked on every lookup, not
+ * once per request, so a retry after the client's restriction is lifted fails
+ * instead of resolving unrestricted.
+ */
+function gatewayCredentialSessionId(opts: AuthGatewayCredentialOptions, model: Model<Api>, sessionId: string): string {
+	return opts.client?.credentialSessionId(model.provider, sessionId) ?? sessionId;
 }
 
 /**

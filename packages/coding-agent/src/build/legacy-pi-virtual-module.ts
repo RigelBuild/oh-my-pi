@@ -7,25 +7,37 @@ export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
 const VIRTUAL_NAMESPACE = "omp-legacy-pi-modules-build";
 const DEFAULT_PACKAGE_DIR = path.resolve(import.meta.dir, "..", "..");
 
+/**
+ * How much of a package's root `./*` catch-all enters the registry.
+ * `null` excludes it, `flat` keeps only top-level files, and `nested` mirrors
+ * Node's slash-matching behavior for `*` exports.
+ */
+type RootWildcard = "flat" | "nested" | null;
+
 interface BundledPackage {
 	readonly dir: string;
 	readonly identifier: string;
 	readonly rootShim: string | null;
+	readonly rootWildcard: RootWildcard;
 }
 
 const BUNDLED_PACKAGES: readonly BundledPackage[] = [
-	{ dir: "agent", identifier: "PiAgentCore", rootShim: null },
-	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts" },
-	{ dir: "catalog", identifier: "PiCatalog", rootShim: null },
-	{ dir: "coding-agent", identifier: "PiCodingAgent", rootShim: "legacy-pi-coding-agent-shim.ts" },
-	{ dir: "natives", identifier: "PiNatives", rootShim: null },
-	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts" },
-	{ dir: "utils", identifier: "PiUtils", rootShim: null },
+	{ dir: "agent", identifier: "PiAgentCore", rootShim: null, rootWildcard: null },
+	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts", rootWildcard: null },
+	{ dir: "catalog", identifier: "PiCatalog", rootShim: null, rootWildcard: "flat" },
+	{
+		dir: "coding-agent",
+		identifier: "PiCodingAgent",
+		rootShim: "legacy-pi-coding-agent-shim.ts",
+		rootWildcard: null,
+	},
+	{ dir: "natives", identifier: "PiNatives", rootShim: null, rootWildcard: null },
+	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts", rootWildcard: "nested" },
+	{ dir: "utils", identifier: "PiUtils", rootShim: null, rootWildcard: "flat" },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";
 const TYPEBOX_COMPAT_MODULE = "legacy-typebox.ts";
-const SKIPPED_WILDCARD_BASENAMES = new Set(["index"]);
 const MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES = new Set(["worker-entry"]);
 
 /** One namespace module the binary must retain for legacy extension imports. */
@@ -65,7 +77,6 @@ function bindingForSubpath(identifier: string, subpath: string): string {
 
 function isSafeWildcardBasename(basename: string): boolean {
 	if (!basename || basename.startsWith(".") || basename.startsWith("_")) return false;
-	if (SKIPPED_WILDCARD_BASENAMES.has(basename)) return false;
 	if (MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES.has(basename)) return false;
 	return !/\.(test|spec|d|d\.json|generated|bench)$/.test(basename);
 }
@@ -92,8 +103,9 @@ function exportImportTarget(value: unknown): string | null {
 }
 /**
  * Derive the bundled legacy Pi module surface from current package exports.
- * Named wildcard exports are expanded from source. Only catalog's root catch-all
- * is safe to expand: other packages expose CLI entrypoints at that level.
+ * Named wildcard exports are expanded from source. Root catch-alls are
+ * package-specific: catalog uses top-level files, pi-tui includes nested
+ * stateful modules, and coding-agent keeps CLI entrypoints out of the registry.
  */
 export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR): Promise<BundledPiEntry[]> {
 	const entries: BundledPiEntry[] = [];
@@ -143,8 +155,9 @@ export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR):
 			if (!sourcePattern) continue;
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
-			const catalogRootWildcard = pkg.dir === "catalog" && (exportKey === "./*" || exportKey === "./*.js");
-			if ((pattern.exportPrefix === "" || pattern.exportPrefix === "/") && !catalogRootWildcard) continue;
+			const rootWildcard = pattern.exportPrefix === "" || pattern.exportPrefix === "/";
+			const jsAliasRootWildcard = exportKey === "./*.js";
+			if (rootWildcard && (!pkg.rootWildcard || (exportKey !== "./*" && !jsAliasRootWildcard))) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {
@@ -165,7 +178,7 @@ export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR):
 				matches.sort();
 				for (const match of matches) {
 					if (!match.endsWith(pattern.sourceSuffix)) continue;
-					if (catalogRootWildcard && match.includes("/")) continue;
+					if (rootWildcard && pkg.rootWildcard === "flat" && match.includes("/")) continue;
 					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
 					const segments = basename.split("/");
 					// Every directory on the way has to be importable too: a private or

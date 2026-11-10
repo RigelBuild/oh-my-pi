@@ -4,11 +4,13 @@ import * as path from "node:path";
 import { bearerTokenAuthorizer, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { registerGatewayShutdown } from "../../../src/cli/auth-gateway-cli";
 
 const holdMs = Number(process.env.HOLD_MS);
 const drainMs = Number(process.env.DRAIN_MS);
 
+postmortem.installProcessHandlers();
 registerMockApi();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-shutdown-"));
 const storage = await AuthStorage.create(path.join(dir, "auth.db"));
