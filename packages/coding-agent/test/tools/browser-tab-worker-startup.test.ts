@@ -29,13 +29,32 @@ const CHROMIUM_AVAILABLE = await chromiumAvailable();
 // Headful Chromium needs a display; keep this E2E opt-in.
 const VISIBLE_BROWSER_AVAILABLE = process.env.OMP_TEST_VISIBLE_BROWSER === "1" && (await visibleBrowserAvailable());
 
+// Chromium inherits the soft core limit at launch, so set it before starting the shared browser.
+let coreLimit: string | undefined;
+beforeAll(() => {
+	const prlimit = process.platform === "linux" ? Bun.which("prlimit") : null;
+	if (!prlimit) return;
+	const pid = `--pid=${process.pid}`;
+	const read = Bun.spawnSync([prlimit, pid, "--core", "--raw", "--noheadings", "-o", "SOFT"]);
+	const soft = read.stdout.toString().trim();
+	if (read.exitCode !== 0 || !soft) return;
+	if (Bun.spawnSync([prlimit, pid, "--core=0:"]).exitCode === 0) coreLimit = soft;
+});
+afterAll(() => {
+	const prlimit = coreLimit && Bun.which("prlimit");
+	if (prlimit) Bun.spawnSync([prlimit, `--pid=${process.pid}`, `--core=${coreLimit}:`]);
+});
+
 // One headless Chromium for the file, held for its whole run: every test opens and closes its own tabs, and none
 // changes the browser in a way another test reads.
 let sharedHeadless: PuppeteerBrowserHandle | undefined;
 
 beforeAll(async () => {
 	if (!CHROMIUM_AVAILABLE) return;
-	sharedHeadless = await headless();
+	const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+	if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
+	holdBrowser(launched);
+	sharedHeadless = launched;
 });
 
 afterAll(async () => {
@@ -43,12 +62,8 @@ afterAll(async () => {
 });
 
 async function headless(): Promise<PuppeteerBrowserHandle> {
-	if (sharedHeadless?.browser.connected) return sharedHeadless;
-	const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
-	holdBrowser(launched);
-	sharedHeadless = launched;
-	return launched;
+	if (!sharedHeadless?.browser.connected) throw new Error("Expected the shared headless browser");
+	return sharedHeadless;
 }
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();
@@ -385,23 +400,6 @@ describe("browser tabs whose renderer crashed", () => {
 		getSessionFile: () => null,
 	} as unknown as ToolSession;
 
-	// Chromium reports a renderer crash only after dumping its core, seconds late on hosts that keep cores. Launched
-	// browsers inherit this soft core limit; without a working prlimit the suite runs unchanged.
-	let coreLimit: string | undefined;
-	beforeAll(() => {
-		const prlimit = process.platform === "linux" ? Bun.which("prlimit") : null;
-		if (!prlimit) return;
-		const pid = `--pid=${process.pid}`;
-		const read = Bun.spawnSync([prlimit, pid, "--core", "--raw", "--noheadings", "-o", "SOFT"]);
-		const soft = read.stdout.toString().trim();
-		if (read.exitCode !== 0 || !soft) return;
-		if (Bun.spawnSync([prlimit, pid, "--core=0:"]).exitCode === 0) coreLimit = soft;
-	});
-	afterAll(() => {
-		const prlimit = coreLimit && Bun.which("prlimit");
-		if (prlimit) Bun.spawnSync([prlimit, `--pid=${process.pid}`, `--core=${coreLimit}:`]);
-	});
-
 	/** Watch the page at `url` over a CDP session of the test's own; `crashed` resolves once Chromium reports its renderer died. */
 	async function watchRenderer(
 		browser: PuppeteerBrowserHandle,
@@ -609,17 +607,35 @@ describe("browser tabs whose renderer crashed", () => {
 				await crashRenderer(browser, url);
 				const tab = getTab(name);
 				if (tab?.backend !== "worker") throw new Error("Expected a worker tab");
-				const recoveryStarted = Promise.withResolvers<void>();
+				const acknowledged = Promise.withResolvers<Extract<WorkerOutbound, { type: "result" }>>();
+				const probeId = `crash-probe-${name}`;
+				const unsubscribe = tab.worker.onMessage(message => {
+					if (message.type !== "result" || message.id !== probeId) return;
+					acknowledged.resolve(message);
+				});
+				try {
+					tab.worker.send({
+						type: "run",
+						id: probeId,
+						name,
+						code: "await Promise.withResolvers().promise;",
+						timeoutMs: 10_000,
+						session: { cwd: process.cwd() },
+					});
+					const result = await acknowledged.promise;
+					expect(result.ok).toBe(false);
+					if (result.ok) throw new Error("Expected a renderer crash result");
+					expect(result.error.rendererCrashed).toBe(true);
+				} finally {
+					unsubscribe();
+				}
 				const terminate = tab.worker.terminate.bind(tab.worker);
 				const terminateSpy = spyOn(tab.worker, "terminate").mockImplementation(async () => {
-					recoveryStarted.resolve();
 					await terminate();
 				});
 				try {
-					const opening = acquireTab(name, browser, { url, timeoutMs: 30_000 });
-					// This termination follows the worker's renderer-crash result, not the test CDP session's event.
-					await recoveryStarted.promise;
-					const reopened = await opening;
+					const reopened = await acquireTab(name, browser, { url, timeoutMs: 30_000 });
+					expect(terminateSpy).toHaveBeenCalled();
 					expect(reopened.created).toBe(false);
 					expect(reopened.note).toContain("This tab's renderer had crashed");
 					expect(reopened.tab.info.title).toBe(name);
