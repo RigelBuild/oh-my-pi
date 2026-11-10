@@ -380,8 +380,8 @@ describe("real CLI Responses WebSocket recovery", () => {
 						expect(replacement.httpRequests).toHaveLength(1);
 						expect(assistantText(await client.getMessages())).toBe("WS");
 					},
-					// Bound the reconnect after the outage while the service is unavailable.
-					{ first: 1 },
+					// Socket close alone doesn't bound the post-outage attempt; `first` caps both the first-event wait and the WS connect timeout, so it must leave headroom for the healthy handshake.
+					{ first: 3 },
 				);
 			} finally {
 				await restored?.server.stop(true);
@@ -601,7 +601,7 @@ describe("real CLI Responses WebSocket recovery", () => {
 							expect(fixture.requests).toHaveLength(1);
 							expect(fixture.httpRequests).toHaveLength(2);
 						},
-						{ first: phase === "first-event" ? 1 : undefined, idle: phase === "idle" ? 0.2 : 1 },
+						{ first: phase === "first-event" ? 3 : undefined, idle: phase === "idle" ? 0.2 : 1 },
 					);
 				} finally {
 					await fixture.server.stop(true);
