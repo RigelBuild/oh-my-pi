@@ -6,6 +6,7 @@
 
 - MCP tool lists re-list every `mcp.toolRefreshIntervalMs` (default 10 minutes; 0 disables), including after `/mcp reload`. A call to a missing `mcp__` tool, top-level or via `xd://`, requests a re-list, throttled to one per 30 seconds. This recovers a session whose list came back partial during a server-side upstream outage. ACP sessions, whose MCP servers the client supplies, are not covered.
 - `auth-gateway serve` redeems a banked Claude reset without a prompt when `claudeResets.autoRedeem` is `yes` and an account's weekly (`anthropic:7d`) limit is exhausted, on a usage-limit 429 or a 5-minute sweep, and then retries the request on the same account.
+- `auth-gateway serve` automatically redeems a saved Codex reset when enabled and the account's live weekly usage stays exhausted for five minutes, confirmed by a fresh read before redemption.
 - `auth-broker serve` accepts `--api-key-metrics-config` (or `OMP_AUTH_BROKER_API_KEY_METRICS`) for bounded upstream credential metrics.
 - `auth-gateway serve` accepts `--api-key-limit-model-classes` (or `OMP_AUTH_GATEWAY_API_KEY_LIMIT_MODEL_CLASSES`) to report Anthropic API-key rate limits per model-class row.
 - Added `compaction.largestContextFallback` (default `true`) to skip the largest-context last-resort compaction candidate when disabled.
