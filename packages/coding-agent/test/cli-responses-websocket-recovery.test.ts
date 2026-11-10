@@ -70,7 +70,7 @@ async function withCli(
 			retry: { enabled: true, maxRetries: 1, baseDelayMs: 1, maxDelayMs: 1000, modelFallback: false },
 			providers: {
 				openaiResponsesWebsockets: options.websockets === "default" ? undefined : (options.websockets ?? true),
-				streamFirstEventTimeoutSeconds: options.first ?? 1,
+				streamFirstEventTimeoutSeconds: options.first,
 				streamIdleTimeoutSeconds: options.idle ?? 1,
 				cacheWarming: "off",
 			},
@@ -350,32 +350,38 @@ describe("real CLI Responses WebSocket recovery", () => {
 			const port = fixture.server.port;
 			let restored: { server: { stop(closeActiveConnections?: boolean): Promise<void> | void } } | undefined;
 			try {
-				await withCli(`${fixture.server.url.origin}/v1`, async ({ client, sessionEvents }) => {
-					const partial = waitForEvent(client, event => hasTextDelta(event, "OUTAGE_PARTIAL"));
-					const result = client.promptAndWait("OUTAGE_USER", undefined, promptTimeout).then(
-						() => ({ error: undefined }),
-						(error: unknown) => ({ error }),
-					);
-					await partial;
-					expect(fixture.requests).toHaveLength(1);
-					await fixture.server.stop(true);
-					const failed = await result;
-					expect(failed.error).toBeInstanceOf(Error);
-					expect(String(failed.error)).not.toContain("Timeout waiting for prompt_result");
-					expect(sessionEvents.filter(event => event.type === "auto_retry_start").length).toBeLessThanOrEqual(1);
-					expect(assistantText(await client.getMessages())).toContain("OUTAGE_PARTIAL");
-					const replacement = endpoint(undefined, { port });
-					restored = replacement;
-					await client.promptAndWait("RESTORED_SAME_SESSION", undefined, promptTimeout);
-					expect(replacement.upgrades).toHaveLength(0);
-					expect(replacement.httpRequests).toHaveLength(1);
-					expect(assistantText(await client.getMessages())).toContain("HTTP");
-					await client.newSession();
-					await client.promptAndWait("RESTORED_NEW_SESSION", undefined, promptTimeout);
-					expect(replacement.requests).toHaveLength(1);
-					expect(replacement.httpRequests).toHaveLength(1);
-					expect(assistantText(await client.getMessages())).toBe("WS");
-				});
+				await withCli(
+					`${fixture.server.url.origin}/v1`,
+					async ({ client, sessionEvents }) => {
+						const partial = waitForEvent(client, event => hasTextDelta(event, "OUTAGE_PARTIAL"));
+						const result = client.promptAndWait("OUTAGE_USER", undefined, promptTimeout).then(
+							() => ({ error: undefined }),
+							(error: unknown) => ({ error }),
+						);
+						await partial;
+						expect(fixture.requests).toHaveLength(1);
+						await fixture.server.stop(true);
+						const failed = await result;
+						expect(failed.error).toBeInstanceOf(Error);
+						expect(String(failed.error)).not.toContain("Timeout waiting for prompt_result");
+						expect(sessionEvents.filter(event => event.type === "auto_retry_start").length).toBeLessThanOrEqual(
+							1,
+						);
+						expect(assistantText(await client.getMessages())).toContain("OUTAGE_PARTIAL");
+						const replacement = endpoint(undefined, { port });
+						restored = replacement;
+						await client.promptAndWait("RESTORED_SAME_SESSION", undefined, promptTimeout);
+						expect(replacement.upgrades).toHaveLength(0);
+						expect(replacement.httpRequests).toHaveLength(1);
+						expect(assistantText(await client.getMessages())).toContain("HTTP");
+						await client.newSession();
+						await client.promptAndWait("RESTORED_NEW_SESSION", undefined, promptTimeout);
+						expect(replacement.requests).toHaveLength(1);
+						expect(replacement.httpRequests).toHaveLength(1);
+						expect(assistantText(await client.getMessages())).toBe("WS");
+					},
+					{ first: 1 },
+				);
 			} finally {
 				await restored?.server.stop(true);
 				await fixture.server.stop(true);
@@ -391,7 +397,11 @@ describe("real CLI Responses WebSocket recovery", () => {
 			const fixture = endpoint(
 				ws => {
 					socket = ws;
-					send(ws, textEvents("VISIBLE_PREFIX ", "resp_partial").slice(0, 4));
+					// Exercise the real first-event timeout across the spawned CLI; fake timers cannot cross that process boundary.
+					setTimeout(() => {
+						if (ws.readyState === WebSocket.OPEN)
+							send(ws, textEvents("VISIBLE_PREFIX ", "resp_partial").slice(0, 4));
+					}, 1_100);
 				},
 				{ httpResponse: () => sse(textEvents("CONTINUED_SUFFIX", "resp_continued")) },
 			);
