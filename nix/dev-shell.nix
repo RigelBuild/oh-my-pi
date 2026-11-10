@@ -6,6 +6,17 @@
 }:
 let
   inherit (pkgs) lib;
+  hk =
+    if
+      builtins.elem pkgs.stdenv.hostPlatform.system [
+        "aarch64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ]
+    then
+      import ./hk.nix { inherit pkgs; }
+    else
+      null;
   linuxLibraries = with pkgs; [
     libpulseaudio
     pipewire
@@ -56,6 +67,7 @@ pkgs.mkShell (
         pcre2
         zlib
       ])
+      ++ lib.optional (hk != null) hk
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux linuxLibraries;
 
     PCRE2_SYS_STATIC = "1";
