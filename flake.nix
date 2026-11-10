@@ -97,10 +97,7 @@
           inherit (localPkgs) bun bun2nix;
           craneLib = (crane.mkLib pkgs).overrideToolchain localPkgs.rustToolchain;
         };
-      packageBinFor =
-        pkgs:
-        args:
-        pkgs.callPackage ./nix/package-bin.nix args;
+      packageBinFor = pkgs: args: pkgs.callPackage ./nix/package-bin.nix args;
       packageBinForSystem =
         system:
         let
@@ -123,6 +120,8 @@
           default = omp;
         }
       );
+
+      formatter = forAllSystems (system: (pkgsFor system).nixfmt);
 
       apps = forAllSystems (system: {
         default = {

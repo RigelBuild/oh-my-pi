@@ -16,11 +16,29 @@ let
   release = import ./release-assets.nix;
   asset = release.assets.${stdenv.hostPlatform.system};
   runtimeNativeLibraries = import ./runtime-native-libraries.nix {
-    inherit addDriverRunpath cudaPackages_13 cudaSupport lib stdenv;
-  } ++ lib.optionals stdenv.hostPlatform.isLinux [ libpulseaudio alsa-lib ];
+    inherit
+      addDriverRunpath
+      cudaPackages_13
+      cudaSupport
+      lib
+      stdenv
+      ;
+  };
+  preloadLibraries = [
+    "libpulse-simple.so.0"
+    "libpulse.so.0"
+    "libasound.so.2"
+  ];
   linuxLoaderFixup = import ./linux-loader-fixup.nix {
-    inherit bun cudaPackages_13 cudaSupport lib runtimeNativeLibraries stdenv;
-    runtimeLDLibraryPath = [ libpulseaudio alsa-lib ];
+    inherit
+      bun
+      cudaPackages_13
+      cudaSupport
+      lib
+      preloadLibraries
+      runtimeNativeLibraries
+      stdenv
+      ;
   };
 in
 stdenv.mkDerivation {
@@ -32,9 +50,17 @@ stdenv.mkDerivation {
     inherit (asset) hash;
   };
 
-  nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [ bun autoPatchelfHook makeBinaryWrapper ];
+  nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [
+    bun
+    autoPatchelfHook
+    makeBinaryWrapper
+  ];
   # libgcc_s is resolved from the compiler's lib output during autoPatchelf.
-  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
+    stdenv.cc.cc.lib
+    libpulseaudio
+    alsa-lib
+  ];
   dontUnpack = true;
   dontConfigure = true;
   dontBuild = true;
@@ -54,6 +80,7 @@ stdenv.mkDerivation {
     runHook preInstallCheck
     versionOutput="$(HOME="$TMPDIR" "$out/bin/omp" --version)"
     test "$versionOutput" = "omp/${release.version}"
+    # Capture rather than pipe: with pipefail, grep could hide omp's #9881 loader SIGSEGV.
     smokeOutput="$(HOME="$TMPDIR" "$out/bin/omp" --smoke-test)"
     grep -q "smoke-test: ok" <<<"$smokeOutput"
     ${linuxLoaderFixup.installCheck}

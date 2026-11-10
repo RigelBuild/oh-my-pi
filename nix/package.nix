@@ -50,10 +50,23 @@ let
   ) rootPackageJson.patchedDependencies;
   patchOverrides = bun2nix.patchedDependenciesToOverrides { inherit patchedDependencies; };
   runtimeNativeLibraries = import ./runtime-native-libraries.nix {
-    inherit addDriverRunpath cudaPackages_13 cudaSupport lib stdenv;
+    inherit
+      addDriverRunpath
+      cudaPackages_13
+      cudaSupport
+      lib
+      stdenv
+      ;
   };
   linuxLoaderFixup = import ./linux-loader-fixup.nix {
-    inherit bun cudaPackages_13 cudaSupport lib runtimeNativeLibraries stdenv;
+    inherit
+      bun
+      cudaPackages_13
+      cudaSupport
+      lib
+      runtimeNativeLibraries
+      stdenv
+      ;
   };
 in
 stdenv.mkDerivation {
@@ -181,18 +194,15 @@ stdenv.mkDerivation {
     remove-references-to -t ${bun} "$out/bin/omp"
   '';
 
-  # Keep C++ runtimes available to dlopen'd addons on NixOS.
-  # DT_NEEDED loads libstdc++ before Bun dlopens native addons.
-  inherit (linuxLoaderFixup) postFixup;
+  # The shared hook patches DT_NEEDED and repairs DT_VERDEF on Linux.
+  inherit (linuxLoaderFixup) postFixup preInstallCheck;
 
   disallowedReferences = [ bun ];
-
-  # Repair DT_VERDEF after patchelf changes the ELF dynamic section.
-  inherit (linuxLoaderFixup) preInstallCheck;
 
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
+    # Capture rather than pipe: with pipefail, grep could hide omp's #9881 loader SIGSEGV.
     smokeOutput="$(HOME="$TMPDIR" "$out/bin/omp" --smoke-test)"
     grep -q "smoke-test: ok" <<<"$smokeOutput"
     BUN_BE_BUN=1 "$out/bin/omp" -e \

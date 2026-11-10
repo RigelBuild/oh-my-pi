@@ -36,7 +36,6 @@ function sha256ToSri(hex: string): string {
 }
 
 export function renderReleaseAssets(version: string, hashes: Readonly<Record<string, string>>): string {
-	const normalizedVersion = version.startsWith("v") ? version.slice(1) : version;
 	const entries = Object.entries(ASSETS).map(([system, name]) => {
 		const hex = hashes[name];
 		if (!hex) throw new Error(`SHA256SUMS.txt has no checksum for ${name}`);
@@ -45,7 +44,7 @@ export function renderReleaseAssets(version: string, hashes: Readonly<Record<str
 
 	return [
 		"{",
-		`  version = ${JSON.stringify(normalizedVersion)};`,
+		`  version = ${JSON.stringify(version)};`,
 		"  assets = {",
 		...entries.flatMap(({ system, name, sri }) => [
 			`    ${system} = {`,

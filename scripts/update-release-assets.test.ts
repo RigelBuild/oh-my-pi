@@ -9,8 +9,8 @@ const checksums: Record<string, string> = {
 };
 
 describe("release asset generator", () => {
-	it("renders the pinned assets in Nix format with a normalized version", () => {
-		const output = renderReleaseAssets("v18.9.2-rigel.2", checksums);
+	it("renders the pinned assets in Nix format from a bare version", () => {
+		const output = renderReleaseAssets("18.9.2-rigel.2", checksums);
 		expect(output).toContain('version = "18.9.2-rigel.2";');
 		expect(output).toContain('hash = "sha256-ERERERERERERERERERERERERERERERERERERERERERE=";');
 		expect(output).toContain('name = "omp-darwin-x64";');
