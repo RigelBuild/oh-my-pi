@@ -1272,11 +1272,11 @@ export interface SessionsApi {
 
 /** Usage reporting, observation, and provider configuration. */
 export interface UsageApi {
-	/** Fetch one stored credential's cached or upstream usage report. */
+	/** Fetch one credential's usage. Fresh reads bypass caches and are available only on the credential host. */
 	report(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal; fresh?: boolean },
 	): Promise<UsageReport | null>;
 	/** Fetch usage reports for configured providers, optionally restricted to one provider. */
 	reports(options?: {

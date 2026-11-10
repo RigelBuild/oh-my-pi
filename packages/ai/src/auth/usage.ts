@@ -123,7 +123,11 @@ export class UsageService implements UsageApi {
 	/** Runtime extension providers take precedence over the configured/default resolver. */
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
 	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
-	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
+	#usageRequestInFlight: Map<
+		string,
+		{ refreshEpoch: number; promise: Promise<UsageReport | null>; superseded: boolean; sequence: number }
+	> = new Map();
+	#usageProbeSequence = 0;
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	readonly fetch: typeof fetch;
@@ -328,7 +332,7 @@ export class UsageService implements UsageApi {
 	/** Cache a credential report with jitter and failure cooldown. */
 	async #fetchUsageCached(
 		request: UsageRequestDescriptor,
-		options: { timeoutMs?: number } = {},
+		options: { timeoutMs?: number; fresh?: boolean } = {},
 	): Promise<UsageReport | null> {
 		const timeoutMs = options.timeoutMs;
 		const cacheKey = this.#deps.cache.reportKey(request);
@@ -336,12 +340,12 @@ export class UsageService implements UsageApi {
 		const now = Date.now();
 		const cached = this.#deps.cache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
-		if (cached && cached.expiresAt > now) {
+		if (!options.fresh && cached && cached.expiresAt > now) {
 			return cached.value;
 		}
 
 		const failure = this.#deps.cache.get<null>(failureKey);
-		if (failure && failure.expiresAt > now) {
+		if (!options.fresh && failure && failure.expiresAt > now) {
 			return this.#deps.cache.lastGood(cacheKey);
 		}
 
@@ -349,7 +353,7 @@ export class UsageService implements UsageApi {
 		// only a refresh that postdates its start (user refresh, confirmed reset)
 		// earns one successor probe.
 		const inFlight = this.#usageRequestInFlight.get(cacheKey);
-		if (inFlight) {
+		if (!options.fresh && inFlight) {
 			const report = await inFlight.promise;
 			return inFlight.refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
 				? report
@@ -358,14 +362,26 @@ export class UsageService implements UsageApi {
 		const usageCacheEpoch = this.#deps.cache.epoch;
 		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
+		const entry = {
+			refreshEpoch,
+			sequence: ++this.#usageProbeSequence,
+			superseded: false,
+			get promise(): Promise<UsageReport | null> {
+				return promise;
+			},
+		};
 		const promise = (async () => {
 			const report = await this.#fetchUsageUncached(request, timeoutMs);
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
-			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch;
+			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch || (!options.fresh && entry.superseded);
 			if (report !== null) {
 				if (invalidated) return report;
+				if (options.fresh) {
+					const older = this.#usageRequestInFlight.get(cacheKey);
+					if (older && older.sequence < entry.sequence) older.superseded = true;
+				}
 				this.#deps.blocks.reconcileRequest(request, report);
 				const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
 				// Success: stagger per-credential cache expiry so all accounts don't
@@ -380,6 +396,7 @@ export class UsageService implements UsageApi {
 				this.#recordUsageHistory(request, report);
 				return report;
 			}
+			if (options.fresh) return null;
 			// Failure: apply a short jittered cool-down so the credential doesn't
 			// re-hit the endpoint on every poll. Most providers serve the last good
 			// value through transient failures. Session-cookie providers can opt out
@@ -394,18 +411,18 @@ export class UsageService implements UsageApi {
 			// cooldown even if a manual refresh or block update raced this probe.
 			// A confirmed reset is the exception: the old failure cannot suppress
 			// the first post-reset probe.
-			if (recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
+			if (!entry.superseded && recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
 				this.#deps.cache.set(failureKey, { value: null, expiresAt: coolDown });
 			}
 			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
 		})().finally(() => {
-			this.#usageRequestInFlight.delete(cacheKey);
+			if (this.#usageRequestInFlight.get(cacheKey) === entry) this.#usageRequestInFlight.delete(cacheKey);
 		});
 
-		this.#usageRequestInFlight.set(cacheKey, { refreshEpoch, promise });
+		if (!options.fresh) this.#usageRequestInFlight.set(cacheKey, entry);
 		const report = await promise;
-		return refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
+		return options.fresh || refreshEpoch === this.#deps.cache.refreshEpoch(request.provider)
 			? report
 			: this.#fetchUsageCached(request, options);
 	}
@@ -715,7 +732,7 @@ export class UsageService implements UsageApi {
 	async report(
 		provider: Provider,
 		credential: AuthCredential,
-		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal; fresh?: boolean },
 	): Promise<UsageReport | null> {
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
@@ -726,6 +743,10 @@ export class UsageService implements UsageApi {
 		if (credential.type === "oauth") {
 			const storeHook = this.#deps.store.getUsageReport?.bind(this.#deps.store);
 			if (storeHook) {
+				if (options?.fresh) {
+					logger.debug("Fresh usage reports require the credential host", { provider });
+					return null;
+				}
 				const report = await storeHook(provider, credential, options?.signal);
 				if (report) {
 					this.#deps.blocks.reconcileRequest(oauthUsageRequest(provider, credential, options?.baseUrl), report);
@@ -741,6 +762,7 @@ export class UsageService implements UsageApi {
 		}
 		return this.#fetchUsageCached(usageRequest(provider, usageCredential, options?.baseUrl), {
 			timeoutMs: options?.timeoutMs ?? this.requestTimeoutMs,
+			fresh: options?.fresh,
 		});
 	}
 
