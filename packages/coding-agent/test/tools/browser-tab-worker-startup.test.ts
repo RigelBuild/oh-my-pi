@@ -35,21 +35,21 @@ let sharedHeadless: PuppeteerBrowserHandle | undefined;
 
 beforeAll(async () => {
 	if (!CHROMIUM_AVAILABLE) return;
-	const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
-	holdBrowser(launched);
-	sharedHeadless = launched;
+	sharedHeadless = await headless();
 });
 
 afterAll(async () => {
 	if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
 });
 
-function headless(): PuppeteerBrowserHandle {
-	if (!sharedHeadless?.browser.connected) throw new Error("Expected the shared headless browser");
-	return sharedHeadless;
+async function headless(): Promise<PuppeteerBrowserHandle> {
+	if (sharedHeadless?.browser.connected) return sharedHeadless;
+	const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+	if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
+	holdBrowser(launched);
+	sharedHeadless = launched;
+	return launched;
 }
-
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();
 	#messageHandlers = new Set<(msg: WorkerOutbound) => void>();
@@ -147,7 +147,7 @@ describe("OMP-owned browser evaluation", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"adopts isolated element arguments into the main world without consuming caller handles",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `handle-evaluate-${process.pid}`;
 			const session = {
 				cwd: process.cwd(),
@@ -235,7 +235,7 @@ describe("OMP-owned browser evaluation", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"tells a caller running calls on one tab together to await each one or use one run",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `parallel-calls-${process.pid}`;
 			const session = {
 				cwd: process.cwd(),
@@ -266,7 +266,7 @@ describe("OMP-owned browser input", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"clicks background tabs through selector, observed handle, and raw Puppeteer actions",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `background-input-${process.pid}`;
 			const session = {
 				cwd: process.cwd(),
@@ -359,7 +359,7 @@ describe("visible OMP-owned browser tabs", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps deterministic viewport emulation for hidden launches",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `hidden-viewport-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			try {
 				const url = `data:text/html,<title>${name}</title><main>hidden</main>`;
@@ -426,7 +426,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"fails a call on a tab whose renderer crashed while idle at once, with the page reloaded for the next",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-idle-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			try {
@@ -451,7 +451,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"fails the call in flight when the renderer crashes under it",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-in-flight-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			try {
@@ -477,7 +477,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps a crashed tab busy while the failing call reloads it",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-busy-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			try {
@@ -522,7 +522,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"closes a tab whose page crashes again as it reloads",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-on-load-${process.pid}`;
 			try {
 				const url = `data:text/html,<title>${name}</title>`;
@@ -546,7 +546,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"answers a run whose page crashes as its result is put together",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-late-${process.pid}`;
 			try {
 				await acquireTab(name, browser, { url: `data:text/html,<title>${name}</title>`, timeoutMs: 30_000 });
@@ -573,7 +573,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"brings back a settle-frozen tab whose renderer crashed",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-frozen-${process.pid}`;
 			const owner = `crashed-frozen-owner-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
@@ -601,16 +601,31 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"reports the reload when an open navigates a tab whose renderer crashed",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-reopen-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			try {
 				await acquireTab(name, browser, { url, timeoutMs: 30_000 });
 				await crashRenderer(browser, url);
-				const reopened = await acquireTab(name, browser, { url, timeoutMs: 30_000 });
-				expect(reopened.created).toBe(false);
-				expect(reopened.note).toContain("This tab's renderer had crashed");
-				expect(reopened.tab.info.title).toBe(name);
+				const tab = getTab(name);
+				if (tab?.backend !== "worker") throw new Error("Expected a worker tab");
+				const recoveryStarted = Promise.withResolvers<void>();
+				const terminate = tab.worker.terminate.bind(tab.worker);
+				const terminateSpy = spyOn(tab.worker, "terminate").mockImplementation(async () => {
+					recoveryStarted.resolve();
+					await terminate();
+				});
+				try {
+					const opening = acquireTab(name, browser, { url, timeoutMs: 30_000 });
+					// This termination follows the worker's renderer-crash result, not the test CDP session's event.
+					await recoveryStarted.promise;
+					const reopened = await opening;
+					expect(reopened.created).toBe(false);
+					expect(reopened.note).toContain("This tab's renderer had crashed");
+					expect(reopened.tab.info.title).toBe(name);
+				} finally {
+					terminateSpy.mockRestore();
+				}
 			} finally {
 				await releaseTab(name, { kill: true });
 			}
@@ -621,7 +636,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"leaves a tab closed while its crashed page is being reattached closed",
 		async () => {
-			const launched = headless();
+			const launched = await headless();
 			const name = `crashed-closed-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			const userPage = await launched.browser.newPage();
@@ -666,7 +681,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"leaves a tab reopened under the same name alone when the closed one's reattach fails",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-reopened-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			try {
@@ -717,7 +732,7 @@ describe("browser tabs whose renderer crashed", () => {
 					return new Response("<title>late-commit</title>", { headers: { "content-type": "text/html" } });
 				},
 			});
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-unlisted-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			const opener = await browser.browser.newPage();
@@ -779,7 +794,7 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"closes a reattached headless tab's page when the tab is released",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `crashed-released-${process.pid}`;
 			const url = `data:text/html,<title>${name}</title>`;
 			try {
@@ -809,7 +824,7 @@ describe("closing an OMP-owned page", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"closes the page by id when its worker reports closed without closing it",
 		async () => {
-			const browser = headless();
+			const browser = await headless();
 			const name = `unconfirmed-close-${process.pid}`;
 			try {
 				await acquireTab(name, browser, { timeoutMs: 30_000 });
