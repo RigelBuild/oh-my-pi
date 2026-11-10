@@ -18,7 +18,6 @@
 - Compiled legacy Pi imports now bundle `.js` root-wildcard aliases beside their TypeScript modules, preserving shared host module instances.
 - `omp auth-broker migrate --from-local` uploads every distinct API key for a provider, skipping only keys the broker already holds, so several Anthropic Console keys can be pooled.
 - Agent definitions with `tools: "*"` or a wildcard in a tool list now retain unrestricted tool access instead of parsing `*` as a literal tool.
-- Responses WebSocket recovery tests retain partial deltas when the runner is slow to start the stream.
 
 ## [18.18.3] - 2026-11-09
 

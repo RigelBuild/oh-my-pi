@@ -350,38 +350,32 @@ describe("real CLI Responses WebSocket recovery", () => {
 			const port = fixture.server.port;
 			let restored: { server: { stop(closeActiveConnections?: boolean): Promise<void> | void } } | undefined;
 			try {
-				await withCli(
-					`${fixture.server.url.origin}/v1`,
-					async ({ client, sessionEvents }) => {
-						const partial = waitForEvent(client, event => hasTextDelta(event, "OUTAGE_PARTIAL"));
-						const result = client.promptAndWait("OUTAGE_USER", undefined, promptTimeout).then(
-							() => ({ error: undefined }),
-							(error: unknown) => ({ error }),
-						);
-						await partial;
-						expect(fixture.requests).toHaveLength(1);
-						await fixture.server.stop(true);
-						const failed = await result;
-						expect(failed.error).toBeInstanceOf(Error);
-						expect(String(failed.error)).not.toContain("Timeout waiting for prompt_result");
-						expect(sessionEvents.filter(event => event.type === "auto_retry_start").length).toBeLessThanOrEqual(
-							1,
-						);
-						expect(assistantText(await client.getMessages())).toContain("OUTAGE_PARTIAL");
-						const replacement = endpoint(undefined, { port });
-						restored = replacement;
-						await client.promptAndWait("RESTORED_SAME_SESSION", undefined, promptTimeout);
-						expect(replacement.upgrades).toHaveLength(0);
-						expect(replacement.httpRequests).toHaveLength(1);
-						expect(assistantText(await client.getMessages())).toContain("HTTP");
-						await client.newSession();
-						await client.promptAndWait("RESTORED_NEW_SESSION", undefined, promptTimeout);
-						expect(replacement.requests).toHaveLength(1);
-						expect(replacement.httpRequests).toHaveLength(1);
-						expect(assistantText(await client.getMessages())).toBe("WS");
-					},
-					{ first: 1 },
-				);
+				await withCli(`${fixture.server.url.origin}/v1`, async ({ client, sessionEvents }) => {
+					const partial = waitForEvent(client, event => hasTextDelta(event, "OUTAGE_PARTIAL"));
+					const result = client.promptAndWait("OUTAGE_USER", undefined, promptTimeout).then(
+						() => ({ error: undefined }),
+						(error: unknown) => ({ error }),
+					);
+					await partial;
+					expect(fixture.requests).toHaveLength(1);
+					await fixture.server.stop(true);
+					const failed = await result;
+					expect(failed.error).toBeInstanceOf(Error);
+					expect(String(failed.error)).not.toContain("Timeout waiting for prompt_result");
+					expect(sessionEvents.filter(event => event.type === "auto_retry_start").length).toBeLessThanOrEqual(1);
+					expect(assistantText(await client.getMessages())).toContain("OUTAGE_PARTIAL");
+					const replacement = endpoint(undefined, { port });
+					restored = replacement;
+					await client.promptAndWait("RESTORED_SAME_SESSION", undefined, promptTimeout);
+					expect(replacement.upgrades).toHaveLength(0);
+					expect(replacement.httpRequests).toHaveLength(1);
+					expect(assistantText(await client.getMessages())).toContain("HTTP");
+					await client.newSession();
+					await client.promptAndWait("RESTORED_NEW_SESSION", undefined, promptTimeout);
+					expect(replacement.requests).toHaveLength(1);
+					expect(replacement.httpRequests).toHaveLength(1);
+					expect(assistantText(await client.getMessages())).toBe("WS");
+				});
 			} finally {
 				await restored?.server.stop(true);
 				await fixture.server.stop(true);
@@ -397,7 +391,7 @@ describe("real CLI Responses WebSocket recovery", () => {
 			const fixture = endpoint(
 				ws => {
 					socket = ws;
-					// Exercise the real first-event timeout across the spawned CLI; fake timers cannot cross that process boundary.
+					// Delay past 1 s so a sub-second default first-event timeout in this harness fails this test; the real CLI process can't use fake timers.
 					setTimeout(() => {
 						if (ws.readyState === WebSocket.OPEN)
 							send(ws, textEvents("VISIBLE_PREFIX ", "resp_partial").slice(0, 4));
@@ -600,9 +594,7 @@ describe("real CLI Responses WebSocket recovery", () => {
 							expect(fixture.requests).toHaveLength(1);
 							expect(fixture.httpRequests).toHaveLength(2);
 						},
-						// A first-event deadline shorter than ~1 s can expire during the WebSocket
-						// handshake on a loaded machine, before the request reaches the socket.
-						{ first: 1, idle: phase === "idle" ? 0.2 : 1 },
+						{ first: phase === "first-event" ? 1 : undefined, idle: phase === "idle" ? 0.2 : 1 },
 					);
 				} finally {
 					await fixture.server.stop(true);
