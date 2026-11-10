@@ -350,32 +350,39 @@ describe("real CLI Responses WebSocket recovery", () => {
 			const port = fixture.server.port;
 			let restored: { server: { stop(closeActiveConnections?: boolean): Promise<void> | void } } | undefined;
 			try {
-				await withCli(`${fixture.server.url.origin}/v1`, async ({ client, sessionEvents }) => {
-					const partial = waitForEvent(client, event => hasTextDelta(event, "OUTAGE_PARTIAL"));
-					const result = client.promptAndWait("OUTAGE_USER", undefined, promptTimeout).then(
-						() => ({ error: undefined }),
-						(error: unknown) => ({ error }),
-					);
-					await partial;
-					expect(fixture.requests).toHaveLength(1);
-					await fixture.server.stop(true);
-					const failed = await result;
-					expect(failed.error).toBeInstanceOf(Error);
-					expect(String(failed.error)).not.toContain("Timeout waiting for prompt_result");
-					expect(sessionEvents.filter(event => event.type === "auto_retry_start").length).toBeLessThanOrEqual(1);
-					expect(assistantText(await client.getMessages())).toContain("OUTAGE_PARTIAL");
-					const replacement = endpoint(undefined, { port });
-					restored = replacement;
-					await client.promptAndWait("RESTORED_SAME_SESSION", undefined, promptTimeout);
-					expect(replacement.upgrades).toHaveLength(0);
-					expect(replacement.httpRequests).toHaveLength(1);
-					expect(assistantText(await client.getMessages())).toContain("HTTP");
-					await client.newSession();
-					await client.promptAndWait("RESTORED_NEW_SESSION", undefined, promptTimeout);
-					expect(replacement.requests).toHaveLength(1);
-					expect(replacement.httpRequests).toHaveLength(1);
-					expect(assistantText(await client.getMessages())).toBe("WS");
-				});
+				await withCli(
+					`${fixture.server.url.origin}/v1`,
+					async ({ client, sessionEvents }) => {
+						const partial = waitForEvent(client, event => hasTextDelta(event, "OUTAGE_PARTIAL"));
+						const result = client.promptAndWait("OUTAGE_USER", undefined, promptTimeout).then(
+							() => ({ error: undefined }),
+							(error: unknown) => ({ error }),
+						);
+						await partial;
+						expect(fixture.requests).toHaveLength(1);
+						await fixture.server.stop(true);
+						const failed = await result;
+						expect(failed.error).toBeInstanceOf(Error);
+						expect(String(failed.error)).not.toContain("Timeout waiting for prompt_result");
+						expect(sessionEvents.filter(event => event.type === "auto_retry_start").length).toBeLessThanOrEqual(
+							1,
+						);
+						expect(assistantText(await client.getMessages())).toContain("OUTAGE_PARTIAL");
+						const replacement = endpoint(undefined, { port });
+						restored = replacement;
+						await client.promptAndWait("RESTORED_SAME_SESSION", undefined, promptTimeout);
+						expect(replacement.upgrades).toHaveLength(0);
+						expect(replacement.httpRequests).toHaveLength(1);
+						expect(assistantText(await client.getMessages())).toContain("HTTP");
+						await client.newSession();
+						await client.promptAndWait("RESTORED_NEW_SESSION", undefined, promptTimeout);
+						expect(replacement.requests).toHaveLength(1);
+						expect(replacement.httpRequests).toHaveLength(1);
+						expect(assistantText(await client.getMessages())).toBe("WS");
+					},
+					// Bound the reconnect after the outage while the service is unavailable.
+					{ first: 1 },
+				);
 			} finally {
 				await restored?.server.stop(true);
 				await fixture.server.stop(true);
