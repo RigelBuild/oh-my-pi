@@ -665,7 +665,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			this.#abortRegistrations?.delete(sync);
 			const reason = new AbortError(signal.reason, "<cancelled>");
 			if (
-				this.proc.exitCode === null ||
+				(this.proc.exitCode === null && this.proc.signalCode === null) ||
 				(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
 			) {
 				this.kill(reason);
