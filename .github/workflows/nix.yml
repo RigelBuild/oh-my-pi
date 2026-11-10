@@ -1,11 +1,11 @@
 name: OMP Nix
 
-# Nightly, on-demand, and release runs only. Releases push their `v*` tag
-# atomically with main (scripts/release.ts), so the tag push is the release
-# trigger; branch pushes and pull requests never run this workflow.
+# Release tags, the nightly schedule, on-demand runs, and rigel-release
+# pushes or PRs that touch the Nix build inputs below.
 on:
   push:
     branches: [rigel-release]
+    tags: ["v*"]
     paths:
       - ".github/workflows/nix.yml"
       - ".cargo/**"
@@ -40,7 +40,6 @@ on:
       - "crates/**"
       - "scripts/**"
       - "docs/**"
-  tags: ["v*"]
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
