@@ -393,6 +393,11 @@ export function buildGatewayApiKeyResolver(
 	const { storage } = opts;
 	let lastKey = initialKey.apiKey;
 	const credentialIdsByBearer = new Map<string, number | undefined>([[initialKey.apiKey, initialKey.credentialId]]);
+	const rememberCredential = (key: ResolvedApiKey): void => {
+		if (credentialIdsByBearer.has(key.apiKey) && credentialIdsByBearer.get(key.apiKey) !== key.credentialId)
+			credentialIdsByBearer.set(key.apiKey, undefined);
+		else if (!credentialIdsByBearer.has(key.apiKey)) credentialIdsByBearer.set(key.apiKey, key.credentialId);
+	};
 	if (logContext) logGatewaySelection(logContext, initialKey.credentialId);
 	// Track the token rejected by each request even when attempts fail out of order.
 	const provenance = createOAuthProvenance();
@@ -429,7 +434,7 @@ export function buildGatewayApiKeyResolver(
 			provenance.record(refreshed);
 			lastKey = refreshed?.apiKey ?? lastKey;
 			if (refreshed) {
-				credentialIdsByBearer.set(refreshed.apiKey, refreshed.credentialId);
+				rememberCredential(refreshed);
 				onResolvedKey?.(refreshed);
 				if (logContext) logGatewaySelection(logContext, refreshed.credentialId);
 			}
@@ -451,7 +456,7 @@ export function buildGatewayApiKeyResolver(
 		lastKey = next?.apiKey ?? lastKey;
 		if (next) {
 			lastKey = next.apiKey;
-			credentialIdsByBearer.set(next.apiKey, next.credentialId);
+			rememberCredential(next);
 			if (logContext) logGatewaySelection(logContext, next.credentialId);
 			onResolvedKey?.(next);
 		}

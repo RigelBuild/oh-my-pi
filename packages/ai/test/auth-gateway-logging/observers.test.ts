@@ -149,3 +149,106 @@ for (const status of [429, 400])
 			vi.useRealTimers();
 		}
 	});
+
+for (const status of [400, 429]) {
+	test(`Codex ${status} error bodies exclude observer latency from their deadline`, async () => {
+		const wait = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		vi.useFakeTimers();
+		const results = [];
+		try {
+			for (const mode of ["control", "slow", "slow-reject"] as const) {
+				let requests = 0;
+				const result = await streamOpenAICodexResponses(createCodexModel("gpt-5.5"), context, {
+					apiKey: token,
+					preferWebsockets: false,
+					streamFirstEventTimeoutMs: 5,
+					codexSseMaxAttempts: 1,
+					fetch: async (_input, init) => {
+						requests++;
+						const body = new ReadableStream<Uint8Array>(
+							{
+								start(controller) {
+									init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
+										once: true,
+									});
+								},
+								pull(controller) {
+									controller.enqueue(
+										new TextEncoder().encode(
+											JSON.stringify({
+												error: { message: "synthetic rejection", code: "invalid_request_error" },
+											}),
+										),
+									);
+									controller.close();
+								},
+							},
+							{ highWaterMark: 0 },
+						);
+						return new Response(body, { status });
+					},
+					onResponse: async () => {
+						if (mode !== "control") vi.advanceTimersByTime(20);
+						if (mode === "slow-reject") throw new Error("synthetic observer failure");
+					},
+				}).result();
+				results.push({
+					requests,
+					status: result.errorStatus,
+					reason: result.stopReason,
+					message: result.errorMessage,
+				});
+			}
+			expect(results[1]).toEqual(results[0]);
+			expect(results[2]).toEqual(results[0]);
+			expect(results[0]?.status).toBe(status);
+		} finally {
+			vi.useRealTimers();
+			wait.mockRestore();
+		}
+	});
+}
+
+test("Codex stalled rejected body still aborts after observation", async () => {
+	const wait = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+	vi.useFakeTimers();
+	let aborted = false;
+	try {
+		const result = await streamOpenAICodexResponses(createCodexModel("gpt-5.5"), context, {
+			apiKey: token,
+			preferWebsockets: false,
+			streamFirstEventTimeoutMs: 5,
+			codexSseMaxAttempts: 1,
+			fetch: async (_input, init) =>
+				new Response(
+					new ReadableStream(
+						{
+							start(controller) {
+								init?.signal?.addEventListener(
+									"abort",
+									() => {
+										aborted = true;
+										controller.error(init.signal?.reason);
+									},
+									{ once: true },
+								);
+							},
+							pull() {
+								vi.advanceTimersByTime(20);
+							},
+						},
+						{ highWaterMark: 0 },
+					),
+					{ status: 400 },
+				),
+			onResponse: async () => {
+				vi.advanceTimersByTime(20);
+			},
+		}).result();
+		expect(aborted).toBe(true);
+		expect(result.stopReason).toBe("error");
+	} finally {
+		vi.useRealTimers();
+		wait.mockRestore();
+	}
+});
