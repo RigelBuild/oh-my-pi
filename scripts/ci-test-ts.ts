@@ -331,7 +331,8 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> 
 			native: [],
 		};
 
-		for (const testFile of testFiles) {
+		// The Rigel fork doesn't ship the browser tool, so its tests are skipped in CI.
+		for (const testFile of testFiles.filter(file => !/browser/i.test(path.basename(file)))) {
 			const content = await Bun.file(path.join(codingAgentDir, testFile)).text();
 			partition[classifyCodingAgentTest(testFile, content)].push(testFile);
 		}
