@@ -66,6 +66,24 @@ describe("MCP tool strict declaration", () => {
 		);
 		expect(adapter.strict).toBe(false);
 	});
+
+	it("forwards rejectUnknownRootKeys through the proxy, definition, and registered adapter", () => {
+		const manager = new MCPManager(process.cwd());
+		vi.spyOn(manager, "getTools").mockReturnValue([new MCPTool(createCapturedConnection([]), STRICT_TOOL)]);
+		const [proxy] = createMCPProxyTools(manager, "child");
+		if (!proxy) {
+			expect.unreachable("no proxy tool created");
+			return;
+		}
+		expect(proxy.rejectUnknownRootKeys).toBe(true);
+		const definition = customToolToDefinition(proxy);
+		expect(definition.rejectUnknownRootKeys).toBe(true);
+		const adapter = wrapRegisteredTool(
+			{ definition, extensionPath: "<sdk>" } as RegisteredTool,
+			{ createContext: () => ({}) } as unknown as ExtensionRunner,
+		);
+		expect(adapter.rejectUnknownRootKeys).toBe(true);
+	});
 });
 
 describe("Skill URI reader capability", () => {

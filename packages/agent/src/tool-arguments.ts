@@ -25,7 +25,10 @@ export function validateAgentToolArguments(
 	source: ToolArgumentSource = "parsed",
 ): ToolCall["arguments"] {
 	try {
-		const validated = validateToolArguments(tool, toolCall, { keepUnknownRootKeys: tool.lenientArgValidation });
+		const validated = validateToolArguments(tool, toolCall, {
+			keepUnknownRootKeys: tool.lenientArgValidation,
+			rejectUnknownRootKeys: tool.rejectUnknownRootKeys,
+		});
 		// Kept unknown root keys must not smuggle the internal sentinels past validation.
 		return tool.lenientArgValidation ? withoutSentinels(validated) : validated;
 	} catch (error) {

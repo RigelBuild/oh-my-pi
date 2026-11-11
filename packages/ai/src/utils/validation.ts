@@ -679,6 +679,7 @@ function normalizeOptionalNullsForSchema(
 	root: unknown = schema,
 	insideContent = false,
 	speculativeUnion = false,
+	rejectUnknownKeys = false,
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
 	if (schema === null || typeof schema !== "object") return { value, changed: false };
@@ -702,6 +703,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				rejectUnknownKeys,
 			);
 			if (
 				branchMatchesSchema(branch, normalized.value, root) &&
@@ -722,6 +724,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion || selectedBranch !== branch,
+				rejectUnknownKeys,
 			);
 			if (!normalized.changed) continue;
 
@@ -739,7 +742,15 @@ function normalizeOptionalNullsForSchema(
 			// Diagnose against the enclosing union to retain authoritative vs.
 			// speculative issue provenance, but normalize only this candidate's
 			// branch. Failed candidates never escape to a sibling.
-			const repaired = runCoercionPasses(branchContext, normalized.value, result, isRoot, insideContent);
+			const repaired = runCoercionPasses(
+				branchContext,
+				normalized.value,
+				result,
+				isRoot,
+				insideContent,
+				undefined,
+				rejectUnknownKeys,
+			);
 			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
 				return { value: repaired.args, changed: true };
 			}
@@ -766,6 +777,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				rejectUnknownKeys,
 			);
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
@@ -790,6 +802,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				rejectUnknownKeys,
 			);
 			if (!normalized.changed) continue;
 			if (!changed) {
@@ -866,6 +879,7 @@ function normalizeOptionalNullsForSchema(
 			root,
 			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
 			speculativeUnion,
+			rejectUnknownKeys,
 		);
 		if (!normalized.changed) continue;
 
@@ -1670,6 +1684,7 @@ function coerceArgsFromIssues(
 	args: unknown,
 	issues: FlatIssue[],
 	droppedRootKeys?: Map<string, unknown>,
+	rejectUnknownKeys = false,
 ): { value: unknown; changed: boolean } {
 	if (issues.length === 0) return { value: args, changed: false };
 
@@ -1684,6 +1699,10 @@ function coerceArgsFromIssues(
 		// Failed union branches still contribute schema-directed type repairs.
 		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
+			// External schemas keep the stray key in place so validation fails and
+			// the error names it. The repair below would drop it silently. Only root
+			// keys: a nested stray key on a closed object is still repaired as before.
+			if (rejectUnknownKeys && decodeJsonPointer(issue.instancePath).length === 1) continue;
 			if (issue.unionBranch) continue;
 			if (droppedRootKeys) {
 				const segments = decodeJsonPointer(issue.instancePath);
@@ -2038,6 +2057,13 @@ export interface ValidateToolArgumentsOptions {
 	 * fields the model sent rather than run without them.
 	 */
 	keepUnknownRootKeys?: boolean;
+	/**
+	 * Refuse unknown root keys on a closed schema instead of deleting them. Set
+	 * for external schemas (MCP servers) whose contract the harness does not
+	 * own: a stray key is a real mismatch the model must see named in the
+	 * error, not a value to drop silently. First-party tools keep the repair.
+	 */
+	rejectUnknownRootKeys?: boolean;
 }
 
 /**
@@ -2090,7 +2116,16 @@ export function validateToolArguments(
 		changed = true;
 	}
 
-	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+	const rejectUnknownKeys = options.rejectUnknownRootKeys === true;
+	const initialNormalization = normalizeOptionalNullsForSchema(
+		json,
+		normalizedArgs,
+		true,
+		json,
+		false,
+		false,
+		rejectUnknownKeys,
+	);
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
 		changed = true;
@@ -2130,8 +2165,11 @@ export function validateToolArguments(
 	// Single-argument tools (e.g. `edit`): if the model put the lone required
 	// string under a different key, adopt the sole string field as that key. Two
 	// or more candidates are ambiguous, so they are left alone and validation
-	// fails, and the model sees its own arguments back.
-	const singleStringNorm = normalizeSingleStringField(json, normalizedArgs);
+	// fails, and the model sees its own arguments back. External schemas are
+	// never rewritten: the server owns the contract, so a stray key must fail.
+	const singleStringNorm = rejectUnknownKeys
+		? { value: normalizedArgs, changed: false }
+		: normalizeSingleStringField(json, normalizedArgs);
 	if (singleStringNorm.changed) {
 		normalizedArgs = singleStringNorm.value;
 		changed = true;
@@ -2141,7 +2179,15 @@ export function validateToolArguments(
 	if (result.success) return result.value as ToolCall["arguments"];
 
 	const droppedRootKeys = options.keepUnknownRootKeys ? new Map<string, unknown>() : undefined;
-	const coercionOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
+	const coercionOutcome = runCoercionPasses(
+		ctx,
+		normalizedArgs,
+		result,
+		true,
+		false,
+		droppedRootKeys,
+		rejectUnknownKeys,
+	);
 	normalizedArgs = coercionOutcome.args;
 	changed ||= coercionOutcome.changed;
 	result = coercionOutcome.result;
@@ -2157,7 +2203,15 @@ export function validateToolArguments(
 		changed = true;
 		result = validateContext(ctx, normalizedArgs);
 		if (!result.success) {
-			const healedOutcome = runCoercionPasses(ctx, normalizedArgs, result, true, false, droppedRootKeys);
+			const healedOutcome = runCoercionPasses(
+				ctx,
+				normalizedArgs,
+				result,
+				true,
+				false,
+				droppedRootKeys,
+				rejectUnknownKeys,
+			);
 			normalizedArgs = healedOutcome.args;
 			result = healedOutcome.result;
 		}
@@ -2198,6 +2252,7 @@ function runCoercionPasses(
 	isRoot = true,
 	insideContent = false,
 	droppedRootKeys?: Map<string, unknown>,
+	rejectUnknownKeys = false,
 ): { args: unknown; result: ContextValidationResult; changed: boolean } {
 	const { json } = ctx;
 	const root = ctx.kind === "json" ? (ctx.root ?? json) : json;
@@ -2206,7 +2261,7 @@ function runCoercionPasses(
 	let changed = false;
 	for (let pass = 0; pass < MAX_COERCION_PASSES; pass += 1) {
 		if (result.success) break;
-		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, droppedRootKeys);
+		const coercion = coerceArgsFromIssues(normalizedArgs, result.flatIssues, droppedRootKeys, rejectUnknownKeys);
 		let passChanged = coercion.changed;
 		normalizedArgs = coercion.value;
 
@@ -2231,6 +2286,7 @@ function runCoercionPasses(
 			root,
 			insideContent,
 			speculativeUnion,
+			rejectUnknownKeys,
 		);
 		if (nullNormalization.changed) {
 			normalizedArgs = nullNormalization.value;
@@ -2271,7 +2327,7 @@ function runCoercionPasses(
 		// Re-run single-string remap: `coerceArgsFromIssues` may have just
 		// unwrapped a JSON-stringified root object, exposing a mislabelled lone
 		// string field the initial pre-pass could not see.
-		if (isRoot && !(ctx.kind === "json" && ctx.union)) {
+		if (isRoot && !rejectUnknownKeys && !(ctx.kind === "json" && ctx.union)) {
 			const singleStringNormPass = normalizeSingleStringField(json, normalizedArgs);
 			if (singleStringNormPass.changed) {
 				normalizedArgs = singleStringNormPass.value;

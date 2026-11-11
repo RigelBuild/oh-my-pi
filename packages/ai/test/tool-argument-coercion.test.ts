@@ -2520,6 +2520,159 @@ describe("Tool argument coercion", () => {
 			expect(errors[0]).toContain('Validation failed for tool "delete_this_file"');
 			expect(errors[0]).toContain("path must be a string (was missing)");
 		});
+
+		it("does not rename a lone unknown key when a second string candidate exists", () => {
+			const renameTool: Tool = {
+				name: "single-rename",
+				description: "",
+				parameters: type({ input: type("string") }),
+			};
+			let message = "";
+			try {
+				validateToolArguments(renameTool, {
+					type: "toolCall",
+					id: "c-two-candidates",
+					name: "single-rename",
+					arguments: { alpha: "A", beta: "B" },
+				});
+			} catch (err) {
+				message = (err as Error).message;
+			}
+			expect(message).toContain("input must be a string (was missing)");
+		});
+	});
+
+	describe("unknown root keys on external (MCP) schemas", () => {
+		const closedTool: Tool = {
+			name: "mcp__search",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: { symbol: { type: "string" }, limit: { type: "number" } },
+				required: ["symbol"],
+				additionalProperties: false,
+			} as never,
+		};
+
+		it("fails with the stray key named when the schema is external", () => {
+			let message = "";
+			try {
+				validateToolArguments(
+					closedTool,
+					{
+						type: "toolCall",
+						id: "c-mcp-stray",
+						name: "mcp__search",
+						arguments: { symbol: "Foo", bogus: "x" },
+					},
+					{ rejectUnknownRootKeys: true },
+				);
+			} catch (err) {
+				message = (err as Error).message;
+			}
+			expect(message).toContain('Validation failed for tool "mcp__search"');
+			expect(message).toContain("bogus: must not be present");
+		});
+
+		it("repairs the same stray key for a first-party schema by dropping it", () => {
+			const result = validateToolArguments(closedTool, {
+				type: "toolCall",
+				id: "c-first-party-stray",
+				name: "mcp__search",
+				arguments: { symbol: "Foo", bogus: "x" },
+			});
+			expect(result).toEqual({ symbol: "Foo" });
+		});
+
+		it("keeps repairing a nested stray key on an external closed object, as before", () => {
+			const nestedTool: Tool = {
+				name: "mcp__nested",
+				description: "",
+				parameters: {
+					type: "object",
+					properties: {
+						opts: {
+							type: "object",
+							properties: { known: { type: "string" } },
+							required: ["known"],
+							additionalProperties: false,
+						},
+					},
+					required: ["opts"],
+					additionalProperties: false,
+				} as never,
+			};
+			const result = validateToolArguments(
+				nestedTool,
+				{
+					type: "toolCall",
+					id: "c-nested-stray",
+					name: "mcp__nested",
+					arguments: { opts: { known: "ok", stray: "x" } },
+				},
+				{ rejectUnknownRootKeys: true },
+			);
+			expect(result).toEqual({ opts: { known: "ok" } });
+		});
+
+		it("refuses a stray key on a root anyOf external schema even when an optional null is normalized", () => {
+			const unionTool: Tool = {
+				name: "mcp__union",
+				description: "",
+				parameters: {
+					anyOf: [
+						{
+							type: "object",
+							properties: { symbol: { type: "string" }, note: { type: "string" } },
+							required: ["symbol"],
+							additionalProperties: false,
+						},
+						{
+							type: "object",
+							properties: { query: { type: "string" } },
+							required: ["query"],
+							additionalProperties: false,
+						},
+					],
+				} as never,
+			};
+			let message = "";
+			try {
+				validateToolArguments(
+					unionTool,
+					{
+						type: "toolCall",
+						id: "c-union-stray",
+						name: "mcp__union",
+						arguments: { symbol: "Foo", note: null, bogus: "x" },
+					},
+					{ rejectUnknownRootKeys: true },
+				);
+			} catch (err) {
+				message = (err as Error).message;
+			}
+			expect(message).toContain('Validation failed for tool "mcp__union"');
+			expect(message).toContain("bogus");
+		});
+
+		it("refuses a lone stray key on an external single-string schema instead of renaming it", () => {
+			const loneTool: Tool = {
+				name: "mcp__lookup",
+				description: "",
+				parameters: type({ input: type("string") }),
+			};
+			let message = "";
+			try {
+				validateToolArguments(
+					loneTool,
+					{ type: "toolCall", id: "c-ext-rename", name: "mcp__lookup", arguments: { _input: "payload" } },
+					{ rejectUnknownRootKeys: true },
+				);
+			} catch (err) {
+				message = (err as Error).message;
+			}
+			expect(message).toContain('Validation failed for tool "mcp__lookup"');
+		});
 	});
 });
 

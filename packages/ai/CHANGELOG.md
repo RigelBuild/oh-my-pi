@@ -9,6 +9,11 @@
 - Auth-gateway `onUsageLimit` hook runs before an account is marked reached; returning `true` resends the request on the same credential.
 - Auth-broker `/metrics` can export bounded lifetime credential counters and observed API-key limits using a live-derived credential roster capped by `maxRoster`.
 - Auth-gateway credential and quota events now carry request-local pool and exact attempt row identity, with allowlisted numeric response metadata and no raw provider errors or payloads in affected logs.
+- `ValidateToolArgumentsOptions.rejectUnknownRootKeys` refuses unknown root keys on a closed schema instead of dropping them, naming the keys in the validation error.
+
+### Changed
+
+- External MCP tool schemas refuse an unknown root argument key with the key named, instead of silently dropping it. First-party tools keep the repair. A lone unknown key is renamed to the sole required string field only for first-party tools.
 
 ### Fixed
 

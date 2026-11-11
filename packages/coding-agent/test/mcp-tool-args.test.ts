@@ -1,3 +1,4 @@
+import { type AgentTool, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -257,6 +258,34 @@ describe("MCP tool arguments", () => {
 		});
 		await tool.execute("false", { i: "caller intent" }, undefined, unusedContext, undefined);
 		expect(calls).toEqual([{ method: "tools/call", params: { name: "false-intent", arguments: {} } }]);
+	});
+
+	it("refuses an unknown argument key the MCP schema does not declare, naming it", () => {
+		// The MCP server owns this schema. A stray key is a real mismatch, so the
+		// agent loop's validation must fail with the key named, never drop it.
+		const tool = new MCPTool(createCapturedConnection([]), {
+			name: "closed-search",
+			description: "Search with a closed argument schema",
+			inputSchema: {
+				type: "object",
+				properties: { symbol: { type: "string" }, language: { type: "string" } },
+				required: ["symbol", "language"],
+				additionalProperties: false,
+			},
+		});
+		let message = "";
+		try {
+			validateAgentToolArguments(tool as unknown as AgentTool, {
+				type: "toolCall",
+				id: "call-stray",
+				name: tool.name,
+				arguments: { symbol: "Foo", language: "TypeScript", bogus_key: "x" },
+			});
+		} catch (err) {
+			message = (err as Error).message;
+		}
+		expect(message).toContain(`Validation failed for tool "${tool.name}"`);
+		expect(message).toContain("bogus_key: must not be present");
 	});
 
 	it("strips intent prohibited by a false pattern schema", async () => {

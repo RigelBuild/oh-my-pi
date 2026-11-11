@@ -742,6 +742,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	 * explicit `false`; an omitted flag would leave nothing to preserve.
 	 */
 	readonly strict = false as const;
+	/** The MCP server owns this schema: unknown argument keys are refused, never dropped (see {@link AgentTool.rejectUnknownRootKeys}). */
+	readonly rejectUnknownRootKeys = true as const;
 	readonly formatApprovalDetails = formatApprovalArguments;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
@@ -895,6 +897,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mergeCallAndResult = true;
 	/** See {@link MCPTool.strict}: MCP servers own validation, so stay non-strict. */
 	readonly strict = false as const;
+	/** See {@link MCPTool.rejectUnknownRootKeys}: the MCP server owns this schema. */
+	readonly rejectUnknownRootKeys = true as const;
 	readonly formatApprovalDetails = formatApprovalArguments;
 
 	readonly #fallbackProvider: string | undefined;
