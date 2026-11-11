@@ -4333,16 +4333,16 @@ describe("ExtensionRunner", () => {
 		});
 
 		it("stops queueing a stalled extension's events behind each other after one handler budget", async () => {
-			// Real timers: the bound under test is the handler timeout itself, which
-			// runs on setTimeout/performance.now.
+			// Gate on the second timeout, not wall time: by then the capped queue has started all 4 updates.
+			// A serial queue would have started only 2, so ordering alone decides the outcome.
 			const budgetMs = 100;
 			testSetExtensionHandlerTimeoutMs(budgetMs);
 			const stall = Promise.withResolvers<void>();
 			try {
-				const entered: number[] = [];
+				let entered = 0;
 				const stalled = inlineExtension("stalled-updates", {
 					tool_execution_update: async () => {
-						entered.push(performance.now());
+						entered++;
 						await stall.promise;
 					},
 				});
@@ -4353,10 +4353,16 @@ describe("ExtensionRunner", () => {
 					sessionManager,
 					modelRegistry,
 				);
-				const timeouts: string[] = [];
-				runner.onError(error => timeouts.push(error.error));
+				let timeouts = 0;
+				let enteredAtSecondTimeout: number | undefined;
+				const secondTimeout = Promise.withResolvers<void>();
+				runner.onError(() => {
+					timeouts++;
+					if (timeouts !== 2) return;
+					enteredAtSecondTimeout = entered;
+					secondTimeout.resolve();
+				});
 
-				const emittedAt = performance.now();
 				const updates = Array.from({ length: 4 }, (_, i) =>
 					runner.emit({
 						type: "tool_execution_update",
@@ -4366,13 +4372,10 @@ describe("ExtensionRunner", () => {
 						partialResult: i,
 					}),
 				);
+				await secondTimeout.promise;
+				expect(enteredAtSecondTimeout).toBe(4);
 				await Promise.all(updates);
-
-				expect(timeouts).toHaveLength(4);
-				// Served one after another the fourth update would start after three
-				// full budgets; capped, every update starts within about one.
-				expect(entered).toHaveLength(4);
-				expect(Math.max(...entered) - emittedAt).toBeLessThan(2 * budgetMs);
+				expect(timeouts).toBe(4);
 			} finally {
 				stall.resolve();
 				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
