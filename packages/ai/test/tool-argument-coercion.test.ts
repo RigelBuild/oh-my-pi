@@ -2540,7 +2540,6 @@ describe("Tool argument coercion", () => {
 			}
 			expect(message).toContain("input must be a string (was missing)");
 		});
-
 	});
 
 	describe("unknown root keys on external (MCP) schemas", () => {
