@@ -16,7 +16,7 @@ use std::{fs, io, path::Path, process::Command};
 pub(crate) fn write_exec_script(path: &Path, contents: &str) -> io::Result<()> {
 	use std::os::unix::fs::PermissionsExt as _;
 
-	let status = Command::new("sh")
+	let status = Command::new("/bin/sh")
 		.arg("-c")
 		.arg(r#"printf '%s' "$1" > "$2""#)
 		.arg("sh")
