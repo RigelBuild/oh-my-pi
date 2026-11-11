@@ -501,6 +501,7 @@ jobs:
               scope: natives-cross
          - name: Build cross-target native addons
            id: build-cross
+           timeout-minutes: 150
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
