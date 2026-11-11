@@ -679,6 +679,7 @@ function normalizeOptionalNullsForSchema(
 	root: unknown = schema,
 	insideContent = false,
 	speculativeUnion = false,
+	rejectUnknownKeys = false,
 ): { value: unknown; changed: boolean } {
 	if (value === null || value === undefined) return { value, changed: false };
 	if (schema === null || typeof schema !== "object") return { value, changed: false };
@@ -702,6 +703,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				rejectUnknownKeys,
 			);
 			if (
 				branchMatchesSchema(branch, normalized.value, root) &&
@@ -722,6 +724,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion || selectedBranch !== branch,
+				rejectUnknownKeys,
 			);
 			if (!normalized.changed) continue;
 
@@ -739,7 +742,15 @@ function normalizeOptionalNullsForSchema(
 			// Diagnose against the enclosing union to retain authoritative vs.
 			// speculative issue provenance, but normalize only this candidate's
 			// branch. Failed candidates never escape to a sibling.
-			const repaired = runCoercionPasses(branchContext, normalized.value, result, isRoot, insideContent);
+			const repaired = runCoercionPasses(
+				branchContext,
+				normalized.value,
+				result,
+				isRoot,
+				insideContent,
+				undefined,
+				rejectUnknownKeys,
+			);
 			if (repaired.result.success && branchMatchesSchema(branch, repaired.args, root)) {
 				return { value: repaired.args, changed: true };
 			}
@@ -766,6 +777,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				rejectUnknownKeys,
 			);
 			if (!normalized.changed) continue;
 			nextValue = normalized.value;
@@ -790,6 +802,7 @@ function normalizeOptionalNullsForSchema(
 				root,
 				insideContent,
 				speculativeUnion,
+				rejectUnknownKeys,
 			);
 			if (!normalized.changed) continue;
 			if (!changed) {
@@ -866,6 +879,7 @@ function normalizeOptionalNullsForSchema(
 			root,
 			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
 			speculativeUnion,
+			rejectUnknownKeys,
 		);
 		if (!normalized.changed) continue;
 
@@ -1686,8 +1700,9 @@ function coerceArgsFromIssues(
 		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
 			// External schemas keep the stray key in place so validation fails and
-			// the error names it. The repair below would drop it silently.
-			if (rejectUnknownKeys) continue;
+			// the error names it. The repair below would drop it silently. Only root
+			// keys: a nested stray key on a closed object is still repaired as before.
+			if (rejectUnknownKeys && decodeJsonPointer(issue.instancePath).length === 1) continue;
 			if (issue.unionBranch) continue;
 			if (droppedRootKeys) {
 				const segments = decodeJsonPointer(issue.instancePath);
@@ -2101,7 +2116,16 @@ export function validateToolArguments(
 		changed = true;
 	}
 
-	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
+	const rejectUnknownKeys = options.rejectUnknownRootKeys === true;
+	const initialNormalization = normalizeOptionalNullsForSchema(
+		json,
+		normalizedArgs,
+		true,
+		json,
+		false,
+		false,
+		rejectUnknownKeys,
+	);
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
 		changed = true;
@@ -2143,7 +2167,6 @@ export function validateToolArguments(
 	// or more candidates are ambiguous, so they are left alone and validation
 	// fails, and the model sees its own arguments back. External schemas are
 	// never rewritten: the server owns the contract, so a stray key must fail.
-	const rejectUnknownKeys = options.rejectUnknownRootKeys === true;
 	const singleStringNorm = rejectUnknownKeys
 		? { value: normalizedArgs, changed: false }
 		: normalizeSingleStringField(json, normalizedArgs);
@@ -2263,6 +2286,7 @@ function runCoercionPasses(
 			root,
 			insideContent,
 			speculativeUnion,
+			rejectUnknownKeys,
 		);
 		if (nullNormalization.changed) {
 			normalizedArgs = nullNormalization.value;

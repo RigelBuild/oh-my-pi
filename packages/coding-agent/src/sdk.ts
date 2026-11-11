@@ -1551,6 +1551,7 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		mcpServerName: tool.mcpServerName,
 		mcpToolName: tool.mcpToolName,
 		mcpReadOnlyHint: tool.mcpReadOnlyHint,
+		rejectUnknownRootKeys: tool.rejectUnknownRootKeys,
 		// Forwarded so MCP tools renamed by the digit-keeping mint keep honoring
 		// legacy `deny`/`prompt` policies; RegisteredToolAdapter re-exposes it.
 		legacyName: tool.legacyName,

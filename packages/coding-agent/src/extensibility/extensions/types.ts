@@ -1041,6 +1041,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpToolName?: string;
 	/** MCP read-only annotation, independent of the approval tier. */
 	mcpReadOnlyHint?: boolean;
+	/** External MCP schema: unknown argument keys fail validation instead of being dropped. */
+	rejectUnknownRootKeys?: boolean;
 	/** Previous public name when a rename changed minting. Forwarded through
 	 *  RegisteredToolAdapter so approval falls back to legacy `deny`/`prompt`. */
 	legacyName?: string;

@@ -1022,6 +1022,7 @@ export function createMCPProxyTools(mcpManager: MCPManagerApi, scope: MCPToolSco
 			description: tool.description ?? "",
 			parameters: tool.parameters,
 			strict: tool.strict,
+			rejectUnknownRootKeys: tool.rejectUnknownRootKeys,
 			mcpServerName: serverName,
 			mcpToolName,
 			execute: async (toolCallId, params, onUpdate, ctx, signal) => {
