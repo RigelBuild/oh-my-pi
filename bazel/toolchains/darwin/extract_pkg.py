@@ -32,6 +32,7 @@ import xml.etree.ElementTree as ET
 import zlib
 
 _CHUNK = 1 << 20
+_SDK_ROOT = "Library/Developer/CommandLineTools/SDKs/"
 
 
 def _payload_span(pkg):
@@ -123,6 +124,7 @@ def main(argv):
         rest = rest[2:]
     prefix = member + "/"
     found = False
+    sdks = set()
     with open(pkg_path, "rb") as pkg:
         offset, length, encoding = _payload_span(pkg)
         if encoding != "application/octet-stream":
@@ -130,6 +132,10 @@ def main(argv):
         stream = _Stream(_pbzx_chunks(pkg, offset, length))
         for name, mode, size in _cpio_entries(stream):
             name = name[2:] if name.startswith("./") else name
+            if name.startswith(_SDK_ROOT):
+                sdk = name[len(_SDK_ROOT):].partition("/")[0]
+                if sdk:
+                    sdks.add(sdk)
             rel = None
             if name == member:
                 rel = ""
@@ -160,7 +166,10 @@ def main(argv):
                 raise SystemExit("extract_pkg: unsupported entry type for " + name)
     if not found:
         shutil.rmtree(dest, ignore_errors=True)
-        raise SystemExit("extract_pkg: package payload has no " + member)
+        listed = ", ".join(sorted(sdks)) or "none"
+        raise SystemExit(
+            "extract_pkg: package payload has no " + member + "; SDKs in payload: " + listed
+        )
 
 
 if __name__ == "__main__":
