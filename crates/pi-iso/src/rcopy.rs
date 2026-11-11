@@ -468,6 +468,8 @@ mod tests {
 	};
 
 	use super::*;
+	#[cfg(unix)]
+	use crate::test_support::write_exec_script;
 
 	/// The non-git `start` path mirrors file and directory mtimes, including
 	/// on readonly files, so the mtime-skipping diff stays fast.
@@ -561,14 +563,12 @@ mod tests {
 		}
 	}
 
-	/// An executable stub standing in for `git`.
+	/// An executable stub standing in for `git`. Written with
+	/// `write_exec_script` to avoid the `ETXTBSY` race.
 	#[cfg(unix)]
 	fn stub(root: &TempDirGuard, script: &str) -> PathBuf {
-		use std::os::unix::fs::PermissionsExt as _;
-
 		let path = root.path().join("git");
-		fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write stub git");
-		fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("make stub executable");
+		write_exec_script(&path, &format!("#!/bin/sh\n{script}\n")).expect("write stub git");
 		path
 	}
 
