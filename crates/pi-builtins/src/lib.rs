@@ -2,7 +2,7 @@
 //! (`cat`, `grep`, `sed`, `ls`, …) and the process builtins (`ps`, `top`,
 //! `sleep`, `pgrep`, `pkill`, `pidwait`). Hosts run them through [`extras`].
 #![cfg_attr(unix, feature(process_setsid))]
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, any(feature = "util.rsync", feature = "util.which")))]
 mod test_support;
 
 /// Atomic whole-file replacement behind `sponge FILE` and `sd`'s in-place edits.

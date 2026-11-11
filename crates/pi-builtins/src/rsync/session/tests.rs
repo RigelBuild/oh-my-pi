@@ -400,7 +400,6 @@ fn shared_writer_retries_would_block() {
 #[cfg(unix)]
 #[test]
 fn cancel_mid_connection_exits_20_with_trailer() {
-
 	use clap::Parser as _;
 	let dir = tempfile::tempdir().unwrap();
 	make_tree(&dir.path().join("src"));

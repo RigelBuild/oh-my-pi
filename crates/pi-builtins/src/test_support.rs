@@ -2,8 +2,12 @@
 
 use std::{fs, io, path::Path, process::Command};
 
-/// Write `contents` to `path` and make it executable from a child shell.
-/// The child avoids inherited write descriptors that can cause `ETXTBSY`.
+/// Write `contents` to `path` and make it executable, writing from a child shell.
+/// A plain `fs::write` here leaks its write fd into any sibling test's fork, and exec of the
+/// script then fails with `ETXTBSY` until that child execs.
+///
+/// # Errors
+/// Returns the error if the shell cannot run, exits non-zero, or the chmod fails.
 pub(crate) fn write_exec_script(path: &Path, contents: &str) -> io::Result<()> {
 	use std::os::unix::fs::PermissionsExt as _;
 
