@@ -1205,6 +1205,12 @@ export interface AgentTool<
 	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM, and unknown root keys a closed schema would drop stay on the args. Malformed argument JSON still returns the parse error. */
 	lenientArgValidation?: boolean;
 	/**
+	 * Set for tools whose schema an external party owns (MCP servers). An
+	 * unknown root key on such a tool fails validation with the key named,
+	 * instead of being dropped by the repair that serves first-party tools.
+	 */
+	rejectUnknownRootKeys?: boolean;
+	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it
 	 * before it starts — to deliver a queued steering message. A function
 	 * resolves this per call from the raw, pre-validation arguments.

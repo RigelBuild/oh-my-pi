@@ -1731,6 +1731,7 @@ const CAPTURE_ADVERTISED_KEYS = [
 	"deferrable",
 	"delegationGuidance",
 	"lenientArgValidation",
+	"rejectUnknownRootKeys",
 ] as const satisfies readonly (keyof AgentTool)[];
 
 /** `AgentTool` keys that run code or let a call reach an effect; a refused copy has none of them. */
