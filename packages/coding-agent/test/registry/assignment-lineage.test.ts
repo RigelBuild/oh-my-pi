@@ -52,11 +52,14 @@ describe("assignment lineage", () => {
 		lineage.wake("child");
 		const wake = lineage.assignmentIdOf("child");
 		expect(minted).toHaveLength(2);
+		if (wake === undefined) throw new Error("wake must mint an assignment");
 		expect(minted[1]).toBe(wake);
 		lineage.disposeSession("child", "child-instance", "park");
 		lineage.attach("child", "revived-instance");
 		expect(minted).toHaveLength(3);
-		expect(minted[2]).toBe(lineage.assignmentIdOf("child"));
+		const revived = lineage.assignmentIdOf("child");
+		if (revived === undefined) throw new Error("revival must mint an assignment");
+		expect(minted[2]).toBe(revived);
 	});
 
 	test("reports stored assignment id through terminal phase and clears it on disposal", () => {
