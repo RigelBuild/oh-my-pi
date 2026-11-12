@@ -17,6 +17,7 @@ interface SessionStub {
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 	let calls = 0;
 	const stub = {
+		sessionManager: { getSessionId: () => "stub-session" },
 		dispose: async () => {
 			calls++;
 			await dispose?.();

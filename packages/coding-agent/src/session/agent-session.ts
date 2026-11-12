@@ -225,6 +225,8 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
+import { AdvisoryAttachment } from "../task/advisory-attachment";
+import { AdvisoryHub } from "../task/advisory-hub";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -398,7 +400,7 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IdleMaintenance, type IdleMaintenanceOptions } from "./idle-maintenance";
-import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
+import { currentIrcRecords, IrcBridge, type IrcBridgeHost } from "./irc-bridge";
 import {
 	buildLaunchCompletionBatchMessage,
 	isLaunchCompletionOwner,
@@ -1134,6 +1136,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#autoQaEnabled = false;
 	/** Teardowns registered via {@link addDisposer} (including settings listeners bound to this session); drained on dispose. */
 	#disposers: Array<() => void> = [];
+	#advisoryAttachment: AdvisoryAttachment | undefined;
 	/** Idle recap and idle compaction, once the owner opts in via {@link enableIdleMaintenance}. */
 	#idleMaintenance: IdleMaintenance | undefined;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
@@ -1874,6 +1877,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// the transition before building the turn from a consistent contract.
 		void this.whenWorkPoolYieldSettled()
 			.then(() => {
+				records = currentIrcRecords(records);
+				if (records.length === 0) return;
 				// Synchronous ownership check, atomic with the dispatch below:
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can
@@ -3173,6 +3178,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
 	addDisposer(dispose: () => void): void {
 		this.#disposers.push(dispose);
+	}
+
+	resetAdvisoryLineage(): void {
+		this.#advisoryAttachment ??= new AdvisoryAttachment(this);
+		this.#advisoryAttachment.reset();
+	}
+
+	disposeAdvisoryLineage(): void {
+		this.#advisoryAttachment?.dispose();
+		this.#advisoryAttachment = undefined;
 	}
 
 	/**
@@ -12161,6 +12176,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
 				});
+				this.resetAdvisoryLineage();
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
@@ -12904,6 +12920,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.sessionManager.branchWithSummary(null, report, { startedAt: checkpointState.startedAt });
 			}
 		});
+		AdvisoryHub.global().navigate(this.sessionManager.getSessionId());
 
 		const rewoundAt = new Date().toISOString();
 		const details = { report, startedAt: checkpointState.startedAt, rewoundAt };
@@ -14191,6 +14208,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#releaseTtsrReservations(previousFollowUpMessages);
 			this.#releaseHeldQueuedMessages([...previousSteeringMessages, ...previousFollowUpMessages]);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
+				this.resetAdvisoryLineage();
 				this.#notifySessionChangeCallbacks();
 			}
 			generationSettled.resolve();
@@ -14417,6 +14435,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
 				}
+				this.resetAdvisoryLineage();
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
@@ -14542,6 +14561,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
 				this.sessionManager.createBranchedSession(leafId);
+				this.resetAdvisoryLineage();
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
@@ -14880,6 +14900,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			} else {
 				this.sessionManager.branch(newLeafId);
 			}
+			AdvisoryHub.global().navigate(this.sessionManager.getSessionId());
 			this.#bash.markSessionTransition(bashTransition);
 			branchTransitioned = true;
 		} finally {

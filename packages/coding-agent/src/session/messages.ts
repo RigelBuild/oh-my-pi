@@ -55,6 +55,9 @@ import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage 
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { advisoryMessage, currentAdvisories } from "../irc/advisory";
+import { escapeHarnessTags } from "./harness-tags";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
@@ -1331,6 +1334,31 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * needs adds no cost here.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
+	const marked = messages.filter(message => advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details)));
+	if (marked.length) {
+		const metadata = new Map<AgentMessage, IrcMessage | IrcMessage[] | undefined>();
+		const bound: IrcMessage[] = [];
+		for (const message of marked) {
+			const value = advisoryMessage in message ? message[advisoryMessage] : message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details ? message.details[advisoryMessage] : undefined;
+			// SAFETY: only the IRC bridge and wait result attach this symbol.
+			const entry = value as IrcMessage | IrcMessage[] | undefined;
+			metadata.set(message, entry);
+			if (entry) bound.push(...(Array.isArray(entry) ? entry : [entry]));
+		}
+		const valid = currentAdvisories(bound);
+		let cursor = 0;
+		const safe: AgentMessage[] = [];
+		for (const message of messages) {
+			if (!metadata.has(message)) { safe.push(message); continue; }
+			const entry = metadata.get(message);
+			if (Array.isArray(entry) && message.role === "toolResult") {
+				const current = entry.filter(() => valid[cursor++] === true);
+				safe.push({ ...message, content: [{ type: "text", text: current.map(item => `[${item.id}] ${item.from}${item.replyTo ? ` (reply to ${item.replyTo})` : ""}${item.progress ? " (progress; reply follows)" : ""}: ${escapeHarnessTags(item.body)}`).join("\n\n") }] });
+			} else if (entry && !Array.isArray(entry) && valid[cursor++]) safe.push(message);
+			else if (message.role === "toolResult") safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
+		}
+		return safe.flatMap((_message, index) => convertMessageAt(safe, index, convertOne));
+	}
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);
 	const sameGeneration = memo !== undefined && memo.generation === convertGeneration;

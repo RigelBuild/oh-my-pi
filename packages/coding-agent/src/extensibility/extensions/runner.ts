@@ -2,6 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { taskAdvisoryFor } from "../../task/advisory-attachment";
 import {
 	type AgentMessage,
 	type AgentTool,
@@ -1761,7 +1762,9 @@ export class ExtensionRunner {
 			void this.runtime.sendUserMessage(text, options);
 		};
 		const getSessionModes = () => this.#sessionModes;
+		const sessionManager = this.sessionManager;
 		return {
+			get taskAdvisory() { return taskAdvisoryFor(sessionManager.getSessionId()); },
 			ui: this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
@@ -1871,8 +1874,7 @@ export class ExtensionRunner {
 	}
 
 	createCommandContext(): ExtensionCommandContext {
-		return {
-			...this.createContext(),
+		return Object.assign(this.createContext(), {
 			getContextUsage: () => this.#getContextUsageFn(),
 			waitForIdle: () => this.#waitForIdleFn(),
 			newSession: options => this.#newSessionHandler(options),
@@ -1881,7 +1883,7 @@ export class ExtensionRunner {
 			switchSession: sessionPath => this.#switchSessionHandler(sessionPath),
 			reload: () => this.#reloadHandler(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-		};
+		} satisfies Pick<ExtensionCommandContext, "getContextUsage" | "waitForIdle" | "newSession" | "branch" | "navigateTree" | "switchSession" | "reload" | "compact">);
 	}
 
 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {

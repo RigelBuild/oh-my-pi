@@ -37,6 +37,7 @@ function makeFakeSession(): FakeSession {
 	const delivered: IrcMessage[] = [];
 	const relayed: CustomMessage[] = [];
 	const session = {
+		sessionManager: { getSessionId: () => "fake-session" },
 		isStreaming: true,
 		deliverIrcMessage: async (msg: IrcMessage) => {
 			if (nextError) {
@@ -290,6 +291,7 @@ describe("IRC", () => {
 			const { promise: disposeGate, resolve: resolveDispose } = Promise.withResolvers<void>();
 			let disposeCalls = 0;
 			const oldSession = {
+				sessionManager: { getSessionId: () => "parking-session" },
 				deliverIrcMessage: async () => {
 					throw new Error("dying session must not receive mail");
 				},
@@ -352,6 +354,7 @@ describe("IRC", () => {
 		it("multiple concurrent sends during park coalesce revive and all deliver", async () => {
 			const { promise: disposeGate, resolve: resolveDispose } = Promise.withResolvers<void>();
 			const oldSession = {
+				sessionManager: { getSessionId: () => "parking-session" },
 				deliverIrcMessage: async () => {
 					throw new Error("dying session must not receive mail");
 				},
@@ -565,6 +568,7 @@ describe("IRC", () => {
 			} as unknown as IrcBridgeHost);
 			const session = {
 				...createSessionDefaults(),
+				sessionManager: { getSessionId: () => id },
 				subscribe: (listener: (event: AgentSessionEvent) => void) => {
 					listeners.push(listener);
 					return () => listeners.splice(listeners.indexOf(listener), 1);
