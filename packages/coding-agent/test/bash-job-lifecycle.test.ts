@@ -58,7 +58,9 @@ it.skipIf(process.platform === "win32")(
 		const watcher = fs.watch(cwd, { signal: watchAbort.signal });
 		const cleaned = (async () => {
 			for await (const event of watcher) {
-				if (event.filename === "cleaned") return true;
+				// Creation fires before the trap's write lands; wait for the content.
+				if (event.filename === "cleaned" && (await Bun.file(path.join(cwd, "cleaned")).text()) === "cleaned")
+					return true;
 			}
 			return false;
 		})();

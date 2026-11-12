@@ -130,10 +130,13 @@ mod tests {
 
 	fn place_file(dir: &Path, name: &str, executable: bool) -> std::path::PathBuf {
 		let path = dir.join(name);
-		fs::write(&path, b"#!/bin/sh\n").expect("file should be written");
-		let mode = if executable { 0o755 } else { 0o644 };
-		fs::set_permissions(&path, fs::Permissions::from_mode(mode))
-			.expect("permissions should be set");
+		if executable {
+			crate::test_support::write_exec_script(&path, "#!/bin/sh\n")
+				.expect("file should be written and made executable");
+		} else {
+			fs::write(&path, b"#!/bin/sh\n").expect("file should be written");
+			fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("permissions should be set");
+		}
 		path
 	}
 

@@ -1421,7 +1421,7 @@ mod tests {
 
 	#[cfg(unix)]
 	mod shell {
-		use std::{os::unix::fs::PermissionsExt, path::Path};
+		use std::path::Path;
 
 		use super::*;
 		use crate::rsync::log::{LogConfig, Logger};
@@ -1432,8 +1432,7 @@ mod tests {
 
 		fn script(dir: &Path, name: &str, body: &str) -> String {
 			let path = dir.join(name);
-			std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+			crate::test_support::write_exec_script(&path, &format!("#!/bin/sh\n{body}")).unwrap();
 			path.to_string_lossy().into_owned()
 		}
 
