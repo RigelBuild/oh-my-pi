@@ -14,6 +14,17 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Optional advisory check identity. */
+	assignmentId?: string;
+	checkId?: string;
+	/** Internal live-only advisory identity, never model-authored. */
+	advisoryBinding?: {
+		ref: { childSessionId: string; assignmentId: string; parentSessionId: string; parentBranchId: string };
+		senderInstanceId: string;
+		recipientInstanceId: string;
+		branchId: string;
+		requestId?: string;
+	};
 	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor
 	 * `relayWakeTurnOutput`). Relays are answers, never wake sources: the
@@ -21,24 +32,16 @@ export interface IrcMessage {
 	 * ping-pong forever.
 	 */
 	wakeRelay?: boolean;
-	/**
-	 * One leg of an `all` broadcast. Like relays, broadcasts never draw an
-	 * automatic wake-turn reply: every woken idle peer would otherwise answer
-	 * the broadcaster, mostly to say the message was not for it.
-	 */
+	/** One leg of an all broadcast, which never draws an automatic reply. */
 	broadcast?: boolean;
-	/**
-	 * Interim acknowledgement or progress on something the recipient asked
-	 * (`agent://<id>?progress`): it neither answers that request nor asks one,
-	 * so the recipient's `wait` keeps waiting for the actual reply.
-	 */
+	/** Progress does not answer a request or interrupt a wait. */
 	progress?: boolean;
 }
 
 /** Delivery outcome for one peer recipient. */
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "injected" | "woken" | "revived" | "duplicate" | "failed";
 	error?: string;
 }
 /** Status ordering for peer rosters in child prompts. */

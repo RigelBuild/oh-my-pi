@@ -15,4 +15,5 @@ export {
 export * from "./runner";
 // Type guards
 export * from "./types";
+export * from "./task-advisory";
 export * from "./wrapper";

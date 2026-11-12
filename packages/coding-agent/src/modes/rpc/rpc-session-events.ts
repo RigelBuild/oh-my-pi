@@ -99,6 +99,7 @@ export class RpcSessionEventForwarder {
 	}
 
 	forward(event: AgentSessionEvent): void {
+		if (event.type === "message_persisted") return;
 		const frame = this.#stamp(event);
 		if (this.#filter && !this.#filter.has(frame.type)) return;
 		if (frame.type === "message_update" && this.#messageUpdates === "delta") {
@@ -112,7 +113,7 @@ export class RpcSessionEventForwarder {
 		this.#output(frame);
 	}
 
-	#stamp(event: AgentSessionEvent): RpcAgentSessionEventFrame {
+ 	#stamp(event: Exclude<AgentSessionEvent, { type: "message_persisted" }>): RpcAgentSessionEventFrame {
 		switch (event.type) {
 			case "message_start": {
 				const messageId = this.#mintMessageId();

@@ -4911,6 +4911,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end") {
 			await messageEndPersistence;
 			if (this.#promptGeneration !== eventPromptGeneration) return;
+			if (event.message.role === "assistant") {
+				const id = (event.message as PersistedAssistantMessage)[kPersistedSessionEntryId];
+				if (id !== undefined)
+					await this.#emitSessionEvent({ type: "message_persisted", id, usage: event.message.usage });
+			}
 			if (interruptedThinkingMessage) {
 				this.sessionManager.appendCustomMessageEntry(
 					interruptedThinkingMessage.customType,
