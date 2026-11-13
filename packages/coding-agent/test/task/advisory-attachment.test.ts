@@ -1,8 +1,14 @@
 import { afterEach, expect, it, spyOn } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { ModelRegistry } from "../../src/config/model-registry";
+import { Settings } from "../../src/config/settings";
+import { AgentSession } from "../../src/session/agent-session";
+import { SessionManager } from "../../src/session/session-manager";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentRegistry } from "../../src/registry/agent-registry";
-import type { AgentSession } from "../../src/session/agent-session";
 import type { AgentSessionEvent } from "../../src/session/agent-session-events";
 import { IrcBridge } from "../../src/session/irc-bridge";
 import { convertToLlm } from "../../src/session/messages";
@@ -125,6 +131,34 @@ it("drops both queued directions after wake remints the assignment", async () =>
 	const records: AgentMessage[] = [...parentBridge.drainPending(), ...childBridge.drainPending()];
 	expect(records).toEqual([]);
 	expect(validate).toHaveBeenCalledTimes(3);
+	let request = "";
+	const mock = createMockModel({
+		handler: context => {
+			request = JSON.stringify(context.messages);
+			return { content: ["done"] };
+		},
+	});
+	const auth = createInMemoryAuthStorage();
+	auth.keys.setRuntime("mock", "test-key");
+	const session = new AgentSession({
+		agent: new Agent({
+			initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: queued },
+			convertToLlm,
+			streamFn: mock.stream,
+		}),
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: new ModelRegistry(auth),
+	});
+	try {
+		await session.prompt("continue");
+		expect(request).toContain("continue");
+		expect(request).not.toContain("secret-reminder-A");
+		expect(request).not.toContain("secret-reply-A");
+	} finally {
+		await session.dispose();
+		auth.close();
+	}
 	validate.mockRestore();
 	hub.detach("child", "c");
 	hub.detach("parent", "p");

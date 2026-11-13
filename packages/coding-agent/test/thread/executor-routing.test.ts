@@ -46,6 +46,7 @@ const TEST_TIMEOUT_MS = 120_000;
 const SCRIPT_ID = Bun.randomUUIDv7("hex");
 const HANG_TASK = `omp-test-scripted-hang-${SCRIPT_ID}`;
 const BG_JOB_TASK = `omp-test-scripted-bg-job-${SCRIPT_ID}`;
+const BLOCK_TOOL_TASK = `omp-test-block-tool-${SCRIPT_ID}`;
 /** In the routed agent's system prompt only, so a request without it is never the run's own turn. */
 const AGENT_MARKER = `omp-test-agent-${SCRIPT_ID}`;
 
@@ -170,6 +171,8 @@ class FakeModelServer {
 			reply = { text: `tool said: ${messageText(last.content)}` };
 		} else if (runTurn && userText.includes(BG_JOB_TASK)) {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
+		} else if (runTurn && userText.includes(BLOCK_TOOL_TASK)) {
+			reply = { tool: "bash", args: { command: "read line < advisory-gate" } };
 		} else if (runTurn && userText.includes(HANG_TASK)) {
 			const held = Promise.withResolvers<void>();
 			this.#hangs.push(held.resolve);
@@ -541,10 +544,16 @@ describe("subagent runs routed into pooled workers", () => {
 		async () => {
 			const parent = rootSession();
 			parent.resetAdvisoryLineage();
+			AgentRegistry.global().register({
+				id: MAIN_AGENT_ID,
+				displayName: MAIN_AGENT_ID,
+				kind: "main",
+				session: parent,
+			});
 			const parentId = parent.sessionManager.getSessionId();
 			const hub = AdvisoryHub.main();
 			const result = await runSubprocess(
-				runOptions("AdvisoryPark", "ping", { parentSessionId: parentId, parentId: MAIN_AGENT_ID }),
+				runOptions("AdvisoryPark", "ping", { parentSessionId: parentId, parentAgentId: MAIN_AGENT_ID }),
 			);
 			expect(result.error).toBeUndefined();
 			expect(hub.children(parentId)[0]).toBeDefined();
@@ -557,8 +566,130 @@ describe("subagent runs routed into pooled workers", () => {
 			if (!worker) throw new Error("worker missing");
 			await worker.terminate("test exit");
 			expect(hub.children(parentId)[0]?.wallMs).toBe(paused?.wallMs);
+			lifecycle.setPersistedSubagentReviverFactory(
+				createPersistedSubagentReviverFactory({
+					session: parent,
+					authStorage,
+					modelRegistry,
+					settings,
+					enableLsp: false,
+					eventBus,
+				}),
+				() => 0,
+			);
+			const revived = mirrorOf(await lifecycle.ensureLive("AdvisoryPark"));
+			expect(revived.home).not.toBe(home);
+			const followUp = await runSubagentFollowUpTurn({
+				id: "AdvisoryPark",
+				agent: AGENT,
+				message: "again",
+				structured: false,
+			});
+			expect(followUp.error).toBeUndefined();
+			const fresh = hub.children(parentId)[0];
+			expect(fresh?.ref.assignmentId).not.toBe(paused?.ref.assignmentId);
+			const receipt = await IrcBus.global().send({ from: MAIN_AGENT_ID, to: "AdvisoryPark", body: "again" });
+			expect(receipt.outcome).not.toBe("failed");
+			await waitFor(() => hub.children(parentId)[0]?.ref.assignmentId !== fresh?.ref.assignmentId);
+			const awake = hub.children(parentId)[0];
+			expect(awake?.ref.assignmentId).not.toBe(fresh?.ref.assignmentId);
+			await lifecycle.park("AdvisoryPark");
 			await lifecycle.release("AdvisoryPark");
 			expect(hub.children(parentId)).toEqual([]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"measures blocked time while a worker tool runs",
+		async () => {
+			const parent = rootSession();
+			parent.resetAdvisoryLineage();
+			const parentId = parent.sessionManager.getSessionId();
+			const gate = path.join(cwd, "advisory-gate");
+			await Bun.spawn(["mkfifo", gate]).exited;
+			const running = runSubprocess(runOptions("AdvisoryTool", BLOCK_TOOL_TASK, { parentSessionId: parentId }));
+			const hub = AdvisoryHub.main();
+			try {
+				await waitFor(() => {
+					const snapshot = hub.children(parentId)[0];
+					return (
+						!!snapshot &&
+						snapshot.unblockedMs !== null &&
+						snapshot.waitReasons.includes("tool") &&
+						snapshot.unblockedMs < snapshot.wallMs
+					);
+				});
+				const snapshot = hub.children(parentId)[0]!;
+				expect(snapshot.unblockedMs).toBeLessThan(snapshot.wallMs);
+			} finally {
+				await Bun.spawn(["sh", "-c", "printf done > advisory-gate"], { cwd }).exited;
+				await running;
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"delivers a reminder to a worker child and rejects its reply after navigation",
+		async () => {
+			const parent = rootSession();
+			parent.resetAdvisoryLineage();
+			AgentRegistry.global().register({
+				id: MAIN_AGENT_ID,
+				displayName: MAIN_AGENT_ID,
+				kind: "main",
+				session: parent,
+			});
+			const parentId = parent.sessionManager.getSessionId();
+			const running = runSubprocess(
+				runOptions("AdvisoryReply", HANG_TASK, {
+					parentSessionId: parentId,
+					parentAgentId: MAIN_AGENT_ID,
+					agent: { ...AGENT, tools: ["read", "bash", "write"] },
+				}),
+			);
+			const hub = AdvisoryHub.main();
+			await server.hung();
+			await waitFor(() => hub.children(parentId).length === 1);
+			const ref = hub.children(parentId)[0]!.ref;
+			const events: string[] = [];
+			const unsubscribe = hub.subscribe(parentId, event => {
+				if (event.type === "reply") events.push(event.state);
+			});
+			try {
+				expect(
+					(await hub.remind({ parentSessionId: parentId, ref, requestId: "check", content: "status" })).outcome,
+				).toBe("injected");
+				const body = JSON.stringify({
+					state: "progressing",
+					progress: "worked",
+					tried: [],
+					blocker: "",
+					nextAction: "continue",
+					requestId: "check",
+				});
+				expect(
+					(
+						await hub.sendBound({
+							childSessionId: ref.childSessionId,
+							fromAgentId: "AdvisoryReply",
+							toAgentId: MAIN_AGENT_ID,
+							assignmentId: ref.assignmentId,
+							checkId: "check",
+							body,
+						})
+					).outcome,
+				).toBe("woken");
+				expect(events).toEqual(["progressing"]);
+				hub.navigate(parentId);
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages))).not.toContain("worked");
+			} finally {
+				unsubscribe();
+				const worker = pool.workers()[0];
+				if (worker) await worker.terminate("test end");
+				await running;
+			}
 		},
 		TEST_TIMEOUT_MS,
 	);
