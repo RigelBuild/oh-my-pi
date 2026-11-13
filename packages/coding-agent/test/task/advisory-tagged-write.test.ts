@@ -21,9 +21,9 @@ it("routes tagged writes and excludes invalid report bodies from errors", async 
 	const ref = hub.mint({ childSessionId: childId, parentSessionId: parentId, messaging: { status: "supported" } });
 	hub.attach({ sessionId: childId, instanceId: "child-instance", agentId: "Parent.Child" });
 	const send = spyOn(hub, "sendBound").mockResolvedValue({ outcome: "injected" });
-	const toolSession = { cwd: process.cwd(), hasUI: false, settings: Settings.isolated(), agentRegistry: registry, getAgentId: () => "Parent.Child", getSessionFile: () => null, taskDepth: 1 } as unknown as ToolSession;
+	const toolSession = { cwd: process.cwd(), hasUI: false, settings: Settings.isolated(), agentRegistry: registry, getAgentId: () => "Parent.Child", getSessionId: () => childId, getSessionFile: () => null, taskDepth: 1 } as unknown as ToolSession;
 	try {
-		const report = JSON.stringify({ state: "progressing", progress: "worked", tried: [], blocker: "", nextAction: "continue" });
+		const report = JSON.stringify({ state: "progressing", progress: "worked", tried: [], blocker: "", nextAction: "continue", requestId: "check-1" });
 		const tool = new WriteTool(toolSession);
 		const result = await tool.execute("write", { path: "agent://Parent", content: report, assignmentId: ref.assignmentId, checkId: "check-1" });
 		expect(result.isError).not.toBe(true);
