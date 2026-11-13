@@ -35,7 +35,7 @@ import type { MainThreadLink, SubagentWorkerInit } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
 import type { ThreadService, WorkerPeer } from "./services";
 import { prewarmModelRegistryMirror } from "./services/auth";
-import { THREAD_SERVICES } from "./services/index";
+import { threadServices } from "./services/index";
 import { isSubagentWorkerLog, receiveWorkerLog } from "./worker-log";
 
 const DEFAULT_INIT_TIMEOUT_MS = 30_000;
@@ -139,7 +139,7 @@ export class SubagentWorker implements WorkerPeer {
 	constructor(options: SubagentWorkerOptions = {}) {
 		this.threadId = `w${nextThreadNumber++}`;
 		this.#options = options;
-		this.#services = options.services ?? THREAD_SERVICES;
+		this.#services = options.services ?? threadServices();
 		const worker = spawnBunWorker(options.entry);
 		this.#worker = worker;
 		// Unref'd until someone holds it: a booting spare never keeps the process alive.
