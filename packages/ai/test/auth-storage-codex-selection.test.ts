@@ -3035,6 +3035,51 @@ describe("AuthStorage codex oauth ranking", () => {
 		const apiKey = await authStorage.keys.get("openai-codex", undefined, { modelId });
 		expect(apiKey).toBe("api-acct-paid");
 	});
+	test("keeps a plan-gated reclaim destination pinned ahead of drain-first siblings", async () => {
+		if (!store || !authStorage) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-a" },
+					priority: 10,
+					reservePct: 5,
+					reclaimAbovePct: 50,
+				},
+				{ provider: "openai-codex", account: { accountId: "acct-b" }, priority: 5 },
+				{ provider: "openai-codex", account: { accountId: "acct-c" }, priority: 0, drainFirst: true },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+			{ type: "oauth", ...createCredential("acct-c", "c@example.com") },
+		]);
+		for (const [accountId, usedFraction] of [
+			["acct-a", 0.1],
+			["acct-b", 0.4],
+			["acct-c", 0.2],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction, resetInMs: 30 * 60 * 1000 },
+					secondary: { usedFraction, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+					metadata: { planType: "plus" },
+				}),
+			);
+		}
+
+		const sessionId = "codex-plan-reclaim-destination";
+		const modelId = "gpt-5.6-sol";
+		expect(
+			await authStorage.keys.get("openai-codex", sessionId, { accountIds: ["acct-b"], modelId }),
+		).toBe("api-acct-b");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
+	});
 
 	test.each([
 		["gpt-5.6-terra", "free", "enterprise"],

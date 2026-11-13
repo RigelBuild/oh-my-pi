@@ -338,6 +338,28 @@ describe("accountPolicies reclaimAbovePct", () => {
 		expect(await auth.keys.get(A, "filtered-reclaim", sessionOptions)).toBe("api-b");
 		expect(await auth.keys.get(A, "filtered-reclaim", sessionOptions)).toBe("api-b");
 	});
+	test("keeps a reserve pin when the only non-reserve sibling is outside the account filter", async () => {
+		const auth = await setup(
+			A,
+			[
+				{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 50 },
+				{ provider: A, account: { accountId: "b" }, priority: 0, reservePct: 0 },
+				{ provider: A, account: { accountId: "c" }, priority: 20, reservePct: 50 },
+			],
+			["a", "b", "c"],
+		);
+		setUsage(A, "a", 0.2, 0.2);
+		setUsage(A, "b", 0.1, 0.1);
+		setUsage(A, "c", 0.7, 0.7);
+		const sessionId = "reserve-filtered-sibling";
+		expect(await auth.keys.get(A, sessionId, { accountIds: ["a"] })).toBe("api-a");
+
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "a", 0.8, 0.8);
+		setUsage(A, "b", 0.1, 0.1);
+		setUsage(A, "c", 0.7, 0.7);
+		expect(await auth.keys.get(A, sessionId, { accountIds: ["a", "c"] })).toBe("api-a");
+	});
 	test("reclaims past a lower-priority drain-first candidate outside the account filter", async () => {
 		const auth = await setup(
 			A,

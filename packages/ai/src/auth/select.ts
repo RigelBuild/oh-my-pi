@@ -832,6 +832,10 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		const enforcePlanRequirement =
+			hasPlanRequirement && candidates.some(candidate => planGate?.(candidate.usage) === true);
+		const candidateMeetsPlanRequirement = (candidate: OAuthCandidate): boolean =>
+			!enforcePlanRequirement || planGate?.(candidate.usage) === true;
 		// Keep the candidate object: preflight may rebind its positional index
 		// after a peer changes the credential pool.
 		const explicitPin = sessionPinIsExplicit
@@ -867,6 +871,7 @@ export class CredentialSelector {
 					candidate === preferredCandidate ||
 					(excludePreflightFailures && preflightFailures.has(candidate)) ||
 					!candidateMatchesAccountFilter(candidate) ||
+					!candidateMeetsPlanRequirement(candidate) ||
 					this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes) ||
 					candidate.reclaimReady !== true ||
 					(candidate.accountPriority ?? 0) <= pinPriority
@@ -1071,7 +1076,7 @@ export class CredentialSelector {
 				candidates.unshift(preferredCandidate);
 			}
 		}
-		if (!hasPlanRequirement && sessionPreferredIsWarm && !sessionPinIsExplicit) {
+		if (sessionPreferredIsWarm && !sessionPinIsExplicit) {
 			const reclaimCandidate = findReclaimCandidate(true);
 			if (reclaimCandidate !== undefined) {
 				const reclaimIndex = candidates.indexOf(reclaimCandidate);
@@ -1081,12 +1086,6 @@ export class CredentialSelector {
 				}
 			}
 		}
-
-		// Enforce a tier only when at least one account is confirmed eligible. If
-		// every report is unknown or ineligible, preserve trial/grandfathered access
-		// by allowing the normal candidate fallback to attempt the request.
-		const enforcePlanRequirement =
-			hasPlanRequirement && candidates.some(candidate => planGate?.(candidate.usage) === true);
 
 		// Plan-gated models rank on every resolve to re-verify account tiers,
 		// so the drain-urgency order can flip between two eligible accounts as their
