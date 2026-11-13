@@ -3080,6 +3080,54 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
 		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
 	});
+	test("keeps an unknown-plan pin over a known-ineligible reclaim target", async () => {
+		if (!store || !authStorage) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-free-reclaim" },
+					priority: 10,
+					reservePct: 0,
+					reclaimAbovePct: 50,
+				},
+				{ provider: "openai-codex", account: { accountId: "acct-unknown-plan" }, priority: 5 },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-free-reclaim", "free-reclaim@example.com") },
+			{ type: "oauth", ...createCredential("acct-unknown-plan", "unknown-plan@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-free-reclaim",
+			createCodexUsageReport({
+				accountId: "acct-free-reclaim",
+				primary: { usedFraction: 0.1, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.1, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+				metadata: { planType: "free" },
+			}),
+		);
+		usageByAccount.set(
+			"acct-unknown-plan",
+			createCodexUsageReport({
+				accountId: "acct-unknown-plan",
+				primary: { usedFraction: 0.4, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.4, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+
+		const sessionId = "codex-unknown-plan-reclaim";
+		const modelId = "gpt-5.6-sol";
+		expect(
+			await authStorage.keys.get("openai-codex", sessionId, {
+				accountIds: ["acct-unknown-plan"],
+				modelId,
+			}),
+		).toBe("api-acct-unknown-plan");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-unknown-plan");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-unknown-plan");
+	});
 
 	test.each([
 		["gpt-5.6-terra", "free", "enterprise"],

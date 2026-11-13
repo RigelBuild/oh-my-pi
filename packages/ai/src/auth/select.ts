@@ -832,10 +832,14 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		// Enforce a tier only when at least one account is confirmed eligible. If
+		// every report is unknown or ineligible, preserve trial/grandfathered access
+		// by allowing the normal candidate fallback to attempt the request.
 		const enforcePlanRequirement =
 			hasPlanRequirement && candidates.some(candidate => planGate?.(candidate.usage) === true);
 		const candidateMeetsPlanRequirement = (candidate: OAuthCandidate): boolean =>
-			!enforcePlanRequirement || planGate?.(candidate.usage) === true;
+			planGate === undefined ||
+			(enforcePlanRequirement ? planGate(candidate.usage) === true : planGate(candidate.usage) !== false);
 		// Keep the candidate object: preflight may rebind its positional index
 		// after a peer changes the credential pool.
 		const explicitPin = sessionPinIsExplicit
@@ -1094,11 +1098,12 @@ export class CredentialSelector {
 		// unenforced and the pin is not known-ineligible) so an active session never
 		// silently migrates accounts mid-conversation; blocked, exhausted, or
 		// known-ineligible pins still fall through to the ranked sibling.
-		if (hasPlanRequirement && sessionPreferredCandidate > 0 && !pinEvictedAfterPreflight) {
-			const preferred = candidates[sessionPreferredCandidate]!;
+		const preferredIndex = preferredCandidate === undefined ? -1 : candidates.indexOf(preferredCandidate);
+		if (hasPlanRequirement && preferredIndex > 0 && !pinEvictedAfterPreflight) {
+			const preferred = candidates[preferredIndex]!;
 			const planEligibility = planGate?.(preferred.usage);
 			if (planEligibility === true || (!enforcePlanRequirement && planEligibility !== false)) {
-				candidates.splice(sessionPreferredCandidate, 1);
+				candidates.splice(preferredIndex, 1);
 				candidates.unshift(preferred);
 			}
 		}
