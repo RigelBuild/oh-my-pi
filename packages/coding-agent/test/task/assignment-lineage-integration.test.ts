@@ -34,6 +34,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	setAgentDir(path.join(home, ".omp", "agent"));
 	AgentRegistry.resetGlobalForTests();
+	AdvisoryHub.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 	registerMockApi("test/assignment-lineage");
@@ -223,6 +224,7 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		await main?.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		AdvisoryHub.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 		unregisterCustomApis("test/assignment-lineage");
 		auth.close();

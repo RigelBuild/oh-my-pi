@@ -32,6 +32,7 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	setAgentDir(path.join(home, ".omp", "agent"));
 	AgentRegistry.resetGlobalForTests();
+	AdvisoryHub.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	registerMockApi("test/advisory-delivery-e2e");
@@ -156,6 +157,7 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 		await main?.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		AdvisoryHub.resetGlobalForTests();
 		unregisterCustomApis("test/advisory-delivery-e2e");
 		auth.close();
 		vi.restoreAllMocks();
@@ -178,6 +180,7 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	setAgentDir(path.join(home, ".omp", "agent"));
 	AgentRegistry.resetGlobalForTests();
+	AdvisoryHub.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	registerMockApi("test/advisory-stranded-e2e");
@@ -335,6 +338,7 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		await AgentLifecycleManager.global().dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		AdvisoryHub.resetGlobalForTests();
 		unregisterCustomApis("test/advisory-stranded-e2e");
 		auth.close();
 		vi.restoreAllMocks();

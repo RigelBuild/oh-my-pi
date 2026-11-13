@@ -118,7 +118,7 @@ export class AdvisoryHub implements AdvisoryHubApi {
 	readonly #suspended = new Map<string, string[]>();
 	readonly #listeners = new Map<string, Set<(event: TaskAdvisoryEvent) => void>>();
 	readonly #last = new Map<string, string>();
-	/** Test-only resource counts for one session. */
+	/** Test-only: inspect resource counts for one session; production code must not use this. */
 	inspectForTests(sessionId: string): {
 		attached: boolean;
 		source: boolean;
