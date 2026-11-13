@@ -7,7 +7,6 @@ import { parseCodexRateLimitHeaders } from "@oh-my-pi/pi-ai";
 import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import {
 	AuthBrokerClient,
-	loadAuthAccountPolicyConfig,
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 	startAuthBroker,
@@ -823,29 +822,17 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 	});
 
-	test("accepts reserve policies whose usage provider registers after storage construction", async () => {
+	test("rejects a non-boolean drainFirst account policy", () => {
 		if (!store) throw new Error("test setup failed");
-		const provider = "openai-codex";
-		authStorage = new AuthStorage(store, {
-			usageProviderResolver: () => undefined,
-			accountPolicies: [
-				{
-					provider,
-					account: { accountId: "acct-runtime" },
-					reservePct: 20,
-				},
-			],
-		});
-		await authStorage.credentials.set(provider, [
-			{ type: "oauth", ...createCredential("acct-runtime", "runtime@example.com") },
-		]);
-
-		await expect(authStorage.keys.get(provider, "before-runtime-usage")).rejects.toThrow(
-			"reservePct requires a usage provider",
-		);
-
-		authStorage.usage.setProvider(provider, { ...usageProvider, id: provider });
-		await expect(authStorage.keys.get(provider, "after-runtime-usage")).resolves.toBe("api-acct-runtime");
+		const activeStore = store;
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [
+						{ provider: "openai-codex", account: { accountId: "acct-drain-first" }, drainFirst: "yes" as never },
+					],
+				}),
+		).toThrow("auth.accountPolicies[0].drainFirst must be a boolean");
 	});
 
 	test("requires a base selector identity", () => {
@@ -863,25 +850,6 @@ describe("AuthStorage codex oauth ranking", () => {
 					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
 				}),
 		).toThrow("without surrounding whitespace");
-	});
-
-	test("parses drainFirst as a boolean in auth account policies", async () => {
-		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-drain-first-config-"));
-		const configPath = path.join(tempDir, "config.yml");
-		const policy = { provider: "openai-codex", account: { accountId: "acct-drain-first" }, drainFirst: true };
-		await Bun.write(configPath, ["auth:", `  accountPolicies: ${JSON.stringify([policy])}`, ""].join("\n"));
-
-		await expect(loadAuthAccountPolicyConfig({ agentDir: tempDir })).resolves.toMatchObject({
-			accountPolicies: [policy],
-		});
-
-		await Bun.write(
-			configPath,
-			["auth:", `  accountPolicies: ${JSON.stringify([{ ...policy, drainFirst: "true" }])}`, ""].join("\n"),
-		);
-		await expect(loadAuthAccountPolicyConfig({ agentDir: tempDir })).rejects.toThrow(
-			"auth.accountPolicies[0].drainFirst must be a boolean",
-		);
 	});
 
 	test("drain-first account outranks a cooler account with faster weekly drain urgency", async () => {

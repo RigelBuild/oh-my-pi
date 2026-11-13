@@ -856,19 +856,20 @@ export class CredentialSelector {
 		// A warm automatic pin normally wins. Three policies may evict it, each only
 		// while a sibling is confirmed better: reserve (sibling measured outside
 		// reserve), spent allowance (unblocked sibling with allowance left), and
-		// opt-in reclaim (the sibling ranking picks next has higher priority and is
-		// measured at or above its `reclaimAbovePct`).
+		// opt-in reclaim (any unblocked, higher-priority sibling has met its
+		// `reclaimAbovePct` threshold).
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
 			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
-			const rankedWinner = candidates.find(
-				candidate =>
-					candidate !== preferredCandidate &&
-					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
-					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
-			);
+			const pinPriority = preferredCandidate.accountPriority ?? 0;
 			if (
-				rankedWinner?.reclaimReady === true &&
-				(rankedWinner.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0)
+				candidates.some(
+					candidate =>
+						candidate !== preferredCandidate &&
+						!(excludePreflightFailures && preflightFailures.has(candidate)) &&
+						!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
+						candidate.reclaimReady === true &&
+						(candidate.accountPriority ?? 0) > pinPriority,
+				)
 			) {
 				return true;
 			}

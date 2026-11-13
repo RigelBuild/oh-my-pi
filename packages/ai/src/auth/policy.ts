@@ -116,9 +116,11 @@ export class AccountPolicies {
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
 		if (canFetchUsage) return;
-		for (const field of ["reservePct", "reclaimAbovePct"] as const) {
+		for (const field of ["reservePct", "reclaimAbovePct", "drainFirst"] as const) {
 			const policyIndex = this.#accountPolicies.findIndex(
-				policy => policy.provider === provider && policy[field] !== undefined,
+				policy =>
+					policy.provider === provider &&
+					(field === "drainFirst" ? policy.drainFirst === true : policy[field] !== undefined),
 			);
 			if (policyIndex !== -1) {
 				throw new AIError.ConfigurationError(

@@ -225,6 +225,24 @@ describe("accountPolicies reclaimAbovePct", () => {
 			"auth.accountPolicies[0].reclaimAbovePct requires a usage provider for anthropic",
 		);
 	});
+	test.each([true, false])("requires a usage provider only when drainFirst is %s", async drainFirst => {
+		if (!store) throw new Error("test setup failed");
+		const auth = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			accountPolicies: [{ provider: A, account: { accountId: "a" }, drainFirst }],
+		});
+		await auth.credentials.set(A, [
+			{ type: "oauth", access: "x", refresh: "y", expires: Date.now() + WEEK, accountId: "a" },
+		]);
+
+		if (drainFirst) {
+			await expect(auth.keys.get(A, "S1")).rejects.toThrow(
+				"auth.accountPolicies[0].drainFirst requires a usage provider for anthropic",
+			);
+		} else {
+			await expect(auth.keys.get(A, "S1")).resolves.toBe("api-a");
+		}
+	});
 	test("reclaims a Codex session whose pins never go cold", async () => {
 		const C = "openai-codex" as const;
 		const auth = await setup(
@@ -273,27 +291,35 @@ describe("accountPolicies reclaimAbovePct", () => {
 		await pushOntoBackupThenRecover(auth, 0.61);
 		expect(await next(auth, A, "S1")).toBe("b");
 	});
-
-	test("keeps the warm pin when ranking would hand the session to a sibling other than the reclaiming account", async () => {
+	test("reclaims past a lower-priority drain-first candidate outside the account filter", async () => {
 		const auth = await setup(
 			A,
 			[
-				{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 5, reclaimAbovePct: 10 },
+				{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 15, reclaimAbovePct: 40 },
 				{ provider: A, account: { accountId: "b" }, priority: 5 },
-				{ provider: A, account: { accountId: "c" }, priority: 0 },
+				{
+					provider: A,
+					account: { accountId: "c" },
+					priority: 0,
+					reservePct: 10,
+					reclaimAbovePct: 40,
+					drainFirst: true,
+				},
 			],
 			["a", "b", "c"],
 		);
-		// S1 starts on B: A is inside its reserve and C's 5h window is hot.
+		// A starts in reserve. C ranks first by drain urgency but is outside the requested account set.
 		setUsage(A, "a", 0.97, 0.1);
 		setUsage(A, "b", 0.3, 0.1);
-		setUsage(A, "c", 0.95, 0.1);
-		expect(await next(auth, A, "S1")).toBe("b");
-		// A recovers past its reclaim line, but the hot-window guard ranks C first.
+		setUsage(A, "c", 0.3, 0.1);
+		const sessionOptions = { accountIds: ["a", "b"] };
+		expect(await auth.keys.get(A, "drain-first-reclaim", sessionOptions)).toBe("api-b");
+
+		// A and C now meet reclaim; C still ranks first but has lower priority than pinned B.
 		await advance(auth, A, 10 * MIN);
-		setUsage(A, "a", 0.88, 0.1);
-		setUsage(A, "b", 0.86, 0.1);
-		setUsage(A, "c", 0, 0.1);
-		expect(await next(auth, A, "S1")).toBe("b");
+		setUsage(A, "a", 0.1, 0.1);
+		setUsage(A, "b", 0.3, 0.1);
+		setUsage(A, "c", 0.1, 0.1);
+		expect(await auth.keys.get(A, "drain-first-reclaim", sessionOptions)).toBe("api-a");
 	});
 });
