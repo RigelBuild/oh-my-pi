@@ -754,6 +754,7 @@ describe("subagent runs routed into pooled workers", () => {
 					toolCallId: "wait",
 					toolName: "wait",
 					...result,
+					isError: result.isError ?? false,
 					timestamp: Date.now(),
 				});
 				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain(
@@ -833,6 +834,7 @@ describe("subagent runs routed into pooled workers", () => {
 					toolCallId: "wait",
 					toolName: "wait",
 					...result,
+					isError: result.isError ?? false,
 					timestamp: Date.now(),
 				});
 				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain(
