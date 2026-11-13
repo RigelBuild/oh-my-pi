@@ -3074,9 +3074,9 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const sessionId = "codex-plan-reclaim-destination";
 		const modelId = "gpt-5.6-sol";
-		expect(
-			await authStorage.keys.get("openai-codex", sessionId, { accountIds: ["acct-b"], modelId }),
-		).toBe("api-acct-b");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { accountIds: ["acct-b"], modelId })).toBe(
+			"api-acct-b",
+		);
 		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
 		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
 	});
