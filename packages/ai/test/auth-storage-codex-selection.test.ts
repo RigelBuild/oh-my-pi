@@ -875,7 +875,10 @@ describe("AuthStorage codex oauth ranking", () => {
 			accountPolicies: [policy],
 		});
 
-		await Bun.write(configPath, ["auth:", `  accountPolicies: ${JSON.stringify([{ ...policy, drainFirst: "true" }])}`, ""].join("\n"));
+		await Bun.write(
+			configPath,
+			["auth:", `  accountPolicies: ${JSON.stringify([{ ...policy, drainFirst: "true" }])}`, ""].join("\n"),
+		);
 		await expect(loadAuthAccountPolicyConfig({ agentDir: tempDir })).rejects.toThrow(
 			"auth.accountPolicies[0].drainFirst must be a boolean",
 		);
@@ -900,22 +903,25 @@ describe("AuthStorage codex oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-drain-first", "api-acct-cooler");
 	});
 
-	test.each(["primary", "secondary"] as const)("keeps drain-first behind a cooler sibling when the %s window blocks", async window => {
-		const storage = await setupDrainFirstAccounts(
-			createCodexUsageReport({
-				accountId: "acct-drain-first",
-				primary: { usedFraction: window === "primary" ? 1 : 0.2, resetInMs: HOUR_MS },
-				secondary: { usedFraction: window === "secondary" ? 1 : 0.6, resetInMs: WEEK_MS },
-			}),
-			createCodexUsageReport({
-				accountId: "acct-cooler",
-				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
-				secondary: { usedFraction: 0.4, resetInMs: HOUR_MS },
-			}),
-		);
-		const counts = await countApiKeySelections(storage, "openai-codex", `drain-first-blocked-${window}`);
-		expectExclusivePreference(counts, "api-acct-cooler", "api-acct-drain-first");
-	});
+	test.each(["primary", "secondary"] as const)(
+		"keeps drain-first behind a cooler sibling when the %s window blocks",
+		async window => {
+			const storage = await setupDrainFirstAccounts(
+				createCodexUsageReport({
+					accountId: "acct-drain-first",
+					primary: { usedFraction: window === "primary" ? 1 : 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: window === "secondary" ? 1 : 0.6, resetInMs: WEEK_MS },
+				}),
+				createCodexUsageReport({
+					accountId: "acct-cooler",
+					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.4, resetInMs: HOUR_MS },
+				}),
+			);
+			const counts = await countApiKeySelections(storage, "openai-codex", `drain-first-blocked-${window}`);
+			expectExclusivePreference(counts, "api-acct-cooler", "api-acct-drain-first");
+		},
+	);
 
 	test("keeps the hot 5h guard ahead of drain-first", async () => {
 		const storage = await setupDrainFirstAccounts(
