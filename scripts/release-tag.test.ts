@@ -5,6 +5,8 @@ import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
 import { checkPr, createTag, expectedNextVersion, mintTarget, parseTrackingVersion, type TagApi } from "./release-tag";
 
+const RELEASE_VERSION = "18.9.2-rigel.2";
+
 describe("parseTrackingVersion", () => {
 	test("accepts X.Y.Z-rigel.N", () => {
 		expect(parseTrackingVersion("18.9.2-rigel.1")).toEqual({ base: "18.9.2", n: 1n });
@@ -40,6 +42,9 @@ describe("expectedNextVersion", () => {
 	test("ignores malformed tags", () => {
 		expect(expectedNextVersion("18.9.2", ["v18.9.2-rigel.01", "v18.9.2-rigel.x"])).toBe("18.9.2-rigel.1");
 	});
+	test("increments from rigel.3 to rigel.4", () => {
+		expect(expectedNextVersion("18.18.3", ["v18.18.3-rigel.3"])).toBe("18.18.3-rigel.4");
+	});
 });
 
 async function repo(): Promise<string> {
@@ -48,11 +53,27 @@ async function repo(): Promise<string> {
 	return dir;
 }
 
-async function commit(dir: string, version?: string): Promise<string> {
+async function commit(dir: string, version?: string, stamp = false): Promise<string> {
 	await fs.mkdir(path.join(dir, ".github"), { recursive: true });
 	const file = path.join(dir, ".github/rigel-version");
 	if (version === undefined) await fs.rm(file, { force: true });
 	else await Bun.write(file, `${version}\n`);
+	if (stamp) {
+		await fs.mkdir(path.join(dir, "packages", "public"), { recursive: true });
+		await Bun.write(
+			path.join(dir, "packages", "public", "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/public", version }),
+		);
+		await fs.mkdir(path.join(dir, "packages", "private"), { recursive: true });
+		await Bun.write(
+			path.join(dir, "packages", "private", "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/private", version: "0.0.1", private: true }),
+		);
+		await Bun.write(
+			path.join(dir, "package.json"),
+			JSON.stringify({ workspaces: { catalog: { "@oh-my-pi/public": version } } }),
+		);
+	}
 	await Bun.write(path.join(dir, "n"), crypto.randomUUID());
 	await $`git add -A && git commit -qm c`.cwd(dir).quiet();
 	return (await $`git rev-parse HEAD`.cwd(dir).text()).trim();
@@ -108,12 +129,27 @@ describe("checkPr", () => {
 		expect(await checkPr(dir, base, head)).toBe("unchanged");
 	});
 
-	test("accepts the next version", async () => {
+	test("rejects a mismatched package version and names the manifest", async () => {
 		const dir = await repo();
 		const base = await commit(dir, "18.9.2-rigel.1");
 		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
-		const head = await commit(dir, "18.9.2-rigel.2");
-		expect(await checkPr(dir, base, head)).toBe("18.9.2-rigel.2");
+		await commit(dir, RELEASE_VERSION, true);
+		await Bun.write(
+			path.join(dir, "packages", "public", "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/public", version: "18.9.2" }),
+		);
+		await $`git add -A && git commit -qm mismatch`.cwd(dir).quiet();
+		await expect(checkPr(dir, base, (await $`git rev-parse HEAD`.cwd(dir).text()).trim())).rejects.toThrow(
+			"packages/public/package.json",
+		);
+	});
+
+	test("accepts matching package and catalog stamps", async () => {
+		const dir = await repo();
+		const base = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
+		const head = await commit(dir, RELEASE_VERSION, true);
+		expect(await checkPr(dir, base, head)).toBe(RELEASE_VERSION);
 	});
 
 	test("rejects a reused version", async () => {

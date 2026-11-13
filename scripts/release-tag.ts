@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 // Validates `.github/rigel-version` changes and mints its `vX.Y.Z-rigel.N` tag.
 // Usage: release-tag.ts check-pr <base-sha> <head-sha> | mint <sha> <owner/repo>
-import { $ } from "bun";
+import { $, Glob } from "bun";
+import { applyPackageVersion } from "./release";
 
 const VERSION_FILE = ".github/rigel-version";
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rigel\.([1-9]\d*)$/;
-
+const packageJsonGlob = new Glob("packages/*/package.json");
 export interface TrackingVersion {
 	base: string;
 	n: bigint;
@@ -39,6 +40,48 @@ async function versionAt(cwd: string, sha: string): Promise<string | null> {
 	return lines[0];
 }
 
+// Check the head tree's public package and catalog versions after a tracking bump.
+async function validateStampedVersions(cwd: string, sha: string, version: string): Promise<void> {
+	const mismatches: string[] = [];
+	for (const packagePath of await Array.fromAsync(packageJsonGlob.scan(cwd))) {
+		const result = await $`git show ${`${sha}:${packagePath}`}`.cwd(cwd).quiet().nothrow();
+		if (result.exitCode !== 0) continue;
+		const contents = result.text();
+		const parsed: unknown = JSON.parse(contents);
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new Error(`${packagePath} is not a JSON object`);
+		}
+		if ("private" in parsed && parsed.private) continue;
+		const updated = applyPackageVersion(contents, version);
+		if (!("version" in parsed) || parsed.version !== version || updated !== contents) mismatches.push(packagePath);
+	}
+
+	const root = await $`git show ${`${sha}:package.json`}`.cwd(cwd).quiet().nothrow();
+	if (root.exitCode === 0) {
+		const parsed: unknown = JSON.parse(root.text());
+		if (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			!Array.isArray(parsed) &&
+			"workspaces" in parsed &&
+			typeof parsed.workspaces === "object" &&
+			parsed.workspaces !== null &&
+			!Array.isArray(parsed.workspaces) &&
+			"catalog" in parsed.workspaces &&
+			typeof parsed.workspaces.catalog === "object" &&
+			parsed.workspaces.catalog !== null &&
+			!Array.isArray(parsed.workspaces.catalog)
+		) {
+			const mismatch = Object.entries(parsed.workspaces.catalog).some(
+				([name, value]) => name.startsWith("@oh-my-pi/") && value !== version,
+			);
+			if (mismatch) mismatches.push("package.json");
+		}
+	}
+
+	if (mismatches.length > 0) throw new Error(`release versions do not match ${version}: ${mismatches.join(", ")}`);
+}
+
 async function validateNext(cwd: string, version: string): Promise<void> {
 	const parsed = parseTrackingVersion(version);
 	if (!parsed) throw new Error(`version '${version}' does not match the required X.Y.Z-rigel.N shape`);
@@ -53,6 +96,7 @@ export async function checkPr(cwd: string, baseSha: string, headSha: string): Pr
 	if (headVersion === (await versionAt(cwd, baseSha))) return "unchanged";
 	if (headVersion === null) throw new Error(`${VERSION_FILE} was removed`);
 	await validateNext(cwd, headVersion);
+	await validateStampedVersions(cwd, headSha, headVersion);
 	return headVersion;
 }
 
