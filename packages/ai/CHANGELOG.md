@@ -4,6 +4,7 @@
 
 ### Added
 
+- Per-account auth routing policies can mark accounts as drain-first; they rank ahead of other unblocked, non-hot accounts.
 - `AuthStorage.usage.report` accepts `fresh: true` for live reads on the credential host; remote-store requests fail closed.
 - `AuthStorage` option `claudeResetBanking` ranks Claude accounts that hold a spare reset clearing the weekly limit ahead of siblings and exempts them from the reserve guard, so they drain first.
 - Auth-gateway `onUsageLimit` hook runs before an account is marked reached; returning `true` resends the request on the same credential.

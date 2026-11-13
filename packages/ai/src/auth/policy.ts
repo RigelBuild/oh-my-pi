@@ -96,6 +96,9 @@ export class AccountPolicies {
 			) {
 				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
 			}
+			if (policy.drainFirst !== undefined && typeof policy.drainFirst !== "boolean") {
+				throw new AIError.ConfigurationError(`${path}.drainFirst must be a boolean`);
+			}
 			if (policy.reclaimAbovePct !== undefined) {
 				const reservePct = policy.reservePct ?? defaultReservePct;
 				if (

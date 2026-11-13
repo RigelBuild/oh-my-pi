@@ -7,6 +7,7 @@ import { parseCodexRateLimitHeaders } from "@oh-my-pi/pi-ai";
 import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import {
 	AuthBrokerClient,
+	loadAuthAccountPolicyConfig,
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 	startAuthBroker,
@@ -340,6 +341,26 @@ describe("AuthStorage codex oauth ranking", () => {
 		});
 	});
 
+	async function setupDrainFirstAccounts(
+		drainFirstUsage: UsageReport,
+		coolerUsage: UsageReport,
+	): Promise<AuthStorage> {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{ provider: "openai-codex", account: { accountId: "acct-drain-first" }, drainFirst: true },
+				{ provider: "openai-codex", account: { accountId: "acct-cooler" } },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-drain-first", "drain-first@example.com") },
+			{ type: "oauth", ...createCredential("acct-cooler", "cooler@example.com") },
+		]);
+		usageByAccount.set("acct-drain-first", drainFirstUsage);
+		usageByAccount.set("acct-cooler", coolerUsage);
+		return authStorage;
+	}
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		store?.close();
@@ -842,6 +863,84 @@ describe("AuthStorage codex oauth ranking", () => {
 					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
 				}),
 		).toThrow("without surrounding whitespace");
+	});
+
+	test("parses drainFirst as a boolean in auth account policies", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-drain-first-config-"));
+		const configPath = path.join(tempDir, "config.yml");
+		const policy = { provider: "openai-codex", account: { accountId: "acct-drain-first" }, drainFirst: true };
+		await Bun.write(configPath, ["auth:", `  accountPolicies: ${JSON.stringify([policy])}`, ""].join("\n"));
+
+		await expect(loadAuthAccountPolicyConfig({ agentDir: tempDir })).resolves.toMatchObject({
+			accountPolicies: [policy],
+		});
+
+		await Bun.write(configPath, ["auth:", `  accountPolicies: ${JSON.stringify([{ ...policy, drainFirst: "true" }])}`, ""].join("\n"));
+		await expect(loadAuthAccountPolicyConfig({ agentDir: tempDir })).rejects.toThrow(
+			"auth.accountPolicies[0].drainFirst must be a boolean",
+		);
+	});
+
+	test("drain-first account outranks a cooler account with faster weekly drain urgency", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = await setupDrainFirstAccounts(
+			createCodexUsageReport({
+				accountId: "acct-drain-first",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.6, resetInMs: 6 * 24 * HOUR_MS },
+			}),
+			createCodexUsageReport({
+				accountId: "acct-cooler",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(storage, "openai-codex", "drain-first-usage");
+		expectExclusivePreference(counts, "api-acct-drain-first", "api-acct-cooler");
+	});
+
+	test.each(["primary", "secondary"] as const)("keeps drain-first behind a cooler sibling when the %s window blocks", async window => {
+		const storage = await setupDrainFirstAccounts(
+			createCodexUsageReport({
+				accountId: "acct-drain-first",
+				primary: { usedFraction: window === "primary" ? 1 : 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: window === "secondary" ? 1 : 0.6, resetInMs: WEEK_MS },
+			}),
+			createCodexUsageReport({
+				accountId: "acct-cooler",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: HOUR_MS },
+			}),
+		);
+		const counts = await countApiKeySelections(storage, "openai-codex", `drain-first-blocked-${window}`);
+		expectExclusivePreference(counts, "api-acct-cooler", "api-acct-drain-first");
+	});
+
+	test("keeps the hot 5h guard ahead of drain-first", async () => {
+		const storage = await setupDrainFirstAccounts(
+			createCodexUsageReport({
+				accountId: "acct-drain-first",
+				primary: {
+					usedFraction: 0.9,
+					resetInMs: HOUR_MS,
+				},
+				secondary: { usedFraction: 0.8, resetInMs: WEEK_MS },
+				primaryWindow: { windowId: "5h", windowLabel: "5 Hour", durationMs: FIVE_HOUR_MS },
+			}),
+			createCodexUsageReport({
+				accountId: "acct-cooler",
+				primary: {
+					usedFraction: 0.2,
+					resetInMs: HOUR_MS,
+				},
+				secondary: { usedFraction: 0.4, resetInMs: WEEK_MS },
+				primaryWindow: { windowId: "5h", windowLabel: "5 Hour", durationMs: FIVE_HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(storage, "openai-codex", "drain-first-hot-5h");
+		expectExclusivePreference(counts, "api-acct-cooler", "api-acct-drain-first");
 	});
 
 	test("keeps hot-window safety ahead of configured priority but not a failed usage fetch", async () => {

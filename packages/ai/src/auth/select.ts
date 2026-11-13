@@ -344,6 +344,7 @@ export class CredentialSelector {
 				allowanceSpent: remainingUsageFraction(strategy, usage, args.rankingContext, nowMs) === 0,
 				usageMeasured,
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
+				drainFirst: false,
 				planPriority: 0,
 				secondaryUsed: normalizeUsageFraction(secondary),
 				secondaryRequiredDrain: windowRequiredDrain(secondary, nowMs, strategy.windowDefaults.secondaryMs),
@@ -645,6 +646,7 @@ export class CredentialSelector {
 					remainingFraction !== undefined &&
 					isWithinUsageReserve(remainingFraction, reserveFraction),
 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
+				drainFirst: policy?.drainFirst === true,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
 				reclaimReady:
