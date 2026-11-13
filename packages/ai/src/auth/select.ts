@@ -853,28 +853,46 @@ export class CredentialSelector {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
+		const candidateMatchesAccountFilter = (candidate: OAuthCandidate): boolean => {
+			if (!enforceAccounts) return true;
+			const accountKey = oauthAccountKey(candidate.selection.credential);
+			return accountKey !== undefined && accountIds?.has(accountKey) === true;
+		};
+		const findReclaimCandidate = (excludePreflightFailures: boolean): OAuthCandidate | undefined => {
+			if (sessionPinIsExplicit || preferredCandidate === undefined) return undefined;
+			const pinPriority = preferredCandidate.accountPriority ?? 0;
+			let reclaimCandidate: OAuthCandidate | undefined;
+			for (const candidate of candidates) {
+				if (
+					candidate === preferredCandidate ||
+					(excludePreflightFailures && preflightFailures.has(candidate)) ||
+					!candidateMatchesAccountFilter(candidate) ||
+					this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes) ||
+					candidate.reclaimReady !== true ||
+					(candidate.accountPriority ?? 0) <= pinPriority
+				) {
+					continue;
+				}
+				if (
+					reclaimCandidate === undefined ||
+					(candidate.accountPriority ?? 0) > (reclaimCandidate.accountPriority ?? 0)
+				) {
+					reclaimCandidate = candidate;
+				}
+			}
+			return reclaimCandidate;
+		};
 		// A warm automatic pin normally wins. Three policies may evict it, each only
 		// while a sibling is confirmed better: reserve (sibling measured outside
 		// reserve), spent allowance (unblocked sibling with allowance left), and
-		// opt-in reclaim (any unblocked, higher-priority sibling has met its
-		// `reclaimAbovePct` threshold).
+		// opt-in reclaim (a selectable, unblocked, higher-priority sibling has met
+		// its `reclaimAbovePct` threshold).
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
 			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
-			const pinPriority = preferredCandidate.accountPriority ?? 0;
-			if (
-				candidates.some(
-					candidate =>
-						candidate !== preferredCandidate &&
-						!(excludePreflightFailures && preflightFailures.has(candidate)) &&
-						!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
-						candidate.reclaimReady === true &&
-						(candidate.accountPriority ?? 0) > pinPriority,
-				)
-			) {
-				return true;
-			}
+			if (findReclaimCandidate(excludePreflightFailures) !== undefined) return true;
 			return candidates.some(candidate => {
 				if (candidate === preferredCandidate) return false;
+				if (!candidateMatchesAccountFilter(candidate)) return false;
 				if (excludePreflightFailures && preflightFailures.has(candidate)) return false;
 				if (
 					preferredCandidate.inReserve === true &&
@@ -1053,6 +1071,16 @@ export class CredentialSelector {
 				candidates.unshift(preferredCandidate);
 			}
 		}
+		if (!hasPlanRequirement && sessionPreferredIsWarm && !sessionPinIsExplicit) {
+			const reclaimCandidate = findReclaimCandidate(true);
+			if (reclaimCandidate !== undefined) {
+				const reclaimIndex = candidates.indexOf(reclaimCandidate);
+				if (reclaimIndex > 0) {
+					candidates.splice(reclaimIndex, 1);
+					candidates.unshift(reclaimCandidate);
+				}
+			}
+		}
 
 		// Enforce a tier only when at least one account is confirmed eligible. If
 		// every report is unknown or ineligible, preserve trial/grandfathered access
@@ -1105,9 +1133,7 @@ export class CredentialSelector {
 
 		for (const pass of passes) {
 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
-				if (preflightFailures.has(candidate)) continue;
-				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
-				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))
+				if (preflightFailures.has(candidate) || (pass.enforceAccounts && !candidateMatchesAccountFilter(candidate)))
 					continue;
 				const resolved = await this.tryOAuth(provider, candidate.selection, providerKey, sessionId, options, {
 					checkUsage,

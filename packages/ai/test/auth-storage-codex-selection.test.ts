@@ -822,6 +822,31 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 	});
 
+	test("accepts reserve policies whose usage provider registers after storage construction", async () => {
+		if (!store) throw new Error("test setup failed");
+		const provider = "openai-codex";
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: () => undefined,
+			accountPolicies: [
+				{
+					provider,
+					account: { accountId: "acct-runtime" },
+					reservePct: 20,
+				},
+			],
+		});
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", ...createCredential("acct-runtime", "runtime@example.com") },
+		]);
+
+		await expect(authStorage.keys.get(provider, "before-runtime-usage")).rejects.toThrow(
+			"reservePct requires a usage provider",
+		);
+
+		authStorage.usage.setProvider(provider, { ...usageProvider, id: provider });
+		await expect(authStorage.keys.get(provider, "after-runtime-usage")).resolves.toBe("api-acct-runtime");
+	});
+
 	test("rejects a non-boolean drainFirst account policy", () => {
 		if (!store) throw new Error("test setup failed");
 		const activeStore = store;

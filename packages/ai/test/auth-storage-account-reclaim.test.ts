@@ -291,6 +291,53 @@ describe("accountPolicies reclaimAbovePct", () => {
 		await pushOntoBackupThenRecover(auth, 0.61);
 		expect(await next(auth, A, "S1")).toBe("b");
 	});
+	test("reclaims to the highest-priority account and keeps it pinned when another sibling ranks first", async () => {
+		const auth = await setup(
+			A,
+			[
+				{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 5, reclaimAbovePct: 10 },
+				{ provider: A, account: { accountId: "b" }, priority: 5 },
+				{ provider: A, account: { accountId: "c" }, priority: 0, drainFirst: true },
+			],
+			["a", "b", "c"],
+		);
+		const sessionOptions = { accountIds: ["a", "b", "c"] };
+		setUsage(A, "a", 0.97, 0.1);
+		setUsage(A, "b", 0.3, 0.1);
+		setUsage(A, "c", 0.95, 0.1);
+		expect(await auth.keys.get(A, "reclaim-destination", sessionOptions)).toBe("api-b");
+
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "a", 0.88, 0.1);
+		setUsage(A, "b", 0.86, 0.1);
+		setUsage(A, "c", 0, 0.1);
+		expect(await auth.keys.get(A, "reclaim-destination", sessionOptions)).toBe("api-a");
+		expect(await auth.keys.get(A, "reclaim-destination", sessionOptions)).toBe("api-a");
+	});
+
+	test("keeps the warm pin when the reclaiming account is outside the account filter", async () => {
+		const auth = await setup(
+			A,
+			[
+				{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 5, reclaimAbovePct: 10 },
+				{ provider: A, account: { accountId: "b" }, priority: 5 },
+				{ provider: A, account: { accountId: "c" }, priority: 0, drainFirst: true },
+			],
+			["a", "b", "c"],
+		);
+		setUsage(A, "a", 0.97, 0.5);
+		setUsage(A, "b", 0.3, 0.1);
+		setUsage(A, "c", 0.95, 0.1);
+		expect(await next(auth, A, "filtered-reclaim")).toBe("b");
+
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "a", 0.1, 0.1);
+		setUsage(A, "b", 0.3, 0.1);
+		setUsage(A, "c", 0.1, 0.1);
+		const sessionOptions = { accountIds: ["b", "c"] };
+		expect(await auth.keys.get(A, "filtered-reclaim", sessionOptions)).toBe("api-b");
+		expect(await auth.keys.get(A, "filtered-reclaim", sessionOptions)).toBe("api-b");
+	});
 	test("reclaims past a lower-priority drain-first candidate outside the account filter", async () => {
 		const auth = await setup(
 			A,
