@@ -18,6 +18,7 @@ import { Settings } from "../../src/config/settings";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
+import { cfgSecretsEnabled } from "../../src/secrets/settings";
 import { AgentSession } from "../../src/session/agent-session";
 import type { AgentSessionHandle } from "../../src/session/agent-session-handle";
 import { AgentStorage } from "../../src/session/agent-storage";
@@ -47,6 +48,8 @@ const SCRIPT_ID = Bun.randomUUIDv7("hex");
 const HANG_TASK = `omp-test-scripted-hang-${SCRIPT_ID}`;
 const BG_JOB_TASK = `omp-test-scripted-bg-job-${SCRIPT_ID}`;
 const BLOCK_TOOL_TASK = `omp-test-block-tool-${SCRIPT_ID}`;
+const REPLY_TASK = `omp-test-reply-${SCRIPT_ID}`;
+const WORKER_SECRET = `worker-private-${SCRIPT_ID}`;
 /** In the routed agent's system prompt only, so a request without it is never the run's own turn. */
 const AGENT_MARKER = `omp-test-agent-${SCRIPT_ID}`;
 
@@ -104,6 +107,8 @@ class FakeModelServer {
 	readonly #server: Bun.Server<undefined>;
 	readonly #hangs: Array<() => void> = [];
 	#hungRequest = Promise.withResolvers<void>();
+	readonly replyRequest = Promise.withResolvers<void>();
+	readonly replyGate = Promise.withResolvers<{ assignmentId: string; checkId: string }>();
 
 	constructor() {
 		this.#server = Bun.serve({
@@ -173,6 +178,25 @@ class FakeModelServer {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
 		} else if (runTurn && userText.includes(BLOCK_TOOL_TASK)) {
 			reply = { tool: "bash", args: { command: "read line < advisory-gate" } };
+		} else if (runTurn && userText.includes(REPLY_TASK)) {
+			this.replyRequest.resolve();
+			const { assignmentId, checkId } = await this.replyGate.promise;
+			reply = {
+				tool: "write",
+				args: {
+					path: `agent://${MAIN_AGENT_ID}`,
+					assignmentId,
+					checkId,
+					content: JSON.stringify({
+						state: "progressing",
+						progress: WORKER_SECRET,
+						tried: [],
+						blocker: "",
+						nextAction: "continue",
+						requestId: checkId,
+					}),
+				},
+			};
 		} else if (runTurn && userText.includes(HANG_TASK)) {
 			const held = Promise.withResolvers<void>();
 			this.#hangs.push(held.resolve);
@@ -624,6 +648,67 @@ describe("subagent runs routed into pooled workers", () => {
 				expect(snapshot.unblockedMs).toBeLessThan(snapshot.wallMs);
 			} finally {
 				await Bun.spawn(["sh", "-c", "printf done > advisory-gate"], { cwd }).exited;
+				await running;
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"redacts a worker-originated tagged reply queued for a streaming parent",
+		async () => {
+			await fs.mkdir(path.join(cwd, ".omp"), { recursive: true });
+			await Bun.write(path.join(cwd, ".omp", "secrets.yml"), `- type: plain\n  content: ${WORKER_SECRET}\n`);
+			cfgSecretsEnabled.set(settings, true);
+			const parent = rootSession();
+			parent.resetAdvisoryLineage();
+			parent.agent.state.isStreaming = true;
+			AgentRegistry.global().register({
+				id: MAIN_AGENT_ID,
+				displayName: MAIN_AGENT_ID,
+				kind: "main",
+				session: parent,
+			});
+			const parentId = parent.sessionManager.getSessionId();
+			const running = runSubprocess(
+				runOptions("WorkerReply", REPLY_TASK, {
+					parentSessionId: parentId,
+					parentAgentId: MAIN_AGENT_ID,
+					agent: { ...AGENT, tools: ["read", "bash", "write"] },
+				}),
+			);
+			const hub = AdvisoryHub.main();
+			const events: string[] = [];
+			const off = hub.subscribe(parentId, event => {
+				if (event.type === "reply") events.push(event.state);
+			});
+			try {
+				await server.replyRequest.promise;
+				await waitFor(() => hub.children(parentId).length === 1);
+				const ref = hub.children(parentId)[0]!.ref;
+				expect(
+					(await hub.remind({ parentSessionId: parentId, ref, requestId: "check", content: "status" })).outcome,
+				).toBe("injected");
+				server.replyGate.resolve({ assignmentId: ref.assignmentId, checkId: "check" });
+				await waitFor(() => events.length === 1);
+				expect(events).toEqual(["progressing"]);
+				let observed = "";
+				expect(
+					parent.drainPendingIrcInboxMessages(MAIN_AGENT_ID, {
+						ifAny: message => {
+							observed = message.body;
+							return false;
+						},
+					}),
+				).toEqual([]);
+				expect(observed).toContain("progressing");
+				expect(observed).not.toContain(WORKER_SECRET);
+				hub.navigate(parentId);
+				expect(parent.drainPendingIrcInboxMessages(MAIN_AGENT_ID)).toEqual([]);
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages))).not.toContain(observed);
+			} finally {
+				parent.agent.state.isStreaming = false;
+				off();
 				await running;
 			}
 		},
