@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
 import { checkPr, createTag, expectedNextVersion, mintTarget, parseTrackingVersion, type TagApi } from "./release-tag";
+import { applyPackageVersion, applyCatalogVersion } from "./release-version";
 
 const RELEASE_VERSION = "18.9.2-rigel.2";
 
@@ -59,10 +60,15 @@ async function commit(dir: string, version?: string, stamp = false): Promise<str
 	if (version === undefined) await fs.rm(file, { force: true });
 	else await Bun.write(file, `${version}\n`);
 	if (stamp) {
+		await fs.mkdir(path.join(dir, "packages", "coding-agent"), { recursive: true });
+		await Bun.write(
+			path.join(dir, "packages", "coding-agent", "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }, null, "\t"),
+		);
 		await fs.mkdir(path.join(dir, "packages", "public"), { recursive: true });
 		await Bun.write(
 			path.join(dir, "packages", "public", "package.json"),
-			JSON.stringify({ name: "@oh-my-pi/public", version }),
+			JSON.stringify({ name: "@oh-my-pi/public", version }, null, "\t"),
 		);
 		await fs.mkdir(path.join(dir, "packages", "private"), { recursive: true });
 		await Bun.write(
@@ -73,6 +79,8 @@ async function commit(dir: string, version?: string, stamp = false): Promise<str
 			path.join(dir, "package.json"),
 			JSON.stringify({ workspaces: { catalog: { "@oh-my-pi/public": version } } }),
 		);
+		await Bun.write(path.join(dir, "Cargo.toml"), `[workspace.package]\nversion = "${version}"\n`);
+		await Bun.write(path.join(dir, "Cargo.lock"), `[[package]]\nname = "pi-coding-agent"\nversion = "${version}"\n`);
 	}
 	await Bun.write(path.join(dir, "n"), crypto.randomUUID());
 	await $`git add -A && git commit -qm c`.cwd(dir).quiet();
@@ -83,8 +91,8 @@ describe("mintTarget", () => {
 	test("tags the oldest first-parent commit carrying the version", async () => {
 		const dir = await repo();
 		await commit(dir);
-		const first = await commit(dir, "18.9.2-rigel.1");
-		const head = await commit(dir, "18.9.2-rigel.1");
+		const first = await commit(dir, "18.9.2-rigel.1", true);
+		const head = await commit(dir, "18.9.2-rigel.1", true);
 		expect(await mintTarget(dir, head)).toEqual({ tag: "v18.9.2-rigel.1", sha: first });
 	});
 
@@ -96,21 +104,26 @@ describe("mintTarget", () => {
 
 	test("does nothing when the tag already marks the introducing commit", async () => {
 		const dir = await repo();
-		const first = await commit(dir, "18.9.2-rigel.1");
+		const first = await commit(dir, "18.9.2-rigel.1", true);
 		await $`git tag -a -m r v18.9.2-rigel.1 ${first}`.cwd(dir).quiet();
-		const head = await commit(dir, "18.9.2-rigel.1");
+		const head = await commit(dir, "18.9.2-rigel.1", true);
 		expect(await mintTarget(dir, head)).toBeNull();
 	});
 
 	test("fails when a second PR reintroduces an already-tagged version", async () => {
 		const dir = await repo();
-		const first = await commit(dir, "18.9.2-rigel.1");
+		const first = await commit(dir, "18.9.2-rigel.1", true);
 		await $`git tag v18.9.2-rigel.1 ${first}`.cwd(dir).quiet();
 		await commit(dir);
-		const head = await commit(dir, "18.9.2-rigel.1");
+		const head = await commit(dir, "18.9.2-rigel.1", true);
 		await expect(mintTarget(dir, head)).rejects.toThrow(
 			`v18.9.2-rigel.1 already exists at ${first}, but ${head} introduced 18.9.2-rigel.1`,
 		);
+	});
+	test("rejects minting an unstamped release", async () => {
+		const dir = await repo();
+		const head = await commit(dir, "18.9.2-rigel.1");
+		await expect(mintTarget(dir, head)).rejects.toThrow("no public package manifests");
 	});
 
 	test("rejects a version that skips N", async () => {
@@ -150,6 +163,73 @@ describe("checkPr", () => {
 		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
 		const head = await commit(dir, RELEASE_VERSION, true);
 		expect(await checkPr(dir, base, head)).toBe(RELEASE_VERSION);
+	});
+	test("validates the release commit even when checkout packages are absent", async () => {
+		const dir = await repo();
+		const base = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
+		const head = await commit(dir, RELEASE_VERSION, true);
+		await fs.rm(path.join(dir, "packages"), { recursive: true });
+		expect(await checkPr(dir, base, head)).toBe(RELEASE_VERSION);
+	});
+
+	test("rejects a bump missing the coding-agent manifest", async () => {
+		const dir = await repo();
+		const base = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
+		await commit(dir, RELEASE_VERSION, true);
+		await fs.rm(path.join(dir, "packages", "coding-agent"), { recursive: true });
+		const head = await commit(dir, RELEASE_VERSION);
+		await expect(checkPr(dir, base, head)).rejects.toThrow("packages/coding-agent/package.json");
+	});
+
+	test("rejects a stale Cargo.lock workspace version", async () => {
+		const dir = await repo();
+		const base = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
+		await commit(dir, RELEASE_VERSION, true);
+		const lock = path.join(dir, "Cargo.lock");
+		const contents = await fs.readFile(lock, "utf8");
+		await Bun.write(lock, contents.replace(RELEASE_VERSION, "18.9.2"));
+		const head = await commit(dir, RELEASE_VERSION);
+		await expect(checkPr(dir, base, head)).rejects.toThrow("Cargo.lock");
+	});
+	test("updates a package manifest version with the release helper", () => {
+		const input = '{\n\t"name": "@oh-my-pi/public",\n\t"version": "18.9.2"\n}';
+		expect(applyPackageVersion(input, RELEASE_VERSION)).toBe(
+			input.replace('"version": "18.9.2"', `"version": "${RELEASE_VERSION}"`),
+		);
+	});
+	test("rewrites root catalog entries with the release version", () => {
+		const input = '{"workspaces":{"catalog":{"@oh-my-pi/public":"18.9.2"}}}';
+		expect(applyCatalogVersion(input, RELEASE_VERSION)).toContain(`"@oh-my-pi/public":"${RELEASE_VERSION}"`);
+	});
+	test("rejects a catalog-only mismatch and names the root manifest", async () => {
+		const dir = await repo();
+		const base = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
+		const head = await commit(dir, RELEASE_VERSION, true);
+		const root = path.join(dir, "package.json");
+		const contents = await fs.readFile(root, "utf8");
+		await Bun.write(root, contents.replace(RELEASE_VERSION, "18.9.2"));
+		await $`git add -A && git commit -qm mismatch`.cwd(dir).quiet();
+		await expect(checkPr(dir, base, (await $`git rev-parse HEAD`.cwd(dir).text()).trim())).rejects.toThrow(
+			"package.json",
+		);
+		expect(head).not.toBe(base);
+	});
+
+	test("rejects a bump with no public package manifests", async () => {
+		const dir = await repo();
+		const base = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
+		await fs.mkdir(path.join(dir, "packages", "coding-agent"), { recursive: true });
+		await Bun.write(
+			path.join(dir, "packages", "coding-agent", "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: RELEASE_VERSION, private: true }),
+		);
+		const head = await commit(dir, RELEASE_VERSION);
+		await expect(checkPr(dir, base, head)).rejects.toThrow("no public package manifests");
 	});
 
 	test("rejects a reused version", async () => {

@@ -18,6 +18,7 @@
 - Compiled legacy Pi imports now bundle `.js` root-wildcard aliases beside their TypeScript modules, preserving shared host module instances.
 - `omp auth-broker migrate --from-local` uploads every distinct API key for a provider, skipping only keys the broker already holds, so several Anthropic Console keys can be pooled.
 - Agent definitions with `tools: "*"` or a wildcard in a tool list now retain unrestricted tool access instead of parsing `*` as a literal tool.
+- Release tag checks now require every public package manifest, the root workspace catalog and Rust workspace metadata to use the tracking version.
 
 ## [18.18.3] - 2026-11-09
 
