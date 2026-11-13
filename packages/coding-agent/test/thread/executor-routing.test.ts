@@ -16,6 +16,7 @@ import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { IrcBus } from "../../src/irc/bus";
+import { messageResult } from "../../src/irc/messaging";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
 import { cfgSecretsEnabled } from "../../src/secrets/settings";
@@ -742,20 +743,22 @@ describe("subagent runs routed into pooled workers", () => {
 				await waitFor(() => events.length === 1);
 				expect(relay).not.toHaveBeenCalled();
 				expect(events).toEqual(["progressing"]);
-				let observed = "";
-				expect(
-					parent.drainPendingIrcInboxMessages(MAIN_AGENT_ID, {
-						ifAny: message => {
-							observed = message.body;
-							return false;
-						},
-					}),
-				).toEqual([]);
+				const waited = parent.drainPendingIrcInboxMessages(MAIN_AGENT_ID);
+				expect(waited).toHaveLength(1);
+				const observed = waited[0]!.body;
 				expect(observed).toContain("progressing");
 				expect(observed).not.toContain(WORKER_SECRET);
+				const result = messageResult(MAIN_AGENT_ID, waited);
+				parent.agent.appendMessage({
+					role: "toolResult",
+					toolCallId: "wait",
+					toolName: "wait",
+					...result,
+					timestamp: Date.now(),
+				});
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain("progressing");
 				hub.navigate(parentId);
-				expect(parent.drainPendingIrcInboxMessages(MAIN_AGENT_ID)).toEqual([]);
-				expect(JSON.stringify(convertToLlm(parent.agent.state.messages))).not.toContain(observed);
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).not.toContain("progressing");
 			} finally {
 				parent.agent.state.isStreaming = false;
 				off();
@@ -770,6 +773,7 @@ describe("subagent runs routed into pooled workers", () => {
 		async () => {
 			const parent = rootSession();
 			parent.resetAdvisoryLineage();
+			parent.agent.state.isStreaming = true;
 			AgentRegistry.global().register({
 				id: MAIN_AGENT_ID,
 				displayName: MAIN_AGENT_ID,
@@ -815,11 +819,23 @@ describe("subagent runs routed into pooled workers", () => {
 							body,
 						})
 					).outcome,
-				).toBe("woken");
+				).toBe("injected");
 				expect(events).toEqual(["progressing"]);
+				const waited = parent.drainPendingIrcInboxMessages(MAIN_AGENT_ID);
+				expect(waited).toHaveLength(1);
+				const result = messageResult(MAIN_AGENT_ID, waited);
+				parent.agent.appendMessage({
+					role: "toolResult",
+					toolCallId: "wait",
+					toolName: "wait",
+					...result,
+					timestamp: Date.now(),
+				});
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain("worked");
 				hub.navigate(parentId);
-				expect(JSON.stringify(convertToLlm(parent.agent.state.messages))).not.toContain("worked");
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).not.toContain("worked");
 			} finally {
+				parent.agent.state.isStreaming = false;
 				unsubscribe();
 				const worker = pool.workers()[0];
 				if (worker) await worker.terminate("test end");
