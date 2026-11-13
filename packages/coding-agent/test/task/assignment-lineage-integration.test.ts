@@ -13,6 +13,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { isLocalAgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AdvisoryHub } from "@oh-my-pi/pi-coding-agent/task/advisory-hub";
@@ -131,6 +132,8 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 		const manager = AgentRegistry.global().get("LineageManager")?.session;
 		const child = AgentRegistry.global().get("LineageManager.LineageChild")?.session;
 		if (!manager || !child) throw new Error("nested sessions were not retained");
+		if (!isLocalAgentSession(manager) || !isLocalAgentSession(child))
+			throw new Error("nested sessions are not local");
 		const managerId = manager.sessionManager.getSessionId();
 		const hub = AdvisoryHub.global();
 		const binding = hub.getAssignment(child.sessionManager.getSessionId());

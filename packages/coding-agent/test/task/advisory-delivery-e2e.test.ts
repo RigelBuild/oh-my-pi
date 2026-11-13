@@ -343,7 +343,7 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 			).outcome,
 		).toBe("injected");
 		hub.terminal(childId, next.ref.assignmentId);
-		const drained = manager.drainPendingIrcInboxMessages("StrandedManager", { limit: 2 });
+		const drained = manager.drainPendingIrcInboxMessages("StrandedManager");
 		expect(drained.map(item => item.body)).toEqual([drainedBody]);
 		manager.agent.state.isStreaming = false;
 		// Requeue the first admitted record through the same bridge before the settle wake.
