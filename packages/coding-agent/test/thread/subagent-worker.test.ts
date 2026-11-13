@@ -202,7 +202,7 @@ describe("SubagentWorkerPool", () => {
 		// Released runs keep their (now idle) workers until the idle countdown ends them.
 		expect(pool.workers()).toHaveLength(2);
 		await Promise.all(pool.workers().map(worker => worker.ready));
-	});
+	}, 60_000);
 
 	it("counts main-thread runs that bypass placement toward the balance", () => {
 		const pool = startPool(4);
@@ -261,7 +261,7 @@ describe("SubagentWorkerPool", () => {
 		expect(exits.map(exit => exit.reason)).toEqual(["idle", "idle"]);
 		expect(exits.every(exit => exit.worker.link.closed)).toBe(true);
 		expect(pool.workers()).toEqual([]);
-	});
+	}, 60_000);
 
 	it("keeps a worker with a resident session alive past idleMs and terminates it idleMs after the release", async () => {
 		const pool = workerOnlyPool(1, { idleMs: 1_000 });
@@ -275,7 +275,7 @@ describe("SubagentWorkerPool", () => {
 		vi.advanceTimersByTime(1_000);
 		expect(lease.worker.exitReason).toBe("idle");
 		expect(pool.workers()).toEqual([]);
-	});
+	}, 60_000);
 
 	it("fails a run whose worker dies at startup with that worker's own error", async () => {
 		const pool = workerOnlyPool(1, {

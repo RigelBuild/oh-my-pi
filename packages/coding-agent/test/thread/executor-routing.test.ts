@@ -121,6 +121,9 @@ class FakeModelServer {
 	get port(): number {
 		return this.#server.port ?? 0;
 	}
+	releaseHangs(): void {
+		for (const release of this.#hangs.splice(0)) release();
+	}
 
 	/** Resolves once a {@link HANG_TASK} request is being held. */
 	hung(): Promise<void> {
@@ -633,14 +636,20 @@ describe("subagent runs routed into pooled workers", () => {
 			);
 			const revived = mirrorOf(await lifecycle.ensureLive("AdvisoryPark"));
 			expect(revived.home).not.toBe(home);
-			const followUp = await runSubagentFollowUpTurn({
+			const revivalStarted = Date.now();
+			const followUp = runSubagentFollowUpTurn({
 				id: "AdvisoryPark",
 				agent: AGENT,
-				message: "again",
+				message: HANG_TASK,
 				structured: false,
 			});
-			expect(followUp.error).toBeUndefined();
+			await server.hung();
 			const fresh = hub.children(parentId)[0];
+			expect(fresh?.phase).toBe("running");
+			expect(fresh?.wallMs).toBeLessThanOrEqual(Date.now() - revivalStarted + 100);
+			expect(fresh?.workTokens).toBeNull();
+			server.releaseHangs();
+			await followUp;
 			expect(fresh?.ref.assignmentId).not.toBe(paused?.ref.assignmentId);
 			const wakeStarted = Date.now();
 			const receipt = await IrcBus.global().send({ from: MAIN_AGENT_ID, to: "AdvisoryPark", body: "again" });
