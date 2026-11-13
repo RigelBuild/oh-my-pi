@@ -1,5 +1,17 @@
-import type { AdvisoryReceipt, AdvisorySnapshot, AssignmentRef, LocalSignal, TaskAdvisoryEvent } from "../../extensibility/extensions/task-advisory";
-import type { AdvisoryAttach, AdvisoryCheck, AdvisoryMint, AdvisoryRemind, AdvisoryReply } from "../../task/advisory-hub";
+import type {
+	AdvisoryReceipt,
+	AdvisorySnapshot,
+	AssignmentRef,
+	LocalSignal,
+	TaskAdvisoryEvent,
+} from "../../extensibility/extensions/task-advisory";
+import type {
+	AdvisoryAttach,
+	AdvisoryCheck,
+	AdvisoryMint,
+	AdvisoryRemind,
+	AdvisoryReply,
+} from "../../task/advisory-hub";
 import type { AdvisoryEvent } from "../../task/advisory-snapshot-source";
 import type { AssignmentBinding } from "../../task/assignment-lineage";
 import type { RpcMethod } from "../rpc";

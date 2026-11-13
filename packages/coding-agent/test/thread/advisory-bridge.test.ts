@@ -13,8 +13,15 @@ it("orders advisory updates and disposes the worker home on exit", async () => {
 	hub.attach({ sessionId: "parent", instanceId: "p", agentId: "Parent" });
 	hub.mint({ childSessionId: "child", parentSessionId: "parent", messaging: { status: "supported" } });
 	const ready = Promise.withResolvers<AdvisoryProbe>();
-	const probeService: ThreadService = { name: "probe", globals: (): AdvisoryProbeGlobals => ({ ready: probe => ready.resolve(probe) }) };
-	const worker = new SubagentWorker({ entry: new URL("../fixtures/advisory-bridge-worker.ts", import.meta.url), services: [identityThreadService, agentsThreadService, advisoryThreadService, probeService], initTimeoutMs: 60_000 });
+	const probeService: ThreadService = {
+		name: "probe",
+		globals: (): AdvisoryProbeGlobals => ({ ready: probe => ready.resolve(probe) }),
+	};
+	const worker = new SubagentWorker({
+		entry: new URL("../fixtures/advisory-bridge-worker.ts", import.meta.url),
+		services: [identityThreadService, agentsThreadService, advisoryThreadService, probeService],
+		initTimeoutMs: 60_000,
+	});
 	const dispose = spyOn(hub, "disposeHome");
 	try {
 		await worker.ready;

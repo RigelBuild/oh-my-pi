@@ -19,21 +19,23 @@ import { runtimeIdentityThreadService } from "./runtime-identity";
 import { settingsThreadService } from "./settings";
 import { telemetryThreadService } from "./telemetry";
 
-export function threadServices(): readonly ThreadService[] { return [
-	identityThreadService,
-	// Early, so a worker's `logger.flush()` waits for main from the first service boot on.
-	loggerThreadService,
-	runtimeIdentityThreadService,
-	settingsThreadService,
-	authService,
-	agentsThreadService,
-	advisoryThreadService,
-	lspThreadService,
-	telemetryThreadService,
-	memoryThreadService,
-	integrationsThreadService,
-	runtimeThreadService,
-	asyncJobsThreadService,
-	// Last: its entry points run subagents against every service above.
-	executorThreadService,
-]; }
+export function threadServices(): readonly ThreadService[] {
+	return [
+		identityThreadService,
+		// Early, so a worker's `logger.flush()` waits for main from the first service boot on.
+		loggerThreadService,
+		runtimeIdentityThreadService,
+		settingsThreadService,
+		authService,
+		agentsThreadService,
+		advisoryThreadService,
+		lspThreadService,
+		telemetryThreadService,
+		memoryThreadService,
+		integrationsThreadService,
+		runtimeThreadService,
+		asyncJobsThreadService,
+		// Last: its entry points run subagents against every service above.
+		executorThreadService,
+	];
+}

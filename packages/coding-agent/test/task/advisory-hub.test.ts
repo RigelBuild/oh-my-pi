@@ -82,7 +82,9 @@ it("cleans worker watches and timers while retaining other live instances", asyn
 	const sibling = hub.mint({ childSessionId: "sibling", parentSessionId: "parent", messaging });
 	hub.attach({ sessionId: "sibling", instanceId: "s", agentId: "Sibling" });
 	hub.publishEvent("sibling", "s", { kind: "ready", at: advisoryNow() });
-	expect((await hub.remind({ parentSessionId: "parent", ref: sibling, requestId: "sibling", content: "status" })).outcome).toBe("injected");
+	expect(
+		(await hub.remind({ parentSessionId: "parent", ref: sibling, requestId: "sibling", content: "status" })).outcome,
+	).toBe("injected");
 	expect((await hub.remind({ parentSessionId: "parent", ref, requestId: "check", content: "status" })).outcome).toBe(
 		"injected",
 	);
@@ -405,7 +407,12 @@ it("expires a watch when messaging support is withdrawn", async () => {
 	vi.useFakeTimers();
 	const clock = spyOn(performance, "now").mockReturnValue(0);
 	let deliveries = 0;
-	const session = { deliverIrcMessage: async () => { deliveries++; return "injected"; } } as unknown as AgentSession;
+	const session = {
+		deliverIrcMessage: async () => {
+			deliveries++;
+			return "injected";
+		},
+	} as unknown as AgentSession;
 	AgentRegistry.global().register({ id: "Child", displayName: "Child", kind: "sub", session });
 	const hub = new AdvisoryHub();
 	hub.attach({ sessionId: "parent", instanceId: "p", agentId: "Parent" });
@@ -414,11 +421,16 @@ it("expires a watch when messaging support is withdrawn", async () => {
 	hub.attach({ sessionId: "child", instanceId: "c", agentId: "Child" });
 	try {
 		await hub.remind({ parentSessionId: "parent", ref, requestId: "check", content: "status" });
-		support.status = "unsupported"; support.reasons = ["messaging-disabled"];
-		clock.mockReturnValue(300_000); vi.advanceTimersByTime(300_000);
+		support.status = "unsupported";
+		support.reasons = ["messaging-disabled"];
+		clock.mockReturnValue(300_000);
+		vi.advanceTimersByTime(300_000);
 		expect(deliveries).toBe(1);
 		expect(vi.getTimerCount()).toBe(0);
-	} finally { hub.detach("child", "c"); clock.mockRestore(); }
+	} finally {
+		hub.detach("child", "c");
+		clock.mockRestore();
+	}
 });
 
 for (const failureAt of [290_000, 300_000]) {
@@ -426,8 +438,17 @@ for (const failureAt of [290_000, 300_000]) {
 		vi.useFakeTimers();
 		const clock = spyOn(performance, "now").mockReturnValue(0);
 		let deliveries = 0;
-		const child = { deliverIrcMessage: async () => { deliveries++; return "injected"; } } as unknown as AgentSession;
-		const parent = { deliverIrcMessage: async () => { throw new Error("failed"); } } as unknown as AgentSession;
+		const child = {
+			deliverIrcMessage: async () => {
+				deliveries++;
+				return "injected";
+			},
+		} as unknown as AgentSession;
+		const parent = {
+			deliverIrcMessage: async () => {
+				throw new Error("failed");
+			},
+		} as unknown as AgentSession;
 		AgentRegistry.global().register({ id: "Child", displayName: "Child", kind: "sub", session: child });
 		AgentRegistry.global().register({ id: "Parent", displayName: "Parent", kind: "sub", session: parent });
 		const { hub, ref } = fixture();
@@ -435,11 +456,32 @@ for (const failureAt of [290_000, 300_000]) {
 			await hub.remind({ parentSessionId: "parent", ref, requestId: "check", content: "status" });
 			clock.mockReturnValue(failureAt);
 			vi.advanceTimersByTime(failureAt);
-			const body = JSON.stringify({ state: "progressing", progress: "worked", tried: [], blocker: "", nextAction: "continue", requestId: "check" });
-			expect((await hub.sendBound({ childSessionId: "child", fromAgentId: "Child", toAgentId: "Parent", assignmentId: ref.assignmentId, checkId: "check", body })).outcome).toBe("unavailable");
+			const body = JSON.stringify({
+				state: "progressing",
+				progress: "worked",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+				requestId: "check",
+			});
+			expect(
+				(
+					await hub.sendBound({
+						childSessionId: "child",
+						fromAgentId: "Child",
+						toAgentId: "Parent",
+						assignmentId: ref.assignmentId,
+						checkId: "check",
+						body,
+					})
+				).outcome,
+			).toBe("unavailable");
 			clock.mockReturnValue(600_000);
 			vi.advanceTimersByTime(310_000);
 			expect(deliveries).toBe(2);
-		} finally { hub.disposeHome("w1"); clock.mockRestore(); }
+		} finally {
+			hub.disposeHome("w1");
+			clock.mockRestore();
+		}
 	});
 }

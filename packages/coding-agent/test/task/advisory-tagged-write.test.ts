@@ -21,18 +21,57 @@ it("routes tagged writes and excludes invalid report bodies from errors", async 
 	const ref = hub.mint({ childSessionId: childId, parentSessionId: parentId, messaging: { status: "supported" } });
 	hub.attach({ sessionId: childId, instanceId: "child-instance", agentId: "Parent.Child" });
 	const send = spyOn(hub, "sendBound").mockResolvedValue({ outcome: "injected" });
-	const toolSession = { cwd: process.cwd(), hasUI: false, settings: Settings.isolated(), agentRegistry: registry, getAgentId: () => "Parent.Child", getSessionId: () => childId, getSessionFile: () => null, taskDepth: 1 } as unknown as ToolSession;
+	const toolSession = {
+		cwd: process.cwd(),
+		hasUI: false,
+		settings: Settings.isolated(),
+		agentRegistry: registry,
+		getAgentId: () => "Parent.Child",
+		getSessionId: () => childId,
+		getSessionFile: () => null,
+		taskDepth: 1,
+	} as unknown as ToolSession;
 	try {
-		const report = JSON.stringify({ state: "progressing", progress: "worked", tried: [], blocker: "", nextAction: "continue", requestId: "check-1" });
+		const report = JSON.stringify({
+			state: "progressing",
+			progress: "worked",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+			requestId: "check-1",
+		});
 		const tool = new WriteTool(toolSession);
-		const result = await tool.execute("write", { path: "agent://Parent", content: report, assignmentId: ref.assignmentId, checkId: "check-1" });
+		const result = await tool.execute("write", {
+			path: "agent://Parent",
+			content: report,
+			assignmentId: ref.assignmentId,
+			checkId: "check-1",
+		});
 		expect(result.isError).not.toBe(true);
-		expect(send).toHaveBeenCalledWith(expect.objectContaining({ childSessionId: childId, fromAgentId: "Parent.Child", toAgentId: "Parent", body: report, assignmentId: ref.assignmentId, checkId: "check-1" }));
+		expect(send).toHaveBeenCalledWith(
+			expect.objectContaining({
+				childSessionId: childId,
+				fromAgentId: "Parent.Child",
+				toAgentId: "Parent",
+				body: report,
+				assignmentId: ref.assignmentId,
+				checkId: "check-1",
+			}),
+		);
 		const privateInput = "PRIVATE_REPORT_BODY_MUST_NOT_APPEAR";
-		const invalid = await tool.execute("invalid", { path: "agent://Parent", content: privateInput, assignmentId: ref.assignmentId, checkId: "check-1" });
+		const invalid = await tool.execute("invalid", {
+			path: "agent://Parent",
+			content: privateInput,
+			assignmentId: ref.assignmentId,
+			checkId: "check-1",
+		});
 		expect(invalid.isError).toBe(true);
 		expect(JSON.stringify(invalid.content)).not.toContain(privateInput);
-		const oversized = await tool.execute("large", { path: "agent://Parent", content: "é".repeat(2049), assignmentId: ref.assignmentId });
+		const oversized = await tool.execute("large", {
+			path: "agent://Parent",
+			content: "é".repeat(2049),
+			assignmentId: ref.assignmentId,
+		});
 		expect(oversized.isError).toBe(true);
 		expect(send).toHaveBeenCalledTimes(1);
 	} finally {

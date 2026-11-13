@@ -25,6 +25,7 @@ import type { AuthStorage } from "../../src/session/auth-storage";
 import { CostGate } from "../../src/session/cost-gate";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
+import { AdvisoryHub } from "../../src/task/advisory-hub";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
 import { type AgentDefinition, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../src/task/types";
@@ -243,6 +244,7 @@ beforeEach(async () => {
 	__resetDirsFromEnvForTests();
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
+	AdvisoryHub.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 
 	server = new FakeModelServer();
@@ -291,6 +293,7 @@ afterEach(async () => {
 	await jobs.dispose({ timeoutMs: 1_000 });
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
+	AdvisoryHub.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 	authStorage.close();
 	AgentStorage.close();
@@ -506,6 +509,56 @@ describe("subagent runs routed into pooled workers", () => {
 				"started",
 				"failed",
 			]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"drops worker-homed advisory state when the worker crashes",
+		async () => {
+			const parent = rootSession();
+			const parentId = parent.sessionManager.getSessionId();
+			const hub = AdvisoryHub.main();
+			parent.resetAdvisoryLineage();
+			const running = runSubprocess(runOptions("AdvisoryCrash", HANG_TASK, { parentSessionId: parentId }));
+			await server.hung();
+			await waitFor(() => hub.children(parentId).length === 1);
+			const ref = hub.children(parentId)[0]!.ref;
+			const worker = pool.workers()[0];
+			if (!worker) throw new Error("worker missing");
+			await worker.terminate("worker crashed: boom");
+			await running;
+			expect(hub.children(parentId)).toEqual([]);
+			expect(
+				(await hub.remind({ parentSessionId: parentId, ref, requestId: "old", content: "status" })).outcome,
+			).toBe("unavailable");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"retains advisory snapshot across parked worker exit and releases it",
+		async () => {
+			const parent = rootSession();
+			parent.resetAdvisoryLineage();
+			const parentId = parent.sessionManager.getSessionId();
+			const hub = AdvisoryHub.main();
+			const result = await runSubprocess(
+				runOptions("AdvisoryPark", "ping", { parentSessionId: parentId, parentId: MAIN_AGENT_ID }),
+			);
+			expect(result.error).toBeUndefined();
+			expect(hub.children(parentId)[0]).toBeDefined();
+			const lifecycle = AgentLifecycleManager.global();
+			const home = mirrorOf(AgentRegistry.global().get("AdvisoryPark")?.session).home;
+			await lifecycle.park("AdvisoryPark");
+			const paused = hub.children(parentId)[0];
+			expect(paused?.phase).toBe("paused");
+			const worker = pool.forThread(home);
+			if (!worker) throw new Error("worker missing");
+			await worker.terminate("test exit");
+			expect(hub.children(parentId)[0]?.wallMs).toBe(paused?.wallMs);
+			await lifecycle.release("AdvisoryPark");
+			expect(hub.children(parentId)).toEqual([]);
 		},
 		TEST_TIMEOUT_MS,
 	);

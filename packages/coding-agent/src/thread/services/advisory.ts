@@ -23,7 +23,13 @@ function serve(peer: WorkerPeer): RpcServe<AdvisoryHub, AdvisoryHubProtocol> {
 		children: (hub, ...args) => hub.children(...args),
 		publishEvent: (hub, ...args) => hub.publishEvent(...args),
 		signal: (hub, ...args) => hub.signal(...args),
-		subscribe: (hub, sessionId, listener) => rpcSync(cleanups.track(peer.threadId, hub.subscribe(sessionId, event => ignoreSettle(listener(event))))),
+		subscribe: (hub, sessionId, listener) =>
+			rpcSync(
+				cleanups.track(
+					peer.threadId,
+					hub.subscribe(sessionId, event => ignoreSettle(listener(event))),
+				),
+			),
 		remind: (hub, ...args) => hub.remind(...args),
 		sendBound: (hub, ...args) => hub.sendBound(...args),
 		validate: (hub, ...args) => hub.validate(...args),
@@ -33,7 +39,11 @@ function serve(peer: WorkerPeer): RpcServe<AdvisoryHub, AdvisoryHubProtocol> {
 export const advisoryThreadService: ThreadService = {
 	name: "advisory",
 	installMain(peer) {
-		peer.link.exportClass<AdvisoryHub, AdvisoryHubProtocol>(ADVISORY_HUB_KIND, (value): value is AdvisoryHub => value instanceof AdvisoryHub, serve(peer));
+		peer.link.exportClass<AdvisoryHub, AdvisoryHubProtocol>(
+			ADVISORY_HUB_KIND,
+			(value): value is AdvisoryHub => value instanceof AdvisoryHub,
+			serve(peer),
+		);
 	},
 	globals: () => AdvisoryHub.main(),
 	onWorkerExit(peer) {
@@ -41,7 +51,10 @@ export const advisoryThreadService: ThreadService = {
 		AdvisoryHub.main().disposeHome(peer.threadId);
 	},
 	installWorker(link) {
-		link.importClass<RemoteAdvisoryHub, AdvisoryHubProtocol>(ADVISORY_HUB_KIND, remote => new RemoteAdvisoryHub(remote));
+		link.importClass<RemoteAdvisoryHub, AdvisoryHubProtocol>(
+			ADVISORY_HUB_KIND,
+			remote => new RemoteAdvisoryHub(remote),
+		);
 	},
 	boot(globals) {
 		if (!(globals instanceof RemoteAdvisoryHub)) throw new Error("Malformed advisory thread globals");
