@@ -756,9 +756,13 @@ describe("subagent runs routed into pooled workers", () => {
 					...result,
 					timestamp: Date.now(),
 				});
-				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain("progressing");
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain(
+					"progressing",
+				);
 				hub.navigate(parentId);
-				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).not.toContain("progressing");
+				expect(
+					JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content)),
+				).not.toContain("progressing");
 			} finally {
 				parent.agent.state.isStreaming = false;
 				off();
@@ -831,9 +835,13 @@ describe("subagent runs routed into pooled workers", () => {
 					...result,
 					timestamp: Date.now(),
 				});
-				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain("worked");
+				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).toContain(
+					"worked",
+				);
 				hub.navigate(parentId);
-				expect(JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content))).not.toContain("worked");
+				expect(
+					JSON.stringify(convertToLlm(parent.agent.state.messages).map(message => message.content)),
+				).not.toContain("worked");
 			} finally {
 				parent.agent.state.isStreaming = false;
 				unsubscribe();
