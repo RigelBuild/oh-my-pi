@@ -3950,7 +3950,9 @@ async function driveFollowUpTurn(
 	// evaluate against its own state, not stale accumulators.
 	resetYieldTurnState(session.getToolByName("yield"));
 	const ref = AgentRegistry.global().get(id);
-	const followUpAssignment = ref?.parentId ? AdvisoryHub.global().mintFollowUp(session.sessionManager.getSessionId(), ref.parentId) : undefined;
+	const followUpAssignment = ref?.parentId
+		? AdvisoryHub.global().mintFollowUp(session.sessionManager.getSessionId(), ref.parentId)
+		: undefined;
 	const sessionFile = ref?.sessionFile ?? undefined;
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
@@ -4065,7 +4067,8 @@ async function driveFollowUpTurn(
 		});
 	} finally {
 		releaseIrcWakes();
-		if (followUpAssignment) AdvisoryHub.global().terminal(session.sessionManager.getSessionId(), followUpAssignment.assignmentId);
+		if (followUpAssignment)
+			AdvisoryHub.global().terminal(session.sessionManager.getSessionId(), followUpAssignment.assignmentId);
 	}
 }
 
@@ -5069,9 +5072,19 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (options.parentSessionId) {
 				advisorySessionId = sessionManager.getSessionId();
 				const messaging: AdvisoryMessagingSupport = options.restrictToolNames
-					? { status: "unsupported", reasons: ircEnabled ? ["extension-disabled"] : ["extension-disabled", "messaging-disabled"] }
-					: ircEnabled ? { status: "supported" } : { status: "unsupported", reasons: ["messaging-disabled"] };
-				advisoryAssignmentId = AdvisoryHub.global().mint({ childSessionId: advisorySessionId, parentSessionId: options.parentSessionId, parentBranchId: options.parentBranchId, messaging }).assignmentId;
+					? {
+							status: "unsupported",
+							reasons: ircEnabled ? ["extension-disabled"] : ["extension-disabled", "messaging-disabled"],
+						}
+					: ircEnabled
+						? { status: "supported" }
+						: { status: "unsupported", reasons: ["messaging-disabled"] };
+				advisoryAssignmentId = AdvisoryHub.global().mint({
+					childSessionId: advisorySessionId,
+					parentSessionId: options.parentSessionId,
+					parentBranchId: options.parentBranchId,
+					messaging,
+				}).assignmentId;
 			}
 			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
@@ -5551,7 +5564,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	try {
 		const done = await runSubagent();
 		monitor.finish();
-		if (advisorySessionId && advisoryAssignmentId) AdvisoryHub.global().terminal(advisorySessionId, advisoryAssignmentId);
+		if (advisorySessionId && advisoryAssignmentId)
+			AdvisoryHub.global().terminal(advisorySessionId, advisoryAssignmentId);
 
 		const result = await finalizeRunResult({
 			monitor,

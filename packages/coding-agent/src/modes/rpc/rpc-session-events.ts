@@ -113,7 +113,7 @@ export class RpcSessionEventForwarder {
 		this.#output(frame);
 	}
 
- 	#stamp(event: Exclude<AgentSessionEvent, { type: "message_persisted" }>): RpcAgentSessionEventFrame {
+	#stamp(event: Exclude<AgentSessionEvent, { type: "message_persisted" }>): RpcAgentSessionEventFrame {
 		switch (event.type) {
 			case "message_start": {
 				const messageId = this.#mintMessageId();

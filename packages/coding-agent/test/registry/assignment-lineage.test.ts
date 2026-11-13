@@ -102,4 +102,55 @@ describe("assignment lineage", () => {
 			reasons: ["extension-disabled"],
 		});
 	});
+	test("stale completion cannot terminalize a later assignment", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "p");
+		const first = lineage.mint("child", "parent");
+		const second = lineage.mint("child", "parent");
+		lineage.attach("child", "c");
+		lineage.terminal("child", first.assignmentId);
+		expect(lineage.getAssignment("child")).toMatchObject({ ref: second, phase: "running" });
+	});
+	test("rejects a child attached after parent navigation", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "p");
+		const branch = lineage.branch("parent");
+		lineage.navigate("parent");
+		lineage.mint("child", "parent", branch);
+		lineage.attach("child", "c");
+		expect(lineage.getAssignment("child")).toBeUndefined();
+	});
+	test("disposal preserves sibling assignments", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("root", "r");
+		lineage.mint("manager", "root");
+		lineage.attach("manager", "m");
+		lineage.mint("sibling", "root");
+		lineage.attach("sibling", "s");
+		lineage.mint("child", "manager");
+		lineage.attach("child", "c");
+		lineage.mint("other", "sibling");
+		lineage.attach("other", "o");
+		lineage.disposeSession("manager", "m");
+		expect(lineage.getAssignment("child")).toBeUndefined();
+		expect(lineage.children("sibling")).toHaveLength(1);
+	});
+	test("distinguishes assignment, branch and instance failures", () => {
+		const lineage = new AssignmentLineage();
+		lineage.attach("parent", "p");
+		const ref = lineage.mint("child", "parent");
+		lineage.attach("child", "c");
+		const binding = { ref, senderInstanceId: "p", recipientInstanceId: "c", branchId: ref.parentBranchId };
+		expect(lineage.validateBinding(binding, "parent", "child")).toBeUndefined();
+		expect(lineage.validateBinding(binding, "other", "child")).toBe("stale-instance");
+		expect(lineage.validateBinding(binding, "child", "parent")).toBe("stale-instance");
+		expect(lineage.validateBinding({ ...binding, ref: { ...ref, assignmentId: "other" } }, "parent", "child")).toBe(
+			"stale-assignment",
+		);
+		lineage.terminal("child", ref.assignmentId);
+		expect(lineage.validateBinding(binding, "parent", "child")).toBe("stale-assignment");
+		expect(lineage.validateBinding(binding, "parent", "child", true)).toBeUndefined();
+		lineage.navigate("parent");
+		expect(lineage.validateBinding(binding, "parent", "child", true)).toBe("stale-parent-branch");
+	});
 });

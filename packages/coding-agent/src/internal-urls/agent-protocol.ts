@@ -192,7 +192,13 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.(), childSessionId: session.getSessionId?.() ?? undefined, redact: session.redactAdvisory },
+			{
+				registry,
+				senderId,
+				sessionFileHint: session.getSessionFile?.(),
+				childSessionId: session.getSessionId?.() ?? undefined,
+				redact: session.redactAdvisory,
+			},
 			{ to, message: content, progress, ...context?.advisory },
 		);
 		return {

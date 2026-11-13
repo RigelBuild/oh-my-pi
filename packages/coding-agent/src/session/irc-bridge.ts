@@ -11,7 +11,9 @@ import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
 type AdvisoryRecord = AgentMessage & { [advisoryMessage]: IrcMessage };
-function isAdvisoryRecord(record: AgentMessage): record is AdvisoryRecord { return advisoryMessage in record; }
+function isAdvisoryRecord(record: AgentMessage): record is AdvisoryRecord {
+	return advisoryMessage in record;
+}
 
 export function currentIrcRecords(records: readonly AgentMessage[]): AgentMessage[] {
 	const bound = records.filter(isAdvisoryRecord).map(record => record[advisoryMessage]);

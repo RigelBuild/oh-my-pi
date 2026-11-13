@@ -46,13 +46,24 @@ export function drainPendingInbox(
 export function messageResult(senderId: string, waited: IrcMessage[]): AgentToolResult<CoordinationDetails> {
 	return {
 		content: [{ type: "text", text: waited.map(formatIncoming).join("\n\n") }],
-		details: { op: "wait", from: senderId, waited, ...(waited.some(message => message.advisoryBinding) ? { advisory: true, [advisoryMessage]: waited } : {}) },
+		details: {
+			op: "wait",
+			from: senderId,
+			waited,
+			...(waited.some(message => message.advisoryBinding) ? { advisory: true, [advisoryMessage]: waited } : {}),
+		},
 	};
 }
 
 /** Send a direct message or, from a top-level agent only, a broadcast; delivery never waits for a reply. */
 export async function executeSend(
-	deps: { registry: AgentRegistryApi; senderId: string; sessionFileHint?: string | null; childSessionId?: string; redact?: (body: string) => string },
+	deps: {
+		registry: AgentRegistryApi;
+		senderId: string;
+		sessionFileHint?: string | null;
+		childSessionId?: string;
+		redact?: (body: string) => string;
+	},
 	params: { to: string; message: string; progress?: boolean; assignmentId?: string; checkId?: string },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint } = deps;
@@ -64,16 +75,39 @@ export async function executeSend(
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	if (params.assignmentId !== undefined || params.checkId !== undefined) {
-		if (!params.assignmentId || Buffer.byteLength(params.assignmentId) > 128 || (params.checkId !== undefined && (!params.checkId || Buffer.byteLength(params.checkId) > 128)))
+		if (
+			!params.assignmentId ||
+			Buffer.byteLength(params.assignmentId) > 128 ||
+			(params.checkId !== undefined && (!params.checkId || Buffer.byteLength(params.checkId) > 128))
+		)
 			return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
 		const body = deps.redact?.(message) ?? message;
 		if (!parseReportInput(body, params.checkId))
-			return coordinationErrorResult("Invalid advisory reply. Send a valid JSON ReportInput of at most 4096 UTF-8 bytes.", { op: "send", from: senderId, to });
-		if (!deps.childSessionId) return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
-		const receipt = await AdvisoryHub.global().sendBound({ childSessionId: deps.childSessionId, fromAgentId: senderId, toAgentId: to, assignmentId: params.assignmentId, checkId: params.checkId, body });
+			return coordinationErrorResult(
+				"Invalid advisory reply. Send a valid JSON ReportInput of at most 4096 UTF-8 bytes.",
+				{ op: "send", from: senderId, to },
+			);
+		if (!deps.childSessionId)
+			return coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to });
+		const receipt = await AdvisoryHub.global().sendBound({
+			childSessionId: deps.childSessionId,
+			fromAgentId: senderId,
+			toAgentId: to,
+			assignmentId: params.assignmentId,
+			checkId: params.checkId,
+			body,
+		});
 		return receipt.outcome === "unavailable"
 			? coordinationErrorResult("Advisory assignment is unavailable.", { op: "send", from: senderId, to })
-			: { content: [{ type: "text", text: receipt.outcome === "duplicate" ? "Duplicate advisory message." : `Delivered to ${to}.` }], details: { op: "send", from: senderId, to } };
+			: {
+					content: [
+						{
+							type: "text",
+							text: receipt.outcome === "duplicate" ? "Duplicate advisory message." : `Delivered to ${to}.`,
+						},
+					],
+					details: { op: "send", from: senderId, to },
+				};
 	}
 	const isBroadcast = to === "all";
 	// A subagent's broadcast wakes every live peer for news that is almost never

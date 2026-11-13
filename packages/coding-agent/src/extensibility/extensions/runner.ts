@@ -1764,7 +1764,9 @@ export class ExtensionRunner {
 		const getSessionModes = () => this.#sessionModes;
 		const sessionManager = this.sessionManager;
 		return {
-			get taskAdvisory() { return taskAdvisoryFor(sessionManager.getSessionId()); },
+			get taskAdvisory() {
+				return taskAdvisoryFor(sessionManager.getSessionId());
+			},
 			ui: this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
@@ -1883,7 +1885,17 @@ export class ExtensionRunner {
 			switchSession: sessionPath => this.#switchSessionHandler(sessionPath),
 			reload: () => this.#reloadHandler(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-		} satisfies Pick<ExtensionCommandContext, "getContextUsage" | "waitForIdle" | "newSession" | "branch" | "navigateTree" | "switchSession" | "reload" | "compact">);
+		} satisfies Pick<
+			ExtensionCommandContext,
+			| "getContextUsage"
+			| "waitForIdle"
+			| "newSession"
+			| "branch"
+			| "navigateTree"
+			| "switchSession"
+			| "reload"
+			| "compact"
+		>);
 	}
 
 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {

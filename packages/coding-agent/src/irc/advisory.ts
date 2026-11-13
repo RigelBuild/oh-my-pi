@@ -8,9 +8,10 @@ export const advisoryMessage = Symbol("advisoryMessage");
 export function currentAdvisories(messages: readonly IrcMessage[]): boolean[] {
 	const checks: AdvisoryCheck[] = [];
 	for (const message of messages) {
-		if (message.advisoryBinding) checks.push({ fromAgentId: message.from, toAgentId: message.to, binding: message.advisoryBinding });
+		if (message.advisoryBinding)
+			checks.push({ fromAgentId: message.from, toAgentId: message.to, binding: message.advisoryBinding });
 	}
 	const valid = checks.length ? AdvisoryHub.global().validate(checks) : [];
 	let index = 0;
-	return messages.map(message => message.advisoryBinding ? valid[index++] === true : true);
+	return messages.map(message => (message.advisoryBinding ? valid[index++] === true : true));
 }

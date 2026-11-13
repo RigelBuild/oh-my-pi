@@ -24,13 +24,22 @@ export class AdvisoryAttachment {
 			subscribe: listener => {
 				const unsubscribe = AdvisoryHub.global().subscribe(session.sessionManager.getSessionId(), listener);
 				this.#subscriptions.add(unsubscribe);
-				return () => { this.#subscriptions.delete(unsubscribe); unsubscribe(); };
+				return () => {
+					this.#subscriptions.delete(unsubscribe);
+					unsubscribe();
+				};
 			},
 			signal: (signal, count) => AdvisoryHub.global().signal(session.sessionManager.getSessionId(), signal, count),
 			remind: (ref, requestId, content) => {
 				const redacted = session.obfuscator?.obfuscate(content) ?? content;
-				if (Buffer.byteLength(redacted) > 4096) return Promise.resolve({ outcome: "unavailable", reason: "handoff-failed" });
-				return AdvisoryHub.global().remind({ parentSessionId: session.sessionManager.getSessionId(), ref, requestId, content: redacted });
+				if (Buffer.byteLength(redacted) > 4096)
+					return Promise.resolve({ outcome: "unavailable", reason: "handoff-failed" });
+				return AdvisoryHub.global().remind({
+					parentSessionId: session.sessionManager.getSessionId(),
+					ref,
+					requestId,
+					content: redacted,
+				});
 			},
 		};
 		this.#unsubscribe = session.subscribe(event => {

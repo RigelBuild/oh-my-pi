@@ -1334,12 +1334,23 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * needs adds no cost here.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
-	const marked = messages.filter(message => advisoryMessage in message || ((message.role === "custom" || message.role === "toolResult") && isRecord(message.details) && (message.details.advisory === true || advisoryMessage in message.details)));
+	const marked = messages.filter(
+		message =>
+			advisoryMessage in message ||
+			((message.role === "custom" || message.role === "toolResult") &&
+				isRecord(message.details) &&
+				(message.details.advisory === true || advisoryMessage in message.details)),
+	);
 	if (marked.length) {
 		const metadata = new Map<AgentMessage, IrcMessage | IrcMessage[] | undefined>();
 		const bound: IrcMessage[] = [];
 		for (const message of marked) {
-			const value = advisoryMessage in message ? message[advisoryMessage] : message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details ? message.details[advisoryMessage] : undefined;
+			const value =
+				advisoryMessage in message
+					? message[advisoryMessage]
+					: message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details
+						? message.details[advisoryMessage]
+						: undefined;
 			// SAFETY: only the IRC bridge and wait result attach this symbol.
 			const entry = value as IrcMessage | IrcMessage[] | undefined;
 			metadata.set(message, entry);
@@ -1349,13 +1360,30 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		let cursor = 0;
 		const safe: AgentMessage[] = [];
 		for (const message of messages) {
-			if (!metadata.has(message)) { safe.push(message); continue; }
+			if (!metadata.has(message)) {
+				safe.push(message);
+				continue;
+			}
 			const entry = metadata.get(message);
 			if (Array.isArray(entry) && message.role === "toolResult") {
 				const current = entry.filter(() => valid[cursor++] === true);
-				safe.push({ ...message, content: [{ type: "text", text: current.map(item => `[${item.id}] ${item.from}${item.replyTo ? ` (reply to ${item.replyTo})` : ""}${item.progress ? " (progress; reply follows)" : ""}: ${escapeHarnessTags(item.body)}`).join("\n\n") }] });
+				safe.push({
+					...message,
+					content: [
+						{
+							type: "text",
+							text: current
+								.map(
+									item =>
+										`[${item.id}] ${item.from}${item.replyTo ? ` (reply to ${item.replyTo})` : ""}${item.progress ? " (progress; reply follows)" : ""}: ${escapeHarnessTags(item.body)}`,
+								)
+								.join("\n\n"),
+						},
+					],
+				});
 			} else if (entry && !Array.isArray(entry) && valid[cursor++]) safe.push(message);
-			else if (message.role === "toolResult") safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
+			else if (message.role === "toolResult")
+				safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
 		}
 		return safe.flatMap((_message, index) => convertMessageAt(safe, index, convertOne));
 	}

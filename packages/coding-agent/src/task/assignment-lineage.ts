@@ -215,6 +215,10 @@ export class AssignmentLineage {
 		return this.#assignments.get(sessionId)?.ref.assignmentId;
 	}
 
+	messagingOf(sessionId: string): AdvisoryMessagingSupport | undefined {
+		return this.#assignments.get(sessionId)?.messaging;
+	}
+
 	isCurrent(ref: AssignmentRef, instanceId: string, branchId: string): boolean {
 		const current = this.getAssignment(ref.childSessionId);
 		return (
