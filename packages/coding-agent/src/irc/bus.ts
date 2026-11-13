@@ -151,8 +151,7 @@ export class IrcBus implements IrcBusApi {
 	 * is buffered for the recipient to drain later.
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt> {
-		if (msg.advisoryBinding)
-			return { to: msg.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+		if (msg.advisoryBinding) return { to: msg.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		// Taken before delivery: a reply sent while this message is still being
 		// delivered must still order after it.
@@ -278,10 +277,12 @@ export class IrcBus implements IrcBusApi {
 			}
 		}
 		if (hooks) {
-			if (hooks.validate()) return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			if (hooks.validate())
+				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 			const admission = hooks.admit(message);
 			if (admission === "duplicate") return { to: message.to, outcome: "duplicate" };
-			if (admission === "reject") return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			if (admission === "reject")
+				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 		}
 
 		// A pending `wait` from the recipient consumes the message directly —

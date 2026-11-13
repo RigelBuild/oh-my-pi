@@ -143,7 +143,13 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 		expect(managerContexts).toHaveLength(1);
 		expect(
 			(
-				await AdvisoryHub.global().sendBound({ childSessionId: binding.ref.childSessionId, fromAgentId: "LineageManager.LineageChild", toAgentId: "LineageManager", assignmentId: binding.ref.assignmentId, body })
+				await AdvisoryHub.global().sendBound({
+					childSessionId: binding.ref.childSessionId,
+					fromAgentId: "LineageManager.LineageChild",
+					toAgentId: "LineageManager",
+					assignmentId: binding.ref.assignmentId,
+					body,
+				})
 			).outcome,
 		).toBe("injected");
 		expect(managerContexts).toHaveLength(1);
@@ -254,7 +260,9 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		});
 		expect(observer).toHaveBeenCalledTimes(1);
 		const started = Promise.withResolvers<void>();
-		const unsubscribeStart = manager.subscribe(event => { if (event.type === "agent_start") started.resolve(); });
+		const unsubscribeStart = manager.subscribe(event => {
+			if (event.type === "agent_start") started.resolve();
+		});
 		const idleBody = JSON.stringify({
 			state: "progressing",
 			progress: "IDLE_PRIVATE_ADVISORY",
@@ -266,7 +274,13 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		const idleRelay = vi.spyOn(main, "emitIrcRelayObservation");
 		expect(
 			(
-				await hub.sendBound({ childSessionId: childId, fromAgentId: "StrandedChild", toAgentId: "StrandedManager", assignmentId: ref.assignmentId, body: idleBody })
+				await hub.sendBound({
+					childSessionId: childId,
+					fromAgentId: "StrandedChild",
+					toAgentId: "StrandedManager",
+					assignmentId: ref.assignmentId,
+					body: idleBody,
+				})
 			).outcome,
 		).toBe("woken");
 		await started.promise;
@@ -294,7 +308,13 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		manager.agent.state.isStreaming = true;
 		expect(
 			(
-				await hub.sendBound({ childSessionId: childId, fromAgentId: "StrandedChild", toAgentId: "StrandedManager", assignmentId: ref.assignmentId, body })
+				await hub.sendBound({
+					childSessionId: childId,
+					fromAgentId: "StrandedChild",
+					toAgentId: "StrandedManager",
+					assignmentId: ref.assignmentId,
+					body,
+				})
 			).outcome,
 		).toBe("injected");
 		manager.agent.state.isStreaming = false;
@@ -313,7 +333,13 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 		});
 		expect(
 			(
-				await hub.sendBound({ childSessionId: childId, fromAgentId: "StrandedChild", toAgentId: "StrandedManager", assignmentId: next.ref.assignmentId, body: drainedBody })
+				await hub.sendBound({
+					childSessionId: childId,
+					fromAgentId: "StrandedChild",
+					toAgentId: "StrandedManager",
+					assignmentId: next.ref.assignmentId,
+					body: drainedBody,
+				})
 			).outcome,
 		).toBe("injected");
 		hub.terminal(childId, next.ref.assignmentId);

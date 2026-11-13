@@ -162,14 +162,20 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 			toAgentId: "LineageManager",
 			assignmentId: binding.ref.assignmentId,
 			checkId: "check-1",
-			body: JSON.stringify({ state: "progressing", progress: "worked", tried: [], blocker: "", nextAction: "continue" }),
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "worked",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+			}),
 		});
-		expect(manager.drainPendingIrcInboxMessages("LineageManager").some(message => message.body.includes("worked"))).toBe(true);
+		expect(
+			manager.drainPendingIrcInboxMessages("LineageManager").some(message => message.body.includes("worked")),
+		).toBe(true);
 		expect(relay).toHaveBeenCalledTimes(0);
 		expect(reply.outcome).toBe("injected");
-		expect(replies).toEqual([
-			{ requestId: "check-1", state: "progressing" },
-		]);
+		expect(replies).toEqual([{ requestId: "check-1", state: "progressing" }]);
 		expect(relay).toHaveBeenCalledTimes(0);
 		expect(mock.calls.length).toBe(callsBeforeDelivery);
 		unsubscribe();
@@ -198,7 +204,13 @@ it("binds nested assignments to their immediate parent and invalidates them on n
 			fromAgentId: "LineageManager.LineageChild",
 			toAgentId: "LineageManager",
 			assignmentId: binding.ref.assignmentId,
-			body: JSON.stringify({ state: "progressing", progress: "nested private advisory", tried: [], blocker: "", nextAction: "continue" }),
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "nested private advisory",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+			}),
 		});
 		expect(receipt.outcome).toBe("injected");
 		const entries = manager.sessionManager.getEntries();

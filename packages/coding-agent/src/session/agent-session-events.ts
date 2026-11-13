@@ -108,10 +108,12 @@ export type AgentSessionEvent =
 	// `remove_queued_message` cannot reach.
 	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number }
 	| {
-		type: "message_persisted";
-		id: string;
-		usage: { input?: number; output?: number; cacheWrite?: number; cacheRead?: number; total?: number } | undefined;
-	};
+			type: "message_persisted";
+			id: string;
+			usage:
+				| { input?: number; output?: number; cacheWrite?: number; cacheRead?: number; total?: number }
+				| undefined;
+	  };
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
