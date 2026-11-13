@@ -12,6 +12,7 @@ import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { attachIrcWakeTurnMonitor } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { AdvisoryHub } from "../../src/task/advisory-hub";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -105,6 +106,69 @@ describe("IRC", () => {
 		}
 	});
 
+	it("rejects invalid bound reports without echoing their body", async () => {
+		const body = "PRIVATE_INVALID_REPORT_BODY";
+		const result = await executeSend(
+			{ registry, senderId: "Child", childSessionId: "child" },
+			{ to: "Parent", message: body, assignmentId: "assignment", checkId: "check" },
+		);
+		expect(result.isError).toBe(true);
+		expect(JSON.stringify(result.content)).toContain("Invalid advisory reply");
+		expect(JSON.stringify(result)).not.toContain(body);
+	});
+
+	it("emits reply state to a waiter without relaying it to main", async () => {
+		AdvisoryHub.resetGlobalForTests();
+		const hub = AdvisoryHub.main();
+		const main = makeFakeSession();
+		const parent = makeFakeSession();
+		const child = makeFakeSession();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: main.session });
+		registry.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "sub",
+			parentId: "Main",
+			session: parent.session,
+		});
+		registry.register({ id: "Child", displayName: "Child", kind: "sub", parentId: "Parent", session: child.session });
+		hub.attach({ sessionId: "parent", instanceId: "p", agentId: "Parent" });
+		const ref = hub.mint({ childSessionId: "child", parentSessionId: "parent", messaging: { status: "supported" } });
+		hub.attach({ sessionId: "child", instanceId: "c", agentId: "Child" });
+		const events: unknown[] = [];
+		const off = hub.subscribe("parent", event => {
+			if (event.type === "reply") events.push(event);
+		});
+		try {
+			const waiter = bus.wait("Parent", {}, 0);
+			const body = JSON.stringify({
+				state: "progressing",
+				progress: "waiter",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+			});
+			expect(
+				(
+					await hub.sendBound({
+						childSessionId: "child",
+						fromAgentId: "Child",
+						toAgentId: "Parent",
+						assignmentId: ref.assignmentId,
+						body,
+					})
+				).outcome,
+			).toBe("injected");
+			expect((await waiter)?.body).toBe(body);
+			expect(events).toMatchObject([{ type: "reply", state: "progressing", ref }]);
+			expect(main.relayed).toEqual([]);
+		} finally {
+			off();
+			hub.detach("child", "c");
+			hub.detach("parent", "p");
+			AdvisoryHub.resetGlobalForTests();
+		}
+	});
 	describe("IrcBus", () => {
 		it("send delivers to a live recipient and reports the session outcome", async () => {
 			const sub = makeFakeSession();

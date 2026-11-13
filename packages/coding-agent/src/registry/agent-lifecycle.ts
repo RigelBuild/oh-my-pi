@@ -432,9 +432,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				} catch (error) {
 					logger.debug("AgentLifecycleManager.park: cost snapshot failed", { id, error: String(error) });
 				}
-				const sessionId = session.sessionManager.getSessionId();
-				adopted.parkedSessionId = sessionId;
-				AdvisoryHub.main().parkSession(sessionId);
+				adopted.parkedSessionId = AdvisoryHub.main().parkAgent(id);
 
 				// Commit: detach + parked *before* dispose so callers never see a
 				// dying session via ref.session / idle status.

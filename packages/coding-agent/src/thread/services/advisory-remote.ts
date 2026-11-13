@@ -1,3 +1,4 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import type { TaskAdvisoryEvent } from "../../extensibility/extensions/task-advisory";
 import type { AdvisoryHubApi } from "../../task/advisory-hub";
 import type { RemoteObject } from "../rpc";
@@ -55,7 +56,13 @@ export class RemoteAdvisoryHub implements AdvisoryHubApi {
 			const listeners = new Set<(event: TaskAdvisoryEvent) => void>();
 			const close = localUnsubscribe(
 				this.#remote.callSync("subscribe", sessionId, event => {
-					for (const subscriber of [...listeners]) subscriber(event);
+					for (const subscriber of [...listeners]) {
+						try {
+							subscriber(event);
+						} catch (error) {
+							logger.debug("Forwarded advisory listener threw", { error: String(error) });
+						}
+					}
 				}),
 			);
 			entry = { listeners, close };

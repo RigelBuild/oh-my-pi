@@ -77,7 +77,7 @@ let nextThreadNumber = 1;
 export interface SubagentWorkerSpawnOptions {
 	/** Bound on start-up (ready handshake + boot); default 30s. */
 	readonly initTimeoutMs?: number;
-	/** Main-side service hooks to install; defaults to `THREAD_SERVICES`. */
+	/** Main-side service hooks to install; defaults to `threadServices()`. */
 	readonly services?: readonly ThreadService[];
 	/** Tests only: module to load instead of the subagent entry, bypassing the CLI worker host. */
 	readonly entry?: URL;

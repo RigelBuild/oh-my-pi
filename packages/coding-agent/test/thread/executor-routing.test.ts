@@ -4,7 +4,7 @@
  * and a scripted OpenAI-compatible server the worker's model registry finds through
  * `models.yml` (the worker mirror re-reads it, so no spies reach into the worker).
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -547,15 +547,38 @@ describe("subagent runs routed into pooled workers", () => {
 			const parentId = parent.sessionManager.getSessionId();
 			const hub = AdvisoryHub.main();
 			parent.resetAdvisoryLineage();
-			const running = runSubprocess(runOptions("AdvisoryCrash", HANG_TASK, { parentSessionId: parentId }));
+			AgentRegistry.global().register({
+				id: MAIN_AGENT_ID,
+				displayName: MAIN_AGENT_ID,
+				kind: "main",
+				session: parent,
+			});
+			const running = runSubprocess(
+				runOptions("AdvisoryCrash", HANG_TASK, {
+					parentSessionId: parentId,
+					parentAgentId: MAIN_AGENT_ID,
+					agent: { ...AGENT, tools: ["read", "bash", "write"] },
+				}),
+			);
 			await server.hung();
 			await waitFor(() => hub.children(parentId).length === 1);
 			const ref = hub.children(parentId)[0]!.ref;
+			expect(
+				(await hub.remind({ parentSessionId: parentId, ref, requestId: "armed", content: "status" })).outcome,
+			).toBe("injected");
+			expect(hub.inspectForTests(ref.childSessionId).timers).toBe(1);
 			const worker = pool.workers()[0];
 			if (!worker) throw new Error("worker missing");
 			await worker.terminate("worker crashed: boom");
 			await running;
 			expect(hub.children(parentId)).toEqual([]);
+			expect(hub.inspectForTests(ref.childSessionId)).toMatchObject({
+				attached: false,
+				source: false,
+				timers: 0,
+				watches: 0,
+				listeners: 0,
+			});
 			expect(
 				(await hub.remind({ parentSessionId: parentId, ref, requestId: "old", content: "status" })).outcome,
 			).toBe("unavailable");
@@ -590,6 +613,13 @@ describe("subagent runs routed into pooled workers", () => {
 			if (!worker) throw new Error("worker missing");
 			await worker.terminate("test exit");
 			expect(hub.children(parentId)[0]?.wallMs).toBe(paused?.wallMs);
+			expect(hub.inspectForTests(paused!.ref.childSessionId)).toMatchObject({
+				attached: false,
+				source: true,
+				timers: 0,
+				watches: 0,
+				listeners: 0,
+			});
 			lifecycle.setPersistedSubagentReviverFactory(
 				createPersistedSubagentReviverFactory({
 					session: parent,
@@ -612,14 +642,23 @@ describe("subagent runs routed into pooled workers", () => {
 			expect(followUp.error).toBeUndefined();
 			const fresh = hub.children(parentId)[0];
 			expect(fresh?.ref.assignmentId).not.toBe(paused?.ref.assignmentId);
+			const wakeStarted = Date.now();
 			const receipt = await IrcBus.global().send({ from: MAIN_AGENT_ID, to: "AdvisoryPark", body: "again" });
 			expect(receipt.outcome).not.toBe("failed");
 			await waitFor(() => hub.children(parentId)[0]?.ref.assignmentId !== fresh?.ref.assignmentId);
 			const awake = hub.children(parentId)[0];
 			expect(awake?.ref.assignmentId).not.toBe(fresh?.ref.assignmentId);
+			expect(awake?.wallMs).toBeLessThanOrEqual(Date.now() - wakeStarted + 100);
 			await lifecycle.park("AdvisoryPark");
 			await lifecycle.release("AdvisoryPark");
 			expect(hub.children(parentId)).toEqual([]);
+			expect(hub.inspectForTests(paused!.ref.childSessionId)).toMatchObject({
+				attached: false,
+				source: false,
+				watches: 0,
+				timers: 0,
+				listeners: 0,
+			});
 		},
 		TEST_TIMEOUT_MS,
 	);
@@ -677,6 +716,7 @@ describe("subagent runs routed into pooled workers", () => {
 					agent: { ...AGENT, tools: ["read", "bash", "write"] },
 				}),
 			);
+			const relay = vi.spyOn(parent, "emitIrcRelayObservation");
 			const hub = AdvisoryHub.main();
 			const events: string[] = [];
 			const off = hub.subscribe(parentId, event => {
@@ -691,6 +731,7 @@ describe("subagent runs routed into pooled workers", () => {
 				).toBe("injected");
 				server.replyGate.resolve({ assignmentId: ref.assignmentId, checkId: "check" });
 				await waitFor(() => events.length === 1);
+				expect(relay).not.toHaveBeenCalled();
 				expect(events).toEqual(["progressing"]);
 				let observed = "";
 				expect(

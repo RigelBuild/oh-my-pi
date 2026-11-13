@@ -1106,10 +1106,15 @@ interface ConvertArrayMemo {
 
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
+const advisoryScanCache = new WeakMap<
+	AgentMessage[],
+	{ generation: number; length: number; tail: AgentMessage | undefined; found: boolean }
+>();
 
 /** Drop the outer-array shortcut when an owner replaces a live history in place. */
 export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void {
 	convertArrayCache.delete(messages);
+	advisoryScanCache.delete(messages);
 }
 
 registerMessageCacheInvalidator(message => {
@@ -1333,15 +1338,35 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * {@link convertMessageAt}; it stays separate so the index mapping `/context`
  * needs adds no cost here.
  */
-export function convertToLlm(messages: AgentMessage[]): Message[] {
-	const marked = messages.filter(
-		message =>
-			advisoryMessage in message ||
-			((message.role === "custom" || message.role === "toolResult") &&
-				isRecord(message.details) &&
-				(message.details.advisory === true || advisoryMessage in message.details)),
+function isAdvisoryBearing(message: AgentMessage): boolean {
+	return (
+		advisoryMessage in message ||
+		((message.role === "custom" || message.role === "toolResult") &&
+			isRecord(message.details) &&
+			(message.details.advisory === true || advisoryMessage in message.details))
 	);
-	if (marked.length) {
+}
+function hasAdvisory(messages: AgentMessage[]): boolean {
+	const cached = advisoryScanCache.get(messages);
+	const length = messages.length;
+	const tail = messages[length - 1];
+	let start = 0;
+	let found = false;
+	if (cached?.generation === convertGeneration) {
+		if (cached.length === length && cached.tail === tail) return cached.found;
+		if (length > cached.length && cached.length > 0 && messages[cached.length - 1] === cached.tail) {
+			found = cached.found;
+			start = cached.length;
+		}
+	}
+	for (let index = start; !found && index < length; index++) found = isAdvisoryBearing(messages[index]);
+	advisoryScanCache.set(messages, { generation: convertGeneration, length, tail, found });
+	return found;
+}
+
+export function convertToLlm(messages: AgentMessage[]): Message[] {
+	if (hasAdvisory(messages)) {
+		const marked = messages.filter(isAdvisoryBearing);
 		const metadata = new Map<AgentMessage, IrcMessage | IrcMessage[] | undefined>();
 		const bound: IrcMessage[] = [];
 		for (const message of marked) {

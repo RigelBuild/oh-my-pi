@@ -35,7 +35,7 @@ const probeService: ThreadService = {
 				return hub.current("child")?.wallMs;
 			},
 			async subscribe() {
-				AdvisoryHub.global().subscribe("child", () => {});
+				AdvisoryHub.global().subscribe("parent", () => {});
 			},
 		});
 	},

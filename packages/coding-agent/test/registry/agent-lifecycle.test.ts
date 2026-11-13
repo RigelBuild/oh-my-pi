@@ -6,6 +6,7 @@ import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/p
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
+import { AdvisoryHub, advisoryNow } from "../../src/task/advisory-hub";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionStub {
@@ -61,6 +62,23 @@ describe("AgentLifecycleManager", () => {
 	function registerIdleSub(id: string, session: AgentSession | null, sessionFile: string | null = `/tmp/${id}.jsonl`) {
 		return registry.register({ id, displayName: "task", kind: "sub", session, sessionFile, status: "idle" });
 	}
+
+	it("parks the attached session rather than a stale mirrored session id", async () => {
+		AdvisoryHub.resetGlobalForTests();
+		const hub = AdvisoryHub.main();
+		hub.attach({ sessionId: "parent", instanceId: "p", agentId: "Parent" });
+		hub.mint({ childSessionId: "current", parentSessionId: "parent", messaging: { status: "supported" } });
+		hub.attachFrom("w1", { sessionId: "current", instanceId: "c", agentId: "Sub" });
+		hub.publishEvent("current", "c", { kind: "ready", at: advisoryNow() });
+		registerIdleSub("Sub", makeSessionStub().session);
+		lifecycle.adopt("Sub", { idleTtlMs: 0 });
+		await lifecycle.park("Sub");
+		hub.disposeHome("w1");
+		expect(hub.children("parent")[0]?.phase).toBe("paused");
+		await lifecycle.release("Sub");
+		expect(hub.children("parent")).toEqual([]);
+		AdvisoryHub.resetGlobalForTests();
+	});
 
 	it("registerIfAvailable never replaces a collision and reuses only the exact expected ref", () => {
 		const parked = registerIdleSub("generation-Sub", null);

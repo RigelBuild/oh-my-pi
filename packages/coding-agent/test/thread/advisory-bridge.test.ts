@@ -22,6 +22,16 @@ it("orders advisory updates and disposes the worker home on exit", async () => {
 		services: [identityThreadService, agentsThreadService, advisoryThreadService, probeService],
 		initTimeoutMs: 60_000,
 	});
+	const originalSubscribe = hub.subscribe.bind(hub);
+	const subscribe = spyOn(hub, "subscribe");
+	let released = 0;
+	subscribe.mockImplementation((id, listener) => {
+		const off = originalSubscribe(id, listener);
+		return () => {
+			released++;
+			off();
+		};
+	});
 	const dispose = spyOn(hub, "disposeHome");
 	try {
 		await worker.ready;
@@ -33,9 +43,11 @@ it("orders advisory updates and disposes the worker home on exit", async () => {
 		await worker.terminate("test exit");
 		expect(dispose).toHaveBeenCalledTimes(1);
 		expect(dispose).toHaveBeenCalledWith(worker.threadId);
+		expect(released).toBe(1);
 		expect(hub.children("parent")).toEqual([]);
 	} finally {
 		await worker.terminate("test cleanup");
+		subscribe.mockRestore();
 		dispose.mockRestore();
 		AdvisoryHub.resetGlobalForTests();
 	}

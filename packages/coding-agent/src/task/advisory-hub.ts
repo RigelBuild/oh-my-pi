@@ -118,6 +118,25 @@ export class AdvisoryHub implements AdvisoryHubApi {
 	readonly #suspended = new Map<string, string[]>();
 	readonly #listeners = new Map<string, Set<(event: TaskAdvisoryEvent) => void>>();
 	readonly #last = new Map<string, string>();
+	/** Test-only resource counts for one session. */
+	inspectForTests(sessionId: string): {
+		attached: boolean;
+		source: boolean;
+		watches: number;
+		timers: number;
+		listeners: number;
+	} {
+		const watches = [...this.#watches.values()].filter(
+			watch => watch.ref.childSessionId === sessionId || watch.ref.parentSessionId === sessionId,
+		);
+		return {
+			attached: this.#attached.has(sessionId),
+			source: this.#sources.has(sessionId),
+			watches: watches.length,
+			timers: watches.filter(watch => watch.timer !== undefined).length,
+			listeners: this.#listeners.get(sessionId)?.size ?? 0,
+		};
+	}
 	constructor() {
 		if (!isMainThread()) throw new Error("Advisory hub is main-thread only");
 		this.#lineage.onMint(ref => {
@@ -167,6 +186,11 @@ export class AdvisoryHub implements AdvisoryHubApi {
 	parkSession(id: string): void {
 		this.#lineage.parkSession(id);
 		this.#remove(id);
+	}
+	parkAgent(agentId: string): string | undefined {
+		const sessionId = this.#agents.get(agentId);
+		if (sessionId) this.parkSession(sessionId);
+		return sessionId;
 	}
 	expireParked(id: string): void {
 		this.#lineage.expireParked(id);
@@ -381,10 +405,12 @@ export class AdvisoryHub implements AdvisoryHubApi {
 		watch.pending = false;
 		if (result.outcome === "unavailable") {
 			clearTimeout(watch.timer);
+			watch.timer = undefined;
 			this.#watches.delete(key);
 			this.#issued.delete(key);
 		} else if (!this.#lineage.isCurrent(ref, binding.instanceId, binding.branchId)) {
 			clearTimeout(watch.timer);
+			watch.timer = undefined;
 			watch.expired = true;
 		}
 		return result;
@@ -412,6 +438,7 @@ export class AdvisoryHub implements AdvisoryHubApi {
 			},
 		};
 		const tick = () => {
+			watch.timer = undefined;
 			if (watch.reply !== undefined || watch.expired) return;
 			const current = this.#lineage.getAssignment(ref.childSessionId);
 			if (
@@ -473,12 +500,14 @@ export class AdvisoryHub implements AdvisoryHubApi {
 			const digest = hash(message.body);
 			if (watch.reply !== undefined) return watch.replyDelivered && watch.reply === digest ? "duplicate" : "reject";
 			clearTimeout(watch.timer);
+			watch.timer = undefined;
 			watch.reply = digest;
 		} else {
 			const keys: string[] = [];
 			for (const [key, watch] of this.#watches)
 				if (key.startsWith(`${binding.ref.assignmentId}:`) && !watch.expired && watch.reply === undefined) {
 					clearTimeout(watch.timer);
+					watch.timer = undefined;
 					keys.push(key);
 				}
 			this.#suspended.set(message.id, keys);

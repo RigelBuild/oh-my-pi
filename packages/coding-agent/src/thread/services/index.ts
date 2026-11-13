@@ -19,6 +19,7 @@ import { runtimeIdentityThreadService } from "./runtime-identity";
 import { settingsThreadService } from "./settings";
 import { telemetryThreadService } from "./telemetry";
 
+// Defer reading service bindings until the cyclic module graph finishes initialization.
 export function threadServices(): readonly ThreadService[] {
 	return [
 		identityThreadService,
