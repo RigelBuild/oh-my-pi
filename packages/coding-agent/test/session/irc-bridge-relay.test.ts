@@ -9,6 +9,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
+import { AdvisoryHub } from "../../src/task/advisory-hub";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
@@ -29,6 +30,34 @@ function makeBridge() {
 }
 
 describe("IrcBridge wake-relay marking", () => {
+	it("wakes a bound advisory without advertising or emitting a relay", async () => {
+		AdvisoryHub.resetGlobalForTests();
+		const hub = AdvisoryHub.main();
+		hub.attach({ sessionId: "parent", instanceId: "p", agentId: "Parent" });
+		const ref = hub.mint({ childSessionId: "child", parentSessionId: "parent", messaging: { status: "supported" } });
+		hub.attach({ sessionId: "child", instanceId: "c", agentId: "Child" });
+		const { bridge, woken } = makeBridge();
+		try {
+			expect(
+				await bridge.deliver({
+					id: "bound",
+					from: "Child",
+					to: "Parent",
+					body: "progress",
+					ts: 1,
+					advisoryBinding: { ref, branchId: ref.parentBranchId, senderInstanceId: "c", recipientInstanceId: "p" },
+				}),
+			).toBe("woken");
+			expect(woken).toHaveLength(1);
+			const record = woken[0][0] as CustomMessage;
+			expect(record.details).toMatchObject({ advisory: true });
+			expect(record.content).toContain("No one replies on your behalf");
+		} finally {
+			hub.detach("child", "c");
+			hub.detach("parent", "p");
+			AdvisoryHub.resetGlobalForTests();
+		}
+	});
 	it("marks relay messages so the peer never relays them back", async () => {
 		const { bridge, woken } = makeBridge();
 		const outcome = await bridge.deliver({

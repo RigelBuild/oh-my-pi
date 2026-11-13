@@ -26,6 +26,7 @@ import * as fs from "node:fs/promises";
 import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
+import { AdvisoryHub } from "../task/advisory-hub";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
 	type AgentRef,
@@ -92,6 +93,7 @@ interface AdoptedAgent {
 	onRelease?: () => Promise<void>;
 	onReviverDropped?: () => void;
 	timer?: NodeJS.Timeout;
+	parkedSessionId?: string;
 }
 
 /** Fire (at most once) the adoption's reviver-dropped hook. */
@@ -430,6 +432,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				} catch (error) {
 					logger.debug("AgentLifecycleManager.park: cost snapshot failed", { id, error: String(error) });
 				}
+				adopted.parkedSessionId = AdvisoryHub.main().parkAgent(id);
 
 				// Commit: detach + parked *before* dispose so callers never see a
 				// dying session via ref.session / idle status.
@@ -649,6 +652,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			if (!park.detached) park.cancel();
 			await park.promise;
 		}
+		if (adopted?.parkedSessionId) AdvisoryHub.main().expireParked(adopted.parkedSessionId);
 
 		const live = this.#registry.get(id) === ref ? ref.session : null;
 		if (options?.tombstone) {
@@ -760,6 +764,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			throw new Error(`Agent "${id}" was replaced or became terminal while its persisted session was reviving.`);
 		}
 		adopted.ref = liveRef;
+		adopted.parkedSessionId = undefined;
 		// Emits status_changed → "idle", which re-arms the TTL timer below.
 		if (!this.#registry.setStatus(id, "idle", liveRef)) {
 			await session.dispose();

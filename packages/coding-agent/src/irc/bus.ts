@@ -14,6 +14,7 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
+import type { AdvisoryBindingFailure } from "../task/assignment-lineage";
 
 interface IrcWaiter {
 	filter: IrcWaitFilter;
@@ -42,6 +43,13 @@ export function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean 
 	if (filter.from !== undefined && msg.from !== filter.from) return false;
 	if (!filter.directOnly || (!msg.broadcast && !msg.progress)) return true;
 	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
+}
+
+export interface BoundDeliveryHooks {
+	validate(): AdvisoryBindingFailure | undefined;
+	admit(message: IrcMessage): "accept" | "duplicate" | "reject";
+	received(message: IrcMessage): void;
+	rollback(message: IrcMessage): void;
 }
 
 /** When a send went out: wall-clock `ts`, and `seq` to order sends within one millisecond. */
@@ -143,6 +151,7 @@ export class IrcBus implements IrcBusApi {
 	 * is buffered for the recipient to drain later.
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt> {
+		if (msg.advisoryBinding) return { to: msg.to, outcome: "failed", error: "Advisory assignment is unavailable." };
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		// Taken before delivery: a reply sent while this message is still being
 		// delivered must still order after it.
@@ -158,6 +167,13 @@ export class IrcBus implements IrcBusApi {
 			}
 		}
 		return receipt;
+	}
+
+	/** Deliver a hub-minted message without buffering or relaying it. */
+	async deliverBound(msg: Omit<IrcMessage, "id" | "ts">, hooks: BoundDeliveryHooks): Promise<IrcDeliveryReceipt> {
+		if (!msg.advisoryBinding || hooks.validate())
+			return { to: msg.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+		return this.#deliver({ ...msg, id: Snowflake.next(), ts: Date.now() }, hooks);
 	}
 
 	#record(table: Map<string, Map<string, SendMark>>, from: string, to: string, mark: SendMark): void {
@@ -209,7 +225,7 @@ export class IrcBus implements IrcBusApi {
 		return unanswered;
 	}
 
-	async #deliver(message: IrcMessage): Promise<IrcDeliveryReceipt> {
+	async #deliver(message: IrcMessage, hooks?: BoundDeliveryHooks): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
@@ -260,6 +276,14 @@ export class IrcBus implements IrcBusApi {
 				};
 			}
 		}
+		if (hooks) {
+			if (hooks.validate())
+				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+			const admission = hooks.admit(message);
+			if (admission === "duplicate") return { to: message.to, outcome: "duplicate" };
+			if (admission === "reject")
+				return { to: message.to, outcome: "failed", error: "Advisory assignment is unavailable." };
+		}
 
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or
@@ -267,31 +291,36 @@ export class IrcBus implements IrcBusApi {
 		const waiter = this.#takeMatchingWaiter(message);
 		if (waiter) {
 			waiter.resolve(message);
-			this.#relayToMainUi(message);
+			if (hooks) hooks.received(message);
+			else this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
 
 		const session = this.#registry.get(message.to)?.session;
 		if (!session) {
+			if (hooks) hooks.rollback(message);
 			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		}
 
+		let delivery: "injected" | "woken";
 		try {
-			const delivery = await session.deliverIrcMessage(message);
-			this.#relayToMainUi(message);
-			return { to: message.to, outcome: revived ? "revived" : delivery };
+			delivery = await session.deliverIrcMessage(message);
 		} catch (error) {
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
 			// the message so a later `wait`/`inbox` from the recipient can still
 			// pick it up. The receipt stays "failed" — the recipient has not
 			// seen it.
-			this.#enqueue(message);
+			if (hooks) hooks.rollback(message);
+			else this.#enqueue(message);
 			return {
 				to: message.to,
 				outcome: "failed",
 				error: error instanceof Error ? error.message : String(error),
 			};
 		}
+		if (hooks) hooks.received(message);
+		else this.#relayToMainUi(message);
+		return { to: message.to, outcome: revived ? "revived" : delivery };
 	}
 
 	/**
