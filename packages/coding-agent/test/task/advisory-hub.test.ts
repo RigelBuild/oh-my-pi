@@ -420,3 +420,26 @@ it("expires a watch when messaging support is withdrawn", async () => {
 		expect(vi.getTimerCount()).toBe(0);
 	} finally { hub.detach("child", "c"); clock.mockRestore(); }
 });
+
+for (const failureAt of [290_000, 300_000]) {
+	it(`restores a failed report at ${failureAt}ms without repeating a follow-up`, async () => {
+		vi.useFakeTimers();
+		const clock = spyOn(performance, "now").mockReturnValue(0);
+		let deliveries = 0;
+		const child = { deliverIrcMessage: async () => { deliveries++; return "injected"; } } as unknown as AgentSession;
+		const parent = { deliverIrcMessage: async () => { throw new Error("failed"); } } as unknown as AgentSession;
+		AgentRegistry.global().register({ id: "Child", displayName: "Child", kind: "sub", session: child });
+		AgentRegistry.global().register({ id: "Parent", displayName: "Parent", kind: "sub", session: parent });
+		const { hub, ref } = fixture();
+		try {
+			await hub.remind({ parentSessionId: "parent", ref, requestId: "check", content: "status" });
+			clock.mockReturnValue(failureAt);
+			vi.advanceTimersByTime(failureAt);
+			const body = JSON.stringify({ state: "progressing", progress: "worked", tried: [], blocker: "", nextAction: "continue", requestId: "check" });
+			expect((await hub.sendBound({ childSessionId: "child", fromAgentId: "Child", toAgentId: "Parent", assignmentId: ref.assignmentId, checkId: "check", body })).outcome).toBe("unavailable");
+			clock.mockReturnValue(600_000);
+			vi.advanceTimersByTime(310_000);
+			expect(deliveries).toBe(2);
+		} finally { hub.disposeHome("w1"); clock.mockRestore(); }
+	});
+}
