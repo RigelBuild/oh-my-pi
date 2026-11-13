@@ -5,6 +5,7 @@
  */
 import type { ThreadService } from "../services";
 import { agentsThreadService } from "./agents";
+import { advisoryThreadService } from "./advisory";
 import { asyncJobsThreadService } from "./async-jobs";
 import { authService } from "./auth";
 import { executorThreadService } from "./executor";
@@ -26,6 +27,7 @@ export const THREAD_SERVICES: readonly ThreadService[] = [
 	settingsThreadService,
 	authService,
 	agentsThreadService,
+	advisoryThreadService,
 	lspThreadService,
 	telemetryThreadService,
 	memoryThreadService,
