@@ -5028,7 +5028,10 @@ describe("AuthStorage claude oauth ranking", () => {
 			}),
 		);
 		const sessionId = "claude-drain-first-banked-sibling";
-		const lease = authStorage.sessions.restrict("anthropic", sessionId, ["email:sibling@example.com", "email:cool@example.com"]);
+		const lease = authStorage.sessions.restrict("anthropic", sessionId, [
+			"email:sibling@example.com",
+			"email:cool@example.com",
+		]);
 		try {
 			const apiKey = await authStorage.keys.get("anthropic", sessionId);
 			expect(apiKey).toBe("api-acct-cool");
