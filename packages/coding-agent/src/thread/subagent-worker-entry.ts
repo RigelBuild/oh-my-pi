@@ -25,7 +25,7 @@ import { consumeWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
 import { isThreadId, setCurrentThreadId } from "./identity";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
-import { THREAD_SERVICES } from "./services/index";
+import { threadServices } from "./services/index";
 import { warmUpSubagentWorker } from "./worker-warm-up";
 
 installGlobalProxyFetch();
@@ -76,9 +76,10 @@ function start(init: SubagentWorkerInit): void {
 		},
 		{ name: `${init.threadId}↔main`, sync: { port: init.replyPort, counter: new Int32Array(init.counter) } },
 	);
-	for (const service of THREAD_SERVICES) service.installWorker?.(link);
+	const services = threadServices();
+	for (const service of services) service.installWorker?.(link);
 	link.handle("boot", async globals => {
-		for (const service of THREAD_SERVICES) await service.boot?.(globals[service.name], link);
+		for (const service of services) await service.boot?.(globals[service.name], link);
 	});
 	link.handle("ping", nonce => link.callSync("ping", nonce));
 	link.handle("warmUp", options => warmUpSubagentWorker(options));

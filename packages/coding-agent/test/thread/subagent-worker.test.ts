@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { RpcClosedError } from "../../src/thread/rpc";
 import type { ThreadService, WorkerPeer } from "../../src/thread/services";
-import { THREAD_SERVICES } from "../../src/thread/services/index";
+import { threadServices } from "../../src/thread/services/index";
 import {
 	allowedSubagentWorkers,
 	SubagentWorker,
@@ -82,7 +82,7 @@ function probeService(): ThreadService & { installed: WorkerPeer[]; exits: strin
 describe("SubagentWorker", () => {
 	it("boots and answers a ping that round-trips through a sync call to main", async () => {
 		const probe = probeService();
-		const worker = startWorker({ services: [...THREAD_SERVICES, probe] });
+		const worker = startWorker({ services: [...threadServices(), probe] });
 		await worker.ready;
 		expect(worker.threadId).toMatch(/^w[1-9][0-9]*$/);
 		expect(probe.installed).toEqual([worker]);
@@ -93,7 +93,7 @@ describe("SubagentWorker", () => {
 		const probe = probeService();
 		const exits: string[] = [];
 		const worker = startWorker({
-			services: [...THREAD_SERVICES, probe],
+			services: [...threadServices(), probe],
 			entry: new URL("../fixtures/subagent-crash-worker.ts", import.meta.url),
 			onExit: (_worker, reason) => exits.push(reason),
 		});

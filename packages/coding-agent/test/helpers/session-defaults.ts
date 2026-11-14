@@ -3,6 +3,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 /** Spread first in a session fake; keep state and behavior overrides on the fake itself. */
 export function createSessionDefaults() {
 	return {
+		sessionManager: { getSessionId: () => "stub-session" } as AgentSession["sessionManager"],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
 		getMountedXdevToolNames: () => [],
 		waitForIdle: async () => {},

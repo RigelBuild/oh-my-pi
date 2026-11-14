@@ -44,6 +44,12 @@ function idsOf(frames: RpcProjectedSessionEventFrame[]): Array<[string, string |
 }
 
 describe("RpcSessionEventForwarder", () => {
+	test("does not expose internal persisted-usage events", () => {
+		const frames: RpcProjectedSessionEventFrame[] = [];
+		const forwarder = new RpcSessionEventForwarder(frame => frames.push(frame));
+		forwarder.forward({ type: "message_persisted", id: "entry-1", usage: { input: 3, output: 2 } });
+		expect(frames).toEqual([]);
+	});
 	test("delta updates preserve each streaming subtype without mutating shared events", () => {
 		const message = makeAssistantMessage();
 		const toolCall = { type: "toolCall" as const, id: "call-1", name: "read", arguments: { path: "file" } };

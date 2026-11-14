@@ -42,6 +42,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { AdvisoryHub } from "./advisory-hub";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
 import {
@@ -779,6 +780,7 @@ function buildExecutorOptions(
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
 	const restrictToolNames = preparedSession !== undefined || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const parentSessionId = request.invocationKind === "task" ? (session.getSessionId?.() ?? undefined) : undefined;
 	return {
 		cwd: session.cwd,
 		costGate: session.costGate,
@@ -798,6 +800,8 @@ function buildExecutorOptions(
 		parentToolCallId: request.parentToolCallId,
 		detached: request.detached,
 		id,
+		parentSessionId,
+		parentBranchId: parentSessionId ? AdvisoryHub.global().branch(parentSessionId) : undefined,
 		taskDepth: session.taskDepth ?? 0,
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,

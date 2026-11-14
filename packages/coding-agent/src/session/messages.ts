@@ -55,6 +55,9 @@ import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage 
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { advisoryMessage, currentAdvisories } from "../irc/advisory";
+import { escapeHarnessTags } from "./harness-tags";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
@@ -1103,10 +1106,15 @@ interface ConvertArrayMemo {
 
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
+const advisoryScanCache = new WeakMap<
+	AgentMessage[],
+	{ generation: number; length: number; tail: AgentMessage | undefined; found: boolean }
+>();
 
 /** Drop the outer-array shortcut when an owner replaces a live history in place. */
 export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void {
 	convertArrayCache.delete(messages);
+	advisoryScanCache.delete(messages);
 }
 
 registerMessageCacheInvalidator(message => {
@@ -1330,7 +1338,80 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * {@link convertMessageAt}; it stays separate so the index mapping `/context`
  * needs adds no cost here.
  */
+function isAdvisoryBearing(message: AgentMessage): boolean {
+	return (
+		advisoryMessage in message ||
+		((message.role === "custom" || message.role === "toolResult") &&
+			isRecord(message.details) &&
+			(message.details.advisory === true || advisoryMessage in message.details))
+	);
+}
+function hasAdvisory(messages: AgentMessage[]): boolean {
+	const cached = advisoryScanCache.get(messages);
+	const length = messages.length;
+	const tail = messages[length - 1];
+	let start = 0;
+	let found = false;
+	if (cached?.generation === convertGeneration) {
+		if (cached.length === length && cached.tail === tail) return cached.found;
+		if (length > cached.length && cached.length > 0 && messages[cached.length - 1] === cached.tail) {
+			found = cached.found;
+			start = cached.length;
+		}
+	}
+	for (let index = start; !found && index < length; index++) found = isAdvisoryBearing(messages[index]);
+	advisoryScanCache.set(messages, { generation: convertGeneration, length, tail, found });
+	return found;
+}
+
 export function convertToLlm(messages: AgentMessage[]): Message[] {
+	if (hasAdvisory(messages)) {
+		const marked = messages.filter(isAdvisoryBearing);
+		const metadata = new Map<AgentMessage, IrcMessage | IrcMessage[] | undefined>();
+		const bound: IrcMessage[] = [];
+		for (const message of marked) {
+			const value =
+				advisoryMessage in message
+					? message[advisoryMessage]
+					: message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details
+						? message.details[advisoryMessage]
+						: undefined;
+			// SAFETY: only the IRC bridge and wait result attach this symbol.
+			const entry = value as IrcMessage | IrcMessage[] | undefined;
+			metadata.set(message, entry);
+			if (entry) bound.push(...(Array.isArray(entry) ? entry : [entry]));
+		}
+		const valid = currentAdvisories(bound);
+		let cursor = 0;
+		const safe: AgentMessage[] = [];
+		for (const message of messages) {
+			if (!metadata.has(message)) {
+				safe.push(message);
+				continue;
+			}
+			const entry = metadata.get(message);
+			if (Array.isArray(entry) && message.role === "toolResult") {
+				const current = entry.filter(() => valid[cursor++] === true);
+				safe.push({
+					...message,
+					content: [
+						{
+							type: "text",
+							text: current
+								.map(
+									item =>
+										`[${item.id}] ${item.from}${item.replyTo ? ` (reply to ${item.replyTo})` : ""}${item.progress ? " (progress; reply follows)" : ""}: ${escapeHarnessTags(item.body)}`,
+								)
+								.join("\n\n"),
+						},
+					],
+				});
+			} else if (entry && !Array.isArray(entry) && valid[cursor++]) safe.push(message);
+			else if (message.role === "toolResult")
+				safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
+		}
+		return safe.flatMap((_message, index) => convertMessageAt(safe, index, convertOne));
+	}
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);
 	const sameGeneration = memo !== undefined && memo.generation === convertGeneration;

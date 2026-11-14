@@ -64,6 +64,7 @@ import { type OverlayLayers, Settings } from "../config/settings";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { PreparedExtension } from "../extensibility/extensions/types";
+import type { AdvisoryMessagingSupport } from "../extensibility/extensions/task-advisory";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionStateApi } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -125,6 +126,7 @@ import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-r
 import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subagent-worker";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { AdvisoryHub } from "./advisory-hub";
 import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
 import { appendToolResult, createTaskWidgetInputs, TOOLS_SOURCE_LABEL } from "./widget-inputs";
 import { TextTap } from "../job-widgets/text-tap";
@@ -464,6 +466,8 @@ export interface ExecutorOptions {
 	description?: string;
 	index: number;
 	id: string;
+	parentSessionId?: string;
+	parentBranchId?: string;
 	parentToolCallId?: string;
 	/**
 	 * Spawn runs as a detached background job (parent turn not blocked on it).
@@ -3176,6 +3180,7 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 	for (const record of records) {
 		if (record.role !== "custom") continue;
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
+		if (details && Reflect.get(details, "advisory") === true) continue;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
 		// Automated wake-turn relays are answers, not wake sources: relaying one
@@ -3352,6 +3357,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
 	session.setIrcWakeTurnObserver(records => {
+		const sessionId = session.sessionManager.getSessionId();
+		AdvisoryHub.global().wake(sessionId);
+		const wakeAssignment = AdvisoryHub.global().getAssignment(sessionId);
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
 		// and retry counters so this wake turn's guards see only its own state.
@@ -3512,6 +3520,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				providerError ??
 				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
 			turnMonitor.finish();
+			if (wakeAssignment && (yielded || aborted || errorForPeer !== undefined))
+				AdvisoryHub.global().terminal(sessionId, wakeAssignment.ref.assignmentId);
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
 				// turn's terminal yield is settled, so terminalize the ref here
@@ -3940,6 +3950,9 @@ async function driveFollowUpTurn(
 	// evaluate against its own state, not stale accumulators.
 	resetYieldTurnState(session.getToolByName("yield"));
 	const ref = AgentRegistry.global().get(id);
+	const followUpAssignment = ref?.parentId
+		? AdvisoryHub.global().mintFollowUp(session.sessionManager.getSessionId(), ref.parentId)
+		: undefined;
 	const sessionFile = ref?.sessionFile ?? undefined;
 	const softRequestBudget = options.softRequestBudget ?? 0;
 	const softRequestBudgetNotice = options.softRequestBudgetNotice ?? softRequestBudget > 0;
@@ -4054,6 +4067,8 @@ async function driveFollowUpTurn(
 		});
 	} finally {
 		releaseIrcWakes();
+		if (followUpAssignment)
+			AdvisoryHub.global().terminal(session.sessionManager.getSessionId(), followUpAssignment.assignmentId);
 	}
 }
 
@@ -4477,6 +4492,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
+	let advisorySessionId: string | undefined;
+	let advisoryAssignmentId: string | undefined;
 
 	// Check if already aborted
 	if (signal?.aborted) {
@@ -5052,6 +5069,23 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
 			if (preparedSession) openedSessionManager = sessionManager;
+			if (options.parentSessionId) {
+				advisorySessionId = sessionManager.getSessionId();
+				const messaging: AdvisoryMessagingSupport = options.restrictToolNames
+					? {
+							status: "unsupported",
+							reasons: ircEnabled ? ["extension-disabled"] : ["extension-disabled", "messaging-disabled"],
+						}
+					: ircEnabled
+						? { status: "supported" }
+						: { status: "unsupported", reasons: ["messaging-disabled"] };
+				advisoryAssignmentId = AdvisoryHub.global().mint({
+					childSessionId: advisorySessionId,
+					parentSessionId: options.parentSessionId,
+					parentBranchId: options.parentBranchId,
+					messaging,
+				}).assignmentId;
+			}
 			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
@@ -5530,6 +5564,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	try {
 		const done = await runSubagent();
 		monitor.finish();
+		if (advisorySessionId && advisoryAssignmentId)
+			AdvisoryHub.global().terminal(advisorySessionId, advisoryAssignmentId);
 
 		const result = await finalizeRunResult({
 			monitor,

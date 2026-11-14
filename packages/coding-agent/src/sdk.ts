@@ -2794,6 +2794,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
+			redactAdvisory: body => obfuscator?.obfuscate(body) ?? body,
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
@@ -5983,6 +5984,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		) {
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
+		session.resetAdvisoryLineage();
+		session.addDisposer(() => session.disposeAdvisoryLineage());
 		hasRegistered = true;
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both

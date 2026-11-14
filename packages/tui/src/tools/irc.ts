@@ -14,6 +14,17 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Optional advisory check identity. */
+	assignmentId?: string;
+	checkId?: string;
+	/** Internal live-only advisory identity, never model-authored. */
+	advisoryBinding?: {
+		ref: { childSessionId: string; assignmentId: string; parentSessionId: string; parentBranchId: string };
+		senderInstanceId: string;
+		recipientInstanceId: string;
+		branchId: string;
+		requestId?: string;
+	};
 	/**
 	 * Automated wake-turn relay of a woken subagent's stop output (task executor
 	 * `relayWakeTurnOutput`). Relays are answers, never wake sources: the
@@ -38,7 +49,7 @@ export interface IrcMessage {
 /** Delivery outcome for one peer recipient. */
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "injected" | "woken" | "revived" | "duplicate" | "failed";
 	error?: string;
 }
 /** Status ordering for peer rosters in child prompts. */
