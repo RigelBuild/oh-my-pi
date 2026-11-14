@@ -10,6 +10,7 @@
 - Auth-broker `/metrics` can export bounded lifetime credential counters and observed API-key limits using a live-derived credential roster capped by `maxRoster`.
 - Auth-gateway credential and quota events now carry request-local pool and exact attempt row identity, with allowlisted numeric response metadata and no raw provider errors or payloads in affected logs.
 - `ValidateToolArgumentsOptions.rejectUnknownRootKeys` refuses unknown root keys on a closed schema instead of dropping them, naming the keys in the validation error.
+- Oneshot retry options can stop on timeouts or when exponential backoff exceeds the delay ceiling.
 
 ### Changed
 
