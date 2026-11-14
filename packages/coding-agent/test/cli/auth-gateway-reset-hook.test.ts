@@ -356,13 +356,29 @@ describe("gateway Claude reset hook", () => {
 		const storage = await AuthStorage.create(":memory:");
 		storages.push(storage);
 		const credentials = [
-			{ type: "oauth" as const, access: "cedar", refresh: "cedar", expires: Date.now() + 60_000, accountId: "acct-cedar" },
-			{ type: "oauth" as const, access: "sibling", refresh: "sibling", expires: Date.now() + 60_000, accountId: "acct-sibling" },
+			{
+				type: "oauth" as const,
+				access: "cedar",
+				refresh: "cedar",
+				expires: Date.now() + 60_000,
+				accountId: "acct-cedar",
+			},
+			{
+				type: "oauth" as const,
+				access: "sibling",
+				refresh: "sibling",
+				expires: Date.now() + 60_000,
+				accountId: "acct-sibling",
+			},
 		];
 		await storage.credentials.set("anthropic", credentials);
 		const storedCredentials = storage.credentials.list("anthropic");
-		const drainId = storedCredentials.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-cedar")?.id;
-		const siblingId = storedCredentials.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-sibling")?.id;
+		const drainId = storedCredentials.find(
+			row => row.credential.type === "oauth" && row.credential.accountId === "acct-cedar",
+		)?.id;
+		const siblingId = storedCredentials.find(
+			row => row.credential.type === "oauth" && row.credential.accountId === "acct-sibling",
+		)?.id;
 		if (drainId === undefined || siblingId === undefined) throw new Error("expected both stored Claude accounts");
 		storage.setAccountPolicies({
 			accountPolicies: [{ provider: "anthropic", account: { accountId: "acct-cedar" }, drainFirst: true }],
@@ -395,7 +411,11 @@ describe("gateway Claude reset hook", () => {
 			{ ...status(resetReport("acct-sibling", "sibling-credit"), ["anthropic:7d"]), credentialId: siblingId },
 		];
 		const list = spyOn(storage.resets, "list").mockResolvedValue(statuses);
-		const redeem = spyOn(storage.resets, "redeem").mockResolvedValue({ ok: true, code: "reset", provider: "anthropic" });
+		const redeem = spyOn(storage.resets, "redeem").mockResolvedValue({
+			ok: true,
+			code: "reset",
+			provider: "anthropic",
+		});
 		const settings = Settings.isolated();
 		cfgClaudeResetsAutoRedeem.set(settings, "no");
 		const hook = createGatewayClaudeResetHook({ storage, settings, coordinator: coordinator() });
