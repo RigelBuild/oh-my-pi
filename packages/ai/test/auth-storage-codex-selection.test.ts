@@ -4986,6 +4986,57 @@ describe("AuthStorage claude oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-banked-reserve", "api-acct-no-reset");
 	});
 
+	test("drain-first-only reset banking keeps an unflagged account inside reserve", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		configureClaudeResetBanking(0, 10, { drainFirstOnly: true });
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", ...createCredential("acct-drain-first-banked", "drain-first@example.com") },
+			{ type: "oauth", ...createCredential("acct-banked-sibling", "sibling@example.com") },
+			{ type: "oauth", ...createCredential("acct-cool", "cool@example.com") },
+		]);
+		authStorage.setAccountPolicies({
+			accountPolicies: [
+				{
+					provider: "anthropic",
+					account: { accountId: "acct-drain-first-banked" },
+					drainFirst: true,
+				},
+				{
+					provider: "anthropic",
+					account: { accountId: "acct-banked-sibling" },
+					reservePct: 10,
+				},
+			],
+			defaultReservePct: 10,
+		});
+		const bankedUsage = (accountId: string) =>
+			addClaudeWeeklyReset(
+				createClaudeUsageReport({
+					accountId,
+					primary: { usedFraction: 0.2, resetInMs: 4 * HOUR_MS },
+					secondary: { usedFraction: 0.95, resetInMs: 5 * 24 * HOUR_MS },
+				}),
+			);
+		usageByAccount.set("acct-drain-first-banked", bankedUsage("acct-drain-first-banked"));
+		usageByAccount.set("acct-banked-sibling", bankedUsage("acct-banked-sibling"));
+		usageByAccount.set(
+			"acct-cool",
+			createClaudeUsageReport({
+				accountId: "acct-cool",
+				primary: { usedFraction: 0.1, resetInMs: 4 * HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: 5 * 24 * HOUR_MS },
+			}),
+		);
+		const sessionId = "claude-drain-first-banked-sibling";
+		const lease = authStorage.sessions.restrict("anthropic", sessionId, ["email:sibling@example.com", "email:cool@example.com"]);
+		try {
+			const apiKey = await authStorage.keys.get("anthropic", sessionId);
+			expect(apiKey).toBe("api-acct-cool");
+		} finally {
+			authStorage.sessions.unrestrict("anthropic", sessionId, lease);
+		}
+	});
+
 	test("keeps the hot-5h guard ahead of a banked weekly reset", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		configureClaudeResetBanking();

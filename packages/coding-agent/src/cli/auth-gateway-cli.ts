@@ -66,7 +66,7 @@ import {
 	REDEEM_RETRY_DEFER_MS,
 	resetPlanSettings,
 } from "../session/codex-auto-reset";
-import { cfgClaudeResets, cfgCodexResets } from "../session/settings";
+import { type ClaudeResetBankingSettings, cfgClaudeResets, cfgCodexResets } from "../session/settings";
 import {
 	type AuthBrokerClientConfig,
 	loadEffectiveAuthAccountPolicyConfig,
@@ -75,6 +75,14 @@ import {
 } from "../session/auth-broker-config";
 import { runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
+
+export function claudeResetBankingFor(
+	cfg: ClaudeResetBankingSettings,
+): { keepCredits: number; drainFirstOnly?: true } | undefined {
+	if (cfg.autoRedeem === "yes") return { keepCredits: cfg.keepCredits };
+	if (cfg.autoRedeem === "no") return { keepCredits: cfg.keepCredits, drainFirstOnly: true };
+	return undefined;
+}
 
 export type AuthGatewayAction = "serve" | "stdio" | "token" | "status" | "check";
 
@@ -431,7 +439,12 @@ export function createGatewayClaudeResetHook(args: {
 		const attempt = (async () => {
 			const credential = args.storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
 			if (credential?.type !== "oauth") return false;
-			const policy = args.storage.oauth.policy(provider, credential);
+			const policy = args.storage.oauth.policy(provider, {
+				accountId: credential.accountId,
+				email: credential.email,
+				projectId: credential.projectId,
+				orgId: credential.orgId,
+			});
 			const drainFirstRecovery = cfg.autoRedeem === "no" && policy?.drainFirst === true;
 			if (cfg.autoRedeem !== "yes" && !drainFirstRecovery) return false;
 			let report: UsageReport | null;
@@ -772,15 +785,12 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
 	// AuthStorage discovers them when no explicit option overrides them, so the
 	// gateway only needs to construct the store and pass it in.
+	const claudeResetBanking = claudeResetBankingFor(claudeResetConfig);
 	const storage = new AuthStorage(store, {
 		sourceLabel: `broker ${brokerConfig.url}`,
 		accountPolicies,
 		defaultReservePct,
-		...(claudeResetConfig.autoRedeem === "yes"
-			? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits } }
-			: claudeResetConfig.autoRedeem === "no"
-				? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits, drainFirstOnly: true } }
-				: {}),
+		...(claudeResetBanking ? { claudeResetBanking } : {}),
 	});
 	await storage.credentials.reload();
 

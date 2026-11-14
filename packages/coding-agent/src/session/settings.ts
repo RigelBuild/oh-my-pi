@@ -1523,6 +1523,15 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 	},
 });
 
+export type ClaudeResetSettings = {
+	autoRedeem: "unset" | "yes" | "no";
+	minBlockedMinutes: number;
+	keepCredits: number;
+	salvageHorizonHours: number;
+};
+
+export type ClaudeResetBankingSettings = Pick<ClaudeResetSettings, "autoRedeem" | "keepCredits">;
+
 /** Claude reset auto-redeem policy (`claudeResets.*`), independent of {@link cfgCodexResets}. */
 export const cfgClaudeResets = combine({
 	autoRedeem: cfgClaudeResetsAutoRedeem,

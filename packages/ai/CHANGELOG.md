@@ -7,6 +7,7 @@
 - Added `drainFirst` to `auth.accountPolicies`: after the block, plan, allowance, reserve, priority-boost and hot-5h guards, it ranks the account ahead of siblings regardless of `priority`.
 - `AuthStorage.usage.report` accepts `fresh: true` for live reads on the credential host; remote-store requests fail closed.
 - `AuthStorage` option `claudeResetBanking` ranks Claude accounts that hold a spare reset clearing the weekly limit ahead of siblings and exempts them from the reserve guard, so they drain first.
+- Added `claudeResetBanking.drainFirstOnly` to limit reset banking and its reserve exemption to accounts whose matching policy has `drainFirst: true`.
 - Auth-gateway `onUsageLimit` hook runs before an account is marked reached; returning `true` resends the request on the same credential.
 - Auth-broker `/metrics` can export bounded lifetime credential counters and observed API-key limits using a live-derived credential roster capped by `maxRoster`.
 - Auth-gateway credential and quota events now carry request-local pool and exact attempt row identity, with allowlisted numeric response metadata and no raw provider errors or payloads in affected logs.

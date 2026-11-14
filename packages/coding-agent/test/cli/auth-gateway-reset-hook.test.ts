@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { AuthStorage, type ResetCreditAccountStatus, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import {
+	claudeResetBankingFor,
 	createGatewayClaudeResetHook,
 	runGatewayClaudeResetSweep,
 	type GatewayClaudeResetCoordinator,
@@ -68,7 +69,6 @@ async function setup(
 		bankedReset?: boolean;
 		keepCredits?: number;
 		minBlockedMinutes?: number;
-		secondAccount?: boolean;
 	} = {},
 ) {
 	const bankedReset = options.bankedReset ?? true;
@@ -83,16 +83,6 @@ async function setup(
 		email: "cedar@example.com",
 	};
 	await storage.credentials.set("anthropic", [credential]);
-	if (options.secondAccount) {
-		await storage.credentials.set("anthropic", {
-			type: "oauth",
-			access: "access-sibling",
-			refresh: "refresh-sibling",
-			expires: Date.now() + 60 * 60_000,
-			accountId: "acct-sibling",
-			email: "sibling@example.com",
-		});
-	}
 	const stored = storage.credentials.list("anthropic")[0];
 	if (!stored || stored.credential.type !== "oauth") throw new Error("expected stored Claude credential");
 	const settings = Settings.isolated();
@@ -136,10 +126,30 @@ async function setup(
 	const list = spyOn(storage.resets, "list").mockResolvedValue(statuses);
 	const redeem = spyOn(storage.resets, "redeem").mockResolvedValue({ ok: true, code: "reset", provider: "anthropic" });
 	const hook = createGatewayClaudeResetHook({ storage, settings, coordinator: coordinator() });
-	return { hook, list, redeem, report, credentialId: stored.id, storage };
+	return { hook, list, redeem, report, credentialId: stored.id };
 }
 
 describe("gateway Claude reset hook", () => {
+	describe("Claude reset banking configuration", () => {
+		it("maps auto-redeem yes to general reset banking", () => {
+			const settings = { autoRedeem: "yes", keepCredits: 2 } as const;
+			expect(claudeResetBankingFor(settings)).toEqual({ keepCredits: 2 });
+		});
+
+		it("limits auto-redeem no reset banking to drain-first policies", () => {
+			const settings = { autoRedeem: "no", keepCredits: 1 } as const;
+			expect(claudeResetBankingFor(settings)).toEqual({
+				keepCredits: 1,
+				drainFirstOnly: true,
+			});
+		});
+
+		it("does not enable reset banking when auto-redeem is unset", () => {
+			const settings = { autoRedeem: "unset", keepCredits: 0 } as const;
+			expect(claudeResetBankingFor(settings)).toBeUndefined();
+		});
+	});
+
 	it("redeems an eligible Cedar reset covering the exhausted 7d limit once", async () => {
 		const { hook, list, redeem, credentialId, report } = await setup("yes", "anthropic:7d");
 		const signal = new AbortController().signal;
