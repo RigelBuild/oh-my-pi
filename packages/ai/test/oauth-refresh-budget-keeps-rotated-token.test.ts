@@ -40,7 +40,8 @@ describe("OAuth refresh budget", () => {
 		// previous one is dead server-side as soon as the grant answers.
 		const validRefreshTokens = new Set(["r0"]);
 		let rotations = 0;
-		// Post-exchange work (e.g. an org lookup) stays pending until the caller has given up.
+		const rotated = Promise.withResolvers<void>();
+		const whoamiStarted = Promise.withResolvers<void>();
 		const whoamiGate = Promise.withResolvers<void>();
 		vi.spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(
@@ -51,10 +52,11 @@ describe("OAuth refresh budget", () => {
 						if (!validRefreshTokens.delete(presented)) return json({ error: "invalid_grant" }, 400);
 						const next = `r${++rotations}`;
 						validRefreshTokens.add(next);
+						rotated.resolve();
 						return json({ access_token: `access-${next}`, refresh_token: next, expires_in: 3600 });
 					}
 					if (url === WHOAMI_URL) {
-						// Like a real request, the lookup ends early if the exchange is aborted.
+						whoamiStarted.resolve();
 						const aborted = Promise.withResolvers<never>();
 						init?.signal?.addEventListener("abort", () => aborted.reject(init.signal?.reason), { once: true });
 						await Promise.race([whoamiGate.promise, aborted.promise]);
@@ -105,6 +107,9 @@ describe("OAuth refresh budget", () => {
 			},
 		});
 
+		// Wait for rotation before observing the timeout; whoami remains held until below.
+		await rotated.promise;
+		await whoamiStarted.promise;
 		// The caller stops waiting at the budget and sees the timeout.
 		await expect(refresh).rejects.toMatchObject({
 			message: `OAuth token refresh timed out for provider: ${PROVIDER}`,
