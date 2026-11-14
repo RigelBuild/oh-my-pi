@@ -432,8 +432,7 @@ export function createGatewayClaudeResetHook(args: {
 			const credential = args.storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
 			if (credential?.type !== "oauth") return false;
 			const policy = args.storage.oauth.policy(provider, credential);
-			const drainFirstRecovery =
-				cfg.autoRedeem === "no" && policy !== undefined && "drainFirst" in policy && policy.drainFirst === true;
+			const drainFirstRecovery = cfg.autoRedeem === "no" && policy?.drainFirst === true;
 			if (cfg.autoRedeem !== "yes" && !drainFirstRecovery) return false;
 			let report: UsageReport | null;
 			try {
@@ -779,7 +778,9 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		defaultReservePct,
 		...(claudeResetConfig.autoRedeem === "yes"
 			? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits } }
-			: {}),
+			: claudeResetConfig.autoRedeem === "no"
+				? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits, drainFirstOnly: true } }
+				: {}),
 	});
 	await storage.credentials.reload();
 

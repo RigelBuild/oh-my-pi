@@ -349,7 +349,7 @@ export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
 	rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
 	accountPolicies?: AuthAccountPolicies;
-	claudeResetBanking?: { keepCredits: number };
+	claudeResetBanking?: { keepCredits: number; drainFirstOnly?: boolean };
 	/** Global reserve fallback for accounts without a matching reservePct policy. */
 	defaultReservePct?: number;
 	usageFetch?: typeof fetch;
