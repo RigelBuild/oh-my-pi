@@ -227,7 +227,7 @@ describe("handoff helpers", () => {
 			generateHandoffFromContext({ systemPrompt: ["Test"], messages: [] }, getTestModel(), {
 				streamOptions: { apiKey: "test-key" },
 				completeImpl,
-				oneshotRetry: { maxAttempts: 11, baseDelayMs: 500, maxDelayMs: 1000, stopWhenDelayExceedsMax: true },
+				oneshotRetry: { maxAttempts: 11, baseDelayMs: 1, maxDelayMs: 2, stopWhenDelayExceedsMax: true },
 			}),
 		).rejects.toThrow("Handoff generation failed");
 		expect(completeImpl).toHaveBeenCalledTimes(3);
