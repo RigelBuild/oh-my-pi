@@ -8,7 +8,7 @@ export function applyCargoWorkspaceVersion(content: string, version: string): st
 
 export function applyCargoLockWorkspaceVersion(content: string, version: string): string {
 	return content.replace(/\[\[package\]\]\n(?:(?!\[\[package\]\]\n)[\s\S])*/g, entry => {
-		if (/^source = /m.test(entry)) return entry;
+		if (!/^name = "pi-/m.test(entry) || /^source = /m.test(entry)) return entry;
 		return entry.replace(/^version = "[^"]+"/m, `version = "${version}"`);
 	});
 }

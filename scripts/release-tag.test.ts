@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
 import { checkPr, createTag, expectedNextVersion, mintTarget, parseTrackingVersion, type TagApi } from "./release-tag";
+import { applyCargoLockWorkspaceVersion } from "./release-version";
 
 const RELEASE_VERSION = "18.9.2-rigel.2";
 
@@ -81,7 +82,7 @@ async function commit(dir: string, version?: string, stamp = false): Promise<str
 		await Bun.write(path.join(dir, "Cargo.toml"), `[workspace.package]\nversion = "${version}"\n`);
 		await Bun.write(
 			path.join(dir, "Cargo.lock"),
-			`[[package]]\nname = "registry-pi-crate"\nversion = "0.1.0"\nsource = "registry+https://example.invalid"\n\n[[package]]\nname = "workspace-crate"\nversion = "${version}"\n`,
+			`[[package]]\nname = "pi-registry"\nversion = "0.1.0"\nsource = "registry+https://example.invalid"\n\n[[package]]\nname = "cfg_aliases"\nversion = "0.1.0"\n\n[[package]]\nname = "pi-coding-agent"\nversion = "${version}"\n`,
 		);
 	}
 	await Bun.write(path.join(dir, "n"), crypto.randomUUID());
@@ -195,6 +196,28 @@ describe("checkPr", () => {
 		await Bun.write(lock, contents.replace(RELEASE_VERSION, "18.9.2"));
 		const head = await commit(dir, RELEASE_VERSION);
 		await expect(checkPr(dir, base, head)).rejects.toThrow("Cargo.lock");
+	});
+	test("does not rewrite registry or vendored Cargo.lock entries", () => {
+		const original = [
+			"[[package]]",
+			'name = "pi-registry"',
+			'version = "0.1.0"',
+			'source = "registry+https://example.invalid"',
+			"",
+			"[[package]]",
+			'name = "cfg_aliases"',
+			'version = "0.1.0"',
+			"",
+			"[[package]]",
+			'name = "tree-sitter-go"',
+			'version = "0.25.0"',
+			"",
+			"[[package]]",
+			'name = "pi-coding-agent"',
+			'version = "18.9.2-rigel.1"',
+		].join("\n");
+		const rewritten = applyCargoLockWorkspaceVersion(original, RELEASE_VERSION);
+		expect(rewritten).toBe(original.replace('version = "18.9.2-rigel.1"', `version = "${RELEASE_VERSION}"`));
 	});
 	test("rejects a stale Cargo.toml workspace version", async () => {
 		const dir = await repo();
