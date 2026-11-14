@@ -425,12 +425,15 @@ export function createGatewayClaudeResetHook(args: {
 }): NonNullable<Parameters<typeof startAuthGateway>[0]["onUsageLimit"]> {
 	return async ({ provider, credentialId, modelId, signal }) => {
 		const cfg = cfgClaudeResets.get(args.settings);
-		if (cfg.autoRedeem !== "yes" || provider !== "anthropic") return false;
+		if (provider !== "anthropic") return false;
 		const current = args.coordinator.inFlightByCredential.get(credentialId);
 		if (current) return current;
 		const attempt = (async () => {
 			const credential = args.storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
 			if (credential?.type !== "oauth") return false;
+			const policy = args.storage.oauth.policy(provider, credential);
+			const drainFirstRecovery = cfg.autoRedeem === "no" && policy?.drainFirst === true;
+			if (cfg.autoRedeem !== "yes" && !drainFirstRecovery) return false;
 			let report: UsageReport | null;
 			try {
 				report = await args.storage.usage.report(provider, credential, {
@@ -453,7 +456,10 @@ export function createGatewayClaudeResetHook(args: {
 					trigger: "blocked",
 					provider,
 					modelId,
-					settings: resetPlanSettings(cfg),
+					settings: {
+						...resetPlanSettings(cfg),
+						enabled: cfg.autoRedeem === "yes" || drainFirstRecovery,
+					},
 					reports: statuses.flatMap(status => (status.report ? [status.report] : [])),
 					statuses,
 					permitsCredential: id => id === credentialId,
@@ -772,7 +778,9 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		defaultReservePct,
 		...(claudeResetConfig.autoRedeem === "yes"
 			? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits } }
-			: {}),
+			: claudeResetConfig.autoRedeem === "no"
+				? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits, drainFirstOnly: true } }
+				: {}),
 	});
 	await storage.credentials.reload();
 
