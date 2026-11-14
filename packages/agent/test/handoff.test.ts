@@ -198,6 +198,29 @@ describe("handoff helpers", () => {
 			reasoning: Effort.Medium,
 		});
 	});
+	test("handoff disables configured transient retries", async () => {
+		const completeImpl = vi.fn(async () => createAssistantError(503, "503 overloaded_error"));
+		await expect(
+			generateHandoffFromContext({ systemPrompt: ["Test"], messages: [] }, getTestModel(), {
+				streamOptions: { apiKey: "test-key" },
+				completeImpl,
+				oneshotRetry: false,
+			}),
+		).rejects.toThrow("Handoff generation failed");
+		expect(completeImpl).toHaveBeenCalledTimes(1);
+	});
+
+	test("handoff honors configured transient retry count", async () => {
+		const completeImpl = vi.fn(async () => createAssistantError(503, "503 overloaded_error"));
+		await expect(
+			generateHandoffFromContext({ systemPrompt: ["Test"], messages: [] }, getTestModel(), {
+				streamOptions: { apiKey: "test-key" },
+				completeImpl,
+				oneshotRetry: { maxAttempts: 5, baseDelayMs: 0 },
+			}),
+		).rejects.toThrow("Handoff generation failed");
+		expect(completeImpl).toHaveBeenCalledTimes(5);
+	});
 
 	test("generateHandoffFromContext retries auto-only tool_choice rejection with live tools", async () => {
 		const completeSimpleSpy = vi

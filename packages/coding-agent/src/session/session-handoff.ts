@@ -18,7 +18,12 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { SessionManager } from "./session-manager";
 
-import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
+import {
+	cfgCompactionHandoffSaveToDisk,
+	cfgCompactionMaxRetries,
+	cfgCompactionRetryMaxDelayMs,
+} from "./context-settings";
+import { cfgRetry } from "./settings";
 
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
@@ -171,6 +176,9 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
+			const retrySettings = cfgRetry.get(this.#host.settings);
+			const configuredMaxRetries = cfgCompactionMaxRetries.get(this.#host.settings);
+			const maxDelayMs = cfgCompactionRetryMaxDelayMs.get(this.#host.settings);
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
@@ -186,6 +194,16 @@ export class SessionHandoff {
 					// resolveCompactionEffort so unsupported-effort models don't trip
 					// requireSupportedEffort.
 					thinkingLevel: this.#host.thinkingLevel(),
+					oneshotRetry: options?.autoTriggered
+						? retrySettings.enabled
+							? {
+									maxAttempts:
+										1 + (configuredMaxRetries >= 0 ? configuredMaxRetries : retrySettings.maxRetries),
+									baseDelayMs: retrySettings.baseDelayMs,
+									maxDelayMs: maxDelayMs > 0 ? maxDelayMs : Number.POSITIVE_INFINITY,
+								}
+							: false
+						: undefined,
 				},
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
