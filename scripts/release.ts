@@ -13,6 +13,7 @@ import { compareVersions } from "../packages/utils/src/version.ts";
 import { runChangelogFixer } from "./fix-changelogs";
 import { generateNixBunDeps, resolveNixBunDepsGenerator } from "./gen-nix-bun";
 import { expectedNextVersion, parseTrackingVersion } from "./release-tag";
+import { applyCargoWorkspaceVersion, applyPackageVersion, applyCatalogVersion } from "./release-version";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
@@ -350,14 +351,6 @@ export function resolveReleaseVersion(versionOrBump: string, latestTag: string):
 	};
 }
 
-export function applyPackageVersion(content: string, version: string): string {
-	return content.replace(/"version": "[^"]+"/g, `"version": "${version}"`);
-}
-
-export function applyCargoWorkspaceVersion(content: string, version: string): string {
-	return content.replace(/^version = "[^"]+"/gm, `version = "${version}"`);
-}
-
 async function cmdDeps(): Promise<void> {
 	console.log("\n=== Full dependency refresh ===\n");
 	await $`rm -f bun.lock`;
@@ -492,13 +485,10 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log();
 
-	// Update @oh-my-pi/* catalog entries in root package.json
 	console.log("Updating root catalog versions...");
-	let rootPkgRaw = await Bun.file("package.json").text();
-	rootPkgRaw = rootPkgRaw.replace(/("@oh-my-pi\/[^"]+":\s*)"[^"]+"/g, `$1"${version}"`);
+	const rootPkgRaw = applyCatalogVersion(await Bun.file("package.json").text(), version);
 	await Bun.write("package.json", rootPkgRaw);
 	console.log("  Updated root catalog @oh-my-pi/* entries");
-
 	// 3. Update Rust workspace version
 	console.log(`Updating Rust workspace version to ${version}…`);
 	await Bun.write("Cargo.toml", applyCargoWorkspaceVersion(await Bun.file("Cargo.toml").text(), version));

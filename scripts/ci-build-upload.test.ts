@@ -69,6 +69,7 @@ async function fixture(): Promise<UploadFixture> {
 		"scripts/ci-build-upload.ts",
 		"scripts/ci-release-notes.ts",
 		"scripts/release-tag.ts",
+		"scripts/release-version.ts",
 		"packages/utils/src/version.ts",
 	]) {
 		await fs.mkdir(path.dirname(path.join(dir, file)), { recursive: true });

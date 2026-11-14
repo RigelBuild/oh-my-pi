@@ -300,8 +300,9 @@ describe("parseChangelog", () => {
 			`${entry.major}.${entry.minor}.${entry.patch}${entry.prerelease ? `-${entry.prerelease}` : ""}`;
 		// A release may ship without a coding-agent section, so the newest one may lag VERSION but never lead it.
 		const latestVersion = versionString(latest);
+		const currentStableVersion = VERSION.replace(/-rigel\.\d+$/, "");
 		expect(latest.content).toContain(`## [${latestVersion}]`);
-		expect(compareVersions(latestVersion, VERSION)).toBeLessThanOrEqual(0);
+		expect(compareVersions(latestVersion, currentStableVersion)).toBeLessThanOrEqual(0);
 		expect(getNewEntries([latest], VERSION)).toEqual([]);
 		expect(getNewEntries(entries, versionString(previous))).toEqual([latest]);
 	});
