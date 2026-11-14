@@ -4,8 +4,6 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
 import {
-	applyCargoWorkspaceVersion,
-	applyPackageVersion,
 	bumpCanaryVersion,
 	bumpVersion,
 	checkExpectedTrackingVersion,
@@ -17,6 +15,7 @@ import {
 	runWithTransientRetry,
 	validateExplicitVersion,
 } from "./release";
+import { applyCargoWorkspaceVersion, applyPackageVersion } from "./release-version";
 
 describe("validateExplicitVersion", () => {
 	test("accepts leading v prefix and normalizes stable versions", () => {

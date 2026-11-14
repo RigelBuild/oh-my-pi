@@ -422,11 +422,11 @@ describe("getLatestRelease configured registry", () => {
 				async (input: FetchInput) => {
 					const url = String(input);
 					urls.push(url);
-					if (url.endsWith("/latest")) {
+					if (url.endsWith("/rigel")) {
 						return Response.json({ version: "999.9.0", "dist-tags": {}, versions: {}, time: {} });
 					}
 					return Response.json({
-						"dist-tags": { latest: "999.2.0" },
+						"dist-tags": { rigel: "999.2.0" },
 						versions: { "999.2.0": { version: "999.2.0", omp: { dist: "binary" } } },
 					});
 				},
@@ -434,11 +434,11 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed });
+		const release = await getLatestRelease({ registries: feed }, "18.18.3-rigel.4");
 
 		expect(urls).toEqual([
-			"https://npm.corp.example/api/npm/feed/@oh-my-pi%2fpi-coding-agent/latest",
-			"https://npm.corp.example/api/npm/feed/@oh-my-pi%2fpi-coding-agent",
+			"https://npm.corp.example/api/npm/feed/@rigelbuild%2fomp-coding-agent/rigel",
+			"https://npm.corp.example/api/npm/feed/@rigelbuild%2fomp-coding-agent",
 		]);
 		expect(release.version).toBe("999.2.0");
 		expect(release.dist).toBe("binary");
