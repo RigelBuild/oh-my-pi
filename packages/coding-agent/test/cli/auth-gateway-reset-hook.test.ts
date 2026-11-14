@@ -56,7 +56,12 @@ function coordinator(): GatewayClaudeResetCoordinator {
 	};
 }
 
-async function setup(autoRedeem: "yes" | "unset", exhausted: "anthropic:5h" | "anthropic:7d") {
+async function setup(
+	autoRedeem: "yes" | "no" | "unset",
+	exhausted: "anthropic:5h" | "anthropic:7d",
+	options: { drainFirst?: boolean; bankedReset?: boolean } = {},
+) {
+	const bankedReset = options.bankedReset ?? true;
 	const storage = await AuthStorage.create(":memory:");
 	storages.push(storage);
 	const credential = {
@@ -71,7 +76,12 @@ async function setup(autoRedeem: "yes" | "unset", exhausted: "anthropic:5h" | "a
 	const stored = storage.credentials.list("anthropic")[0];
 	if (!stored || stored.credential.type !== "oauth") throw new Error("expected stored Claude credential");
 	const settings = Settings.isolated();
-	if (autoRedeem === "yes") cfgClaudeResetsAutoRedeem.set(settings, "yes");
+	cfgClaudeResetsAutoRedeem.set(settings, autoRedeem);
+	if (options.drainFirst) {
+		const accountPolicy = { provider: "anthropic", account: { accountId: "acct-cedar" } };
+		Reflect.set(accountPolicy, "drainFirst", true);
+		storage.setAccountPolicies({ accountPolicies: [accountPolicy], defaultReservePct: 10 });
+	}
 	const usage: UsageReport = {
 		provider: "anthropic",
 		fetchedAt: Date.now(),
@@ -80,18 +90,28 @@ async function setup(autoRedeem: "yes" | "unset", exhausted: "anthropic:5h" | "a
 			limit("anthropic:7d", exhausted === "anthropic:7d" ? 1 : 0.2),
 		],
 		metadata: { accountId: "acct-cedar", email: "cedar@example.com" },
-		resetCredits: {
-			availableCount: 1,
-			redeemableCount: 1,
-			eligible: true,
-			nextCreditId: "cedar-credit",
-			credits: [
-				{ id: "cedar-credit", program: "cedar_ember", usable: true, remainingCount: 1, clears: ["anthropic:7d"] },
-			],
-		},
+		...(bankedReset
+			? {
+					resetCredits: {
+						availableCount: 1,
+						redeemableCount: 1,
+						eligible: true,
+						nextCreditId: "cedar-credit",
+						credits: [
+							{
+								id: "cedar-credit",
+								program: "cedar_ember",
+								usable: true,
+								remainingCount: 1,
+								clears: ["anthropic:7d"],
+							},
+						],
+					},
+				}
+			: {}),
 	};
 	const report = spyOn(storage.usage, "report").mockResolvedValue(usage);
-	const statuses = [{ ...status(usage, ["anthropic:7d"]), credentialId: stored.id }];
+	const statuses = bankedReset ? [{ ...status(usage, ["anthropic:7d"]), credentialId: stored.id }] : [];
 	const list = spyOn(storage.resets, "list").mockResolvedValue(statuses);
 	const redeem = spyOn(storage.resets, "redeem").mockResolvedValue({ ok: true, code: "reset", provider: "anthropic" });
 	const hook = createGatewayClaudeResetHook({ storage, settings, coordinator: coordinator() });
@@ -126,6 +146,64 @@ describe("gateway Claude reset hook", () => {
 
 	it("does not list or redeem when auto-redeem is unset", async () => {
 		const { hook, list, redeem, credentialId } = await setup("unset", "anthropic:7d");
+		expect(
+			await hook({
+				provider: "anthropic",
+				credentialId,
+				modelId: "claude-sonnet",
+				signal: new AbortController().signal,
+			}),
+		).toBe(false);
+		expect(list).not.toHaveBeenCalled();
+		expect(redeem).not.toHaveBeenCalled();
+	});
+
+	it("redeems an exhausted weekly reset for a drain-first account when auto-redeem is no", async () => {
+		const { hook, list, redeem, credentialId } = await setup("no", "anthropic:7d", { drainFirst: true });
+		expect(
+			await hook({
+				provider: "anthropic",
+				credentialId,
+				modelId: "claude-sonnet",
+				signal: new AbortController().signal,
+			}),
+		).toBe(true);
+		expect(list).toHaveBeenCalledTimes(1);
+		expect(redeem).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not redeem when auto-redeem is no and the account is not drain-first", async () => {
+		const { hook, list, redeem, credentialId } = await setup("no", "anthropic:7d");
+		expect(
+			await hook({
+				provider: "anthropic",
+				credentialId,
+				modelId: "claude-sonnet",
+				signal: new AbortController().signal,
+			}),
+		).toBe(false);
+		expect(list).not.toHaveBeenCalled();
+		expect(redeem).not.toHaveBeenCalled();
+	});
+
+	it("keeps auto-redeem yes behavior for a drain-first account", async () => {
+		const { hook, redeem, credentialId } = await setup("yes", "anthropic:7d", { drainFirst: true });
+		expect(
+			await hook({
+				provider: "anthropic",
+				credentialId,
+				modelId: "claude-sonnet",
+				signal: new AbortController().signal,
+			}),
+		).toBe(true);
+		expect(redeem).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not redeem a drain-first account without a banked reset", async () => {
+		const { hook, list, redeem, credentialId } = await setup("no", "anthropic:7d", {
+			drainFirst: true,
+			bankedReset: false,
+		});
 		expect(
 			await hook({
 				provider: "anthropic",
