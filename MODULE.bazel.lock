@@ -204,7 +204,7 @@
         "bzlTransitiveDigest": "4e0uNkFgykXeLgcLZkqWKJbzzSSYqEPlPhfMFR3V4Mw=",
         "usagesDigest": "4zI5I6zxiEhqi0NCI+8L2UJAB0YRzM18lpY66+oT9Ec=",
         "recordedInputs": [
-          "ENV:CARGO_BAZEL_DEBUG 1",
+          "ENV:CARGO_BAZEL_DEBUG \\0",
           "ENV:CARGO_BAZEL_GENERATOR_SHA256 \\0",
           "ENV:CARGO_BAZEL_GENERATOR_URL \\0",
           "ENV:CARGO_BAZEL_ISOLATED 0",
