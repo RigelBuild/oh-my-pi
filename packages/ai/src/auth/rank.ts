@@ -53,6 +53,7 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
 	allowanceSpent: boolean;
 	usageMeasured: boolean;
 	planPriority: number;
+	drainFirst: boolean;
 	secondaryUsed: number;
 	secondaryRequiredDrain: number;
 	primaryUsed: number;
@@ -113,6 +114,7 @@ function compareUsageRankedCandidatePriority(
 	const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	if (leftHot !== rightHot) return leftHot ? 1 : -1;
+	if (left.drainFirst !== right.drainFirst) return left.drainFirst ? -1 : 1;
 	// A banked grant replenishes the weekly quota; banked accounts keep the existing drain order.
 	if (left.resetBanked !== right.resetBanked) return left.resetBanked ? -1 : 1;
 	// Configured priority is the user's order; a failed usage fetch says nothing

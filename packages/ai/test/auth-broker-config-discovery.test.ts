@@ -70,6 +70,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				account: { email: "policy@example.com" },
 				reservePct: 25,
 				reclaimAbovePct: 60,
+				drainFirst: true,
 			},
 		] satisfies AuthAccountPolicies;
 		await Bun.write(
@@ -256,6 +257,18 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"",
 				].join("\n"),
 				error: "auth.accountPolicies[0].reclaimAbovePct must be a finite number",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        accountId: acct-drain-first",
+					"      drainFirst: yes",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].drainFirst must be a boolean",
 			},
 			{
 				yaml: [

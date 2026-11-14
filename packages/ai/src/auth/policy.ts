@@ -96,6 +96,9 @@ export class AccountPolicies {
 			) {
 				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
 			}
+			if (policy.drainFirst !== undefined && typeof policy.drainFirst !== "boolean") {
+				throw new AIError.ConfigurationError(`${path}.drainFirst must be a boolean`);
+			}
 			if (policy.reclaimAbovePct !== undefined) {
 				const reservePct = policy.reservePct ?? defaultReservePct;
 				if (
@@ -113,9 +116,11 @@ export class AccountPolicies {
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
 		if (canFetchUsage) return;
-		for (const field of ["reservePct", "reclaimAbovePct"] as const) {
+		for (const field of ["reservePct", "reclaimAbovePct", "drainFirst"] as const) {
 			const policyIndex = this.#accountPolicies.findIndex(
-				policy => policy.provider === provider && policy[field] !== undefined,
+				policy =>
+					policy.provider === provider &&
+					(field === "drainFirst" ? policy.drainFirst === true : policy[field] !== undefined),
 			);
 			if (policyIndex !== -1) {
 				throw new AIError.ConfigurationError(

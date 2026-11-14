@@ -59,7 +59,7 @@ export interface AuthAccountSelector {
 	readonly orgId?: string;
 }
 
-/** Priority and reserve policy for a provider account. */
+/** Priority, reserve and drain-first routing policy for a provider account. */
 export interface AuthAccountPolicy {
 	readonly provider: string;
 	readonly account: AuthAccountSelector;
@@ -69,6 +69,8 @@ export interface AuthAccountPolicy {
 	readonly reservePct?: number;
 	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
+	/** Rank this account ahead of other unblocked, non-hot accounts. */
+	readonly drainFirst?: boolean;
 }
 
 /** Read-only set of per-account routing policies. */

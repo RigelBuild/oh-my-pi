@@ -340,6 +340,26 @@ describe("AuthStorage codex oauth ranking", () => {
 		});
 	});
 
+	async function setupDrainFirstAccounts(
+		drainFirstUsage: UsageReport,
+		coolerUsage: UsageReport,
+	): Promise<AuthStorage> {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{ provider: "openai-codex", account: { accountId: "acct-drain-first" }, drainFirst: true },
+				{ provider: "openai-codex", account: { accountId: "acct-cooler" } },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-drain-first", "drain-first@example.com") },
+			{ type: "oauth", ...createCredential("acct-cooler", "cooler@example.com") },
+		]);
+		usageByAccount.set("acct-drain-first", drainFirstUsage);
+		usageByAccount.set("acct-cooler", coolerUsage);
+		return authStorage;
+	}
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		store?.close();
@@ -827,6 +847,19 @@ describe("AuthStorage codex oauth ranking", () => {
 		await expect(authStorage.keys.get(provider, "after-runtime-usage")).resolves.toBe("api-acct-runtime");
 	});
 
+	test("rejects a non-boolean drainFirst account policy", () => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [
+						{ provider: "openai-codex", account: { accountId: "acct-drain-first" }, drainFirst: "yes" as never },
+					],
+				}),
+		).toThrow("auth.accountPolicies[0].drainFirst must be a boolean");
+	});
+
 	test("requires a base selector identity", () => {
 		if (!store) throw new Error("test setup failed");
 		const activeStore = store;
@@ -842,6 +875,71 @@ describe("AuthStorage codex oauth ranking", () => {
 					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
 				}),
 		).toThrow("without surrounding whitespace");
+	});
+
+	test("drain-first account outranks a cooler account with faster weekly drain urgency", async () => {
+		if (!store) throw new Error("test setup failed");
+		const storage = await setupDrainFirstAccounts(
+			createCodexUsageReport({
+				accountId: "acct-drain-first",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.6, resetInMs: 6 * 24 * HOUR_MS },
+			}),
+			createCodexUsageReport({
+				accountId: "acct-cooler",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(storage, "openai-codex", "drain-first-usage");
+		expectExclusivePreference(counts, "api-acct-drain-first", "api-acct-cooler");
+	});
+
+	test.each(["primary", "secondary"] as const)(
+		"keeps drain-first behind a cooler sibling when the %s window blocks",
+		async window => {
+			const storage = await setupDrainFirstAccounts(
+				createCodexUsageReport({
+					accountId: "acct-drain-first",
+					primary: { usedFraction: window === "primary" ? 1 : 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: window === "secondary" ? 1 : 0.6, resetInMs: WEEK_MS },
+				}),
+				createCodexUsageReport({
+					accountId: "acct-cooler",
+					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.4, resetInMs: HOUR_MS },
+				}),
+			);
+			const counts = await countApiKeySelections(storage, "openai-codex", `drain-first-blocked-${window}`);
+			expectExclusivePreference(counts, "api-acct-cooler", "api-acct-drain-first");
+		},
+	);
+
+	test("keeps the hot 5h guard ahead of drain-first", async () => {
+		const storage = await setupDrainFirstAccounts(
+			createCodexUsageReport({
+				accountId: "acct-drain-first",
+				primary: {
+					usedFraction: 0.9,
+					resetInMs: HOUR_MS,
+				},
+				secondary: { usedFraction: 0.8, resetInMs: WEEK_MS },
+				primaryWindow: { windowId: "5h", windowLabel: "5 Hour", durationMs: FIVE_HOUR_MS },
+			}),
+			createCodexUsageReport({
+				accountId: "acct-cooler",
+				primary: {
+					usedFraction: 0.2,
+					resetInMs: HOUR_MS,
+				},
+				secondary: { usedFraction: 0.4, resetInMs: WEEK_MS },
+				primaryWindow: { windowId: "5h", windowLabel: "5 Hour", durationMs: FIVE_HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(storage, "openai-codex", "drain-first-hot-5h");
+		expectExclusivePreference(counts, "api-acct-cooler", "api-acct-drain-first");
 	});
 
 	test("keeps hot-window safety ahead of configured priority but not a failed usage fetch", async () => {
@@ -2936,6 +3034,99 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const apiKey = await authStorage.keys.get("openai-codex", undefined, { modelId });
 		expect(apiKey).toBe("api-acct-paid");
+	});
+	test("keeps a plan-gated reclaim destination pinned ahead of drain-first siblings", async () => {
+		if (!store || !authStorage) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-a" },
+					priority: 10,
+					reservePct: 5,
+					reclaimAbovePct: 50,
+				},
+				{ provider: "openai-codex", account: { accountId: "acct-b" }, priority: 5 },
+				{ provider: "openai-codex", account: { accountId: "acct-c" }, priority: 0, drainFirst: true },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+			{ type: "oauth", ...createCredential("acct-c", "c@example.com") },
+		]);
+		for (const [accountId, usedFraction] of [
+			["acct-a", 0.1],
+			["acct-b", 0.4],
+			["acct-c", 0.2],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction, resetInMs: 30 * 60 * 1000 },
+					secondary: { usedFraction, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+					metadata: { planType: "plus" },
+				}),
+			);
+		}
+
+		const sessionId = "codex-plan-reclaim-destination";
+		const modelId = "gpt-5.6-sol";
+		expect(await authStorage.keys.get("openai-codex", sessionId, { accountIds: ["acct-b"], modelId })).toBe(
+			"api-acct-b",
+		);
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-a");
+	});
+	test("keeps an unknown-plan pin over a known-ineligible reclaim target", async () => {
+		if (!store || !authStorage) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-free-reclaim" },
+					priority: 10,
+					reservePct: 0,
+					reclaimAbovePct: 50,
+				},
+				{ provider: "openai-codex", account: { accountId: "acct-unknown-plan" }, priority: 5 },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-free-reclaim", "free-reclaim@example.com") },
+			{ type: "oauth", ...createCredential("acct-unknown-plan", "unknown-plan@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-free-reclaim",
+			createCodexUsageReport({
+				accountId: "acct-free-reclaim",
+				primary: { usedFraction: 0.1, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.1, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+				metadata: { planType: "free" },
+			}),
+		);
+		usageByAccount.set(
+			"acct-unknown-plan",
+			createCodexUsageReport({
+				accountId: "acct-unknown-plan",
+				primary: { usedFraction: 0.4, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.4, resetInMs: 6 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+
+		const sessionId = "codex-unknown-plan-reclaim";
+		const modelId = "gpt-5.6-sol";
+		expect(
+			await authStorage.keys.get("openai-codex", sessionId, {
+				accountIds: ["acct-unknown-plan"],
+				modelId,
+			}),
+		).toBe("api-acct-unknown-plan");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-unknown-plan");
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId })).toBe("api-acct-unknown-plan");
 	});
 
 	test.each([
