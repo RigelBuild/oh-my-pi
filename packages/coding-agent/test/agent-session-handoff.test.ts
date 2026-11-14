@@ -252,7 +252,38 @@ describe("AgentSession handoff", () => {
 		cfgCompactionRetryMaxDelayMs.override(session.settings, 1234);
 		const spy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("document");
 		await session.handoff(undefined, { autoTriggered: true });
-		expect(spy.mock.calls[0]?.[2].oneshotRetry).toEqual({ maxAttempts: 5, baseDelayMs: 12, maxDelayMs: 1234 });
+		expect(spy.mock.calls[0]?.[2].oneshotRetry).toEqual({
+			maxAttempts: 5,
+			baseDelayMs: 12,
+			maxDelayMs: 1234,
+			stopWhenDelayExceedsMax: true,
+			stopOnTimeout: true,
+		});
+	});
+
+	it("automatic handoff inherits retry count when compaction count is -1", async () => {
+		const spy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("document");
+		await session.handoff(undefined, { autoTriggered: true });
+		expect(spy.mock.calls[0]?.[2].oneshotRetry).toEqual({
+			maxAttempts: 11,
+			baseDelayMs: 500,
+			maxDelayMs: 30000,
+			stopWhenDelayExceedsMax: true,
+			stopOnTimeout: true,
+		});
+	});
+
+	it("automatic handoff disables the retry delay ceiling at zero", async () => {
+		cfgCompactionRetryMaxDelayMs.override(session.settings, 0);
+		const spy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("document");
+		await session.handoff(undefined, { autoTriggered: true });
+		expect(spy.mock.calls[0]?.[2].oneshotRetry).toEqual({
+			maxAttempts: 11,
+			baseDelayMs: 500,
+			maxDelayMs: Number.POSITIVE_INFINITY,
+			stopWhenDelayExceedsMax: true,
+			stopOnTimeout: true,
+		});
 	});
 
 	it("manual handoff leaves retry policy unchanged", async () => {

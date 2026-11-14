@@ -221,6 +221,31 @@ describe("handoff helpers", () => {
 		).rejects.toThrow("Handoff generation failed");
 		expect(completeImpl).toHaveBeenCalledTimes(5);
 	});
+	test("handoff stops when exponential retry delay exceeds ceiling", async () => {
+		const completeImpl = vi.fn(async () => createAssistantError(503, "503 overloaded_error"));
+		await expect(
+			generateHandoffFromContext({ systemPrompt: ["Test"], messages: [] }, getTestModel(), {
+				streamOptions: { apiKey: "test-key" },
+				completeImpl,
+				oneshotRetry: { maxAttempts: 11, baseDelayMs: 500, maxDelayMs: 1000, stopWhenDelayExceedsMax: true },
+			}),
+		).rejects.toThrow("Handoff generation failed");
+		expect(completeImpl).toHaveBeenCalledTimes(3);
+	});
+
+	test("handoff does not retry timeout under compaction policy", async () => {
+		const completeImpl = vi.fn(async () => {
+			throw new Error("Request timed out");
+		});
+		await expect(
+			generateHandoffFromContext({ systemPrompt: ["Test"], messages: [] }, getTestModel(), {
+				streamOptions: { apiKey: "test-key" },
+				completeImpl,
+				oneshotRetry: { maxAttempts: 3, baseDelayMs: 0, stopOnTimeout: true },
+			}),
+		).rejects.toThrow();
+		expect(completeImpl).toHaveBeenCalledTimes(1);
+	});
 
 	test("generateHandoffFromContext retries auto-only tool_choice rejection with live tools", async () => {
 		const completeSimpleSpy = vi

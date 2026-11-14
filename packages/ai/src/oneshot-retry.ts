@@ -42,6 +42,10 @@ export interface OneshotRetryOptions {
 	 * error surfaces so higher-level recovery (or the user) can decide.
 	 */
 	maxDelayMs?: number;
+	/** Stop rather than clamp when the uncapped exponential backoff exceeds maxDelayMs. */
+	stopWhenDelayExceedsMax?: boolean;
+	/** Treat timeouts as terminal. */
+	stopOnTimeout?: boolean;
 	/**
 	 * Stops further attempts. Two distinct paths, both preserving the caller's
 	 * intent: an abort already visible when an attempt settles surfaces that
@@ -194,7 +198,11 @@ export async function retryTransientCompletion(
 				: ((message as AssistantMessage).errorMessage ?? "unknown error");
 		const errorStatus = thrown !== undefined ? AIError.status(thrown) : (message as AssistantMessage).errorStatus;
 		const lastAttempt = attempt >= maxAttempts;
-		if (lastAttempt || !isRetryableOneshotFailure(errorId, errorStatus, errorMessage)) {
+		if (
+			lastAttempt ||
+			(options?.stopOnTimeout && AIError.is(errorId, AIError.Flag.Timeout)) ||
+			!isRetryableOneshotFailure(errorId, errorStatus, errorMessage)
+		) {
 			if (thrown !== undefined) throw thrown;
 			return message as AssistantMessage;
 		}
@@ -222,7 +230,10 @@ export async function retryTransientCompletion(
 				: Math.max(headerHintMs ?? 0, textHintMs ?? 0);
 		// An over-cap hint means "come back much later"; parking a oneshot that
 		// long is worse than surfacing the failure to the caller.
-		if (hintMs !== undefined && hintMs > maxDelayMs) {
+		if (
+			(hintMs !== undefined && hintMs > maxDelayMs) ||
+			(options?.stopWhenDelayExceedsMax && baseDelayMs * 2 ** (attempt - 1) > maxDelayMs)
+		) {
 			if (thrown !== undefined) throw thrown;
 			return message as AssistantMessage;
 		}

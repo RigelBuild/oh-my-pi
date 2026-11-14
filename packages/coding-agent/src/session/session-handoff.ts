@@ -201,6 +201,8 @@ export class SessionHandoff {
 										1 + (configuredMaxRetries >= 0 ? configuredMaxRetries : retrySettings.maxRetries),
 									baseDelayMs: retrySettings.baseDelayMs,
 									maxDelayMs: maxDelayMs > 0 ? maxDelayMs : Number.POSITIVE_INFINITY,
+									stopWhenDelayExceedsMax: true,
+									stopOnTimeout: true,
 								}
 							: false
 						: undefined,
