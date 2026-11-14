@@ -298,6 +298,39 @@ describe("retryTransientCompletion", () => {
 		expect(calls).toBe(1);
 		expect(final.stopReason).toBe("error");
 	});
+	it("stops when exponential backoff exceeds the ceiling even with an in-range retry hint", async () => {
+		let calls = 0;
+		const failure = rateLimited();
+		const final = await retryTransientCompletion(
+			() => {
+				calls += 1;
+				return Promise.resolve(failure);
+			},
+			{
+				maxAttempts: 5,
+				baseDelayMs: 1,
+				maxDelayMs: 2,
+				stopWhenDelayExceedsMax: true,
+				getResponseHeaders: () => ({ "retry-after-ms": "1" }),
+			},
+		);
+		expect(calls).toBe(3);
+		expect(final).toBe(failure);
+	});
+
+	it("stops on timeout when requested", async () => {
+		let calls = 0;
+		const failure = message({ stopReason: "error", errorMessage: "Request timed out" });
+		const final = await retryTransientCompletion(
+			() => {
+				calls += 1;
+				return Promise.resolve(failure);
+			},
+			{ ...fast, stopOnTimeout: true },
+		);
+		expect(calls).toBe(1);
+		expect(final).toBe(failure);
+	});
 
 	it("honors a retry-after-ms response header over the backoff floor", async () => {
 		// The header is the only place a real Anthropic 429 carries its wait: the

@@ -1113,6 +1113,8 @@ export interface HandoffOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
+	/** Retry policy for handoff requests; false disables transient retries. */
+	oneshotRetry?: OneshotRetryOptions | false;
 }
 
 export function renderHandoffPrompt(customInstructions?: string): string {
@@ -1143,6 +1145,8 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
+	/** See {@link HandoffOptions.oneshotRetry}. */
+	oneshotRetry?: OneshotRetryOptions | false;
 }
 
 /**
@@ -1168,18 +1172,19 @@ export async function generateHandoffFromContext(
 		reasoning: resolveCompactionEffort(model, options.thinkingLevel),
 		toolChoice: "none" as const,
 	};
+	const retry = options.oneshotRetry === false ? undefined : (options.oneshotRetry ?? {});
 	let response = await instrumentedCompleteSimple(model, context, requestOptions, {
 		telemetry: options.telemetry,
 		oneshotKind: "handoff",
 		completeImpl: options.completeImpl,
-		retry: {},
+		retry,
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
 		response = await instrumentedCompleteSimple(
 			model,
 			context,
 			{ ...requestOptions, toolChoice: "auto" },
-			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
+			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry },
 		);
 	}
 
@@ -1226,6 +1231,7 @@ export async function generateHandoff(
 			},
 			telemetry: options.telemetry,
 			thinkingLevel: options.thinkingLevel,
+			oneshotRetry: options.oneshotRetry,
 		},
 	);
 }
