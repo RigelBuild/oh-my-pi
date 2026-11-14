@@ -159,6 +159,9 @@ describe("OAuth refresh budget", () => {
 				return hung.promise;
 			},
 		});
+		const firstOutcome = expect(first).rejects.toMatchObject({
+			message: `OAuth token refresh timed out for provider: ${PROVIDER}`,
+		});
 		await firstStarted.promise;
 		dateNow.mockRestore();
 
@@ -178,6 +181,7 @@ describe("OAuth refresh budget", () => {
 		).rejects.toMatchObject({ message: `OAuth token refresh timed out for provider: ${PROVIDER}` });
 		expect(Date.now() - started).toBeLessThan(1_000);
 		expect(peerExchanged).toBe(false);
+		await firstOutcome;
 		hung.reject(new Error("done"));
 	});
 
