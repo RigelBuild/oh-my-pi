@@ -4,7 +4,6 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
 import { checkPr, createTag, expectedNextVersion, mintTarget, parseTrackingVersion, type TagApi } from "./release-tag";
-import { applyPackageVersion, applyCatalogVersion } from "./release-version";
 
 const RELEASE_VERSION = "18.9.2-rigel.2";
 
@@ -80,7 +79,10 @@ async function commit(dir: string, version?: string, stamp = false): Promise<str
 			JSON.stringify({ workspaces: { catalog: { "@oh-my-pi/public": version } } }),
 		);
 		await Bun.write(path.join(dir, "Cargo.toml"), `[workspace.package]\nversion = "${version}"\n`);
-		await Bun.write(path.join(dir, "Cargo.lock"), `[[package]]\nname = "pi-coding-agent"\nversion = "${version}"\n`);
+		await Bun.write(
+			path.join(dir, "Cargo.lock"),
+			`[[package]]\nname = "registry-pi-crate"\nversion = "0.1.0"\nsource = "registry+https://example.invalid"\n\n[[package]]\nname = "workspace-crate"\nversion = "${version}"\n`,
+		);
 	}
 	await Bun.write(path.join(dir, "n"), crypto.randomUUID());
 	await $`git add -A && git commit -qm c`.cwd(dir).quiet();
@@ -194,29 +196,28 @@ describe("checkPr", () => {
 		const head = await commit(dir, RELEASE_VERSION);
 		await expect(checkPr(dir, base, head)).rejects.toThrow("Cargo.lock");
 	});
-	test("updates a package manifest version with the release helper", () => {
-		const input = '{\n\t"name": "@oh-my-pi/public",\n\t"version": "18.9.2"\n}';
-		expect(applyPackageVersion(input, RELEASE_VERSION)).toBe(
-			input.replace('"version": "18.9.2"', `"version": "${RELEASE_VERSION}"`),
-		);
-	});
-	test("rewrites root catalog entries with the release version", () => {
-		const input = '{"workspaces":{"catalog":{"@oh-my-pi/public":"18.9.2"}}}';
-		expect(applyCatalogVersion(input, RELEASE_VERSION)).toContain(`"@oh-my-pi/public":"${RELEASE_VERSION}"`);
-	});
-	test("rejects a catalog-only mismatch and names the root manifest", async () => {
+	test("rejects a stale Cargo.toml workspace version", async () => {
 		const dir = await repo();
 		const base = await commit(dir, "18.9.2-rigel.1");
 		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
-		const head = await commit(dir, RELEASE_VERSION, true);
+		await commit(dir, RELEASE_VERSION, true);
+		const cargo = path.join(dir, "Cargo.toml");
+		const contents = await fs.readFile(cargo, "utf8");
+		await Bun.write(cargo, contents.replace(RELEASE_VERSION, "18.9.2"));
+		const head = await commit(dir, RELEASE_VERSION);
+		await expect(checkPr(dir, base, head)).rejects.toThrow(`do not match ${RELEASE_VERSION}: Cargo.toml`);
+	});
+	test("rejects a catalog-only mismatch", async () => {
+		const dir = await repo();
+		const base = await commit(dir, "18.9.2-rigel.1");
+		await $`git tag v18.9.2-rigel.1`.cwd(dir).quiet();
+		await commit(dir, RELEASE_VERSION, true);
 		const root = path.join(dir, "package.json");
 		const contents = await fs.readFile(root, "utf8");
 		await Bun.write(root, contents.replace(RELEASE_VERSION, "18.9.2"));
 		await $`git add -A && git commit -qm mismatch`.cwd(dir).quiet();
-		await expect(checkPr(dir, base, (await $`git rev-parse HEAD`.cwd(dir).text()).trim())).rejects.toThrow(
-			"package.json",
-		);
-		expect(head).not.toBe(base);
+		const head = (await $`git rev-parse HEAD`.cwd(dir).text()).trim();
+		await expect(checkPr(dir, base, head)).rejects.toThrow(`do not match ${RELEASE_VERSION}: package.json`);
 	});
 
 	test("rejects a bump with no public package manifests", async () => {

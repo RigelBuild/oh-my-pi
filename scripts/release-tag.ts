@@ -39,7 +39,7 @@ async function versionAt(cwd: string, sha: string): Promise<string | null> {
 	return lines[0];
 }
 
-// Check the head tree's public package and catalog versions after a tracking bump.
+// Check public package, catalog, and Rust workspace versions after a tracking bump.
 async function validateStampedVersions(cwd: string, sha: string, version: string): Promise<void> {
 	const mismatches: string[] = [];
 	const paths = await $`git ls-tree -r --name-only ${sha} packages/`.cwd(cwd).quiet().text();
@@ -125,6 +125,8 @@ export async function checkPr(cwd: string, baseSha: string, headSha: string): Pr
 	await validateStampedVersions(cwd, headSha, headVersion);
 	return headVersion;
 }
+
+/** The tag to create and its commit, or null when there is nothing to mint. */
 export async function mintTarget(cwd: string, sha: string): Promise<{ tag: string; sha: string } | null> {
 	const version = await versionAt(cwd, sha);
 	if (version === null) return null;
