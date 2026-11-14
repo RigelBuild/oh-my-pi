@@ -40,6 +40,7 @@ describe("OAuth refresh budget", () => {
 		// previous one is dead server-side as soon as the grant answers.
 		const validRefreshTokens = new Set(["r0"]);
 		let rotations = 0;
+		const whoamiStarted = Promise.withResolvers<void>();
 		// Post-exchange work (e.g. an org lookup) stays pending until the caller has given up.
 		const whoamiGate = Promise.withResolvers<void>();
 		vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -54,6 +55,7 @@ describe("OAuth refresh budget", () => {
 						return json({ access_token: `access-${next}`, refresh_token: next, expires_in: 3600 });
 					}
 					if (url === WHOAMI_URL) {
+						whoamiStarted.resolve();
 						// Like a real request, the lookup ends early if the exchange is aborted.
 						const aborted = Promise.withResolvers<never>();
 						init?.signal?.addEventListener("abort", () => aborted.reject(init.signal?.reason), { once: true });
@@ -79,6 +81,8 @@ describe("OAuth refresh budget", () => {
 
 		let exchangeSignal: AbortSignal | undefined;
 		const failures: unknown[] = [];
+		const frozenNow = Date.now();
+		const dateNow = vi.spyOn(Date, "now").mockReturnValue(frozenNow);
 		const refresh = authStorage.oauth.refreshStored(PROVIDER, {
 			credentialId,
 			credentialFromRow: row => row,
@@ -105,6 +109,9 @@ describe("OAuth refresh budget", () => {
 			},
 		});
 
+		// Restore the clock once whoami starts, so only the post-exchange hook consumes the budget.
+		await whoamiStarted.promise;
+		dateNow.mockRestore();
 		// The caller stops waiting at the budget and sees the timeout.
 		await expect(refresh).rejects.toMatchObject({
 			message: `OAuth token refresh timed out for provider: ${PROVIDER}`,
@@ -139,14 +146,24 @@ describe("OAuth refresh budget", () => {
 		]);
 		const credentialId = store.listAuthCredentials(PROVIDER)[0]!.id;
 		const hung = Promise.withResolvers<never>();
+		const firstStarted = Promise.withResolvers<void>();
+		const frozenNow = Date.now();
+		const dateNow = vi.spyOn(Date, "now").mockReturnValue(frozenNow);
 		const first = authStorage.oauth.refreshStored(PROVIDER, {
 			credentialId,
 			credentialFromRow: row => row,
 			forceRefresh: true,
 			refreshTimeoutMs: 50,
-			refresh: () => hung.promise,
+			refresh: () => {
+				firstStarted.resolve();
+				return hung.promise;
+			},
 		});
-		await expect(first).rejects.toMatchObject({ message: `OAuth token refresh timed out for provider: ${PROVIDER}` });
+		const firstOutcome = expect(first).rejects.toMatchObject({
+			message: `OAuth token refresh timed out for provider: ${PROVIDER}`,
+		});
+		await firstStarted.promise;
+		dateNow.mockRestore();
 
 		let peerExchanged = false;
 		const started = Date.now();
@@ -164,6 +181,7 @@ describe("OAuth refresh budget", () => {
 		).rejects.toMatchObject({ message: `OAuth token refresh timed out for provider: ${PROVIDER}` });
 		expect(Date.now() - started).toBeLessThan(1_000);
 		expect(peerExchanged).toBe(false);
+		await firstOutcome;
 		hung.reject(new Error("done"));
 	});
 
