@@ -1465,7 +1465,7 @@ export const cfgClaudeResetsAutoRedeem = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Resets",
 		description:
-			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage.",
+			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage except the auth-gateway permits recovery for drain-first accounts.",
 		options: [
 			{
 				value: "unset",
@@ -1474,7 +1474,12 @@ export const cfgClaudeResetsAutoRedeem = register({
 					"Check live eligibility, then ask before spending the first Claude reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
-			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },
+			{
+				value: "no",
+				label: "No",
+				description:
+					"Do not run Claude reset auto-redeem checks, except auth-gateway blocked recovery for drain-first accounts.",
+			},
 		],
 	},
 });
@@ -1517,6 +1522,15 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage. 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes are still attempted regardless of usage or reserve. Provider limit requirements still apply.",
 	},
 });
+
+export type ClaudeResetSettings = {
+	autoRedeem: "unset" | "yes" | "no";
+	minBlockedMinutes: number;
+	keepCredits: number;
+	salvageHorizonHours: number;
+};
+
+export type ClaudeResetBankingSettings = Pick<ClaudeResetSettings, "autoRedeem" | "keepCredits">;
 
 /** Claude reset auto-redeem policy (`claudeResets.*`), independent of {@link cfgCodexResets}. */
 export const cfgClaudeResets = combine({

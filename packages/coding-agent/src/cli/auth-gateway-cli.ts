@@ -66,7 +66,7 @@ import {
 	REDEEM_RETRY_DEFER_MS,
 	resetPlanSettings,
 } from "../session/codex-auto-reset";
-import { cfgClaudeResets, cfgCodexResets } from "../session/settings";
+import { type ClaudeResetBankingSettings, cfgClaudeResets, cfgCodexResets } from "../session/settings";
 import {
 	type AuthBrokerClientConfig,
 	loadEffectiveAuthAccountPolicyConfig,
@@ -75,6 +75,14 @@ import {
 } from "../session/auth-broker-config";
 import { runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
+
+export function claudeResetBankingFor(
+	cfg: ClaudeResetBankingSettings,
+): { keepCredits: number; drainFirstOnly?: true } | undefined {
+	if (cfg.autoRedeem === "yes") return { keepCredits: cfg.keepCredits };
+	if (cfg.autoRedeem === "no") return { keepCredits: cfg.keepCredits, drainFirstOnly: true };
+	return undefined;
+}
 
 export type AuthGatewayAction = "serve" | "stdio" | "token" | "status" | "check";
 
@@ -425,12 +433,20 @@ export function createGatewayClaudeResetHook(args: {
 }): NonNullable<Parameters<typeof startAuthGateway>[0]["onUsageLimit"]> {
 	return async ({ provider, credentialId, modelId, signal }) => {
 		const cfg = cfgClaudeResets.get(args.settings);
-		if (cfg.autoRedeem !== "yes" || provider !== "anthropic") return false;
+		if (provider !== "anthropic") return false;
 		const current = args.coordinator.inFlightByCredential.get(credentialId);
 		if (current) return current;
 		const attempt = (async () => {
 			const credential = args.storage.credentials.list(provider).find(row => row.id === credentialId)?.credential;
 			if (credential?.type !== "oauth") return false;
+			const policy = args.storage.oauth.policy(provider, {
+				accountId: credential.accountId,
+				email: credential.email,
+				projectId: credential.projectId,
+				orgId: credential.orgId,
+			});
+			const drainFirstRecovery = cfg.autoRedeem === "no" && policy?.drainFirst === true;
+			if (cfg.autoRedeem !== "yes" && !drainFirstRecovery) return false;
 			let report: UsageReport | null;
 			try {
 				report = await args.storage.usage.report(provider, credential, {
@@ -453,7 +469,10 @@ export function createGatewayClaudeResetHook(args: {
 					trigger: "blocked",
 					provider,
 					modelId,
-					settings: resetPlanSettings(cfg),
+					settings: {
+						...resetPlanSettings(cfg),
+						enabled: cfg.autoRedeem === "yes" || drainFirstRecovery,
+					},
 					reports: statuses.flatMap(status => (status.report ? [status.report] : [])),
 					statuses,
 					permitsCredential: id => id === credentialId,
@@ -766,13 +785,12 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
 	// AuthStorage discovers them when no explicit option overrides them, so the
 	// gateway only needs to construct the store and pass it in.
+	const claudeResetBanking = claudeResetBankingFor(claudeResetConfig);
 	const storage = new AuthStorage(store, {
 		sourceLabel: `broker ${brokerConfig.url}`,
 		accountPolicies,
 		defaultReservePct,
-		...(claudeResetConfig.autoRedeem === "yes"
-			? { claudeResetBanking: { keepCredits: claudeResetConfig.keepCredits } }
-			: {}),
+		...(claudeResetBanking ? { claudeResetBanking } : {}),
 	});
 	await storage.credentials.reload();
 
