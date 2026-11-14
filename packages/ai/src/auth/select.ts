@@ -92,7 +92,7 @@ export interface CredentialSelectorDeps {
 	usage: UsageService;
 	refresher: OAuthRefresher;
 	strategies: RankingStrategyResolver;
-	claudeResetBanking?: { keepCredits: number };
+	claudeResetBanking?: { keepCredits: number; drainFirstOnly?: boolean };
 }
 
 /** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
@@ -530,7 +530,7 @@ export class CredentialSelector {
 		options?: AuthApiKeyOptions;
 		strategy?: CredentialRankingStrategy;
 		defaultReservePct?: number;
-		claudeResetBanking?: { keepCredits: number };
+		claudeResetBanking?: { keepCredits: number; drainFirstOnly?: boolean };
 		rankingContext: CredentialRankingContext;
 		blockScope?: string;
 		/** Scopes a block may live under for this request; reads honour all of them. */
@@ -625,6 +625,7 @@ export class CredentialSelector {
 			const resetBanked =
 				args.provider === "anthropic" &&
 				args.claudeResetBanking !== undefined &&
+				(!args.claudeResetBanking.drainFirstOnly || policy?.drainFirst === true) &&
 				resetCredits?.eligible === true &&
 				resetCredits.availableCount - args.claudeResetBanking.keepCredits >= 1 &&
 				(cooldownUntilMs === undefined || (Number.isFinite(cooldownUntilMs) && cooldownUntilMs <= nowMs)) &&
