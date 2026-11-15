@@ -45,6 +45,8 @@ describe("ovnfs search fast path", () => {
 		const socket = path.join(root, "admin.sock");
 		server = net.createServer(conn => {
 			conns.add(conn);
+			// A peer may disappear mid-write during deadline teardown.
+			conn.on("error", () => {});
 			let buffered = Buffer.alloc(0);
 			conn.on("data", (chunk: Buffer) => {
 				buffered = Buffer.concat([buffered, chunk]);
@@ -179,6 +181,8 @@ describe("ovnfs search fast path", () => {
 		const statusStarted = Promise.withResolvers<void>();
 		const statusClosed = Promise.withResolvers<void>();
 		const statusServer = net.createServer(conn => {
+			// A peer may disappear mid-write during deadline teardown.
+			conn.on("error", () => {});
 			conn.on("close", () => statusClosed.resolve());
 			statusStarted.resolve();
 		});
@@ -266,6 +270,8 @@ describe("ovnfs search fast path", () => {
 		const unwelcomedConns = new Set<net.Socket>();
 		const unwelcomedServer = net.createServer(conn => {
 			unwelcomedConns.add(conn);
+			// A peer may disappear mid-write during deadline teardown.
+			conn.on("error", () => {});
 			let buffered = Buffer.alloc(0);
 			conn.on("data", (chunk: Buffer) => {
 				buffered = Buffer.concat([buffered, chunk]);
@@ -307,7 +313,6 @@ describe("ovnfs search fast path", () => {
 			expect(firstConn).not.toBeNull();
 			const firstClosed = Promise.withResolvers<void>();
 			firstConn!.on("close", () => firstClosed.resolve());
-
 			// A second caller joins the pending connection; aborting the first caller preserves it for the second,
 			// and when the second caller times out with no waiters left, the unfinished connection is closed and forgotten.
 			const timedOut = glob({ pattern: "*", path: dir, timeoutMs: 50 }, null, unwelcomedOvnfs);
