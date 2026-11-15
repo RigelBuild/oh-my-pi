@@ -1,21 +1,21 @@
 {
-  version = "18.9.2-rigel.2";
+  version = "18.18.3-rigel.4";
   assets = {
     x86_64-linux = {
       name = "omp-linux-x64";
-      hash = "sha256-q2VODOOK8WiODDC3Pbh7wyQcsfSTcw2Zz+36toHBCKw=";
+      hash = "sha256-Eg3vCp3AW71LYwi651DRIhDzf9Xpto3RajLncMHCGtY=";
     };
     aarch64-linux = {
       name = "omp-linux-arm64";
-      hash = "sha256-tbhRb2tOfb1QZEaRV8W92NsWwii782OeCt6YwC05VdU=";
+      hash = "sha256-kRIpknHknnHmdyiOuJmwg8KbNayC7HNpmxfkaveyvlo=";
     };
     aarch64-darwin = {
       name = "omp-darwin-arm64";
-      hash = "sha256-DXaHTpiNponLaRJGWHjnprL8yy4jlokRZcD84mVlIGU=";
+      hash = "sha256-RWnvs62bgL4cVnAgcwPRsbC5KUx78hCzlmuTFQ0Iv/4=";
     };
     x86_64-darwin = {
       name = "omp-darwin-x64";
-      hash = "sha256-4joWy2LwYsmWSPHKsO8tGj0oy2DRAnN/r3xT+T85DR4=";
+      hash = "sha256-JbbrcTGaQCqyxVTJpDpZu+/VKDAnRpP/75tB/LMvOfI=";
     };
   };
 }
