@@ -311,6 +311,8 @@ describe("ovnfs search fast path", () => {
 				),
 			]);
 			expect(firstConn).not.toBeNull();
+			const firstClosed = Promise.withResolvers<void>();
+			firstConn!.on("close", () => firstClosed.resolve());
 			// A second caller joins the pending connection; aborting the first caller preserves it for the second,
 			// and when the second caller times out with no waiters left, the unfinished connection is closed and forgotten.
 			const timedOut = glob({ pattern: "*", path: dir, timeoutMs: 50 }, null, unwelcomedOvnfs);
@@ -318,6 +320,7 @@ describe("ovnfs search fast path", () => {
 			firstController.abort();
 			await expect(firstAborted).rejects.toMatchObject({ name: "AbortError", message: "Aborted: Signal" });
 			await expect(timedOut).rejects.toThrow("Aborted: Timeout");
+			await firstClosed.promise;
 
 			// A later retry opens a fresh connection; one caller aborting preserves it for another waiting caller.
 			helloReceived = Promise.withResolvers<net.Socket>();
