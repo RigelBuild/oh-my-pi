@@ -203,3 +203,163 @@ describe("retry fallback cooldown shared across sessions", () => {
 		]);
 	});
 });
+
+/**
+ * Walk-level cases. Each runs one prompt through a chain map and a per-model failure
+ * script, and records every request. A request cap stops an unbounded walk, so a loop
+ * fails the assertion instead of hanging the suite.
+ */
+describe("fallback walk bounds and candidate gating (RIG-10406)", () => {
+	const REQUEST_CAP = 12;
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let session: AgentSession | undefined;
+
+	beforeAll(async () => {
+		tempDir = TempDir.createSync("@pi-walk-bounds-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		tempDir.removeSync();
+	});
+
+	beforeEach(() => {
+		modelRegistry.clearSuppressedSelectors();
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+			session = undefined;
+		}
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		vi.restoreAllMocks();
+	});
+
+	/**
+	 * Run one prompt on `primary`. `failures` maps a model selector to the error it throws on
+	 * every request; a model absent from it answers. `chains` is the default fallback chain.
+	 */
+	async function runWalk(options: {
+		primary: string;
+		chainMap: Record<string, string[]>;
+		failures: Record<string, string>;
+		withoutKey?: string[];
+		cooled?: string[];
+	}) {
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+		for (const selector of options.cooled ?? []) {
+			modelRegistry.suppressSelector(selector, Date.now() + 5 * 60 * 1000);
+		}
+		const [primaryProvider, ...primaryRest] = options.primary.split("/");
+		const primaryModel = getBundledModel(primaryProvider, primaryRest.join("/"));
+		if (!primaryModel) throw new Error(`Expected bundled model ${options.primary}`);
+		for (const selector of options.withoutKey ?? []) {
+			modelRegistry.authStorage.keys.removeRuntime(selector.split("/")[0]);
+		}
+
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => {
+				const selector = `${model.provider}/${model.id}`;
+				return options.withoutKey?.includes(selector) ? undefined : `${model.provider}-test-key`;
+			},
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, streamOptions) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				const mock = createMockModel();
+				if (requestedModels.length > REQUEST_CAP) {
+					mock.push({ throw: "request cap reached: the walk did not end" });
+				} else if (options.failures[selector] !== undefined) {
+					mock.push({ throw: options.failures[selector] });
+				} else {
+					mock.push({ content: [`ok:${selector}`] });
+				}
+				return mock.stream(model, context, streamOptions);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.fallbackChains": options.chainMap,
+		});
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		mockSchedulerWaitWithClock();
+		await session.prompt("walk");
+		await session.waitForIdle();
+		return { requestedModels };
+	}
+
+	it("ends a mutual chain on a transport error after a bounded number of requests", async () => {
+		const a = "openai/gpt-4o";
+		const b = "anthropic/claude-sonnet-4-5";
+		const { requestedModels } = await runWalk({
+			primary: a,
+			chainMap: { [a]: [b], [b]: [a] },
+			failures: { [a]: TRANSPORT_ERROR, [b]: TRANSPORT_ERROR },
+		});
+		expect(requestedModels.length).toBeLessThanOrEqual(REQUEST_CAP);
+		expect(requestedModels).not.toContain("request cap reached");
+		// The walk never switches back to the origin, so `a` is requested once. Requests to
+		// `b` are same-model retries, which `retry.maxRetries` (default 10) bounds.
+		expect(requestedModels.filter(selector => selector === a).length).toBe(1);
+		expect(requestedModels.filter(selector => selector === b).length).toBeLessThanOrEqual(10);
+	});
+
+	it("ends a mutual chain on a long usage limit after a bounded number of requests", async () => {
+		const a = "openai/gpt-4o";
+		const b = "anthropic/claude-sonnet-4-5";
+		const longLimit = "429 usage_limit_reached retry-after-ms=11180001";
+		const { requestedModels } = await runWalk({
+			primary: a,
+			chainMap: { [a]: [b], [b]: [a] },
+			failures: { [a]: longLimit, [b]: longLimit },
+		});
+		expect(requestedModels.length).toBeLessThanOrEqual(REQUEST_CAP);
+		expect(requestedModels.filter(selector => selector === a).length).toBe(1);
+		expect(requestedModels.filter(selector => selector === b).length).toBe(1);
+	});
+
+	it("uses a cooled candidate after an earlier cooled candidate has no key", async () => {
+		const primary = "openai/gpt-4o";
+		const noKey = "anthropic/claude-sonnet-4-5";
+		const usable = "openai/gpt-5";
+		const { requestedModels } = await runWalk({
+			primary,
+			chainMap: { [primary]: [noKey, usable] },
+			failures: { [primary]: USAGE_LIMIT },
+			withoutKey: [noKey],
+			cooled: [noKey, usable],
+		});
+		expect(requestedModels).toEqual([primary, usable]);
+	});
+
+	it("switches to a cooled candidate when an uncooled candidate has no auth", async () => {
+		const primary = "openai/gpt-4o";
+		const noAuth = "anthropic/claude-sonnet-4-5";
+		const cooledUsable = "openai/gpt-5";
+		const { requestedModels } = await runWalk({
+			primary,
+			chainMap: { [primary]: [noAuth, cooledUsable] },
+			failures: { [primary]: USAGE_LIMIT },
+			withoutKey: [noAuth],
+			cooled: [cooledUsable],
+		});
+		expect(requestedModels).toEqual([primary, cooledUsable]);
+	});
+});
+
+/*
+ * Skipped by design (RIG-10406 review, finding 6): an end-to-end executor test for the
+ * `<task-result model="…">` attribute after a real fallback. It needs the full task
+ * executor harness, which this change does not stand up. Not done.
+ */
