@@ -533,7 +533,7 @@ export function isSameModelTurn(
  * replayed foreign thinking would trip the classifier. Class-owned (catalog
  * `classifier-cot-extraction`), so it holds on every host.
  */
-export function isClaudeTarget(model: Pick<Model, "provider" | "api" | "id">): boolean {
+export function isClaudeTarget(model: Pick<Model, "provider" | "api" | "id" | "reasoning">): boolean {
 	return resolveCatalogPolicy(model).classifierCotExtraction === true;
 }
 
@@ -881,6 +881,15 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 	});
 }
 
+/**
+ * Per-request replay policy shared by every `transformMessages` caller. Add
+ * fields here, not positional parameters.
+ */
+export interface TransformReplayOptions {
+	/** Foreign or unsigned thinking for Claude targets: `"drop"` removes it, `"demote"` keeps it as text. */
+	foreignThinkingReplay?: "demote" | "drop";
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
@@ -889,8 +898,9 @@ export function transformMessages<TApi extends Api>(
 	duplicateToolCallIdSuffixPrefix = "_dup",
 	targetCompat: Model<TApi>["compat"] = model.compat,
 	targetCredentialId?: number,
-	foreignThinkingReplay: "demote" | "drop" = "demote",
+	replay?: TransformReplayOptions,
 ): Message[] {
+	const foreignThinkingReplay = replay?.foreignThinkingReplay ?? "demote";
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
 	// block errors from LLM providers (e.g. invalid_prompt).

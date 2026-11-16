@@ -787,6 +787,11 @@ export interface StreamOptions {
 	 * observes limit headers, and decides capacity waits.
 	 */
 	anthropicSlowMode?: AnthropicSlowModeHooks;
+	/**
+	 * How foreign or unsigned thinking from earlier turns replays to a Claude target:
+	 * `"demote"` (default) sends it as visible text; `"drop"` removes it.
+	 */
+	foreignThinkingReplay?: "demote" | "drop";
 }
 
 /**
@@ -840,11 +845,6 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * Useful when the UI hides thinking blocks anyway and the summary is wasted bandwidth.
 	 */
 	hideThinkingSummary?: boolean;
-	/**
-	 * How foreign or unsigned thinking from earlier turns replays to a Claude target:
-	 * `"demote"` (default) sends it as visible text; `"drop"` removes it.
-	 */
-	foreignThinkingReplay?: "demote" | "drop";
 	/** OpenAI Responses/Codex `text.verbosity` response detail level. */
 	textVerbosity?: "low" | "medium" | "high";
 	/** Custom token budgets for thinking levels (token-based providers only) */

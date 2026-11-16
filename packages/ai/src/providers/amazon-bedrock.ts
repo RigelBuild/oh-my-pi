@@ -59,7 +59,7 @@ import type { MessageCreateParams, MessageCreateParamsStreaming, RawMessageStrea
 import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
 import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
-import { transformMessages } from "./transform-messages";
+import { isClaudeTarget, type TransformReplayOptions, transformMessages } from "./transform-messages";
 
 /**
  * Headers SigV4 generates for itself. A caller cannot be allowed to supply these:
@@ -833,7 +833,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			const promptCachePolicy = resolvePromptCachePolicy(model, cacheRetention);
-			const convertedMessages = convertMessages(context, model, promptCachePolicy);
+			const convertedMessages = convertMessages(context, model, promptCachePolicy, {
+				foreignThinkingReplay: options.foreignThinkingReplay,
+			});
 			const toolPlan = planToolConfig(context.tools, options.toolChoice, convertedMessages);
 			let toolConfig = toolPlan.toolConfig;
 			const sentinelInjected = toolPlan.sentinelInjected;
@@ -1366,9 +1368,19 @@ function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
 	promptCachePolicy: BedrockPromptCachePolicy,
+	replay: TransformReplayOptions = {},
 ): WireMessage[] {
 	const result: WireMessage[] = [];
-	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
+	const transformedMessages = transformMessages(
+		context.messages,
+		model,
+		id => normalizeToolCallId(id),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		replay,
+	);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -1445,6 +1457,7 @@ function convertMessages(
 								// content survives, just no longer typed as a reasoning block. This matches how
 								// every other provider (Anthropic, Google, OpenAI-completions) handles thinking
 								// blocks it can't safely replay.
+								if (replay.foreignThinkingReplay === "drop" && isClaudeTarget(model)) break;
 								contentBlocks.push({ text: renderDemotedThinking(model.id, c.thinking) });
 							}
 							break;

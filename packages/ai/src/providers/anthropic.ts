@@ -153,7 +153,7 @@ import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
-import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
+import { isClaudeTarget, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
@@ -5865,7 +5865,7 @@ export function convertAnthropicMessages(
 		undefined,
 		undefined,
 		opts?.credentialId,
-		opts?.foreignThinkingReplay,
+		{ foreignThinkingReplay: opts?.foreignThinkingReplay },
 	);
 	// The turn this request answers: the last message that started a run (a
 	// `user` message, or a `developer` prompt such as a `/guided-goal` kickoff
@@ -6063,6 +6063,7 @@ export function convertAnthropicMessages(
 					if (hasSignedThinking) {
 						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
 							if (block.thinking.trim().length === 0) continue;
+							if (opts?.foreignThinkingReplay === "drop" && isClaudeTarget(model)) continue;
 							blocks.push({
 								type: "text",
 								text: renderDemotedThinking(model.id, block.thinking),
@@ -6084,6 +6085,8 @@ export function convertAnthropicMessages(
 								thinking: block.thinking.toWellFormed(),
 								signature: "",
 							});
+						} else if (opts?.foreignThinkingReplay === "drop" && isClaudeTarget(model)) {
+							// Dropped: the target's classifier refuses quoted reasoning.
 						} else {
 							blocks.push({
 								type: "text",

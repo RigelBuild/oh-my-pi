@@ -1301,7 +1301,7 @@ export function buildRequest(
 	accountKey?: string,
 ): CloudCodeAssistRequest {
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
-	const contents = convertMessages(model, context);
+	const contents = convertMessages(model, context, { foreignThinkingReplay: options.foreignThinkingReplay });
 	const generationConfig: CloudCodeAssistRequest["request"]["generationConfig"] = {};
 	if (options.temperature !== undefined) {
 		generationConfig.temperature = options.temperature;

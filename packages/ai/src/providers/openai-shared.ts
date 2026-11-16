@@ -134,7 +134,12 @@ import {
 	resolveOpenCodeGoCacheAffinity,
 	setHeaderIfAbsent,
 } from "./inference-headers";
-import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
+import {
+	isMalformedToolCallName,
+	isValidToolCallId,
+	type TransformReplayOptions,
+	transformMessages,
+} from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -2051,6 +2056,8 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	};
 	includeThinkingSignatures?: boolean;
 	developerStringContent?: boolean;
+	/** Foreign-thinking replay policy for the target; see {@link TransformReplayOptions}. */
+	replay?: TransformReplayOptions;
 	repairOrphanOutputs?: boolean;
 	/** Preserve assistant message item IDs from text signatures during fallback replay. */
 	preserveAssistantMessageIds?: boolean;
@@ -2305,6 +2312,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		undefined,
 		undefined,
 		filteredCompat,
+		undefined,
+		options.replay,
 	);
 	const filterReasoning = <T extends { type?: string }>(items: T[]): T[] =>
 		options.nativeHistory?.filterReasoning ? items.filter(item => item?.type !== "reasoning") : items;

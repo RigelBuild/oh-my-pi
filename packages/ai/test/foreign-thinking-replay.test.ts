@@ -13,6 +13,35 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 const THINKING = "FOREIGN-GPT-REASONING-TEXT";
 const VISIBLE = "VISIBLE-ANSWER";
 
+import { streamSimple } from "@oh-my-pi/pi-ai";
+
+/** Production path: settings → streamSimple → mapOptionsForApi → provider. */
+describe("foreignThinkingReplay via streamSimple (production path)", () => {
+	it("Claude over the Anthropic API: a drop set on SimpleStreamOptions reaches the wire", async () => {
+		const bodies: unknown[] = [];
+		await streamSimple(claudeAnthropic(), context, {
+			apiKey: "k",
+			fetch: captureFetch(bodies),
+			foreignThinkingReplay: "drop",
+		}).result();
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).not.toContain(THINKING);
+		expect(wire).toContain(VISIBLE);
+	});
+
+	it("Claude id through an OpenAI-compatible gateway: a drop set on SimpleStreamOptions reaches the wire", async () => {
+		const bodies: unknown[] = [];
+		await streamSimple(claudeLiteLLM(), context, {
+			apiKey: "k",
+			fetch: captureFetch(bodies),
+			foreignThinkingReplay: "drop",
+		}).result();
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).not.toContain(THINKING);
+		expect(wire).toContain(VISIBLE);
+	});
+});
+
 function claudeAnthropic(): Model<"anthropic-messages"> {
 	return buildModel({
 		api: "anthropic-messages",

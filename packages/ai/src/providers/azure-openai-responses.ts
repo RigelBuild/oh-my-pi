@@ -374,6 +374,7 @@ function buildParams(
 		model,
 		context,
 		strictResponsesPairing: true,
+		replay: { foreignThinkingReplay: options?.foreignThinkingReplay },
 		supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
 		systemRole,
 		nativeHistory: { replay: true, filterReasoning: false },
