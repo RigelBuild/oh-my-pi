@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Agents and subagents get the full evidence-only rule: other agents and models are asked only for evidence and results, never for their internal process or raw transcripts.
+
 ## [18.18.3-rigel.6] - 2026-11-16
 
 ### Fixed

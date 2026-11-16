@@ -244,7 +244,7 @@ describe("runSubprocess yield reminders", () => {
 			"ask only for evidence and results: log lines, file paths, commands run, message IDs, or a final summary.",
 		);
 		expect(systemPrompt?.[2]).toContain(
-			"Pass another model's final answer only; never its raw transcript or hidden blocks.",
+			"Never paste another model's raw transcript or hidden blocks into a prompt; pass its final answer only.",
 		);
 		// The parent-conversation CONTEXT section is gone: subagents get their
 		// background inside the assignment (or a local:// file), never a dump.
