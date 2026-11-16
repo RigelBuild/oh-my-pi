@@ -1412,7 +1412,7 @@ describe("AgentSession queued steer delivery", () => {
 
 			expect(mock.calls).toHaveLength(2);
 			const steeredContext = JSON.stringify(mock.calls[1].context.messages);
-			expect(steeredContext).toContain("Multi-step reasoning");
+			expect(steeredContext).toContain("Investigate the problem carefully before acting.");
 			expect(steeredContext).toContain("review this ?ultrathink");
 			// The early streaming branch queues before normalization runs; its
 			// notice-only metadata must not be mistaken for prepared attachments,
@@ -1456,7 +1456,7 @@ describe("AgentSession queued steer delivery", () => {
 			expect(promoted).toBe(true);
 			expect(mock.calls).toHaveLength(2);
 			const steeredContext = JSON.stringify(mock.calls[1].context.messages);
-			expect(steeredContext).toContain("Multi-step reasoning");
+			expect(steeredContext).toContain("Investigate the problem carefully before acting.");
 			expect(steeredContext).toContain("follow-up with ?ultrathink");
 			expect(session.agent.hasQueuedMessages()).toBe(false);
 		});
