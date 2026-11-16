@@ -5443,6 +5443,7 @@ function buildParams(
 		thinkingEnabled: thinking?.type === "adaptive" || thinking?.type === "enabled",
 		droppedThinkingBlocks,
 		credentialId: options?.credentialId,
+		foreignThinkingReplay: options?.foreignThinkingReplay,
 		compactionRequest,
 	};
 	const wireMessages = convertAnthropicMessages(
@@ -5785,6 +5786,8 @@ type AnthropicConversionOptions = {
 	thinkingEnabled?: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
 	credentialId?: number;
+	/** Foreign or unsigned thinking replay for Claude targets; see `StreamOptions.foreignThinkingReplay`. */
+	foreignThinkingReplay?: "demote" | "drop";
 	/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
 	compactionRequest?: AnthropicCompactionRequest;
 };
@@ -5862,6 +5865,7 @@ export function convertAnthropicMessages(
 		undefined,
 		undefined,
 		opts?.credentialId,
+		opts?.foreignThinkingReplay,
 	);
 	// The turn this request answers: the last message that started a run (a
 	// `user` message, or a `developer` prompt such as a `/guided-goal` kickoff

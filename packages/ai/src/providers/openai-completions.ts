@@ -2250,7 +2250,7 @@ function buildParams(
 		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
 	});
 	const compat = finalPolicy.compat as ResolvedOpenAICompat;
-	const messages = convertMessages(model, context, compat);
+	const messages = convertMessages(model, context, compat, options?.foreignThinkingReplay);
 	maybeAddAnthropicCacheControl(compat, messages);
 	params.messages = messages;
 	const outputToken = resolveOpenAIOutputTokenParam({
@@ -2429,6 +2429,7 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompat,
+	foreignThinkingReplay: "demote" | "drop" = "demote",
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -2465,6 +2466,8 @@ export function convertMessages(
 		maxNormalizedToolCallIdLength,
 		duplicateToolCallIdSuffixPrefix,
 		compat,
+		undefined,
+		foreignThinkingReplay,
 	);
 
 	const remappedToolCallIds = new Map<string, string[]>();

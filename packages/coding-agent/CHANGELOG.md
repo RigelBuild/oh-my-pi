@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `thinking.foreignReplay` setting (`demote` default, `drop`). With `drop`, thinking from other models is removed from requests to Claude instead of replayed as visible text, which avoids Claude's `reasoning_extraction` refusals. Other targets keep demotion.
+
 ### Changed
 
 - Advisors no longer receive the primary model's thinking by default. Set `includeReasoning: true` on a `WATCHDOG.yml` advisor entry to opt back in.

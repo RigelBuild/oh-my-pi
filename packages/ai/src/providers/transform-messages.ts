@@ -529,6 +529,15 @@ export function isSameModelTurn(
 }
 
 /**
+ * Whether `model` is a Claude target: its class refuses quoted reasoning, so
+ * replayed foreign thinking would trip the classifier. Class-owned (catalog
+ * `classifier-cot-extraction`), so it holds on every host.
+ */
+export function isClaudeTarget(model: Pick<Model, "provider" | "api" | "id">): boolean {
+	return resolveCatalogPolicy(model).classifierCotExtraction === true;
+}
+
+/**
  * Whether an API's encoder runs {@link transformMessages} against the target
  * model itself, so {@link isSameModelTurn} decides what replays. Agent proxies
  * encode through an inner model or their own path; extension APIs are not
@@ -880,6 +889,7 @@ export function transformMessages<TApi extends Api>(
 	duplicateToolCallIdSuffixPrefix = "_dup",
 	targetCompat: Model<TApi>["compat"] = model.compat,
 	targetCredentialId?: number,
+	foreignThinkingReplay: "demote" | "drop" = "demote",
 ): Message[] {
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
@@ -1190,6 +1200,7 @@ export function transformMessages<TApi extends Api>(
 					// stay byte-identical. A separator baked into the block text would
 					// leak to non-flattening targets: Anthropic/Bedrock reject a
 					// terminal assistant message whose text ends with whitespace.
+					if (foreignThinkingReplay === "drop" && isClaudeTarget(model)) return [];
 					return {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),

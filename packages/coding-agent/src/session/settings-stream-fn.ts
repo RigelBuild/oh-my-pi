@@ -21,6 +21,7 @@ import {
 	cfgModelLoopGuardCheckAssistantContent,
 	cfgModelLoopGuardEnabled,
 	cfgOmitThinking,
+	cfgThinkingForeignReplay,
 	cfgProvidersAnthropicServerSideFallback,
 	cfgProvidersAnthropicSlowMode,
 	cfgProvidersAntigravityEndpoint,
@@ -185,6 +186,7 @@ export function createSettingsAwareStreamFn(
 				...streamOptions?.loopGuard,
 			},
 			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? cfgOmitThinking.get(settings),
+			foreignThinkingReplay: streamOptions?.foreignThinkingReplay ?? cfgThinkingForeignReplay.get(settings),
 			// An off switch, not a default: the agent loop always offers its queue.
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
