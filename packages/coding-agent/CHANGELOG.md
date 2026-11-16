@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.3-rigel.6] - 2026-11-16
+
 ### Fixed
 
 - A subagent's retry fallback is no longer ended by a cooldown another session wrote after a connection drop. A socket close, a truncated payload, a stream stall, or a reset, refused, or timed-out connection does not cool a selector, on the main walk and the advisor path. A recognised limit or a 429, 402 or 5xx status cools even when it also names a drop. On the main walk only, a cooled candidate that passes every other check may be used once no same-model retry remains. A long-limit wrap may revisit an earlier model only after its cooldown has expired. `<task-result>` names the model the subagent ran on in a `model` attribute.
