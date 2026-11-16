@@ -1064,8 +1064,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedSystemPromptTemplate = undefined;
 		rendered = prompt.render(systemPromptTemplate, data);
 	}
-	// One shared block for every selected template. A literal customPrompt or an
-	// SDK string systemPrompt is the only opt-out (sdk.ts returns before this builder).
+	// One shared block for every selected template, customPrompt included. An SDK string
+	// systemPrompt is the only opt-out (sdk.ts returns before this builder).
 	const systemPrompt = [rendered, evidenceOnlyBlock.trim()];
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
