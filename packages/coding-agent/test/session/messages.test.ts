@@ -54,7 +54,7 @@ function interruptedThinkingContinuity(): CustomMessage {
 	return {
 		role: "custom",
 		customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
-		content: "preserved reasoning",
+		content: "PRIVATE INTERRUPTED BLOCK",
 		display: false,
 		attribution: "agent",
 		timestamp: 2,
@@ -97,55 +97,53 @@ describe("convertToLlm", () => {
 		expect(saved.content[0]).toMatchObject({ name: "xd://recall" });
 	});
 
-	it("strips the demoted trailing thinking run from the assistant LLM view when its continuity message follows", () => {
+	it("drops hidden interrupted thinking while retaining a generic interruption notice", () => {
 		const messages: AgentMessage[] = [
 			abortedAssistant([
 				{ type: "text", text: "partial answer" },
-				{ type: "thinking", thinking: "interrupted reasoning" },
+				{ type: "thinking", thinking: "PRIVATE INTERRUPTED BLOCK" },
 			]),
 			interruptedThinkingContinuity(),
+		];
+
+		const llm = convertToLlm(messages);
+
+		expect(JSON.stringify(llm).toLowerCase()).not.toContain("private interrupted block");
+		expect(
+			llm.some(entry => entry.role === "developer" && JSON.stringify(entry.content).includes("user interrupted")),
+		).toBe(true);
+	});
+
+	it("drops trailing unsigned thinking without continuity because it is unsafe to replay", () => {
+		const messages: AgentMessage[] = [
+			abortedAssistant([
+				{ type: "text", text: "partial answer" },
+				{ type: "thinking", thinking: "PRIVATE INTERRUPTED BLOCK" },
+			]),
 		];
 
 		const llm = convertToLlm(messages);
 		const assistant = llm.find(entry => entry.role === "assistant");
 		expect(Array.isArray(assistant?.content) && assistant.content.map(block => block.type)).toEqual(["text"]);
-		expect(llm.some(entry => entry.role === "developer")).toBe(true);
+		expect(JSON.stringify(llm).toLowerCase()).not.toContain("private interrupted block");
 	});
-
-	it("keeps trailing thinking on the assistant LLM view when no continuity message follows", () => {
+	it("keeps a signed (complete) trailing thinking block in the assistant LLM view even with a continuity marker", () => {
 		const messages: AgentMessage[] = [
 			abortedAssistant([
 				{ type: "text", text: "partial answer" },
-				{ type: "thinking", thinking: "interrupted reasoning" },
-			]),
-		];
-
-		const llm = convertToLlm(messages);
-		const assistant = llm.find(entry => entry.role === "assistant");
-		expect(Array.isArray(assistant?.content) && assistant.content.map(block => block.type)).toEqual([
-			"text",
-			"thinking",
-		]);
-	});
-
-	it("keeps a signed (complete) trailing thinking block in the assistant LLM view even with a continuity message", () => {
-		const messages: AgentMessage[] = [
-			abortedAssistant([
-				{ type: "text", text: "partial answer" },
-				{ type: "thinking", thinking: "complete reasoning", thinkingSignature: "sig" },
+				{ type: "thinking", thinking: "complete signed block", thinkingSignature: "sig" },
 			]),
 			interruptedThinkingContinuity(),
 		];
-
 		const llm = convertToLlm(messages);
 		const assistant = llm.find(entry => entry.role === "assistant");
 		expect(Array.isArray(assistant?.content) && assistant.content.map(block => block.type)).toEqual([
 			"text",
 			"thinking",
 		]);
+		expect(JSON.stringify(assistant?.content)).toContain("complete signed block");
 	});
 });
-
 function settledAssistant(text: string): AssistantMessage {
 	return {
 		role: "assistant",
@@ -265,38 +263,31 @@ describe("convertMessagesForContextView", () => {
 		expect(converted.map(entry => entry.message)).toEqual(filterProviderReplayMessages(convertToLlm(messages)));
 	});
 
-	it("honors neighboring continuity markers without replacing either production cache", () => {
+	it("shares signed-only assistant conversion across context and provider views", () => {
 		const assistant = abortedAssistant([
 			{ type: "text", text: "partial answer" },
 			{ type: "thinking", thinking: "unfinished" },
 		]);
 		const messages: AgentMessage[] = [userMessage("question", 1), assistant];
 		const production = convertToLlm(messages);
-		const viewed = convertMessagesForContextView([messages[0], assistant, interruptedThinkingContinuity()]);
-		const viewedAssistant = viewed[1].message;
-		expect(viewedAssistant.role === "assistant" && viewedAssistant.content.map(block => block.type)).toEqual([
+		const viewed = convertMessagesForContextView([messages[0]!, assistant, interruptedThinkingContinuity()]);
+		const viewedAssistant = viewed[1]?.message;
+		expect(viewedAssistant?.role === "assistant" && viewedAssistant.content.map(block => block.type)).toEqual([
 			"text",
 		]);
 		expect(viewed.map(entry => entry.sourceIndex)).toEqual([0, 1, 2]);
 		expect(viewed.map(entry => entry.convertedIndex)).toEqual([0, 1, 2]);
 		expect(convertToLlm(messages)).toBe(production);
-		// A different outer history must still reuse the original per-message fragment.
+		// Different histories reuse the same filtered per-message fragment.
 		expect(convertToLlm([...messages])[1]).toBe(production[1]);
-		const originalAssistant = production[1];
-		expect(originalAssistant.role === "assistant" && originalAssistant.content.map(block => block.type)).toEqual([
-			"text",
-			"thinking",
-		]);
+		expect(production[1]?.role === "assistant" && production[1].content.map(block => block.type)).toEqual(["text"]);
 
-		const withContinuity: AgentMessage[] = [assistant, interruptedThinkingContinuity()];
-		const strippedProduction = convertToLlm(withContinuity);
-		const withoutContinuity = convertMessagesForContextView([assistant])[0].message;
-		expect(withoutContinuity.role === "assistant" && withoutContinuity.content.map(block => block.type)).toEqual([
-			"text",
-			"thinking",
+		const complete = abortedAssistant([
+			{ type: "text", text: "partial answer" },
+			{ type: "thinking", thinking: "complete signed block", thinkingSignature: "sig" },
 		]);
-		expect(convertToLlm(withContinuity)).toBe(strippedProduction);
-		expect(convertToLlm([...withContinuity])[0]).toBe(strippedProduction[0]);
+		const signed = convertToLlm([complete])[0];
+		expect(signed?.role === "assistant" && signed.content.map(block => block.type)).toEqual(["text", "thinking"]);
 	});
 });
 
@@ -320,28 +311,6 @@ describe("convertToLlm caching", () => {
 		expect(grown.length).toBe(first.length + 1);
 		expect(grown.slice(0, first.length)).toEqual(first);
 		expect(grown[grown.length - 1]?.role).toBe("user");
-	});
-
-	it("recomputes the boundary assistant when a following interrupted-thinking marker appears on growth", () => {
-		const messages: AgentMessage[] = [
-			abortedAssistant([
-				{ type: "text", text: "partial answer" },
-				{ type: "thinking", thinking: "interrupted reasoning" },
-			]),
-		];
-		const before = convertToLlm(messages);
-		const beforeAssistant = before.find(entry => entry.role === "assistant");
-		expect(Array.isArray(beforeAssistant?.content) && beforeAssistant.content.map(b => b.type)).toEqual([
-			"text",
-			"thinking",
-		]);
-
-		// Append the continuity marker on the same array: the assistant is now the
-		// boundary message and its LLM view must drop the trailing thinking run.
-		messages.push(interruptedThinkingContinuity());
-		const after = convertToLlm(messages);
-		const afterAssistant = after.find(entry => entry.role === "assistant");
-		expect(Array.isArray(afterAssistant?.content) && afterAssistant.content.map(b => b.type)).toEqual(["text"]);
 	});
 
 	it("recomputes a message after strip-images invalidates its cache", () => {

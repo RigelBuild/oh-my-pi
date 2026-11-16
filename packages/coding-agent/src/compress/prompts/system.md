@@ -66,7 +66,7 @@ Articles; copulas; expletive there/it; complementizer `that`; relative pronouns;
 ## NEVER ship
 
 - External deixis — `A`, `B`, "the claim above". Name the thing.
-- Scratchpad residue — `Hmm`, `Actually`, `Wait`, abandoned clauses, goals revised mid-line.
+- Drafting residue — `Hmm`, `Actually`, `Wait`, abandoned clauses, goals revised mid-line.
 - Layered corrections or dead branches. A cold reader cannot tell which pass won; a model may execute the abandoned one.
 - Nested colons, and `...` or `?` used as operators. They mean nothing to a cold reader.
 - Prose that mixes instruction with data. Keep instructions in a marked channel: heading, tag, or MUST line.

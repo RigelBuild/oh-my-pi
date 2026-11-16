@@ -87,17 +87,16 @@ Never invent private glyphs — a bespoke one needs a legend that costs more tha
 
 ## Private register — never ship
 
-The scratchpad style that generates this register carries features that work only while writer and reader are the same person, minutes apart. Strip all of them:
+The drafting style that generates this register works only while writer and reader are the same person, minutes apart. Strip all of it:
 
 - **External deixis** — `A`, `B`, `C`, `G`, "the equation", "the claim above". Shipped text is self-contained: name the thing.
-- **Scratchpad residue** — `Hmm`, `Actually`, `Wait`, `just`, `fine`, `Good`; goals revised mid-line; abandoned clauses.
+- **Private drafting residue** — `Hmm`, `Actually`, `Wait`, `just`, `fine`, `Good`; goals revised mid-line; abandoned clauses.
 - **Layered corrections** — a wrong value left standing beside its fix. A cold reader cannot tell which pass won. Delete the loser.
 - **Dead branches** — an abandoned approach left beside the chosen one. A model may execute the abandoned one.
 - **Ambiguous `...` and `?`** — in notes they mean omitted / abandoned / infinite, and conjecture / check-this. In shipped text they mean nothing. Drop both.
 - **Nested colons** — `Step: from X: cases: a,b=1: 3-c:` is unparseable cold. One colon per line.
 - **Unmarked instruction vs data** — a bare line like `Word limit 1200 - write concisely` sitting in content is indistinguishable from content. Keep instructions in a marked channel: heading, tag, or MUST line.
-- **Revisiting instead of rewriting** — fine while thinking, fatal in a prompt. One canonical statement per rule.
-
+- **Revisiting instead of rewriting** — fine while drafting, fatal in a prompt. One canonical statement per rule.
 ## Tool and skill descriptions
 
 The body compresses hard. The trigger does not.

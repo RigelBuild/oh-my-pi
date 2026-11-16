@@ -239,7 +239,12 @@ describe("runSubprocess yield reminders", () => {
 		expect(systemPrompt).toHaveLength(3);
 		expect(systemPrompt?.[0]).toBe("system");
 		expect(systemPrompt?.[1]).toBe("<project-context>\ncwd\n</project-context>");
-		expect(systemPrompt?.[2]).toContain(baseAgent.systemPrompt);
+		expect(systemPrompt?.[2]).toContain(
+			"ask only for evidence and results: log lines, file paths, commands run, message IDs, or a final summary.",
+		);
+		expect(systemPrompt?.[2]).toContain(
+			"Pass another model's final answer only; never its raw transcript or hidden blocks.",
+		);
 		// The parent-conversation CONTEXT section is gone: subagents get their
 		// background inside the assignment (or a local:// file), never a dump.
 		expect(systemPrompt?.[2]).not.toMatch(/CONTEXT\n=+/);

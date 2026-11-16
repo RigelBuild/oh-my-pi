@@ -5,7 +5,7 @@ Author ONE Time Traveling Stream Rule (TTSR) that would have caught the offendin
 TTSR mechanics:
 - A rule is a markdown file with YAML frontmatter. Its body is injected as correction guidance when the rule triggers.
 - `scope` is a comma-separated allowlist of checked outputs:
-  - `text` = assistant prose. `thinking` = reasoning summaries. `tool` = every tool call.
+  - `text` = assistant prose. `thinking` = hidden assistant blocks. `tool` = every tool call.
   - `tool:<name>(<glob>)` = one tool, only when its file path matches the glob, e.g. `tool:write(*.rb)`, `tool:edit(*.ts)`.
 - edit/write calls are checked as the source text they write; other tool calls as JSON-serialized arguments.
 - Three trigger kinds:
@@ -16,7 +16,7 @@ TTSR mechanics:
 Trigger choice:
 - You MUST prefer `condition` or `astCondition`. They are exact, free, and interrupt before damage.
 - Code structure (call shapes, nesting, argument patterns) → `astCondition`. Literal tokens or phrases → `condition`.
-- Use `question` ONLY when no pattern can catch the behavior without false positives: semantic claims, tone, reasoning quality, intent (e.g. "claims tests pass without running them").
+- Use `question` ONLY when no pattern can catch the behavior without false positives: unsupported claims, tone, instruction compliance, or intent (e.g. "claims tests pass without running them").
 - `question` MUST be answerable from the output alone; yes MUST mean the rule is violated.
 - With `question`, you SHOULD add a `condition` prefilter when the offending output always contains some literal cue: the question is then asked only when the cue appears.
 

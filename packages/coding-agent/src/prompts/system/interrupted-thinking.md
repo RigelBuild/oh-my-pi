@@ -1,4 +1,1 @@
-You were saying this but I interrupted you:
-```
-{{reasoning}}
-```
+The user interrupted the previous response. Continue from the visible conversation and do not infer unfinished content.

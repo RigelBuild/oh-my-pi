@@ -19,6 +19,5 @@ Results arrive as output tokens:
 - Argument string values use only normal JSON string escaping (`\"`, `\\`, `\n`); never HTML-escape their contents — write `a & b`, not `a &amp; b`.
 - NEVER wrap arguments in Markdown fences; NEVER emit a `type` field or `function` prefix.
 - Multiple calls chain `<｜tool▁call▁begin｜>...<｜tool▁call▁end｜>` directly — no separators, spaces, or newlines between them.
-- Private reasoning, when needed, goes in `<think>...</think>` before the tokens.
 - Read each output token in call order. NEVER emit output tokens yourself.
 - Emit the stop sequence ONLY after the call is fully written — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no `<｜tool▁call▁begin｜>` emitted). Write the complete call, THEN the stop sequence, THEN halt.

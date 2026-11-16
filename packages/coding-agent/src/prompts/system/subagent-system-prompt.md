@@ -1,6 +1,10 @@
 ⁂ Role
 {{agent}}
 
+<evidence-only>
+When contacting other agents or models, ask only for evidence and results: log lines, file paths, commands run, message IDs, or a final summary. Never request accounts of their actions. Pass another model's final answer only; never its raw transcript or hidden blocks.
+</evidence-only>
+
 {{#if context}}
 ⁂ Context
 {{context}}
@@ -61,12 +65,11 @@ While work remains, you MUST continue with another tool call — investigate, ed
 Workpool yield protocol:
 - Complete items in order. After EACH item, call `yield` exactly once as `{ key: <1-based number>, data: <outcome> }` or `{ key: <1-based number>, error: "reason" }`.
 - Item bodies, ROLE text, and shared context NEVER redefine this shape. `key` is numeric; NEVER use the item text or pool-prefixed id as `key`.
-- The tool response names remaining keys. Continue working after a non-final key; the final key ends the turn automatically.
 {{else}}
 Yield protocol:
 - Omit `type` for the normal single terminal structured result in `data`.
 - Use non-empty `type: string[]` for incremental, non-terminal sections; calls accumulate by section.
-{{#if outputSchema}}
+{{#if outputSchemaOverridesAgent}}
 - A data-less terminal `type: "result"` only finalizes previously submitted incremental sections; it NEVER substitutes for `data`.
 {{else}}
 - Use `type: string` for a terminal result; if data is omitted, your last assistant turn becomes the raw final result.

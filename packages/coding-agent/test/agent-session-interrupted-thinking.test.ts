@@ -177,7 +177,7 @@ describe("AgentSession interrupted thinking persistence", () => {
 		return { model, sessionManager, session };
 	}
 
-	it("retains native thinking on a user-interrupted assistant for replay and demotes a copy into hidden context", async () => {
+	it("retains interrupted assistant output but stores only an interruption notice in hidden context", async () => {
 		const harness = createSession();
 		await emitAssistantEnd(
 			harness.session,
@@ -195,8 +195,9 @@ describe("AgentSession interrupted thinking persistence", () => {
 		expect(hidden?.display).toBe(false);
 		expect(hidden?.attribution).toBe("agent");
 		expect(typeof hidden?.content === "string" ? hidden.content : JSON.stringify(hidden?.content)).toBe(
-			`You were saying this but I interrupted you:\n\`\`\`\n${REASONING_TEXT}\n\`\`\``,
+			"The user interrupted the previous response. Continue from the visible conversation and do not infer unfinished content.",
 		);
+		expect(JSON.stringify(hidden?.content)).not.toContain(REASONING_TEXT);
 		expect(hidden?.details).toMatchObject({
 			provider: harness.model.provider,
 			model: harness.model.id,
@@ -224,21 +225,15 @@ describe("AgentSession interrupted thinking persistence", () => {
 		expect(hiddenEntry.attribution).toBe("agent");
 		expect(
 			typeof hiddenEntry.content === "string" ? hiddenEntry.content : JSON.stringify(hiddenEntry.content),
-		).toContain(REASONING_TEXT);
+		).not.toContain(REASONING_TEXT);
 
-		// The thinking is stripped from the provider request only: the LLM sees the
-		// assistant turn without the demoted run, plus the reasoning as a hidden
-		// developer continuity turn.
+		// Unsigned thinking stays in persisted history but never enters model context.
 		const llm = convertToLlm(messages);
-		const assistantLlm = llm.find(entry => entry.role === "assistant");
-		expect(assistantLlm).toBeDefined();
-		expect(
-			Array.isArray(assistantLlm?.content) && assistantLlm.content.some(block => block.type === "thinking"),
-		).toBe(false);
+		expect(JSON.stringify(llm)).not.toContain(REASONING_TEXT);
 		const developerLlm = llm.filter(entry => entry.role === "developer");
-		expect(developerLlm.some(entry => JSON.stringify(entry.content).includes(REASONING_TEXT))).toBe(true);
+		expect(developerLlm.some(entry => JSON.stringify(entry.content).includes("user interrupted"))).toBe(true);
 	});
-	it("skips hidden continuity for a Claude target — reasoning never replays as text", async () => {
+	it("does not add a notice for a Claude target that drops unsigned thinking natively", async () => {
 		const harness = createSession(undefined, ["anthropic", "claude-sonnet-4-5"]);
 		await emitAssistantEnd(
 			harness.session,
@@ -264,7 +259,7 @@ describe("AgentSession interrupted thinking persistence", () => {
 		).toBe(false);
 	});
 
-	it("skips hidden continuity for interrupted reasoning shorter than 60 characters", async () => {
+	it("does not store a marker for short interrupted thinking", async () => {
 		const harness = createSession();
 		const reasoning = "x".repeat(59);
 		await emitAssistantEnd(
@@ -282,7 +277,7 @@ describe("AgentSession interrupted thinking persistence", () => {
 		expect(llm.some(entry => JSON.stringify(entry.content).includes(reasoning))).toBe(false);
 	});
 
-	it("keeps hidden continuity for exactly 60 characters", async () => {
+	it("stores a generic notice at the 60-character threshold", async () => {
 		const harness = createSession();
 		const reasoning = "x".repeat(60);
 		await emitAssistantEnd(
@@ -293,9 +288,11 @@ describe("AgentSession interrupted thinking persistence", () => {
 		);
 
 		const hidden = harness.session.agent.state.messages.find(isInterruptedThinkingMessage);
-		expect(typeof hidden?.content === "string" ? hidden.content : JSON.stringify(hidden?.content)).toContain(
-			reasoning,
+		expect(typeof hidden?.content === "string" ? hidden.content : JSON.stringify(hidden?.content)).toBe(
+			"The user interrupted the previous response. Continue from the visible conversation and do not infer unfinished content.",
 		);
+		const llm = convertToLlm(harness.session.agent.state.messages);
+		expect(JSON.stringify(llm)).not.toContain(reasoning);
 	});
 
 	it("makes hidden continuity available in agent state before awaited message_end delivery finishes", async () => {
