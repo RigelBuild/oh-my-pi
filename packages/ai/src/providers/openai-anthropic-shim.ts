@@ -137,6 +137,7 @@ export function streamOpenAIAnthropicShim(
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					maxHttpAttempts: options?.maxHttpAttempts,
 					signal: options?.signal,
+					foreignThinkingReplay: options?.foreignThinkingReplay,
 					headers: mergedHeaders,
 					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
 					metadata: config.forwardCacheOptions ? options?.metadata : undefined,

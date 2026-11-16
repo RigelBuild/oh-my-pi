@@ -1128,15 +1128,6 @@ export function transformMessages<TApi extends Api>(
 						signatureUntrustworthy && block.thinkingSignature
 							? { ...block, thinkingSignature: undefined }
 							: block;
-					// Under drop, a Claude target never receives foreign or unsigned thinking,
-					// as text or as a native block. Same-model signed thinking still replays.
-					if (
-						foreignThinkingReplay === "drop" &&
-						isClaudeTarget(model) &&
-						!(isSameModel && sanitized.thinkingSignature)
-					) {
-						return [];
-					}
 					if (isAnthropicReplay) {
 						// A signature is only replayable where its issuer can verify it.
 						// Same-provider replays (including cross-model-id switches within
@@ -1164,6 +1155,10 @@ export function transformMessages<TApi extends Api>(
 						if (staleSignature && signingAnthropicInvolved && sanitized.thinkingSignature) {
 							sanitized = { ...sanitized, thinkingSignature: undefined };
 						}
+						// Under drop, a Claude target gets only signed thinking that stays on
+						// the same deployment or model. Foreign or unsigned thinking is removed.
+						const keepsOwnSignature = !!sanitized.thinkingSignature && (isSameModel || sameAnthropicDeployment);
+						if (foreignThinkingReplay === "drop" && isClaudeTarget(model) && !keepsOwnSignature) return [];
 						// Drop blocks with neither a signature anchor nor any text —
 						// nothing for the next turn to replay.
 						if (!sanitized.thinkingSignature && (!sanitized.thinking || sanitized.thinking.trim() === "")) {
@@ -1198,6 +1193,8 @@ export function transformMessages<TApi extends Api>(
 					// llama.cpp cache-prefix replay are orthogonal encoder concerns;
 					// keeping inert foreign CoT native for those flags loses the
 					// canonical visible-text fallback without adding model context.
+					// Under drop, a Claude target never receives cross-model thinking natively.
+					if (foreignThinkingReplay === "drop" && isClaudeTarget(model)) return [];
 					if (targetReadsForeignThinking(model, targetCompat)) {
 						return sanitized.thinkingSignature ? { ...sanitized, thinkingSignature: undefined } : sanitized;
 					}
