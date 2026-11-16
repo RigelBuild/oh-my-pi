@@ -83,7 +83,7 @@ Most FS/bash tools resolve these; path selectors: `read` docs.
 
 {{#has tools "think"}}
 # Planning notes
-`{{toolRefs.think}}` records planning notes; other tools become callable once it completes.
+MUST use `{{toolRefs.think}}` to record planning notes first; other tools become callable once it completes.
 {{/has}}
 
 {{#if xdevTools.length}}
