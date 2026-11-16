@@ -6,7 +6,6 @@ Each function call is one assistant message on the `commentary` channel addresse
 <|start|>assistant<|channel|>commentary to=functions.function_name<|message|>{"arg":"value"}<|call|>
 ```
 
-
 Tool results arrive as messages authored by the function, addressed back to the assistant:
 
 ```text
@@ -21,5 +20,6 @@ Tool results arrive as messages authored by the function, addressed back to the 
 - Multiple calls = consecutive call messages.
 - An optional visible preamble is a `commentary` message ending `<|end|>`.
 - NEVER wrap calls in Markdown/code fences.
+- NEVER emit tool calls on the `analysis` channel; they are not parsed.
 - Read each tool-result message in call order. NEVER emit tool-result messages yourself.
 - Emit the stop sequence ONLY after the call is fully written — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no `<|call|>` message emitted). Write the complete call, THEN the stop sequence, THEN halt.

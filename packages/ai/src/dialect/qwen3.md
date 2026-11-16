@@ -8,7 +8,6 @@ Emit each tool call as one `<tool_call>` block wrapping a single-line JSON objec
 </tool_call>
 ```
 
-
 Tool results arrive later in a user turn:
 
 ```text
@@ -22,5 +21,6 @@ verbatim tool result
 - `name` MUST match a listed function; `arguments` is a JSON object, never a JSON string.
 - Argument string values use only normal JSON string escaping (`\"`, `\\`, `\n`); never HTML-escape their contents — write `a & b`, not `a &amp; b`.
 - Multiple calls = consecutive `<tool_call>...</tool_call>` blocks; keep prose outside them.
+- NEVER emit tool calls inside `<think>…</think>`; they are not parsed.
 - Read each `<tool_response>` in call order. NEVER emit `<tool_response>` yourself.
 - Emit the stop sequence ONLY after the call is fully written — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no `<tool_call>` emitted). Write the complete call, THEN the stop sequence, THEN halt.

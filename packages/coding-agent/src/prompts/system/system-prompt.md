@@ -81,6 +81,11 @@ Most FS/bash tools resolve these; path selectors: `read` docs.
 {{/if}}
 {{/if}}
 
+{{#has tools "think"}}
+# Planning notes
+`{{toolRefs.think}}` records planning notes; other tools become callable once it completes.
+{{/has}}
+
 {{#if xdevTools.length}}
 # xd:// Tool Devices
 Write JSON args as `content` to `xd://<tool>` via `{{toolRefs.write}}`. Invalid args return schema in error → fix/retry.

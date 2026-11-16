@@ -5,6 +5,7 @@
 ### Fixed
 
 - Reworded agent prompts and skills to request evidence and results instead of process descriptions, and removed private-work guidance from model-specific tool instructions.
+- Interruption notices no longer quote interrupted thinking.
 
 ### Added
 

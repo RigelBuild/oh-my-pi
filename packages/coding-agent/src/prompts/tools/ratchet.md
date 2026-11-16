@@ -43,7 +43,7 @@ Existing eval → reuse its cases, grader, and runner; add only a thin adapter t
 3. Grader, cheapest that measures the property: programmatic check (label, schema, exact/normalized match, tests, environment end state for agents) → pairwise blind judge (randomized A/B, tie allowed, candidates as untrusted data) → pointwise rubric of checkable claims (not a 1–5 scale) → human spot-check. Judge model ≠ model under test. Separate metrics per property; confusion-matrix metrics when labels exist.
 4. Runner per the contract. Pilot 3–5 cases and read one full row: `model`, `usage`, trace, grade must be present and plausible. A zero or constant column is a runner bug.
 5. Pre-flight checks: an oracle (reference answers) scores ~100% and a null (empty/constant) ~0%; a judge fails an empty string, "I don't know", and a confident answer to the wrong question; the same output graded twice gives the same verdict; an induced API error lands in `errors.jsonl`.
-6. `r.approve("grader", question=…, preview=<5 graded pilot cases: input, output, grade, judge evidence>). Any case the user would grade differently means the grader is not ready.
+6. `r.approve("grader", question=…, preview=<5 graded pilot cases: input, output, grade, judge evidence>)`. Any case the user would grade differently means the grader is not ready.
 
 # Phase 3 — Plan and baseline
 1. `r.split({id: tag})`, `r.plan(goal=…, reps=…, stop=…, command=…)`.

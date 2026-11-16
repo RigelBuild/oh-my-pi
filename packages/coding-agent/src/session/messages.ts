@@ -13,6 +13,7 @@ import {
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
+	isUserInterruptAbort,
 	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
 export {
@@ -995,6 +996,7 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 /** Per-message conversion result, keyed by identity. */
 interface ConvertMemoEntry {
 	fragment: Message[];
+	interrupted: boolean;
 }
 
 const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
@@ -1041,7 +1043,7 @@ registerMessageCacheInvalidator(message => {
 });
 
 /** Convert one message to its LLM fragment. */
-function convertOne(m: AgentMessage): Message[] {
+function convertOne(m: AgentMessage, interrupted = false): Message[] {
 	switch (m.role) {
 		case "bashExecution":
 			if (m.excludeFromContext) {
@@ -1145,8 +1147,10 @@ function convertOne(m: AgentMessage): Message[] {
 			return converted ? [converted] : [];
 		}
 		case "assistant": {
-			const source = stripUnsignedThinkingForLlm(m);
-			if (source.stopReason === "aborted" && source.content.length === 0 && !source.requestControls) return [];
+			const isInterrupted = interrupted || (m.stopReason === "aborted" && isUserInterruptAbort(m));
+			const source = isInterrupted ? stripUnsignedThinkingForLlm(m) : m;
+			if (isInterrupted && source.stopReason === "aborted" && source.content.length === 0 && !source.requestControls)
+				return [];
 			const converted = convertMessageToLlm(canonicalizeXdToolCallNames(source));
 			return converted ? [converted] : [];
 		}
@@ -1198,7 +1202,11 @@ export function convertMessagesForContextView(messages: AgentMessage[]): Context
 	const modelMessages = wrapSteeringForModel(messages);
 	const result: ContextViewMessage[] = [];
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
-		for (const message of convertOne(modelMessages[sourceIndex])) {
+		const next = modelMessages[sourceIndex + 1];
+		for (const message of convertOne(
+			modelMessages[sourceIndex],
+			next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE,
+		)) {
 			if (message.role === "assistant" && isProviderRefusalMessage(message)) continue;
 			result.push({ message, sourceIndex, convertedIndex: result.length });
 		}
@@ -1207,12 +1215,12 @@ export function convertMessagesForContextView(messages: AgentMessage[]): Context
 }
 
 /** Cached per-message conversion. */
-function convertOneCached(m: AgentMessage): Message[] {
+function convertOneCached(m: AgentMessage, interrupted: boolean): Message[] {
 	const cached = convertCache.get(m);
-	if (cached !== undefined) return cached.fragment;
-	const fragment = convertOne(m);
+	if (cached !== undefined && cached.interrupted === interrupted) return cached.fragment;
+	const fragment = convertOne(m, interrupted);
 	for (const message of fragment) copyPerCallContextMessage(message, m);
-	convertCache.set(m, { fragment });
+	convertCache.set(m, { fragment, interrupted });
 	return fragment;
 }
 
@@ -1310,7 +1318,10 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 			else if (message.role === "toolResult")
 				safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
 		}
-		return safe.flatMap(convertOne);
+		return safe.flatMap((message, index) => {
+			const next = safe[index + 1];
+			return convertOne(message, next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE);
+		});
 	}
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);
@@ -1351,7 +1362,11 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const fragment = convertOneCached(messages[i]!);
+		const next = messages[i + 1];
+		const fragment = convertOneCached(
+			messages[i]!,
+			next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE,
+		);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;

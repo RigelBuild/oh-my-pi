@@ -239,6 +239,7 @@ describe("runSubprocess yield reminders", () => {
 		expect(systemPrompt).toHaveLength(3);
 		expect(systemPrompt?.[0]).toBe("system");
 		expect(systemPrompt?.[1]).toBe("<project-context>\ncwd\n</project-context>");
+		expect(systemPrompt?.[2]).toContain(baseAgent.systemPrompt);
 		expect(systemPrompt?.[2]).toContain(
 			"ask only for evidence and results: log lines, file paths, commands run, message IDs, or a final summary.",
 		);
