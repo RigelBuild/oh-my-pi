@@ -10,7 +10,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
  * instead of being demoted to visible text. Other targets keep demotion.
  * Asserts on the outgoing request body, not on encoder internals.
  */
-const THINKING = "SECRET-GPT-REASONING-TEXT";
+const THINKING = "FOREIGN-GPT-REASONING-TEXT";
 const VISIBLE = "VISIBLE-ANSWER";
 
 function claudeAnthropic(): Model<"anthropic-messages"> {
