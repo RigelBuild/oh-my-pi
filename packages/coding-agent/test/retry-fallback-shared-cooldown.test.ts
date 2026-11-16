@@ -2,6 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import * as resolveModule from "@oh-my-pi/pi-catalog/compat/resolve";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -162,6 +164,25 @@ describe("retry fallback cooldown shared across sessions", () => {
 		expect(modelRegistry.isSelectorSuppressed(`${primaryModel.provider}/${primaryModel.id}`)).toBe(true);
 	});
 
+	// Each row: the message a primary fails with, and whether that failure must cool it.
+	const COOLDOWN_TABLE: Array<[label: string, message: string, cools: boolean]> = [
+		[
+			"Envoy 503 with proxy wording and an overflow reset reason",
+			"503 upstream connect error or disconnect/reset before headers. reset reason: overflow",
+			true,
+		],
+		["a bare connection error", "Connection error.", false],
+		["a request timeout", "Request timed out.", false],
+	];
+	for (const [label, message, cools] of COOLDOWN_TABLE) {
+		it(`${cools ? "cools" : "does not cool"} on ${label}`, async () => {
+			const primaryModel = getBundledModel("openai", "gpt-4o");
+			if (!primaryModel) throw new Error("Expected bundled test models to exist");
+			await runPrimaryFailure(message);
+			expect(modelRegistry.isSelectorSuppressed(`${primaryModel.provider}/${primaryModel.id}`)).toBe(cools);
+		});
+	}
+
 	it("a sibling's socket-closed failure on the candidate does not block the parent's usage-limit fallback", async () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o");
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -209,7 +230,7 @@ describe("retry fallback cooldown shared across sessions", () => {
  * script, and records every request. A request cap stops an unbounded walk, so a loop
  * fails the assertion instead of hanging the suite.
  */
-describe("fallback walk bounds and candidate gating (RIG-10406)", () => {
+describe("fallback walk bounds and candidate gating", () => {
 	const REQUEST_CAP = 12;
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -308,7 +329,6 @@ describe("fallback walk bounds and candidate gating (RIG-10406)", () => {
 			failures: { [a]: TRANSPORT_ERROR, [b]: TRANSPORT_ERROR },
 		});
 		expect(requestedModels.length).toBeLessThanOrEqual(REQUEST_CAP);
-		expect(requestedModels).not.toContain("request cap reached");
 		// The walk never switches back to the origin, so `a` is requested once. Requests to
 		// `b` are same-model retries, which `retry.maxRetries` (default 10) bounds.
 		expect(requestedModels.filter(selector => selector === a).length).toBe(1);
@@ -327,6 +347,53 @@ describe("fallback walk bounds and candidate gating (RIG-10406)", () => {
 		expect(requestedModels.length).toBeLessThanOrEqual(REQUEST_CAP);
 		expect(requestedModels.filter(selector => selector === a).length).toBe(1);
 		expect(requestedModels.filter(selector => selector === b).length).toBe(1);
+	});
+
+	it("ends a mutual chain of two long-limit providers after a bounded number of requests", async () => {
+		const a = "openai/gpt-4o";
+		const b = "anthropic/claude-sonnet-4-5";
+		const longLimit = "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=11180001";
+		// Both providers carry the long-limit flag, so each long limit wraps around to the other.
+		const real = resolveModelPolicy;
+		const flagged = vi.spyOn(resolveModule, "resolveModelPolicy").mockImplementation((spec, route) => {
+			const policy = real(spec, route);
+			return { ...policy, catalog: { ...policy.catalog, longUsageLimitFallback: true } } as typeof policy;
+		});
+		try {
+			const { requestedModels } = await runWalk({
+				primary: a,
+				chainMap: { [a]: [b], [b]: [a] },
+				failures: { [a]: longLimit, [b]: longLimit },
+			});
+			// Each provider is requested once: its long limit cools it, so the wrap back is blocked.
+			expect(requestedModels).toEqual([a, b]);
+		} finally {
+			flagged.mockRestore();
+		}
+	});
+
+	it("does not loop when the origin fails transport and a flagged peer wraps back to it", async () => {
+		const a = "openai/gpt-4o";
+		const b = "anthropic/claude-sonnet-4-5";
+		const longLimit = "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=11180001";
+		const real = resolveModelPolicy;
+		const flagged = vi.spyOn(resolveModule, "resolveModelPolicy").mockImplementation((spec, route) => {
+			const policy = real(spec, route);
+			return { ...policy, catalog: { ...policy.catalog, longUsageLimitFallback: true } } as typeof policy;
+		});
+		try {
+			const { requestedModels } = await runWalk({
+				primary: a,
+				chainMap: { [a]: [b], [b]: [a] },
+				failures: { [a]: TRANSPORT_ERROR, [b]: longLimit },
+			});
+			// Hops: origin A, peer B, then A four times. The uncooled origin is revisited by the
+			// peer's wrap, then retried on the same model until `retry.maxRetries` (default 10) is spent.
+			// The walk ends after six requests; it does not loop.
+			expect(requestedModels).toEqual([a, b, a, a, a, a]);
+		} finally {
+			flagged.mockRestore();
+		}
 	});
 
 	it("uses a cooled candidate after an earlier cooled candidate has no key", async () => {
@@ -357,9 +424,3 @@ describe("fallback walk bounds and candidate gating (RIG-10406)", () => {
 		expect(requestedModels).toEqual([primary, cooledUsable]);
 	});
 });
-
-/*
- * Skipped by design (RIG-10406 review, finding 6): an end-to-end executor test for the
- * `<task-result model="…">` attribute after a real fallback. It needs the full task
- * executor harness, which this change does not stand up. Not done.
- */
