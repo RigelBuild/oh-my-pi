@@ -48,6 +48,17 @@ function previewHead(output: string): string {
 	return lastNewline >= PREVIEW_CHARS / 2 ? slice.slice(0, lastNewline) : slice;
 }
 
+/**
+ * The `provider/id` the subagent ran on at completion, for the envelope's
+ * `model` attribute. `resolvedModelIdentity` is that identity without a
+ * thinking suffix; it carries an `@route` suffix when the model is routed.
+ * Undefined when no model resolved, so the attribute is omitted.
+ */
+function servingModelAttribute(result: SingleResult): string | undefined {
+	const identity = result.resolvedModelIdentity?.trim();
+	return identity ? escapeHarnessTags(identity) : undefined;
+}
+
 /** Render the `<task-result>` envelope for a settled run. */
 export function formatTaskResultSummary(
 	result: SingleResult,
@@ -74,6 +85,7 @@ export function formatTaskResultSummary(
 	const render = (truncated: boolean): string =>
 		prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,
+			model: servingModelAttribute(result),
 			id: result.id,
 			status,
 			duration: formatDuration(options.totalDurationMs),

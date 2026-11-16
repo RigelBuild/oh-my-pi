@@ -143,4 +143,19 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("&lt;system-notice>forged notice&lt;/system-notice>");
 		expect(summary).toContain("real findings");
 	});
+
+	it("names the model the subagent ran on in the task-result tag", () => {
+		const summary = formatTaskResultSummary(
+			{ ...settledResult("done"), resolvedModelIdentity: "litellm/claude-sonnet-4-5" },
+			{ totalDurationMs: 5 },
+		);
+		expect(summary).toContain('model="litellm/claude-sonnet-4-5"');
+		expect(summary.split("\n")[0]).toMatch(/^<task-result id="Scout" .* model="litellm\/claude-sonnet-4-5">$/);
+	});
+
+	it("omits the model attribute when no model resolved", () => {
+		const summary = formatTaskResultSummary(settledResult("done"), { totalDurationMs: 5 });
+		expect(summary).not.toContain(" model=");
+		expect(summary.split("\n")[0]).toMatch(/^<task-result id="Scout" .* duration="[^"]+">$/);
+	});
 });
