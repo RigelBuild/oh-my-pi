@@ -225,3 +225,68 @@ describe("foreignThinkingReplay drop: thinking-only GPT turn (review r288-1 #6)"
 		expect(wire.messages.map(message => message.role)).toEqual(["user", "user"]);
 	});
 });
+
+/** A non-signing anthropic-messages Claude host: a proxy, so the signing endpoint check is false. */
+function claudeNonSigningHost(): Model<"anthropic-messages"> {
+	return buildModel({
+		api: "anthropic-messages",
+		provider: "litellm",
+		id: "claude-sonnet-4-5",
+		name: "Claude Sonnet 4.5 (proxy)",
+		baseUrl: "https://llm-proxy.example/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	} as ModelSpec<"anthropic-messages">);
+}
+
+describe("foreignThinkingReplay drop: native replay on a non-signing Claude host (review r288-2 M2)", () => {
+	it("sends no foreign thinking as text or native block for a GPT source turn", async () => {
+		const bodies: unknown[] = [];
+		await streamSimple(
+			claudeNonSigningHost(),
+			{
+				messages: [
+					userTurn,
+					gptTurn([
+						{ type: "thinking", thinking: FOREIGN, thinkingSignature: "" },
+						{ type: "text", text: VISIBLE },
+					]),
+					nextUser,
+				],
+			},
+			{ apiKey: "k", fetch: captureFetch(bodies), foreignThinkingReplay: "drop" },
+		).result();
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).not.toContain(FOREIGN);
+		expect(wire).toContain(VISIBLE);
+	});
+
+	it("still replays same-model signed thinking natively under drop", async () => {
+		const SIGNED = "SAME-MODEL-SIGNED-REASONING";
+		const sameModelTurn: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: SIGNED, thinkingSignature: "sig_same_model" },
+				{ type: "text", text: VISIBLE },
+			],
+			api: "anthropic-messages",
+			provider: "litellm",
+			model: "claude-sonnet-4-5",
+			usage: usage(),
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const bodies: unknown[] = [];
+		await streamSimple(
+			claudeNonSigningHost(),
+			{ messages: [userTurn, sameModelTurn, nextUser] },
+			{ apiKey: "k", fetch: captureFetch(bodies), foreignThinkingReplay: "drop" },
+		).result();
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).toContain(SIGNED);
+		expect(wire).toContain("sig_same_model");
+	});
+});

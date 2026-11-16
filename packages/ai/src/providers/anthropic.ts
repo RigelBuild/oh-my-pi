@@ -5857,16 +5857,10 @@ export function convertAnthropicMessages(
 		legacyCompactionFiles = undefined;
 	};
 
-	const transformedMessages = transformMessages(
-		messages,
-		model,
-		id => normalizeToolCallId(id),
-		undefined,
-		undefined,
-		undefined,
-		opts?.credentialId,
-		{ foreignThinkingReplay: opts?.foreignThinkingReplay },
-	);
+	const transformedMessages = transformMessages(messages, model, id => normalizeToolCallId(id), {
+		targetCredentialId: opts?.credentialId,
+		foreignThinkingReplay: opts?.foreignThinkingReplay,
+	});
 	// The turn this request answers: the last message that started a run (a
 	// `user` message, or a `developer` prompt such as a `/guided-goal` kickoff
 	// or the continue shortcut, which is `synthetic` or user-attributed) with no

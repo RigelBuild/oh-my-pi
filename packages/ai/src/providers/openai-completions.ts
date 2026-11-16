@@ -122,7 +122,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { completionsSendsOwnThinking, type TransformReplayOptions, transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, type TransformOptions, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2429,9 +2429,9 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompat,
-	replay: TransformReplayOptions = {},
+	options: TransformOptions = {},
 ): ChatCompletionMessageParam[] {
-	const { foreignThinkingReplay } = replay;
+	const { foreignThinkingReplay } = options;
 	const params: ChatCompletionMessageParam[] = [];
 
 	const maxNormalizedToolCallIdLength = compat.requiresMistralToolIds
@@ -2464,11 +2464,12 @@ export function convertMessages(
 		context.messages,
 		model,
 		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
-		maxNormalizedToolCallIdLength,
-		duplicateToolCallIdSuffixPrefix,
-		compat,
-		undefined,
-		{ foreignThinkingReplay },
+		{
+			maxNormalizedToolCallIdLength,
+			duplicateToolCallIdSuffixPrefix,
+			targetCompat: compat,
+			foreignThinkingReplay,
+		},
 	);
 
 	const remappedToolCallIds = new Map<string, string[]>();

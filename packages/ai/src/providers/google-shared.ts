@@ -42,7 +42,7 @@ import type {
 	ThinkingLevel,
 	UsageMetadata,
 } from "./google-types";
-import { type TransformReplayOptions, transformMessages } from "./transform-messages";
+import { type TransformOptions, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
@@ -209,22 +209,13 @@ export class FunctionCallOrder {
 export function convertMessages<T extends GoogleApiType>(
 	model: Model<T>,
 	context: Context,
-	replay: TransformReplayOptions = {},
+	options: TransformOptions = {},
 ): Content[] {
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
 	const callOrder = new FunctionCallOrder();
 
-	const transformedMessages = transformMessages(
-		context.messages,
-		model,
-		id => normalizeToolCallId(id),
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		replay,
-	);
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id), options);
 
 	// Gemini < 3 image tool results go in a separate user turn, but parallel tool results must
 	// stay a single contiguous functionResponse turn ("number of function response parts is not

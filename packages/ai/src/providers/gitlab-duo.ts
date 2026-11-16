@@ -158,6 +158,7 @@ export function streamGitLabDuo(
 								maxTokens: options.maxTokens ?? model.maxTokens ?? undefined,
 								signal: options.signal,
 								cacheRetention: options.cacheRetention,
+								foreignThinkingReplay: options.foreignThinkingReplay,
 								headers,
 								maxRetryDelayMs: options.maxRetryDelayMs,
 								metadata: options.metadata,

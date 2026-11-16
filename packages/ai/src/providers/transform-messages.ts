@@ -882,10 +882,18 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 }
 
 /**
- * Per-request replay policy shared by every `transformMessages` caller. Add
- * fields here, not positional parameters.
+ * Per-call options for {@link transformMessages}. Add fields here, not
+ * positional parameters.
  */
-export interface TransformReplayOptions {
+export interface TransformOptions<TApi extends Api = Api> {
+	/** Maximum length a normalized tool-call id may reach; defaults to {@link MAX_TOOL_CALL_ID_LENGTH}. */
+	maxNormalizedToolCallIdLength?: number;
+	/** Suffix prefix for duplicate tool-call ids; defaults to `"_dup"`. */
+	duplicateToolCallIdSuffixPrefix?: string;
+	/** Target compat used for replay decisions; defaults to the target model's compat. */
+	targetCompat?: Model<TApi>["compat"];
+	/** Credential the target request will use, for credential-bound thinking. */
+	targetCredentialId?: number;
 	/** Foreign or unsigned thinking for Claude targets: `"drop"` removes it, `"demote"` keeps it as text. */
 	foreignThinkingReplay?: "demote" | "drop";
 }
@@ -894,13 +902,15 @@ export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
-	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
-	duplicateToolCallIdSuffixPrefix = "_dup",
-	targetCompat: Model<TApi>["compat"] = model.compat,
-	targetCredentialId?: number,
-	replay?: TransformReplayOptions,
+	options: TransformOptions<TApi> = {},
 ): Message[] {
-	const foreignThinkingReplay = replay?.foreignThinkingReplay ?? "demote";
+	const {
+		maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
+		duplicateToolCallIdSuffixPrefix = "_dup",
+		targetCompat = model.compat,
+		targetCredentialId,
+		foreignThinkingReplay = "demote",
+	} = options;
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
 	// block errors from LLM providers (e.g. invalid_prompt).
@@ -1118,6 +1128,15 @@ export function transformMessages<TApi extends Api>(
 						signatureUntrustworthy && block.thinkingSignature
 							? { ...block, thinkingSignature: undefined }
 							: block;
+					// Under drop, a Claude target never receives foreign or unsigned thinking,
+					// as text or as a native block. Same-model signed thinking still replays.
+					if (
+						foreignThinkingReplay === "drop" &&
+						isClaudeTarget(model) &&
+						!(isSameModel && sanitized.thinkingSignature)
+					) {
+						return [];
+					}
 					if (isAnthropicReplay) {
 						// A signature is only replayable where its issuer can verify it.
 						// Same-provider replays (including cross-model-id switches within
@@ -1210,7 +1229,6 @@ export function transformMessages<TApi extends Api>(
 					// stay byte-identical. A separator baked into the block text would
 					// leak to non-flattening targets: Anthropic/Bedrock reject a
 					// terminal assistant message whose text ends with whitespace.
-					if (foreignThinkingReplay === "drop" && isClaudeTarget(model)) return [];
 					return {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),

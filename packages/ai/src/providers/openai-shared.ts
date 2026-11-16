@@ -137,7 +137,7 @@ import {
 import {
 	isMalformedToolCallName,
 	isValidToolCallId,
-	type TransformReplayOptions,
+	type TransformOptions,
 	transformMessages,
 } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
@@ -2056,8 +2056,8 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	};
 	includeThinkingSignatures?: boolean;
 	developerStringContent?: boolean;
-	/** Foreign-thinking replay policy for the target; see {@link TransformReplayOptions}. */
-	replay?: TransformReplayOptions;
+	/** Per-call transform options (foreign-thinking replay policy); see {@link TransformOptions}. */
+	replay?: TransformOptions;
 	repairOrphanOutputs?: boolean;
 	/** Preserve assistant message item IDs from text signatures during fallback replay. */
 	preserveAssistantMessageIds?: boolean;
@@ -2309,11 +2309,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		options.context.messages,
 		options.model,
 		normalizeResponsesToolCallIdForTransform,
-		undefined,
-		undefined,
-		filteredCompat,
-		undefined,
-		options.replay,
+		{ ...options.replay, targetCompat: filteredCompat },
 	);
 	const filterReasoning = <T extends { type?: string }>(items: T[]): T[] =>
 		options.nativeHistory?.filterReasoning ? items.filter(item => item?.type !== "reasoning") : items;

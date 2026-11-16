@@ -59,7 +59,7 @@ import type { MessageCreateParams, MessageCreateParamsStreaming, RawMessageStrea
 import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } from "./anthropic-wire";
 import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
-import { isClaudeTarget, type TransformReplayOptions, transformMessages } from "./transform-messages";
+import { isClaudeTarget, type TransformOptions, transformMessages } from "./transform-messages";
 
 /**
  * Headers SigV4 generates for itself. A caller cannot be allowed to supply these:
@@ -1368,19 +1368,10 @@ function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
 	promptCachePolicy: BedrockPromptCachePolicy,
-	replay: TransformReplayOptions = {},
+	options: TransformOptions = {},
 ): WireMessage[] {
 	const result: WireMessage[] = [];
-	const transformedMessages = transformMessages(
-		context.messages,
-		model,
-		id => normalizeToolCallId(id),
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		replay,
-	);
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id), options);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -1457,7 +1448,7 @@ function convertMessages(
 								// content survives, just no longer typed as a reasoning block. This matches how
 								// every other provider (Anthropic, Google, OpenAI-completions) handles thinking
 								// blocks it can't safely replay.
-								if (replay.foreignThinkingReplay === "drop" && isClaudeTarget(model)) break;
+								if (options.foreignThinkingReplay === "drop" && isClaudeTarget(model)) break;
 								contentBlocks.push({ text: renderDemotedThinking(model.id, c.thinking) });
 							}
 							break;

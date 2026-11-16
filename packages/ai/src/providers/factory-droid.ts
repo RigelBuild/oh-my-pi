@@ -363,6 +363,7 @@ type ForwardedOptions = Pick<
 	| "streamFirstEventTimeoutMs"
 	| "maxTokens"
 	| "waitForTerminalDrain"
+	| "foreignThinkingReplay"
 > & { apiKey: string; headers: Record<string, string> };
 
 /** One resolved request attempt, shared by every wire encoder. */
@@ -764,6 +765,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
 					maxTokens: options?.maxTokens ?? scope.model.maxTokens ?? undefined,
 					waitForTerminalDrain: options?.waitForTerminalDrain,
+					foreignThinkingReplay: options?.foreignThinkingReplay,
 					headers: {
 						...buildIdentityHeaders({
 							upstream: scope.upstream,
