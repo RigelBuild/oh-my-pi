@@ -527,7 +527,12 @@ export interface SessionAdvisorsHost {
 		currentModel?: Model | null,
 	): RetryFallbackSelector[];
 	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean;
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void;
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		status?: number,
+	): void;
 	createCodexCompactionContext(options: {
 		trigger: CodexCompactionContext["trigger"];
 		reason: CodexCompactionContext["reason"];
@@ -2206,7 +2211,7 @@ export class SessionAdvisors {
 			isClassifierRefusal(assistantFailure) &&
 			(advisor.retryFallback === undefined || advisor.retryFallback.originalSelector === currentSelector);
 		if (!primaryRefused) {
-			this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+			this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message, assistantFailure?.errorStatus);
 		}
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
