@@ -140,13 +140,15 @@ function hasNonWhitespace(value: string): boolean {
 }
 
 /**
- * Transport-drop wording: the socket closed, a payload arrived truncated, a stream stalled, or the
- * connection was reset or refused. Such a failure names no provider limit, so it never cools a
- * selector, since cooldowns are shared across sessions. 429 and 5xx text do not match, even when a
- * proxy adds wording such as `upstream connect error`: a status line still cools.
+ * Connection-drop wording (no HTTP status): the socket closed or was reset, the payload was cut
+ * short, the connection was refused, unreachable, or timed out. Such a failure names no provider
+ * limit, so it must not cool a selector: cooldowns are shared across sessions. A message that
+ * carries a 429, 402 or 5xx status is never a drop; `noteRetryFallbackCooldown` checks that first.
  */
 const TRANSPORT_DROP_RE =
-	/socket connection was closed|socket hang up|other side closed|use of closed network connection|peer closed connection|incomplete chunked read|payload is not completed|stream stall|stream stalled|connection (?:was )?reset|ECONNRESET|connection refused|ECONNREFUSED|ConnectionRefused|unable to connect|fetch failed|reset before headers/i;
+	/socket connection was closed|socket hang up|other side closed|use of closed network connection|peer closed connection|incomplete chunked read|payload is not completed|stream stall|stream stalled|connection (?:was )?reset|ECONNRESET|connection refused|ECONNREFUSED|ConnectionRefused|unable to connect|fetch failed|reset before headers|connection error|timed out|terminated|network error|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|EPIPE|couldn.?t reach|stream_read_error|HTTP2StreamReset|transport error reading/i;
+/** A 429, 402 or 5xx status anywhere in the message. Such a message cools, even with drop wording. */
+const STATUS_LIMIT_RE = /\b(?:429|402|5\d\d)\b/;
 
 /**
  * End of the conversation in `messages`, before trailing context-only custom
@@ -1914,8 +1916,9 @@ export class TurnRecovery {
 
 	/** Records the cooldown that should suppress a failing selector. */
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
-		// Cooldowns are shared across sessions: a transport drop names no limit, so it must not cool.
-		if (TRANSPORT_DROP_RE.test(errorMessage)) return;
+		// A status-carrying message cools even with drop wording. Cooldowns are shared
+		// across sessions, so a status-free connection drop must not cool.
+		if (!STATUS_LIMIT_RE.test(errorMessage) && TRANSPORT_DROP_RE.test(errorMessage)) return;
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
@@ -2321,10 +2324,7 @@ export class TurnRecovery {
 			refusalWalk?: boolean;
 			/** The retry policy retries the failed model if this hop does not switch. */
 			sameModelRetryAvailable?: boolean;
-			/**
-			 * One-shot: the first cooled candidate may be used. Set only by the caller's
-			 * second walk, after a walk with no cooled candidate found no switch.
-			 */
+			/** Cooled candidates may be used. Set only by the caller's second walk, after no switch was found. */
 			allowSuppressedFallback?: boolean;
 		},
 	): Promise<boolean> {
@@ -2357,23 +2357,22 @@ export class TurnRecovery {
 			!!sourceModel &&
 			sourceModel.provider === latestAssistant.provider &&
 			sourceModel.id === latestAssistant.model;
-		let suppressedUsed = false;
 		// The failing model is the saga's origin: a chain that names it back must not re-enter it.
 		this.#walkedThisSaga.add(this.#refusalWalkKey(currentSelector));
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				const cooled = this.isRetryFallbackSelectorSuppressed(selector);
-				// A cooled selector is skipped, unless this walk is the one-shot retry on the
-				// first cooled candidate that clears every check below (see the caller's gating).
-				if (cooled && (!options?.allowSuppressedFallback || suppressedUsed)) continue;
+				// The second walk may use a cooled candidate once every other check passes.
+				if (cooled && !options?.allowSuppressedFallback) continue;
 				// A refusal walk visits any one model at most once per turn. Without this a
 				// pair of chains naming each other alternates: each hop is a model the walk
 				// has already been refused on, and the budget no longer stops it.
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
 				// Any error kind: a chain pair that names each other must not walk back to a
-				// model this saga already switched to, or the budget resets on every hop. A
-				// long usage-limit wrap is the exception: it waits out a real reset first.
-				if (!options?.wrapAround && this.#walkedThisSaga.has(formatRetryFallbackBaseSelector(selector))) continue;
+				// model this saga already switched to. A wrap may revisit one only once its
+				// cooldown has expired, so a model that is still cooled stays out.
+				if (this.#walkedThisSaga.has(formatRetryFallbackBaseSelector(selector)) && (!options?.wrapAround || cooled))
+					continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
@@ -2485,7 +2484,6 @@ export class TurnRecovery {
 				}
 				if (applied) {
 					this.#walkedThisSaga.add(formatRetryFallbackBaseSelector(selector));
-					if (cooled) suppressedUsed = true;
 				}
 				return applied;
 			}
