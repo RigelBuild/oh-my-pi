@@ -142,13 +142,31 @@ function hasNonWhitespace(value: string): boolean {
 /**
  * Connection-drop wording (no HTTP status): the socket closed or was reset, the payload was cut
  * short, the connection was refused, unreachable, or timed out. Such a failure names no provider
- * limit, so it must not cool a selector: cooldowns are shared across sessions. A message that
- * carries a 429, 402 or 5xx status is never a drop; `noteRetryFallbackCooldown` checks that first.
+ * limit, so it must not cool a selector: cooldowns are shared across sessions. `terminated` is
+ * anchored so that `access_terminated_error` (a Kimi usage limit) does not match.
  */
 const TRANSPORT_DROP_RE =
-	/socket connection was closed|socket hang up|other side closed|use of closed network connection|peer closed connection|incomplete chunked read|payload is not completed|stream stall|stream stalled|connection (?:was )?reset|ECONNRESET|connection refused|ECONNREFUSED|ConnectionRefused|unable to connect|fetch failed|reset before headers|connection error|timed out|terminated|network error|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|EPIPE|couldn.?t reach|stream_read_error|HTTP2StreamReset|transport error reading/i;
-/** A 429, 402 or 5xx status anywhere in the message. Such a message cools, even with drop wording. */
-const STATUS_LIMIT_RE = /\b(?:429|402|5\d\d)\b/;
+	/socket connection was closed|socket hang up|other side closed|use of closed network connection|peer closed connection|incomplete chunked read|payload is not completed|stream stall|stream stalled|connection (?:was )?reset|ECONNRESET|connection refused|ECONNREFUSED|ConnectionRefused|unable to connect|fetch failed|reset before headers|connection error|timed out|\bterminated\b|network error|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|EPIPE|couldn.?t reach|stream_read_error|HTTP2StreamReset|transport error reading/i;
+/** A status number written as a status: a leading code, or `status`/`code`/`HTTP` before it. */
+const STATUS_TEXT_RE = /^\s*(?:HTTP\s*)?(\d{3})\b|\b(?:status|code|HTTP)[ :=]*(\d{3})\b/i;
+
+/** True when the failure carries a 429, 402 or 5xx status: the explicit one, else one written in the text. */
+function isLimitStatus(status: number | undefined, errorMessage: string): boolean {
+	const match = STATUS_TEXT_RE.exec(errorMessage);
+	const code = status ?? Number(match?.[1] ?? match?.[2]);
+	return code === 429 || code === 402 || (code >= 500 && code <= 599);
+}
+
+/**
+ * True when the failure is a connection drop with no recognised limit. The reason check keeps a
+ * limit beside drop wording (a Kimi `access_terminated_error` 403) cooling: only UNKNOWN or
+ * SERVER_ERROR reasons may skip the cooldown.
+ */
+function isDropFailure(errorMessage: string): boolean {
+	if (!TRANSPORT_DROP_RE.test(errorMessage)) return false;
+	const reason = parseRateLimitReason(errorMessage);
+	return reason === "UNKNOWN" || reason === "SERVER_ERROR";
+}
 
 /**
  * End of the conversation in `messages`, before trailing context-only custom
@@ -1915,10 +1933,15 @@ export class TurnRecovery {
 	}
 
 	/** Records the cooldown that should suppress a failing selector. */
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
-		// A status-carrying message cools even with drop wording. Cooldowns are shared
-		// across sessions, so a status-free connection drop must not cool.
-		if (!STATUS_LIMIT_RE.test(errorMessage) && TRANSPORT_DROP_RE.test(errorMessage)) return;
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		status?: number,
+	): void {
+		// Drops never cool, since cooldowns are shared across sessions. A recognised limit
+		// or a 429, 402 or 5xx status always cools, even beside drop wording.
+		if (!isLimitStatus(status, errorMessage) && isDropFailure(errorMessage)) return;
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
@@ -3047,7 +3070,12 @@ export class TurnRecovery {
 					// to a still-exhausted primary. A switched credential means a
 					// sibling is free now, and that wait covers only the spent one.
 					const usageCooldownMs = recordedUsageLimitOutcome?.switchedCredential ? undefined : usageLimitWaitMs;
-					this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
+					this.noteRetryFallbackCooldown(
+						currentSelector,
+						usageCooldownMs ?? parsedRetryAfterMs,
+						errorMessage,
+						message.errorStatus,
+					);
 				}
 				// Deferring a chain candidate only pays when the code below makes
 				// another attempt on this model that can succeed. Each term is a

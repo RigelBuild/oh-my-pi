@@ -173,6 +173,12 @@ describe("retry fallback cooldown shared across sessions", () => {
 		],
 		["a bare connection error", "Connection error.", false],
 		["a request timeout", "Request timed out.", false],
+		[
+			"a Kimi 403 monthly usage limit (access_terminated_error)",
+			'403 {"error":{"message":"You have reached your monthly usage limit","type":"access_terminated_error"}}',
+			true,
+		],
+		["a socket hang up that reports a byte count, with no status", "socket hang up after 512 bytes", false],
 	];
 	for (const [label, message, cools] of COOLDOWN_TABLE) {
 		it(`${cools ? "cools" : "does not cool"} on ${label}`, async () => {
@@ -388,8 +394,8 @@ describe("fallback walk bounds and candidate gating", () => {
 				failures: { [a]: TRANSPORT_ERROR, [b]: longLimit },
 			});
 			// Hops: origin A, peer B, then A four times. The uncooled origin is revisited by the
-			// peer's wrap, then retried on the same model until `retry.maxRetries` (default 10) is spent.
-			// The walk ends after six requests; it does not loop.
+			// peer's wrap. Its same-model retries stop once the backoff passes `retry.maxDelayMs`
+			// (100 in runWalk), so the cap, not `retry.maxRetries`, bounds the count. The walk ends.
 			expect(requestedModels).toEqual([a, b, a, a, a, a]);
 		} finally {
 			flagged.mockRestore();
