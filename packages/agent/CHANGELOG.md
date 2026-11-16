@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.3-rigel.5] - 2026-11-16
+
 ### Added
 
 - `AgentTool.rejectUnknownRootKeys` marks a tool whose schema an external party owns (MCP servers). Unknown root argument keys fail validation with the key named, instead of being dropped.

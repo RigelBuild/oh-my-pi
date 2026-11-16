@@ -2,10 +2,7 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Reworded agent prompts and skills to request evidence and results instead of process descriptions, and removed private-work guidance from model-specific tool instructions.
-- Interruption notices no longer quote interrupted thinking.
+## [18.18.3-rigel.5] - 2026-11-16
 
 ### Added
 
@@ -23,6 +20,8 @@
 
 ### Fixed
 
+- Reworded agent prompts and skills to request evidence and results instead of process descriptions, and removed private-work guidance from model-specific tool instructions.
+- Interruption notices no longer quote interrupted thinking.
 - Automatic handoffs honor the compaction retry policy; manual handoffs retain their existing retry behavior.
 - Compiled legacy Pi imports now bundle `.js` root-wildcard aliases beside their TypeScript modules, preserving shared host module instances.
 - `omp auth-broker migrate --from-local` uploads every distinct API key for a provider, skipping only keys the broker already holds, so several Anthropic Console keys can be pooled.
@@ -184,6 +183,7 @@
 - Eval `wait()` progress rows for agents spawned by one `task` call show each agent's own tool count, context, cost and activity instead of the first agent's ([#18393](https://github.com/can1357/oh-my-pi/issues/18393))
 - In the Pseudo shell visualization, an `&&` chain keeps its `and` rows while it runs and after it finishes, instead of switching to literal `&&` rows and a raw-bash tail when the output minimizer runs it one command at a time ([#18408](https://github.com/can1357/oh-my-pi/issues/18408))
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
