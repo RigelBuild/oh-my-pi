@@ -140,6 +140,23 @@ function hasNonWhitespace(value: string): boolean {
 }
 
 /**
+ * Whether a failed request hit a provider limit (a usage cap, a rate limit, or
+ * a capacity/overload cap). Only these cool the failing selector down. A
+ * transport failure (socket closed, truncated payload, stall, a bare 5xx with
+ * no limit wording) names no limit, and the registry's cooldowns are shared
+ * across sessions, so cooling it would block a sibling's fallback for minutes.
+ */
+function isProviderLimitFailure(id: number, status: number | undefined, errorMessage: string): boolean {
+	if (AIError.is(id, AIError.Flag.UsageLimit) || AIError.isUsageLimitStatus(status)) return true;
+	const reason = parseRateLimitReason(errorMessage);
+	if (reason === "MODEL_CAPACITY_EXHAUSTED") return CAPACITY_WORDING_RE.test(errorMessage);
+	return reason !== "UNKNOWN" && reason !== "SERVER_ERROR";
+}
+
+/** Capacity or overload wording. A bare `503` is a generic 5xx, not a cap. */
+const CAPACITY_WORDING_RE = /capacity|overloaded|\b529\b|resource.?exhausted|MODEL_CAPACITY_(?:EXHAUSTED|EXCEEDED)/i;
+
+/**
  * End of the conversation in `messages`, before trailing context-only custom
  * messages: eval runtime snapshots (appended at startup and on display-context
  * rebuilds) and deliveries folded in without a turn — e.g. an `async-result`
@@ -1907,6 +1924,23 @@ export class TurnRecovery {
 	}
 
 	/**
+	 * Whether the fallback walk has candidates and every one is cooled down by a
+	 * failure. A candidate that is not cooled is a hard skip for the walk (no auth,
+	 * no-op, context too large, excluded provider), so one such candidate means the
+	 * walk may not reach a cooled one.
+	 */
+	#everyRetryFallbackCandidateCooled(currentSelector: string, options?: { wrapAround?: boolean }): boolean {
+		let seen = false;
+		for (const role of this.retryFallbackChainKeys(currentSelector)) {
+			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
+				seen = true;
+				if (!this.isRetryFallbackSelectorSuppressed(selector)) return false;
+			}
+		}
+		return seen;
+	}
+
+	/**
 	 * Map the failing model selector to the chain key that owns it, by
 	 * specificity: an exact model-selector key, then a `provider/*` wildcard,
 	 * then a model role whose current assignment matches, then `default`.
@@ -2303,6 +2337,11 @@ export class TurnRecovery {
 			refusalWalk?: boolean;
 			/** The retry policy retries the failed model if this hop does not switch. */
 			sameModelRetryAvailable?: boolean;
+			/**
+			 * One-shot: the first cooled candidate may be used. Set only by the caller's
+			 * second walk, after a walk with no cooled candidate found no switch.
+			 */
+			allowSuppressedFallback?: boolean;
 		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -2334,9 +2373,15 @@ export class TurnRecovery {
 			!!sourceModel &&
 			sourceModel.provider === latestAssistant.provider &&
 			sourceModel.id === latestAssistant.model;
+		let suppressedUsed = false;
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
+				if (this.isRetryFallbackSelectorSuppressed(selector)) {
+					// A cooled selector is skipped, unless this walk is the one-shot
+					// retry on the first such candidate (see the caller's gating).
+					if (!options?.allowSuppressedFallback || suppressedUsed) continue;
+					suppressedUsed = true;
+				}
 				// A refusal walk visits any one model at most once per turn. Without this a
 				// pair of chains naming each other alternates: each hop is a model the walk
 				// has already been refused on, and the budget no longer stops it.
@@ -3012,36 +3057,52 @@ export class TurnRecovery {
 					// to a still-exhausted primary. A switched credential means a
 					// sibling is free now, and that wait covers only the spent one.
 					const usageCooldownMs = recordedUsageLimitOutcome?.switchedCredential ? undefined : usageLimitWaitMs;
-					this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
+					if (isProviderLimitFailure(id, message.errorStatus, errorMessage)) {
+						this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
+					}
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
+				// Deferring a chain candidate only pays when the code below makes
+				// another attempt on this model that can succeed. Each term is a
+				// branch below that, with no switch, ends the turn instead (a spent
+				// budget, a refusal or account-policy denial, a hard-error or
+				// Fast-degrade consult the classifier would not retry, a wait past
+				// the fail-fast cap), or, under `retry.rateLimitWalksChain`, a rate
+				// limit on this model, which the next attempt re-hits.
+				const sameModelRetryAvailable =
+					!retryBudgetExhausted &&
+					!sourceRateLimited &&
+					!classifierRefusal &&
+					!accountPolicyDenial &&
+					!((options?.fireworksFastFallback || options?.hardErrorFallback) && !this.isRetryableError(message)) &&
+					!exceedsDelayCap(
+						usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+							? parsedRetryAfterMs
+							: delayMs,
+					);
+				const fallbackOptions = {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
 					pinFallback: classifierRefusal,
 					refusalWalk: classifierRefusal,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
-					// Deferring a chain candidate only pays when the code below makes
-					// another attempt on this model that can succeed. Each term is a
-					// branch below that, with no switch, ends the turn instead (a spent
-					// budget, a refusal or account-policy denial, a hard-error or
-					// Fast-degrade consult the classifier would not retry, a wait past
-					// the fail-fast cap), or, under `retry.rateLimitWalksChain`, a rate
-					// limit on this model, which the next attempt re-hits.
-					sameModelRetryAvailable:
-						!retryBudgetExhausted &&
-						!sourceRateLimited &&
-						!classifierRefusal &&
-						!accountPolicyDenial &&
-						!(
-							(options?.fireworksFastFallback || options?.hardErrorFallback) &&
-							!this.isRetryableError(message)
-						) &&
-						!exceedsDelayCap(
-							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
-								? parsedRetryAfterMs
-								: delayMs,
-						),
-				});
+					// The retry policy retries the failed model when this is true; deferring
+					// a chain candidate pays only then.
+					sameModelRetryAvailable,
+				};
+				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, fallbackOptions);
+				// A chain whose every candidate a sibling's failure cooled down must not end
+				// the turn when no same-model retry remains in the delay cap. Any candidate
+				// not cooled is a hard skip, so the second walk runs only when all are cooled.
+				if (
+					!switchedModel &&
+					!sameModelRetryAvailable &&
+					this.#everyRetryFallbackCandidateCooled(currentSelector, { wrapAround: longUsageLimitFallback })
+				) {
+					switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
+						...fallbackOptions,
+						allowSuppressedFallback: true,
+					});
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
