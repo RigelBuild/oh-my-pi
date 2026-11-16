@@ -1805,6 +1805,7 @@ export function buildParams(
 		model,
 		context,
 		strictResponsesPairing,
+		replay: { foreignThinkingReplay: options?.foreignThinkingReplay },
 		supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
 		nativeHistory: {
 			replay: shouldReplayNativeHistory,

@@ -529,6 +529,24 @@ export function isSameModelTurn(
 }
 
 /**
+ * Whether `model` is a Claude target: its class refuses quoted reasoning, so
+ * replayed foreign thinking would trip the classifier. Class-owned (catalog
+ * `classifier-cot-extraction`), so it holds on every host.
+ */
+export function isClaudeTarget(model: Pick<Model, "provider" | "api" | "id" | "reasoning">): boolean {
+	return resolveCatalogPolicy(model).classifierCotExtraction === true;
+}
+
+/**
+ * Whether a replayed assistant turn came from a Claude model. Same catalog class
+ * as {@link isClaudeTarget}, applied to the source turn's provider, api and id.
+ * `reasoning` is the target's flag: a turn does not record it.
+ */
+function isClaudeSourceTurn(turn: Pick<AssistantMessage, "provider" | "api" | "model">, reasoning: boolean): boolean {
+	return isClaudeTarget({ provider: turn.provider, api: turn.api, id: turn.model, reasoning });
+}
+
+/**
  * Whether an API's encoder runs {@link transformMessages} against the target
  * model itself, so {@link isSameModelTurn} decides what replays. Agent proxies
  * encode through an inner model or their own path; extension APIs are not
@@ -872,15 +890,36 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 	});
 }
 
+/**
+ * Per-call options for {@link transformMessages}. Add fields here, not
+ * positional parameters.
+ */
+export interface TransformOptions<TApi extends Api = Api> {
+	/** Maximum length a normalized tool-call id may reach; defaults to {@link MAX_TOOL_CALL_ID_LENGTH}. */
+	maxNormalizedToolCallIdLength?: number;
+	/** Suffix prefix for duplicate tool-call ids; defaults to `"_dup"`. */
+	duplicateToolCallIdSuffixPrefix?: string;
+	/** Target compat used for replay decisions; defaults to the target model's compat. */
+	targetCompat?: Model<TApi>["compat"];
+	/** Credential the target request will use, for credential-bound thinking. */
+	targetCredentialId?: number;
+	/** Foreign or unsigned thinking for Claude targets: `"drop"` removes it, `"demote"` keeps it as text. */
+	foreignThinkingReplay?: "demote" | "drop";
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
-	maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
-	duplicateToolCallIdSuffixPrefix = "_dup",
-	targetCompat: Model<TApi>["compat"] = model.compat,
-	targetCredentialId?: number,
+	options: TransformOptions<TApi> = {},
 ): Message[] {
+	const {
+		maxNormalizedToolCallIdLength = MAX_TOOL_CALL_ID_LENGTH,
+		duplicateToolCallIdSuffixPrefix = "_dup",
+		targetCompat = model.compat,
+		targetCredentialId,
+		foreignThinkingReplay = "demote",
+	} = options;
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
 	// block errors from LLM providers (e.g. invalid_prompt).
@@ -1125,6 +1164,13 @@ export function transformMessages<TApi extends Api>(
 						if (staleSignature && signingAnthropicInvolved && sanitized.thinkingSignature) {
 							sanitized = { ...sanitized, thinkingSignature: undefined };
 						}
+						// Under drop, a Claude target gets only signed thinking it can verify: the
+						// same model, the same deployment, or a Claude source on the same provider.
+						const ownClaudeSource =
+							assistantMsg.provider === model.provider && isClaudeSourceTurn(assistantMsg, model.reasoning);
+						const keepsOwnSignature =
+							!!sanitized.thinkingSignature && (isSameModel || sameAnthropicDeployment || ownClaudeSource);
+						if (foreignThinkingReplay === "drop" && isClaudeTarget(model) && !keepsOwnSignature) return [];
 						// Drop blocks with neither a signature anchor nor any text —
 						// nothing for the next turn to replay.
 						if (!sanitized.thinkingSignature && (!sanitized.thinking || sanitized.thinking.trim() === "")) {
@@ -1159,6 +1205,8 @@ export function transformMessages<TApi extends Api>(
 					// llama.cpp cache-prefix replay are orthogonal encoder concerns;
 					// keeping inert foreign CoT native for those flags loses the
 					// canonical visible-text fallback without adding model context.
+					// Under drop, a Claude target never receives cross-model thinking natively.
+					if (foreignThinkingReplay === "drop" && isClaudeTarget(model)) return [];
 					if (targetReadsForeignThinking(model, targetCompat)) {
 						return sanitized.thinkingSignature ? { ...sanitized, thinkingSignature: undefined } : sanitized;
 					}

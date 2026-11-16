@@ -813,6 +813,53 @@ describe("Latest-turn foreign thinking signatures (model switch mid tool-loop)",
 		expect(thinking?.signature).toBe("sig_fable");
 	});
 
+	// RIG-10349 r288-3 high: drop removes foreign or unsigned thinking only. Signed
+	// thinking on the same official deployment, and the latest abandoned turn that
+	// Anthropic requires byte-for-byte, are neither, so they must survive drop.
+	it("keeps signed thinking from another Claude model on the same deployment under drop", () => {
+		const target = officialFable();
+		const messages: Message[] = [
+			makeUser("Fix the PR body"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "sonnet reasoning", thinkingSignature: "sig_sonnet" },
+					{ type: "toolCall", id: "toolu_send", name: "send", arguments: {} },
+				],
+				{ provider: "anthropic", model: "claude-sonnet-4-5" },
+			),
+			toolResult("toolu_send", "sent"),
+			makeUser("continue"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false, { foreignThinkingReplay: "drop" });
+		const blocks = params.filter(p => p.role === "assistant")[0].content as WireBlock[];
+		const thinking = blocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("sonnet reasoning");
+		expect(thinking?.signature).toBe("sig_sonnet");
+	});
+
+	it("replays the latest abandoned same-model tool-use turn byte-identical under drop", () => {
+		const target = officialFable();
+		const messages: Message[] = [
+			makeUser("Do the thing"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: "fable reasoning", thinkingSignature: "sig_fable" },
+					{ type: "toolCall", id: "toolu_left", name: "read", arguments: { path: "a" } },
+				],
+				{ provider: "anthropic", model: "claude-fable-5", stopReason: "stop" },
+			),
+			toolResult("toolu_left", "placeholder"),
+			makeUser("continue"),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false, { foreignThinkingReplay: "drop" });
+		const blocks = params.filter(p => p.role === "assistant")[0].content as WireBlock[];
+		const thinking = blocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("fable reasoning");
+		expect(thinking?.signature).toBe("sig_fable");
+	});
+
 	it("drops a foreign redacted_thinking sibling on the latest turn for signing targets", () => {
 		const target = officialFable();
 		const messages: Message[] = [

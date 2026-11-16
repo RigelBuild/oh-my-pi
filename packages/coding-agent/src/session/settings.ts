@@ -298,6 +298,23 @@ export const cfgOmitThinking = register({
 	},
 });
 
+export const cfgThinkingForeignReplay = register({
+	id: "thinking.foreignReplay",
+	type: "enum",
+	values: ["demote", "drop"] as const,
+	default: "demote",
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Foreign thinking replay",
+		description: "How thinking from other models replays to Claude: demote sends it as text; drop removes it",
+		options: [
+			{ value: "demote", label: "Demote", description: "Send foreign thinking as visible text" },
+			{ value: "drop", label: "Drop", description: "Remove foreign thinking for Claude targets" },
+		],
+	},
+});
+
 export const cfgExternalThinking = register({
 	id: "externalThinking",
 	type: "boolean",

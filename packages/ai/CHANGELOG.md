@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `StreamOptions.foreignThinkingReplay` (`"demote"` default, `"drop"`). With `"drop"`, foreign or unsigned thinking from earlier turns is removed for Claude targets instead of replayed as visible text. Other targets keep demotion.
+
 ## [18.18.3-rigel.5] - 2026-11-16
 
 ### Added

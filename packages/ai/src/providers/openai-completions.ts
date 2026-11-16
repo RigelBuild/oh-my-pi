@@ -122,7 +122,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, type TransformOptions, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2250,7 +2250,7 @@ function buildParams(
 		hasTools: Array.isArray(params.tools) && params.tools.length > 0,
 	});
 	const compat = finalPolicy.compat as ResolvedOpenAICompat;
-	const messages = convertMessages(model, context, compat);
+	const messages = convertMessages(model, context, compat, { foreignThinkingReplay: options?.foreignThinkingReplay });
 	maybeAddAnthropicCacheControl(compat, messages);
 	params.messages = messages;
 	const outputToken = resolveOpenAIOutputTokenParam({
@@ -2429,7 +2429,9 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompat,
+	options: TransformOptions = {},
 ): ChatCompletionMessageParam[] {
+	const { foreignThinkingReplay } = options;
 	const params: ChatCompletionMessageParam[] = [];
 
 	const maxNormalizedToolCallIdLength = compat.requiresMistralToolIds
@@ -2462,9 +2464,12 @@ export function convertMessages(
 		context.messages,
 		model,
 		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
-		maxNormalizedToolCallIdLength,
-		duplicateToolCallIdSuffixPrefix,
-		compat,
+		{
+			maxNormalizedToolCallIdLength,
+			duplicateToolCallIdSuffixPrefix,
+			targetCompat: compat,
+			foreignThinkingReplay,
+		},
 	);
 
 	const remappedToolCallIds = new Map<string, string[]>();

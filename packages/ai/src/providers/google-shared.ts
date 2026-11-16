@@ -42,7 +42,7 @@ import type {
 	ThinkingLevel,
 	UsageMetadata,
 } from "./google-types";
-import { transformMessages } from "./transform-messages";
+import { type TransformOptions, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
@@ -206,12 +206,16 @@ export class FunctionCallOrder {
 /**
  * Convert internal messages to Gemini Content[] format.
  */
-export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
+export function convertMessages<T extends GoogleApiType>(
+	model: Model<T>,
+	context: Context,
+	options: TransformOptions = {},
+): Content[] {
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
 	const callOrder = new FunctionCallOrder();
 
-	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id), options);
 
 	// Gemini < 3 image tool results go in a separate user turn, but parallel tool results must
 	// stay a single contiguous functionResponse turn ("number of function response parts is not
@@ -896,7 +900,7 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	options: GoogleSharedStreamOptions,
 ): GenerateContentParameters {
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
-	const contents = convertMessages(model, context);
+	const contents = convertMessages(model, context, { foreignThinkingReplay: options.foreignThinkingReplay });
 
 	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) generationConfig.temperature = options.temperature;

@@ -787,6 +787,11 @@ export interface StreamOptions {
 	 * observes limit headers, and decides capacity waits.
 	 */
 	anthropicSlowMode?: AnthropicSlowModeHooks;
+	/**
+	 * How foreign or unsigned thinking from earlier turns replays to a Claude target:
+	 * `"demote"` (default) sends it as visible text; `"drop"` removes it.
+	 */
+	foreignThinkingReplay?: "demote" | "drop";
 }
 
 /**

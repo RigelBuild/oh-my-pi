@@ -153,7 +153,7 @@ import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
-import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
+import { isClaudeTarget, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
@@ -5443,6 +5443,7 @@ function buildParams(
 		thinkingEnabled: thinking?.type === "adaptive" || thinking?.type === "enabled",
 		droppedThinkingBlocks,
 		credentialId: options?.credentialId,
+		foreignThinkingReplay: options?.foreignThinkingReplay,
 		compactionRequest,
 	};
 	const wireMessages = convertAnthropicMessages(
@@ -5785,6 +5786,8 @@ type AnthropicConversionOptions = {
 	thinkingEnabled?: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
 	credentialId?: number;
+	/** Foreign or unsigned thinking replay for Claude targets; see `StreamOptions.foreignThinkingReplay`. */
+	foreignThinkingReplay?: "demote" | "drop";
 	/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
 	compactionRequest?: AnthropicCompactionRequest;
 };
@@ -5854,15 +5857,10 @@ export function convertAnthropicMessages(
 		legacyCompactionFiles = undefined;
 	};
 
-	const transformedMessages = transformMessages(
-		messages,
-		model,
-		id => normalizeToolCallId(id),
-		undefined,
-		undefined,
-		undefined,
-		opts?.credentialId,
-	);
+	const transformedMessages = transformMessages(messages, model, id => normalizeToolCallId(id), {
+		targetCredentialId: opts?.credentialId,
+		foreignThinkingReplay: opts?.foreignThinkingReplay,
+	});
 	// The turn this request answers: the last message that started a run (a
 	// `user` message, or a `developer` prompt such as a `/guided-goal` kickoff
 	// or the continue shortcut, which is `synthetic` or user-attributed) with no
@@ -6059,6 +6057,7 @@ export function convertAnthropicMessages(
 					if (hasSignedThinking) {
 						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
 							if (block.thinking.trim().length === 0) continue;
+							if (opts?.foreignThinkingReplay === "drop" && isClaudeTarget(model)) continue;
 							blocks.push({
 								type: "text",
 								text: renderDemotedThinking(model.id, block.thinking),
@@ -6080,6 +6079,8 @@ export function convertAnthropicMessages(
 								thinking: block.thinking.toWellFormed(),
 								signature: "",
 							});
+						} else if (opts?.foreignThinkingReplay === "drop" && isClaudeTarget(model)) {
+							// Dropped: the target's classifier refuses quoted reasoning.
 						} else {
 							blocks.push({
 								type: "text",
