@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.3-rigel.7] - 2026-11-16
+
 ### Added
 
 - Added the `thinking.foreignReplay` setting (`demote` default, `drop`). With `drop`, thinking from other models is removed from requests to Claude instead of replayed as visible text, which avoids Claude's `reasoning_extraction` refusals. Other targets keep demotion.
