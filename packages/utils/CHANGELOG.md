@@ -2,14 +2,16 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- `ChildProcess.exitReason` is set as soon as `kill(reason)` runs, before the process exits.
-- Abort signals cancel output reads started after the root exits when a descendant keeps a pipe open.
+## [18.18.3-rigel.5] - 2026-11-16
 
 ### Added
 
 - Added `postmortem.setCleanupDeadline()` so a long-lived server can let a signal-driven cleanup step (such as an HTTP drain) run past the default 10 s deadline.
+
+### Fixed
+
+- `ChildProcess.exitReason` is set as soon as `kill(reason)` runs, before the process exits.
+- Abort signals cancel output reads started after the root exits when a descendant keeps a pipe open.
 
 ## [18.18.2] - 2026-11-08
 
@@ -22,6 +24,7 @@
 
 - Fixed relaxed JSON parsing so `__proto__` is preserved as a regular own property rather than modifying the parsed object's prototype.
 - Fixed SIGHUP handling so stopped terminal sessions display recovery hints, including the `--resume` command.
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
@@ -188,6 +191,7 @@
 ### Added
 
 - Added `getMnemopiEmbedRuntimeDir()` for the shared mnemopi embedding server endpoints and logs.
+
 ### Fixed
 
 - Fixed `ChildProcess.kill()` silently leaving the child running when the native process handle could not be resolved or used; it now signals the child directly and escalates to SIGKILL after the grace period.
