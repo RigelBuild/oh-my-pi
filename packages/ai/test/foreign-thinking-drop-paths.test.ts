@@ -290,3 +290,69 @@ describe("foreignThinkingReplay drop: native replay on a non-signing Claude host
 		expect(wire).toContain("sig_same_model");
 	});
 });
+
+/** Opus on the same non-signing proxy as {@link claudeNonSigningHost}: same provider, not official, no prefix binding. */
+function opusNonSigningHost(): Model<"anthropic-messages"> {
+	return buildModel({
+		api: "anthropic-messages",
+		provider: "litellm",
+		id: "claude-opus-4-5",
+		name: "Claude Opus 4.5 (proxy)",
+		baseUrl: "https://llm-proxy.example/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	} as ModelSpec<"anthropic-messages">);
+}
+
+describe("foreignThinkingReplay drop: Claude source on a non-signing proxy (review r288-4 medium)", () => {
+	it("keeps signed Sonnet thinking natively when replayed to Opus on the same proxy under drop", async () => {
+		const SIGNED = "SONNET-SIGNED-REASONING";
+		const sonnetTurn: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: SIGNED, thinkingSignature: "sig_sonnet" },
+				{ type: "text", text: VISIBLE },
+			],
+			api: "anthropic-messages",
+			provider: "litellm",
+			model: "claude-sonnet-4-5",
+			usage: usage(),
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const bodies: unknown[] = [];
+		await streamSimple(
+			opusNonSigningHost(),
+			{ messages: [userTurn, sonnetTurn, nextUser] },
+			{ apiKey: "k", fetch: captureFetch(bodies), foreignThinkingReplay: "drop" },
+		).result();
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).toContain(SIGNED);
+		expect(wire).toContain("sig_sonnet");
+	});
+
+	it("drops GPT-signed thinking replayed to Opus on the same proxy under drop", async () => {
+		const bodies: unknown[] = [];
+		await streamSimple(
+			opusNonSigningHost(),
+			{
+				messages: [
+					userTurn,
+					gptTurn([
+						{ type: "thinking", thinking: FOREIGN, thinkingSignature: "rs_gpt" },
+						{ type: "text", text: VISIBLE },
+					]),
+					nextUser,
+				],
+			},
+			{ apiKey: "k", fetch: captureFetch(bodies), foreignThinkingReplay: "drop" },
+		).result();
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).not.toContain(FOREIGN);
+		expect(wire).not.toContain("rs_gpt");
+		expect(wire).toContain(VISIBLE);
+	});
+});

@@ -538,6 +538,15 @@ export function isClaudeTarget(model: Pick<Model, "provider" | "api" | "id" | "r
 }
 
 /**
+ * Whether a replayed assistant turn came from a Claude model. Same catalog class
+ * as {@link isClaudeTarget}, applied to the source turn's provider, api and id.
+ * `reasoning` is the target's flag: a turn does not record it.
+ */
+function isClaudeSourceTurn(turn: Pick<AssistantMessage, "provider" | "api" | "model">, reasoning: boolean): boolean {
+	return isClaudeTarget({ provider: turn.provider, api: turn.api, id: turn.model, reasoning });
+}
+
+/**
  * Whether an API's encoder runs {@link transformMessages} against the target
  * model itself, so {@link isSameModelTurn} decides what replays. Agent proxies
  * encode through an inner model or their own path; extension APIs are not
@@ -1155,9 +1164,12 @@ export function transformMessages<TApi extends Api>(
 						if (staleSignature && signingAnthropicInvolved && sanitized.thinkingSignature) {
 							sanitized = { ...sanitized, thinkingSignature: undefined };
 						}
-						// Under drop, a Claude target gets only signed thinking that stays on
-						// the same deployment or model. Foreign or unsigned thinking is removed.
-						const keepsOwnSignature = !!sanitized.thinkingSignature && (isSameModel || sameAnthropicDeployment);
+						// Under drop, a Claude target gets only signed thinking it can verify: the
+						// same model, the same deployment, or a Claude source on the same provider.
+						const ownClaudeSource =
+							assistantMsg.provider === model.provider && isClaudeSourceTurn(assistantMsg, model.reasoning);
+						const keepsOwnSignature =
+							!!sanitized.thinkingSignature && (isSameModel || sameAnthropicDeployment || ownClaudeSource);
 						if (foreignThinkingReplay === "drop" && isClaudeTarget(model) && !keepsOwnSignature) return [];
 						// Drop blocks with neither a signature anchor nor any text —
 						// nothing for the next turn to replay.
