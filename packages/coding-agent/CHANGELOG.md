@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Advisors no longer receive the primary model's thinking by default. Set `includeReasoning: true` on a `WATCHDOG.yml` advisor entry to opt back in.
+
 ### Fixed
 
 - Agents and subagents get the full evidence-only rule: other agents and models are asked only for evidence and results, never for their internal process or raw transcripts.

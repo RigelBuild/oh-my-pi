@@ -85,7 +85,7 @@ export interface AdvisorConfig {
 	syncBacklog?: AdvisorSyncBacklog;
 	/** Which session kinds this advisor attaches to (`main`, `subagent`, or `all`; defaults to `all`). */
 	scope?: AdvisorSessionScope;
-	/** Whether primary assistant thinking blocks are included in updates sent to this advisor (defaults to `true`). */
+	/** Whether primary assistant thinking blocks are included in updates sent to this advisor (defaults to `false`). */
 	includeReasoning?: boolean;
 }
 

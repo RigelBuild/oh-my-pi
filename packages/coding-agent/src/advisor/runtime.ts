@@ -95,9 +95,9 @@ export interface AdvisorRuntimeHost {
 	notifyIdle?(): void;
 	/**
 	 * Whether primary assistant thinking blocks (`_thinking:_`) are included in
-	 * deltas rendered for this advisor. Defaults to `true`. Setting `false`
-	 * runs the advisor in evidence-only mode (actions, tool I/O, and outputs
-	 * without the primary model's chain-of-thought).
+	 * deltas rendered for this advisor. Defaults to `false`: the primary model's
+	 * thinking is not sent to the advisor unless the advisor opts in with `true`.
+	 * Thinking is never forwarded as plain text by default.
 	 */
 	includeReasoning?: boolean;
 }
@@ -363,7 +363,7 @@ export class AdvisorRuntime {
 		private readonly host: AdvisorRuntimeHost,
 		private readonly retryDelayMs = 1000,
 	) {
-		this.#configuredIncludeThinking = host.includeReasoning !== false;
+		this.#configuredIncludeThinking = host.includeReasoning === true;
 		this.#includeThinking = this.#configuredIncludeThinking;
 	}
 
