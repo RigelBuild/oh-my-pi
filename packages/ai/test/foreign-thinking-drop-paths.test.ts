@@ -335,19 +335,24 @@ describe("foreignThinkingReplay drop: Claude source on a non-signing proxy (revi
 	});
 
 	it("drops GPT-signed thinking replayed to Opus on the same proxy under drop", async () => {
+		// Same provider and Anthropic API as the proxy, so only the source-model check can drop it.
+		const gptProxyTurn: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: FOREIGN, thinkingSignature: "rs_gpt" },
+				{ type: "text", text: VISIBLE },
+			],
+			api: "anthropic-messages",
+			provider: "litellm",
+			model: "gpt-5",
+			usage: usage(),
+			stopReason: "stop",
+			timestamp: 1,
+		};
 		const bodies: unknown[] = [];
 		await streamSimple(
 			opusNonSigningHost(),
-			{
-				messages: [
-					userTurn,
-					gptTurn([
-						{ type: "thinking", thinking: FOREIGN, thinkingSignature: "rs_gpt" },
-						{ type: "text", text: VISIBLE },
-					]),
-					nextUser,
-				],
-			},
+			{ messages: [userTurn, gptProxyTurn, nextUser] },
 			{ apiKey: "k", fetch: captureFetch(bodies), foreignThinkingReplay: "drop" },
 		).result();
 		const wire = JSON.stringify(bodies[0]);
