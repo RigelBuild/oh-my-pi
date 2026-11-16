@@ -97,6 +97,7 @@ The drafting style that generates this register works only while writer and read
 - **Nested colons** — `Step: from X: cases: a,b=1: 3-c:` is unparseable cold. One colon per line.
 - **Unmarked instruction vs data** — a bare line like `Word limit 1200 - write concisely` sitting in content is indistinguishable from content. Keep instructions in a marked channel: heading, tag, or MUST line.
 - **Revisiting instead of rewriting** — fine while drafting, fatal in a prompt. One canonical statement per rule.
+
 ## Tool and skill descriptions
 
 The body compresses hard. The trigger does not.

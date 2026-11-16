@@ -4519,6 +4519,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#createInterruptedThinkingNotice(message: AssistantMessage): CustomMessage<InterruptedThinkingDetails> | undefined {
 		if (message.stopReason !== "aborted" || !isUserInterruptAbort(message)) return undefined;
 		const reader = this.agent.state.model ?? this.#modelRegistry.find(message.provider, message.model);
+		// Preserve the existing eligibility gate: the notice replaces continuity only for readers that include thinking.
 		if (!reader || !readerIncludesThinking(reader)) return undefined;
 		let blockCount = 0;
 		let length = 0;

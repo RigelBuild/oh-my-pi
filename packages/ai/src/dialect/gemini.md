@@ -26,11 +26,11 @@ verbatim tool result
 ```
 ````
 
-
 ## Rules
+
 - The function name MUST match a listed function; arguments are keyword form (`name=value`).
 - Argument string values use only normal Python string escaping; never HTML-escape their contents — write `"a & b"`, not `"a &amp; b"`.
 - Multiple calls = a single `[...]` list (or one `default_api...` call per line) inside one ` ```tool_code ` block.
-- Put tool calls in one ` ```tool_code ` block after the ` ```thinking ` block; NEVER put them in the thinking block.
+- Put tool calls in a ` ```tool_code ` block, never inside a ` ```thinking ` block.
 - Read each ` ```tool_outputs ` block in call order. NEVER write a ` ```tool_outputs ` block yourself.
 - Emit the ` ```tool_code ` block in full, THEN stop and halt — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no ` ```tool_code ` block emitted).

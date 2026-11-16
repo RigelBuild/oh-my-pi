@@ -46,6 +46,7 @@ function abortedAssistant(content: AssistantMessage["content"]): AssistantMessag
 		model: "claude-sonnet-4-5",
 		usage: interruptedUsage,
 		stopReason: "aborted",
+		errorMessage: "Interrupted by user",
 		timestamp: 1,
 	};
 }
@@ -95,6 +96,23 @@ describe("convertToLlm", () => {
 		expect(result?.role === "toolResult" && [result.toolCallId, result.toolName]).toEqual(["call_1|fc_1", "recall"]);
 		// Persisted history stays untouched; only the provider view is canonical.
 		expect(saved.content[0]).toMatchObject({ name: "xd://recall" });
+	});
+
+	it.each(["stop", "toolUse"] as const)("keeps unsigned thinking in completed %s turns", stopReason => {
+		const message = { ...abortedAssistant([{ type: "thinking", thinking: "native continuation" }]), stopReason };
+		expect(JSON.stringify(convertToLlm([message]))).toContain("native continuation");
+	});
+	it("keeps unsigned thinking on non-user aborts and filters it when a marker is appended", () => {
+		const message = {
+			...abortedAssistant([{ type: "thinking", thinking: "native continuation" }]),
+			errorMessage: "network error",
+		};
+		const messages: AgentMessage[] = [message];
+		expect(JSON.stringify(convertToLlm(messages))).toContain("native continuation");
+		expect(JSON.stringify(convertMessagesForContextView(messages))).toContain("native continuation");
+		messages.push(interruptedThinkingContinuity());
+		expect(JSON.stringify(convertToLlm(messages))).not.toContain("native continuation");
+		expect(JSON.stringify(convertMessagesForContextView(messages))).not.toContain("native continuation");
 	});
 
 	it("drops hidden interrupted thinking while retaining a generic interruption notice", () => {
