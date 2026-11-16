@@ -2205,7 +2205,9 @@ export class SessionAdvisors {
 			assistantFailure !== undefined &&
 			isClassifierRefusal(assistantFailure) &&
 			(advisor.retryFallback === undefined || advisor.retryFallback.originalSelector === currentSelector);
-		if (!primaryRefused) this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+		if (!primaryRefused) {
+			this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+		}
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;

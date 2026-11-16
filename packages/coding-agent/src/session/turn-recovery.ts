@@ -140,21 +140,13 @@ function hasNonWhitespace(value: string): boolean {
 }
 
 /**
- * Whether a failed request hit a provider limit (a usage cap, a rate limit, or
- * a capacity/overload cap). Only these cool the failing selector down. A
- * transport failure (socket closed, truncated payload, stall, a bare 5xx with
- * no limit wording) names no limit, and the registry's cooldowns are shared
- * across sessions, so cooling it would block a sibling's fallback for minutes.
+ * Transport-drop wording: the socket closed, a payload arrived truncated, a stream stalled, or the
+ * connection was reset or refused. Such a failure names no provider limit, so it never cools a
+ * selector, since cooldowns are shared across sessions. 429 and 5xx text do not match, even when a
+ * proxy adds wording such as `upstream connect error`: a status line still cools.
  */
-function isProviderLimitFailure(id: number, status: number | undefined, errorMessage: string): boolean {
-	if (AIError.is(id, AIError.Flag.UsageLimit) || AIError.isUsageLimitStatus(status)) return true;
-	const reason = parseRateLimitReason(errorMessage);
-	if (reason === "MODEL_CAPACITY_EXHAUSTED") return CAPACITY_WORDING_RE.test(errorMessage);
-	return reason !== "UNKNOWN" && reason !== "SERVER_ERROR";
-}
-
-/** Capacity or overload wording. A bare `503` is a generic 5xx, not a cap. */
-const CAPACITY_WORDING_RE = /capacity|overloaded|\b529\b|resource.?exhausted|MODEL_CAPACITY_(?:EXHAUSTED|EXCEEDED)/i;
+const TRANSPORT_DROP_RE =
+	/socket connection was closed|socket hang up|other side closed|use of closed network connection|peer closed connection|incomplete chunked read|payload is not completed|stream stall|stream stalled|connection (?:was )?reset|ECONNRESET|connection refused|ECONNREFUSED|ConnectionRefused|unable to connect|fetch failed|reset before headers/i;
 
 /**
  * End of the conversation in `messages`, before trailing context-only custom
@@ -415,6 +407,12 @@ export class TurnRecovery {
 	 * the exhausted budget, a cancelled wait, an abort), so no turn inherits another turn's walk.
 	 */
 	readonly #refusalWalkTried = new Set<string>();
+	/**
+	 * Base selectors the fallback walk has switched to in the current retry saga, for every error
+	 * kind. A chain pair that names each other would otherwise ping-pong with no delay, since a
+	 * switch back resets the retry budget. Cleared with `#refusalWalkTried` in `resolveRetry()`.
+	 */
+	readonly #walkedThisSaga = new Set<string>();
 	/** Per-model account walk allowance, snapshotted once and cleared when the retry saga ends. */
 	readonly #accountPolicyRotationsRemaining = new Map<string, number>();
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
@@ -910,6 +908,7 @@ export class TurnRecovery {
 	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
 	resolveRetry(): void {
 		this.#refusalWalkTried.clear();
+		this.#walkedThisSaga.clear();
 		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
@@ -1915,29 +1914,14 @@ export class TurnRecovery {
 
 	/** Records the cooldown that should suppress a failing selector. */
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
+		// Cooldowns are shared across sessions: a transport drop names no limit, so it must not cool.
+		if (TRANSPORT_DROP_RE.test(errorMessage)) return;
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
 			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
 		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
-	}
-
-	/**
-	 * Whether the fallback walk has candidates and every one is cooled down by a
-	 * failure. A candidate that is not cooled is a hard skip for the walk (no auth,
-	 * no-op, context too large, excluded provider), so one such candidate means the
-	 * walk may not reach a cooled one.
-	 */
-	#everyRetryFallbackCandidateCooled(currentSelector: string, options?: { wrapAround?: boolean }): boolean {
-		let seen = false;
-		for (const role of this.retryFallbackChainKeys(currentSelector)) {
-			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				seen = true;
-				if (!this.isRetryFallbackSelectorSuppressed(selector)) return false;
-			}
-		}
-		return seen;
 	}
 
 	/**
@@ -2374,18 +2358,22 @@ export class TurnRecovery {
 			sourceModel.provider === latestAssistant.provider &&
 			sourceModel.id === latestAssistant.model;
 		let suppressedUsed = false;
+		// The failing model is the saga's origin: a chain that names it back must not re-enter it.
+		this.#walkedThisSaga.add(this.#refusalWalkKey(currentSelector));
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				if (this.isRetryFallbackSelectorSuppressed(selector)) {
-					// A cooled selector is skipped, unless this walk is the one-shot
-					// retry on the first such candidate (see the caller's gating).
-					if (!options?.allowSuppressedFallback || suppressedUsed) continue;
-					suppressedUsed = true;
-				}
+				const cooled = this.isRetryFallbackSelectorSuppressed(selector);
+				// A cooled selector is skipped, unless this walk is the one-shot retry on the
+				// first cooled candidate that clears every check below (see the caller's gating).
+				if (cooled && (!options?.allowSuppressedFallback || suppressedUsed)) continue;
 				// A refusal walk visits any one model at most once per turn. Without this a
 				// pair of chains naming each other alternates: each hop is a model the walk
 				// has already been refused on, and the budget no longer stops it.
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
+				// Any error kind: a chain pair that names each other must not walk back to a
+				// model this saga already switched to, or the budget resets on every hop. A
+				// long usage-limit wrap is the exception: it waits out a real reset first.
+				if (!options?.wrapAround && this.#walkedThisSaga.has(formatRetryFallbackBaseSelector(selector))) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
@@ -2494,6 +2482,10 @@ export class TurnRecovery {
 						targetSelector: `${candidate.provider}/${candidate.id}`,
 						handle: creditHandle,
 					};
+				}
+				if (applied) {
+					this.#walkedThisSaga.add(formatRetryFallbackBaseSelector(selector));
+					if (cooled) suppressedUsed = true;
 				}
 				return applied;
 			}
@@ -3057,9 +3049,7 @@ export class TurnRecovery {
 					// to a still-exhausted primary. A switched credential means a
 					// sibling is free now, and that wait covers only the spent one.
 					const usageCooldownMs = recordedUsageLimitOutcome?.switchedCredential ? undefined : usageLimitWaitMs;
-					if (isProviderLimitFailure(id, message.errorStatus, errorMessage)) {
-						this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
-					}
+					this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
 				}
 				// Deferring a chain candidate only pays when the code below makes
 				// another attempt on this model that can succeed. Each term is a
@@ -3085,19 +3075,13 @@ export class TurnRecovery {
 					refusalWalk: classifierRefusal,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
-					// The retry policy retries the failed model when this is true; deferring
-					// a chain candidate pays only then.
 					sameModelRetryAvailable,
 				};
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, fallbackOptions);
-				// A chain whose every candidate a sibling's failure cooled down must not end
-				// the turn when no same-model retry remains in the delay cap. Any candidate
-				// not cooled is a hard skip, so the second walk runs only when all are cooled.
-				if (
-					!switchedModel &&
-					!sameModelRetryAvailable &&
-					this.#everyRetryFallbackCandidateCooled(currentSelector, { wrapAround: longUsageLimitFallback })
-				) {
+				// No same-model retry and no switch yet: a cooled candidate may still be the
+				// only usable one. The walk skips uncooled candidates it cannot use, so the
+				// second walk must not be gated on whether every candidate is cooled.
+				if (!switchedModel && !sameModelRetryAvailable) {
 					switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 						...fallbackOptions,
 						allowSuppressedFallback: true,

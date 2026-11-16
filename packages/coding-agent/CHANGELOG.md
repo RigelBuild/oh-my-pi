@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A subagent's retry fallback keeps a chain candidate that another session cooled down after a transport error. Only provider limits (usage cap, rate limit, capacity) now cool a selector down. When every chain candidate is cooled and no same-model retry remains, the first cooled candidate is used. `<task-result>` names the model the subagent ran on in a `model` attribute.
+- A subagent's retry fallback is no longer ended by a cooldown another session wrote after a transport drop. A socket close, a truncated payload, a stream stall, or a reset or refused connection does not cool a selector, on the main walk and the advisor path. Other failures cool as before. When no same-model retry remains and no switch was found, a cooled candidate that passes every other check may be used. A saga never switches back to a model it already walked to. `<task-result>` names the model the subagent ran on in a `model` attribute.
 
 ## [18.18.3-rigel.5] - 2026-11-16
 
