@@ -3,10 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
-import { prompt } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
-
-const SUBAGENT_TEMPLATE = path.resolve(import.meta.dir, "../src/prompts/system/subagent-system-prompt.md");
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -16,65 +13,54 @@ const EMPTY_TREE = {
 	agentsMdFiles: [],
 };
 
-// Every agent prompt must carry the evidence-only rule. Subagents run
-// with excludeAgentsMd, so their own template is the only place the rule reaches them.
-function extractEvidenceBlock(rendered: string): string {
-	const match = /<evidence-only>([\s\S]*?)<\/evidence-only>/.exec(rendered);
-	expect(match).not.toBeNull();
-	return match?.[1] ?? "";
-}
+// Every selected template gets the shared evidence-only block once, from the
+// builder. A literal customPrompt or SDK string systemPrompt is the only opt-out.
+describe("evidence-only rule in every system prompt", () => {
+	let tempDir = "";
+	let tempHomeDir = "";
+	let originalHome: string | undefined;
 
-function assertCarriesEvidenceRule(rendered: string): void {
-	const block = extractEvidenceBlock(rendered);
-	// Part 1: ask other agents only for evidence and results.
-	expect(block).toContain("evidence and results");
-	expect(block).toContain("log lines");
-	expect(block).toContain("file paths");
-	expect(block).toContain("commands run");
-	expect(block).toContain("message IDs");
-	expect(block).toContain("final summary");
-	// Part 2: never ask for a description of internal process.
-	expect(block).toContain("internal process");
-	expect(block).toContain("how they did the work");
-	// Part 3: never paste a raw transcript or hidden blocks, only the final answer.
-	expect(block).toContain("raw transcript");
-	expect(block).toContain("hidden blocks");
-	expect(block).toContain("final answer");
-	// Banned wording: these terms trigger reasoning_extraction refusals.
-	expect(block).not.toMatch(/reasoning|thinking process|chain of thought|step by step|explain your/i);
-}
-
-describe("evidence-only rule in agent prompts", () => {
-	it("subagent system prompt renders the full evidence-only block", async () => {
-		const templateSource = await fs.promises.readFile(SUBAGENT_TEMPLATE, "utf-8");
-		const rendered = prompt.render(templateSource, { agent: "test-agent" });
-		assertCarriesEvidenceRule(rendered);
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-evidence-only-"));
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-evidence-only-home-"));
+		originalHome = process.env.HOME;
+		process.env.HOME = tempHomeDir;
 	});
 
-	describe("main system prompt", () => {
-		let tempDir = "";
-		let tempHomeDir = "";
-		let originalHome: string | undefined;
+	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
-		beforeEach(() => {
-			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-evidence-only-"));
-			tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-evidence-only-home-"));
-			originalHome = process.env.HOME;
-			process.env.HOME = tempHomeDir;
-		});
+	function build(options: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}): Promise<string[]> {
+		return buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			...options,
+		}).then(result => result.systemPrompt);
+	}
 
-		afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	// Presence and the ban list only. Banned wording triggers reasoning_extraction refusals.
+	function expectOneRuleBlock(blocks: string[]): void {
+		const carriers = blocks.filter(block => /<evidence-only>[\s\S]*<\/evidence-only>/.test(block));
+		expect(carriers).toHaveLength(1);
+		expect(carriers[0]).not.toMatch(/reasoning|thinking process|chain of thought|step by step|explain your/i);
+	}
 
-		it("renders the full evidence-only block", async () => {
-			const { systemPrompt } = await buildSystemPrompt({
-				cwd: tempDir,
-				contextFiles: [],
-				skills: [],
-				rules: [],
-				toolNames: [],
-				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
-			});
-			assertCarriesEvidenceRule(systemPrompt.join("\n\n"));
-		});
+	it("the default main prompt carries the rule once", async () => {
+		expectOneRuleBlock(await build());
+	});
+
+	it("a literal customPrompt still carries the rule", async () => {
+		expectOneRuleBlock(await build({ customPrompt: "You are a custom assistant." }));
+	});
+
+	it("a systemPromptTemplate still carries the rule", async () => {
+		expectOneRuleBlock(await build({ systemPromptTemplate: "Custom template body.\n{{#if subagent}}sub{{/if}}" }));
+	});
+
+	it("a subagent prompt carries the rule once", async () => {
+		expectOneRuleBlock(await build({ subagent: true, personality: "none" }));
 	});
 });

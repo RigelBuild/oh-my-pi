@@ -107,6 +107,18 @@ describe("advisor memory context", () => {
 		expect(advisor.state.tools.map(tool => tool.name)).not.toContain("recall");
 	});
 
+	it("carries the evidence-only block in the real advisor system prompt", async () => {
+		tempDir = TempDir.createSync("@pi-advisor-evidence-only-");
+		session = await createAdvisedSession("sharpshooter");
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to exist");
+		const advisorPrompt = advisor.state.systemPrompt.join("\n");
+		expect(advisorPrompt).toContain("<evidence-only>");
+		expect(advisorPrompt).toContain("</evidence-only>");
+		const block = /<evidence-only>[\s\S]*?<\/evidence-only>/.exec(advisorPrompt)?.[0] ?? "";
+		expect(block).not.toMatch(/reasoning|thinking process|chain of thought|step by step|explain your/i);
+	});
+
 	it("grants the default advisor roster a recall tool when the backend builds one", async () => {
 		tempDir = TempDir.createSync("@pi-advisor-memory-");
 		// Hindsight without apiUrl is inert at runtime but still builds the recall

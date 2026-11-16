@@ -89,6 +89,7 @@ import { bridgeToolMap } from "../cursor-bridge-tools";
 import { estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorBoundaryGuidance from "../prompts/advisor/boundary-guidance.md" with { type: "text" };
+import evidenceOnlyBlock from "../prompts/system/evidence-only.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
@@ -1257,7 +1258,7 @@ export class SessionAdvisors {
 		// The service tier is bound at build time, so a `tier.advisor` edit must rebuild.
 		const tier = cfgTierAdvisor.get(this.#host.settings);
 		const scope = config.scope ?? "all";
-		const includeReasoning = config.includeReasoning !== false ? "1" : "0";
+		const includeReasoning = config.includeReasoning === true ? "1" : "0";
 		return [
 			config.name,
 			slug,
@@ -1348,7 +1349,10 @@ export class SessionAdvisors {
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [prompt.render(advisorSystemPrompt, { max_notes_per_update: budgetPerUpdate })];
+			const systemPrompt = [
+				prompt.render(advisorSystemPrompt, { max_notes_per_update: budgetPerUpdate }),
+				evidenceOnlyBlock.trim(),
+			];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorMemoryPrompt) systemPrompt.push(this.#advisorMemoryPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);

@@ -31,6 +31,7 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
+import evidenceOnlyBlock from "./prompts/system/evidence-only.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -1063,7 +1064,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedSystemPromptTemplate = undefined;
 		rendered = prompt.render(systemPromptTemplate, data);
 	}
-	const systemPrompt = [rendered];
+	// One shared block for every selected template. A literal customPrompt or an
+	// SDK string systemPrompt is the only opt-out (sdk.ts returns before this builder).
+	const systemPrompt = [rendered, evidenceOnlyBlock.trim()];
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);

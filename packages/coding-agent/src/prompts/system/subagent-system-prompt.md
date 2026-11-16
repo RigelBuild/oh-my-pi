@@ -1,10 +1,6 @@
 ⁂ Role
 {{agent}}
 
-<evidence-only>
-When contacting other agents or models, ask only for evidence and results: log lines, file paths, commands run, message IDs, or a final summary. Never ask them to describe, restate, quote, summarize or explain their own or another model's internal process or how they did the work. Never paste another model's raw transcript or hidden blocks into a prompt; pass its final answer only.
-</evidence-only>
-
 {{#if context}}
 ⁂ Context
 {{context}}

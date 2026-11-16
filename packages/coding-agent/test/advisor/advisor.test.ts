@@ -1679,6 +1679,30 @@ describe("advisor", () => {
 			expect(review).toContain("inspect the retry config");
 			expect(review).toContain("now raise the limit");
 		});
+		it("omits primary thinking blocks by default when includeReasoning is unset", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: "verify the patch", timestamp: 1 } as AgentMessage,
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "Default-off thinking that must not reach the advisor." },
+						{ type: "text", text: "Observable answer with file:line evidence." },
+					],
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages });
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(1);
+			const review = promptText(promptInputs[0]);
+			expect(review).toContain("Observable answer with file:line evidence.");
+			expect(review).not.toContain("Default-off thinking that must not reach the advisor.");
+			expect(review).not.toContain("_thinking:_");
+		});
 		it("omits primary thinking blocks when includeReasoning is false, including across model switches", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);
@@ -1734,6 +1758,7 @@ describe("advisor", () => {
 			];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
+				includeReasoning: true,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -3458,6 +3483,7 @@ describe("advisor", () => {
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
 				obfuscator,
+				includeReasoning: true,
 			};
 			const runtime = new AdvisorRuntime(agent, host);
 
@@ -5200,6 +5226,7 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
+					includeReasoning: true,
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -5254,6 +5281,7 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
+					includeReasoning: true,
 					notifyFailure: error => failures.push(error),
 				},
 				0,
@@ -5321,6 +5349,7 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
+					includeReasoning: true,
 					notifyFailure: error => failures.push(error),
 					onTurnError: async () => {
 						fallbackCalls++;
@@ -5434,6 +5463,7 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
+					includeReasoning: true,
 					notifyFailure: error => failures.push(error),
 					onTurnError: async () => {
 						fallbackCalls++;
@@ -5642,6 +5672,7 @@ describe("advisor", () => {
 				agent,
 				{
 					snapshotMessages: () => messages,
+					includeReasoning: true,
 					notifyFailure: error => failures.push(error),
 				},
 				0,

@@ -240,12 +240,7 @@ describe("runSubprocess yield reminders", () => {
 		expect(systemPrompt?.[0]).toBe("system");
 		expect(systemPrompt?.[1]).toBe("<project-context>\ncwd\n</project-context>");
 		expect(systemPrompt?.[2]).toContain(baseAgent.systemPrompt);
-		expect(systemPrompt?.[2]).toContain(
-			"ask only for evidence and results: log lines, file paths, commands run, message IDs, or a final summary.",
-		);
-		expect(systemPrompt?.[2]).toContain(
-			"Never paste another model's raw transcript or hidden blocks into a prompt; pass its final answer only.",
-		);
+		// The evidence-only block is a default block, covered by evidence-only-rule.test.ts.
 		// The parent-conversation CONTEXT section is gone: subagents get their
 		// background inside the assignment (or a local:// file), never a dump.
 		expect(systemPrompt?.[2]).not.toMatch(/CONTEXT\n=+/);
