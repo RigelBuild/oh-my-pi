@@ -6,7 +6,6 @@
  */
 import { type AgentMessage, isProviderRefusalMessage } from "@oh-my-pi/pi-agent-core";
 import {
-	isUserInterruptAbort,
 	isCustomMessageContent,
 	type BashExecutionMessage,
 	type PythonExecutionMessage,
@@ -60,6 +59,7 @@ import { advisoryMessage, currentAdvisories } from "../irc/advisory";
 import { escapeHarnessTags } from "./harness-tags";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
@@ -467,82 +467,11 @@ export interface InterruptedThinkingDetails {
 	blockCount: number;
 }
 
-/** Pure helper result for persisting interrupted thinking outside the assistant turn. */
-export interface DemotedInterruptedThinking {
-	reasoning: string;
-	strippedContent: AssistantMessage["content"];
-	blockCount: number;
+/** Keep only provider-signed thinking when an assistant turn is replayed. */
+function stripUnsignedThinkingForLlm(message: AssistantMessage): AssistantMessage {
+	const content = message.content.filter(block => block.type !== "thinking" || !!block.thinkingSignature?.trim());
+	return content.length === message.content.length ? message : { ...message, content };
 }
-
-/**
- * Demote a trailing run of *incomplete* interrupted-thinking from an assistant
- * message — reasoning that was still streaming when the user aborted.
- *
- * A block joins the run only when it is a non-empty `thinking` block with no
- * `thinkingSignature`. A signed/complete thinking block (Anthropic signature,
- * OpenAI reasoning item id) is safely replayable, so it ends the run and stays
- * in place — as do `redactedThinking` encrypted blobs, text, tool calls,
- * empty-thinking blocks, and trailing empty text placeholders.
- */
-export function demoteInterruptedThinking(
-	message: Pick<AssistantMessage, "content">,
-): DemotedInterruptedThinking | undefined {
-	const content = message.content;
-	let scanEnd = content.length;
-	while (scanEnd > 0) {
-		const block = content[scanEnd - 1]!;
-		if (block.type !== "text" || block.text.trim().length > 0) {
-			break;
-		}
-		scanEnd--;
-	}
-
-	let runStart = scanEnd;
-	while (runStart > 0) {
-		const block = content[runStart - 1]!;
-		if (block.type !== "thinking" || block.thinking.trim().length === 0 || block.thinkingSignature) {
-			break;
-		}
-		runStart--;
-	}
-
-	const blockCount = scanEnd - runStart;
-	if (blockCount === 0) {
-		return undefined;
-	}
-
-	const reasoningBlocks: string[] = [];
-	for (let index = runStart; index < scanEnd; index++) {
-		const block = content[index]!;
-		if (block.type === "thinking") {
-			reasoningBlocks.push(block.thinking.trim());
-		}
-	}
-
-	return {
-		reasoning: reasoningBlocks.join("\n\n"),
-		strippedContent: content.slice(0, runStart),
-		blockCount,
-	};
-}
-
-/**
- * True when the assistant turn at `messages[index]` is immediately followed by
- * its hidden `interrupted-thinking` continuity message — the marker that a
- * trailing thinking run was demoted on user interrupt. The run stays on the
- * persisted/displayed assistant message; this flag tells the LLM path to drop it.
- */
-function followedByInterruptedThinking(messages: AgentMessage[], index: number): boolean {
-	const next = messages[index + 1];
-	return next !== undefined && next.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE;
-}
-
-/** Drop an incomplete trailing thinking run from an interrupted assistant in the LLM view. */
-function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
-	const demoted = demoteInterruptedThinking(message);
-	return demoted ? { ...message, content: demoted.strippedContent } : message;
-}
-
 /**
  * Replay `xd://<device>` tool-call names under their bare device name. Sessions
  * saved before the agent loop canonicalized fallback-resolved names persist the
@@ -1063,22 +992,11 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 	return converted;
 }
 
-/**
- * Per-message conversion result, keyed by message identity. `interruptedNext`
- * records the neighbor state the fragment was built against so an assistant
- * whose following {@link INTERRUPTED_THINKING_MESSAGE_TYPE} marker appears or
- * disappears is recomputed (its LLM view strips the trailing thinking run only
- * while that marker follows).
- *
- * WeakMap (not a symbol tag) is deliberate: `wrapSteeringForModel` and
- * `deobfuscateAgentMessages` spread messages into fresh variants with different
- * content; a symbol-keyed fragment would ride that spread and mis-convert the
- * copy. Identity keying keeps the cache off spread copies.
- */
+/** Per-message conversion result, keyed by identity. */
 interface ConvertMemoEntry {
-	interruptedNext: boolean;
 	fragment: Message[];
 }
+
 const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
 
 // Array-level shortcuts over the per-message memo. The live agent mutates one
@@ -1091,8 +1009,7 @@ const convertCache = new WeakMap<AgentMessage, ConvertMemoEntry>();
 //   - exact-repeat: same array, same length, same generation, same tail identity
 //     → hand back the same outer array.
 //   - slice-on-growth: same array, same generation, length grew → copy the
-//     unchanged prefix output and reconvert only the neighbor-sensitive boundary
-//     message plus the appended suffix.
+//     unchanged prefix output and reconvert the boundary and appended suffix.
 // The tail-identity guard on exact-repeat catches the streaming snapshot swap
 // (partial → trailing is a fresh identity), so a settled tail is never served
 // from a stale mid-stream fragment.
@@ -1123,9 +1040,8 @@ registerMessageCacheInvalidator(message => {
 	convertGeneration++;
 });
 
-/** Convert one message to its LLM fragment. `interruptedNext` is true only for an
- *  assistant turn immediately followed by its interrupted-thinking marker. */
-function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
+/** Convert one message to its LLM fragment. */
+function convertOne(m: AgentMessage): Message[] {
 	switch (m.role) {
 		case "bashExecution":
 			if (m.excludeFromContext) {
@@ -1191,6 +1107,16 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			return out;
 		}
 		case "custom": {
+			if (m.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) {
+				return [
+					{
+						role: "developer",
+						content: prompt.render(interruptedThinkingTemplate),
+						attribution: m.attribution,
+						timestamp: m.timestamp,
+					},
+				];
+			}
 			if (!isCustomMessageContent(m.content)) return [];
 			if (isSteeringUserMessage(m)) {
 				const converted = convertMessageToLlm(wrapSteeringUserMessage(m));
@@ -1219,16 +1145,8 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			return converted ? [converted] : [];
 		}
 		case "assistant": {
-			// Persisted/displayed messages retain interrupted thinking. Signed or
-			// encrypted blocks replay natively; incomplete unsigned runs are
-			// stripped whether or not they were long enough for a continuity note.
-			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
-			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
-			// An empty interrupted response still carries the controls its request
-			// sent (e.g. an Anthropic `tool_removal`); later requests replay them from it.
-			if (userInterrupted && !interruptedNext && source.content.length === 0 && m.requestControls === undefined) {
-				return [];
-			}
+			const source = stripUnsignedThinkingForLlm(m);
+			if (source.stopReason === "aborted" && source.content.length === 0 && !source.requestControls) return [];
 			const converted = convertMessageToLlm(canonicalizeXdToolCallNames(source));
 			return converted ? [converted] : [];
 		}
@@ -1255,22 +1173,6 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 	}
 }
 
-/**
- * Converts `messages[index]` with its neighbor-sensitive state.
- * {@link convertToLlm} and {@link convertMessagesForContextView} both go
- * through here so the viewer cannot drift from the per-message conversion that
- * gets sent; a filter or reorder added outside this helper must be mirrored in
- * both.
- */
-function convertMessageAt(
-	messages: AgentMessage[],
-	index: number,
-	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
-): Message[] {
-	const m = messages[index];
-	return convert(m, m.role === "assistant" && followedByInterruptedThinking(messages, index));
-}
-
 /** A converted viewer message and its position in the source and converted histories. */
 export interface ContextViewMessage {
 	message: Message;
@@ -1283,7 +1185,7 @@ export interface ContextViewMessage {
  * and array conversion caches. Steering messages show the envelope
  * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
  * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
- * through {@link convertMessageAt}, then drops API-level provider refusals
+ * through the same conversion path, then drops API-level provider refusals
  * like the send path's `filterProviderReplayMessages`, since they are never
  * replayed.
  *
@@ -1296,7 +1198,7 @@ export function convertMessagesForContextView(messages: AgentMessage[]): Context
 	const modelMessages = wrapSteeringForModel(messages);
 	const result: ContextViewMessage[] = [];
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
-		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
+		for (const message of convertOne(modelMessages[sourceIndex])) {
 			if (message.role === "assistant" && isProviderRefusalMessage(message)) continue;
 			result.push({ message, sourceIndex, convertedIndex: result.length });
 		}
@@ -1304,14 +1206,13 @@ export function convertMessagesForContextView(messages: AgentMessage[]): Context
 	return result;
 }
 
-/** Cached per-message conversion. Reuses the stored fragment while identity and
- *  `interruptedNext` neighbor state hold; recomputes on a neighbor flip. */
-function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] {
+/** Cached per-message conversion. */
+function convertOneCached(m: AgentMessage): Message[] {
 	const cached = convertCache.get(m);
-	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
-	const fragment = convertOne(m, interruptedNext);
+	if (cached !== undefined) return cached.fragment;
+	const fragment = convertOne(m);
 	for (const message of fragment) copyPerCallContextMessage(message, m);
-	convertCache.set(m, { interruptedNext, fragment });
+	convertCache.set(m, { fragment });
 	return fragment;
 }
 
@@ -1334,9 +1235,8 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * Owner mutations (prune/shake/strip-images) invalidate the affected message
  * through the shared registry before the next pass.
  *
- * {@link convertMessagesForContextView} mirrors this loop through
- * {@link convertMessageAt}; it stays separate so the index mapping `/context`
- * needs adds no cost here.
+ * {@link convertMessagesForContextView} shares this conversion without caching;
+ * it stays separate so `/context` can preserve its source index mapping.
  */
 function isAdvisoryBearing(message: AgentMessage): boolean {
 	return (
@@ -1410,7 +1310,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 			else if (message.role === "toolResult")
 				safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
 		}
-		return safe.flatMap((_message, index) => convertMessageAt(safe, index, convertOne));
+		return safe.flatMap(convertOne);
 	}
 	const len = messages.length;
 	const memo = convertArrayCache.get(messages);
@@ -1427,11 +1327,9 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 
 	// Slice-on-growth: same array grew by append. Every interior message is
 	// immutable under one array identity, so copy the unchanged prefix output
-	// (messages[0 .. lastLen-1)) and reconvert only the old boundary message
-	// (neighbor-sensitive: a following interrupted-thinking marker may now exist)
-	// plus the appended suffix. The boundary-identity check (old tail still sits
-	// at its old index) rejects an in-place interior splice-replace that grew the
-	// array while swapping earlier identities, forcing a full rebuild.
+	// (messages[0 .. lastLen-1)) and reconvert the old boundary and appended suffix.
+	// The boundary-identity check rejects an in-place interior splice-replace
+	// that grew the array while swapping earlier identities, forcing a full rebuild.
 	let out: Message[];
 	let start: number;
 	if (
@@ -1453,7 +1351,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const fragment = convertMessageAt(messages, i, convertOneCached);
+		const fragment = convertOneCached(messages[i]!);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;

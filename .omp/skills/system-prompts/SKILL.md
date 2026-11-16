@@ -49,7 +49,7 @@ Load-bearing tokens only; every bullet adds a claim.
 
 - One claim/bullet; cut behavior-neutral subclauses.
 - Quick check `X? Y.` replaces “If X, then Y.”
-- Reasoning ONLY when it changes the call.
+- Reason only when it changes the call.
 - Bold lead names rule; NEVER restate in body.
 - Prefer `→`, `=`, `+`/`<`/`-`, `B+1`, `A..B`.
 - Parallel edits: `add → +/<; delete → -; = ONLY when modifying inside.`
@@ -116,7 +116,7 @@ Live-system-prompt patterns:
 |Politeness padding (`"Would you be so kind…"`)|+perplexity, −accuracy|
 |Bribes (`"I'll tip $2000"`)|No improvement; sometimes worse|
 |Few-shot on advanced models + clear task|Noise/bias|
-|Explicit CoT on reasoning models (o1/o3)|Conflicts with internal reasoning|
+|Prompts for private internal work|Conflicts with model design|
 |`"Be efficient with tokens"`|Premature task abandonment|
 |`"Don't do X"` without alternative|`"Always do Y"` processes better|
 |Self-critique without external feedback|Detection bottleneck, not correction|

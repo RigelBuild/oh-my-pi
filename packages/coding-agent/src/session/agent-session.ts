@@ -416,7 +416,6 @@ import {
 	type CustomMessagePayload,
 	convertToLlm,
 	dedupeEphemeralReply,
-	demoteInterruptedThinking,
 	didSessionMessagesChange,
 	type FileMentionMessage,
 	type HookMessage,
@@ -4516,42 +4515,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#persistSessionMessageIfMissing(message);
 	}
 
-	/**
-	 * On a user-interrupted (`Esc`) abort, copy a meaningful trailing thinking
-	 * run into hidden continuity context for the next turn. Short fragments are
-	 * omitted; `convertToLlm` still strips their incomplete thinking from replay.
-	 *
-	 * Skipped for readers whose classifier refuses quoted reasoning (the
-	 * `classifier-cot-extraction` catalog axis): the continuity quote replays the
-	 * model's own reasoning as conversation text, which Anthropic's
-	 * `reasoning_extraction` classifier refuses (verified live against Fable 5 —
-	 * the quoted fragment trips it even inside a full agentic request on
-	 * OAuth/subscription auth). transform-messages already drops the unsigned
-	 * trailing run from replay, so nothing else is lost. With no model to resolve
-	 * the reader from, the quote is skipped too.
-	 *
-	 * The original thinking stays on the assistant message so live render, reload,
-	 * and display-reset rebuilds keep showing it.
-	 */
-	#demoteInterruptedThinkingOnUserInterrupt(
-		message: AssistantMessage,
-	): CustomMessage<InterruptedThinkingDetails> | undefined {
+	/** Store a generic notice for a substantial interrupted thinking tail. */
+	#createInterruptedThinkingNotice(message: AssistantMessage): CustomMessage<InterruptedThinkingDetails> | undefined {
 		if (message.stopReason !== "aborted" || !isUserInterruptAbort(message)) return undefined;
 		const reader = this.agent.state.model ?? this.#modelRegistry.find(message.provider, message.model);
 		if (!reader || !readerIncludesThinking(reader)) return undefined;
-		const demoted = demoteInterruptedThinking(message);
-		if (!demoted || demoted.reasoning.length < INTERRUPTED_THINKING_MIN_CHARS) return undefined;
+		let blockCount = 0;
+		let length = 0;
+		for (let i = message.content.length - 1; i >= 0; i--) {
+			const block = message.content[i]!;
+			if (block.type === "text" && !block.text.trim() && blockCount === 0) continue;
+			if (block.type !== "thinking" || block.thinkingSignature?.trim() || !block.thinking.trim()) break;
+			length += block.thinking.trim().length + (blockCount ? 2 : 0);
+			blockCount++;
+		}
+		if (length < INTERRUPTED_THINKING_MIN_CHARS) return undefined;
 		const interruptedAt = Date.now();
 		return {
 			role: "custom",
 			customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
-			content: prompt.render(interruptedThinkingTemplate, { reasoning: demoted.reasoning }),
+			content: prompt.render(interruptedThinkingTemplate),
 			display: false,
 			details: {
 				interruptedAt,
 				provider: message.provider,
 				model: message.model,
-				blockCount: demoted.blockCount,
+				blockCount,
 			},
 			attribution: "agent",
 			timestamp: interruptedAt,
@@ -4764,7 +4753,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		const interruptedThinkingMessage =
 			event.type === "message_end" && event.message.role === "assistant"
-				? this.#demoteInterruptedThinkingOnUserInterrupt(event.message as AssistantMessage)
+				? this.#createInterruptedThinkingNotice(event.message as AssistantMessage)
 				: undefined;
 		// `message_end` handling is fire-and-forget from agent-core. Make the
 		// hidden continuity turn visible to the next prompt before any awaited

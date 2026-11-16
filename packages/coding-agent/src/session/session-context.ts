@@ -788,9 +788,8 @@ export function buildSessionContext(
 	// later user message follows through non-context entries (`session_exit`,
 	// labels, etc.); otherwise a resumed session replays a dead partial turn
 	// and can spend minutes reprocessing old context before the new prompt.
-	// Keep the interrupted-thinking continuity pair: convertToLlm strips the
-	// unsafe trailing thinking from that assistant and sends the hidden
-	// continuity note instead.
+	// Keep the interrupted-turn pair so convertToLlm can strip unsigned blocks
+	// and replace the hidden content with a generic notice.
 	if (!options?.transcript) {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];

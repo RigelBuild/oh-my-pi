@@ -5,7 +5,7 @@ Plan approved.
 
 <instruction>
 Full plan inlined below; durable copy at `{{planFilePath}}` (identical content).
-Execute plan step-by-step with full tool access; MUST verify each step before next.
+Follow the plan in order and verify each step before continuing.
 NEVER re-read `{{planFilePath}}` while the inline plan is intact; the path is for subagent handoff and recovery only.
 {{#has tools "todo"}}
 Before execution: initialize todo tracking with `todo`.

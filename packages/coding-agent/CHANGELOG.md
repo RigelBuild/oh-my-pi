@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reworded agent prompts and skills to request evidence and results instead of process descriptions, and removed private-work guidance from model-specific tool instructions.
+
 ### Added
 
 - Added a Nix package for the hash-pinned prebuilt release binary, with Linux loader fixups and install checks.

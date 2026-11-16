@@ -12,7 +12,7 @@ Shared prompts MUST be written for the smallest model that consumes them — big
 - **≤5 constraint sentences.** Every extra rule dilutes the rest.
 - **Executable vocabulary.** "sentence case" is meta-knowledge; "Capitalize only the first word" is an action.
 - **Front-load.** Task, then format, then style. Middle loss is worse than in big models.
-- **NEVER request CoT.** Reasoning-out-loud degrades sub-1B output.
+- NEVER request private internal work. It degrades small-model output.
 - **AVOID contrast examples.** A labeled "Bad:" sample gets copied, not avoided. Show only correct pairs.
 
 ## Scaffold, Don't Instruct

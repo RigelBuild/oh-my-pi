@@ -1,3 +1,3 @@
 <system-notice>
-Multi-step reasoning: think carefully through the problem before responding.
+Investigate the problem carefully before acting.
 </system-notice>
