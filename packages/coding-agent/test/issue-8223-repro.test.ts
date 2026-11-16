@@ -60,7 +60,10 @@ test("keeps Gemini 3.6 advisor context and accepts a silent review", async () =>
 		expect(bodies).toHaveLength(1);
 		expect(bodies[0]).toMatchObject({
 			systemInstruction: {
-				parts: [{ text: expect.any(String) }],
+				parts: [
+					{ text: expect.any(String) },
+					{ text: expect.stringContaining("ask only for evidence and results") },
+				],
 			},
 			tools: [
 				{
