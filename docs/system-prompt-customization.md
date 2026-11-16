@@ -13,7 +13,7 @@ Primary implementation:
 
 ## Block layout and prompt caching
 
-The provider-facing prompt is an ordered block array. Static, cwd-independent blocks come first: block 0 (the default, custom, or template instruction block) and eval-prelude guidance. Every working-directory-derived section follows in one trailing footer block that opens with `<project-context>`: workstation data, context files with their paths (`<repo-rules>`), `<dir-context>` pointers, `<workspace-tree>`, `<workspace-roots>`, active nested-repository context, the final completion requirements, and the append text. Task subagents append their per-spawn role/assignment block after the footer.
+The provider-facing prompt is an ordered block array. Static, cwd-independent blocks come first: block 0 (the default, custom, or template instruction block), block 1 (the shared `<evidence-only>` rule, added for every template), and eval-prelude guidance. Every working-directory-derived section follows in one trailing footer block that opens with `<project-context>`: workstation data, context files with their paths (`<repo-rules>`), `<dir-context>` pointers, `<workspace-tree>`, `<workspace-roots>`, active nested-repository context, the final completion requirements, and the append text. Task subagents append their per-spawn role/assignment block after the footer.
 
 On Anthropic, the system cache breakpoint lands on the last block before the first `<project-context>` (or `<memories>`) block, so sessions and subagent spawns of the same agent in different directories (for example one git worktree per task) share the static prompt as a cached prefix. Other providers receive the same ordered blocks.
 

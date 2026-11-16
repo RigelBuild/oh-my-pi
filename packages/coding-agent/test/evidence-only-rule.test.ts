@@ -14,7 +14,7 @@ const EMPTY_TREE = {
 };
 
 // Every selected template gets the shared evidence-only block once, from the
-// builder. A literal customPrompt or SDK string systemPrompt is the only opt-out.
+// builder. An SDK string systemPrompt is the only opt-out.
 describe("evidence-only rule in every system prompt", () => {
 	let tempDir = "";
 	let tempHomeDir = "";
