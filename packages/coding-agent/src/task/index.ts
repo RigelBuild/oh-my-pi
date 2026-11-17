@@ -916,6 +916,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return prompt.render(taskAsyncContractTemplate, {
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			waitTool: hasWaitTool(this.session),
+			subagent: (this.session.taskDepth ?? 0) > 0,
 		});
 	}
 

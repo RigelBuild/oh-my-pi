@@ -1002,7 +1002,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, { subagent: (this.session.taskDepth ?? 0) > 0 }));
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
 			details,

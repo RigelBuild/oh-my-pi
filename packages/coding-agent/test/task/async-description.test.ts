@@ -35,3 +35,22 @@ it("updates async guidance when wait, messaging, or background execution availab
 	expect(tool.description).not.toContain("Results auto-deliver");
 	expect(tool.description).not.toContain("read proc://");
 });
+
+it("tells a subagent that results arrive only while its run is live, and to wait before it yields", async () => {
+	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+	const settings = Settings.isolated({ "async.enabled": true });
+	const tool = await TaskTool.create({
+		cwd: "/tmp/task-async-description",
+		hasUI: false,
+		settings,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		isToolActive: () => true,
+		taskDepth: 1,
+	} as unknown as ToolSession);
+	const description = tool.description;
+	expect(description).toContain("Results arrive only while this run is live");
+	expect(description).toContain("call `wait` on pending jobs before you end your turn");
+	expect(description).not.toContain("Results auto-deliver");
+	expect(description).not.toContain("Call `wait` to receive");
+});

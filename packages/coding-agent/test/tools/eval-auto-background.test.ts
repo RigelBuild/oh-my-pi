@@ -184,6 +184,29 @@ describe("EvalTool auto-background", () => {
 		await asyncJobManager.dispose();
 	});
 
+	it("tells a subagent cell to call wait instead of promising a wake", async () => {
+		const asyncJobManager = new AsyncJobManager({});
+		const cell = mockGatedCell("start\ndone\n");
+		const tool = new EvalTool({
+			...makeSession(
+				Settings.isolated({
+					"eval.autoBackground.enabled": true,
+					"eval.autoBackground.thresholdMs": 10,
+				}),
+				asyncJobManager,
+			),
+			taskDepth: 1,
+		});
+		const result = await tool.execute("call-sub-background", { language: "js", code: "await work()" });
+		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(text).toContain("Backgrounded as job");
+		expect(text).not.toContain("wait to be woken");
+		expect(text).toContain("call `wait`");
+		cell.release();
+		await asyncJobManager.waitForAll();
+		await asyncJobManager.dispose();
+	});
+
 	it("backgrounds a running cell when the steering signal fires mid-wait", async () => {
 		const asyncJobManager = new AsyncJobManager({});
 		const cell = mockGatedCell("steered\n");

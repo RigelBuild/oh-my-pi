@@ -57,6 +57,7 @@ describe("workflow notice", () => {
 		js: true,
 		freshAgents: false,
 		perCallModel: false,
+		subagent: false,
 	};
 
 	it("defaults to workpools and hides eval-defined tools when disabled", () => {
@@ -67,6 +68,16 @@ describe("workflow notice", () => {
 		expect(disabled).toContain("Default to `workpool()`");
 		expect(disabled).not.toContain("`@tool`");
 		expect(disabled).not.toContain("tools=None");
+	});
+
+	it("tells a subagent its results arrive only while it runs, and to wait before it yields", () => {
+		const top = renderWorkflowNotice(base);
+		const sub = renderWorkflowNotice({ ...base, subagent: true });
+		expect(top).toContain("Results auto-deliver.");
+		expect(top).not.toContain("Results arrive only while this run is live");
+		expect(sub).toContain("Results arrive only while this run is live");
+		expect(sub).toContain("call the `wait` tool");
+		expect(sub).not.toContain("Results auto-deliver");
 	});
 
 	it("describes the pool dispatch mode the session will actually use", () => {
