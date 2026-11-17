@@ -1,4 +1,4 @@
-import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { isUsageLimit, status as getErrorStatus } from "./flags";
 import { isBillingCapAnswer, isConcurrencyCapExclusion, isUsageLimitOutcome, parseRateLimitReason } from "./rate-limit";
 import { isProviderRetryableError } from "./retryable";
@@ -16,9 +16,9 @@ export interface GatewayErrorClassification {
  * Classify an upstream / gateway-internal error into a status code and a
  * format-neutral type. The order is intentional:
  *
- *  1. Honour the HTTP status the error carries: a numeric `status`,
- *     `statusCode`, `response.status`, or one in its `cause`
- *     ({@link extractHttpStatusFromError}).
+ *  1. Honour a numeric HTTP status the error carries as a structured field:
+ *     `status`, `statusCode` or `response.status`, or the same on its `cause`.
+ *     The message text is never read in this step.
  *  2. A billing cap keeps its upstream status. An answered upstream message
  *     passes its `errorStatus` as `upstreamStatus`. A 402, or billing wording
  *     ({@link isBillingCapAnswer}), keeps that status: topping up clears it,
@@ -34,8 +34,8 @@ export interface GatewayErrorClassification {
 export function classifyGatewayError(err: unknown, upstreamStatus?: number): GatewayErrorClassification {
 	const message = err instanceof Error ? err.message : String(err);
 
-	// 1. The HTTP status the error carries: `status`, `statusCode`, `response.status`, or one in its `cause`.
-	const httpStatus = extractHttpStatusFromError(err);
+	// 1. A numeric HTTP status the error carries as a structured field, never one parsed from its message.
+	const httpStatus = ownHttpStatus(err) ?? (isRecord(err) ? ownHttpStatus(err.cause) : undefined);
 	if (httpStatus !== undefined) return bucketStatus(httpStatus, message);
 
 	if (err instanceof Error && err.name === "AbortError") return { status: 499, type: "request_aborted", message };
@@ -105,6 +105,22 @@ function extractEmbeddedStatus(message: string): number | undefined {
 	if (!raw) return undefined;
 	const code = Number.parseInt(raw, 10);
 	return Number.isFinite(code) && code >= 100 && code < 600 ? code : undefined;
+}
+
+/**
+ * The numeric HTTP status a thrown value carries in its own `status`,
+ * `statusCode` or `response.status` field. Message text is never parsed here:
+ * step 3 ({@link extractEmbeddedStatus}) owns that.
+ */
+function ownHttpStatus(value: unknown): number | undefined {
+	if (!isRecord(value)) return undefined;
+	const response = isRecord(value.response) ? value.response.status : undefined;
+	for (const candidate of [value.status, value.statusCode, response]) {
+		if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 100 && candidate <= 599) {
+			return candidate;
+		}
+	}
+	return undefined;
 }
 
 export type UpstreamFailureKind =

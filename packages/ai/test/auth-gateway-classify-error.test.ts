@@ -161,6 +161,16 @@ describe("auth-gateway classifyGatewayError", () => {
 			expect(classifyGatewayError(err).status).toBe(402);
 		}
 	});
+
+	it("answers 429 for `rate limit exceeded; error: 500` with no status field, since the message status is not read in step 1", () => {
+		const err = new Error("rate limit exceeded; error: 500");
+		expect(classifyGatewayError(err).type).toBe("rate_limit_error");
+		expect(classifyGatewayError(err).status).toBe(429);
+	});
+
+	it("pins `out of credit, error: 402` with no status field at 502, since step 1 reads no message text and step 3 finds no keyword", () => {
+		expect(classifyGatewayError(new Error("out of credit, error: 402")).status).toBe(502);
+	});
 });
 
 const classifierModel = buildModel({
