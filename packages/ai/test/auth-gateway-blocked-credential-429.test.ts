@@ -233,7 +233,7 @@ describe("auth-gateway: a usage cap answers 429 (RIG-10540)", () => {
 	});
 
 	it("answers chat 429 with errorMessage, not errorClassificationMessage, when the two differ", async () => {
-		// The split fixture sets the classifier text to a usage-free string, so the 429 comes from the
+		// The split fixture puts the usage text only in the classifier field, so the 429 comes from the
 		// usage check and the body must carry the client text (`errorMessage`), not the classifier text.
 		const splitModel = registerSplitErrorApi();
 		const gateway = await startGateway("", { model: splitModel });
