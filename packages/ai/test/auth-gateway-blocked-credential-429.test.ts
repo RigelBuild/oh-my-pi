@@ -128,6 +128,28 @@ function codexUsageCapResponse(): Response {
 	);
 }
 
+/** A 402 out-of-credit answer: the account needs a top-up, which waiting never clears. */
+function outOfCreditResponse(): Response {
+	return new Response(JSON.stringify({ error: { type: "insufficient_quota", message: "out of credit" } }), {
+		status: 402,
+		headers: { "content-type": "application/json" },
+	});
+}
+
+/** Anthropic's prepaid-balance 400, which a top-up clears. */
+function creditBalanceTooLowResponse(): Response {
+	return new Response(
+		JSON.stringify({
+			error: {
+				type: "invalid_request_error",
+				message:
+					"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+			},
+		}),
+		{ status: 400, headers: { "content-type": "application/json" } },
+	);
+}
+
 /**
  * Registers a custom api whose terminal error sets `errorMessage` (client text) and
  * `errorClassificationMessage` (the classifier's text) to different strings.
@@ -315,13 +337,7 @@ describe("auth-gateway: a usage cap answers 429 (RIG-10540)", () => {
 	it("keeps a 402 out-of-credit answer at 402, not 429", async () => {
 		// A billing cap is cleared by topping up, so waiting never helps: it must not become a retry-able 429.
 		// A real 402 is a non-2xx response, which the provider turns into a status-carrying error.
-		const gateway = await startGateway("", {
-			respond: () =>
-				new Response(JSON.stringify({ error: { type: "insufficient_quota", message: "out of credit" } }), {
-					status: 402,
-					headers: { "content-type": "application/json" },
-				}),
-		});
+		const gateway = await startGateway("", { respond: outOfCreditResponse });
 		try {
 			const response = await sendChat(gateway.url);
 
@@ -333,22 +349,7 @@ describe("auth-gateway: a usage cap answers 429 (RIG-10540)", () => {
 	});
 
 	it("keeps Anthropic's 'credit balance is too low' 400 at 400, not 429", async () => {
-		const gateway = await startGateway("", {
-			respond: () =>
-				new Response(
-					JSON.stringify({
-						error: {
-							type: "invalid_request_error",
-							message:
-								"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
-						},
-					}),
-					{
-						status: 400,
-						headers: { "content-type": "application/json" },
-					},
-				),
-		});
+		const gateway = await startGateway("", { respond: creditBalanceTooLowResponse });
 		try {
 			const response = await sendChat(gateway.url);
 
@@ -369,6 +370,61 @@ describe("auth-gateway: a usage cap answers 429 (RIG-10540)", () => {
 
 			expect(response.status).toBe(429);
 			expect(response.headers.get("retry-after")).toBe("45");
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("keeps a 402 out-of-credit answer at 402 on the pi-native answered branch", async () => {
+		const gateway = await startGateway("", { respond: outOfCreditResponse });
+		try {
+			const response = await sendPiNative(gateway.url);
+
+			expect(response.status).toBe(402);
+			expect(response.headers.get("retry-after")).toBeNull();
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("keeps Anthropic's 'credit balance is too low' 400 at 400 on the pi-native answered branch", async () => {
+		const gateway = await startGateway("", { respond: creditBalanceTooLowResponse });
+		try {
+			const response = await sendPiNative(gateway.url);
+
+			expect(response.status).toBe(400);
+			expect(response.headers.get("retry-after")).toBeNull();
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("keeps a 402 out-of-credit answer at 402 on the candidate-failover path", async () => {
+		// The answered message reaches judgeAttempt through the failover loop, and no follower can take it.
+		const gateway = await startGateway("", {
+			respond: outOfCreditResponse,
+			candidateFailover: { next: async () => undefined, onFailure: () => {} },
+		});
+		try {
+			const response = await sendChat(gateway.url);
+
+			expect(response.status).toBe(402);
+			expect(response.headers.get("retry-after")).toBeNull();
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("keeps Anthropic's 'credit balance is too low' 400 at 400 on the candidate-failover path", async () => {
+		const gateway = await startGateway("", {
+			respond: creditBalanceTooLowResponse,
+			candidateFailover: { next: async () => undefined, onFailure: () => {} },
+		});
+		try {
+			const response = await sendChat(gateway.url);
+
+			expect(response.status).toBe(400);
+			expect(response.headers.get("retry-after")).toBeNull();
 		} finally {
 			await gateway.close();
 		}

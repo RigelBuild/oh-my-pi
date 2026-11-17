@@ -642,7 +642,7 @@ function judgeAttempt(
 	}
 	const text = message.errorClassificationMessage ?? message.errorMessage;
 	const usageLimit = gatewayUsageLimitAnswer(model.provider, text ?? errorMessage, message.errorStatus);
-	const classified = usageLimit?.failure ?? classifyGatewayError(text ?? errorMessage);
+	const classified = usageLimit?.failure ?? classifyGatewayError(text ?? errorMessage, message.errorStatus);
 	return {
 		outcome: {
 			kind: "failed",
@@ -1274,7 +1274,10 @@ async function handleFormatEndpoint(
 						...usageLimit,
 						failure: { ...usageLimit.failure, message: errorMessage },
 					});
-				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
+				const classified = classifyGatewayError(
+					message.errorClassificationMessage ?? errorMessage,
+					message.errorStatus,
+				);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
 			return json(
@@ -1557,7 +1560,10 @@ async function handlePiNative(
 						...usageLimit,
 						failure: { ...usageLimit.failure, message: errorMessage },
 					});
-				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
+				const classified = classifyGatewayError(
+					message.errorClassificationMessage ?? errorMessage,
+					message.errorStatus,
+				);
 				return noStoreErrorResponse(classified.status, classified.type, errorMessage);
 			}
 			return json(

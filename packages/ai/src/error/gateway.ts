@@ -1,5 +1,6 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { isUsageLimit, status as getErrorStatus } from "./flags";
-import { isConcurrencyCapExclusion, isUsageLimitOutcome, parseRateLimitReason } from "./rate-limit";
+import { isBillingCapAnswer, isConcurrencyCapExclusion, isUsageLimitOutcome, parseRateLimitReason } from "./rate-limit";
 import { isProviderRetryableError } from "./retryable";
 import type { Api, Model } from "../types";
 import { extractProviderRetryHint, getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
@@ -15,34 +16,41 @@ export interface GatewayErrorClassification {
  * Classify an upstream / gateway-internal error into a status code and a
  * format-neutral type. The order is intentional:
  *
- *  1. Honour an explicit numeric `status` property on the thrown error.
- *  2. Parse a status code embedded in the message string. Provider errors
+ *  1. Honour a numeric HTTP status the error carries as a structured field:
+ *     `status`, `statusCode` or `response.status`, or the same on its `cause`.
+ *     The message text is never read in this step.
+ *  2. A billing cap keeps its upstream status. An answered upstream message
+ *     passes its `errorStatus` as `upstreamStatus`. A 402, or billing wording
+ *     ({@link isBillingCapAnswer}), keeps that status: topping up clears it,
+ *     so a 429 would only invite a retry.
+ *  3. Parse a status code embedded in the message string. Provider errors
  *     virtually always carry one (`Google API error (400): …`, `HTTP 429`,
  *     `status=503`) and the embedded value is authoritative.
- *  3. Fall through to **word-boundaried** substring heuristics. The old
+ *  4. Fall through to **word-boundaried** substring heuristics. The old
  *     `lower.includes("rate")` test famously matched `GenerateContentRequest`,
  *     surfacing every Google 400 as a 429 `rate_limit_error`. The patterns here
  *     all require boundaries so they don't collide with provider field names.
  */
-export function classifyGatewayError(err: unknown): GatewayErrorClassification {
+export function classifyGatewayError(err: unknown, upstreamStatus?: number): GatewayErrorClassification {
 	const message = err instanceof Error ? err.message : String(err);
 
-	// 1. Custom pi-ai errors may attach a numeric `status` property.
-	const statusProp =
-		typeof err === "object" && err !== null && typeof (err as { status?: unknown }).status === "number"
-			? (err as { status: number }).status | 0
-			: undefined;
-	if (statusProp !== undefined) return bucketStatus(statusProp, message);
+	// 1. A numeric HTTP status the error carries as a structured field, never one parsed from its message.
+	const httpStatus = ownHttpStatus(err) ?? (isRecord(err) ? ownHttpStatus(err.cause) : undefined);
+	if (httpStatus !== undefined) return bucketStatus(httpStatus, message);
 
 	if (err instanceof Error && err.name === "AbortError") return { status: 499, type: "request_aborted", message };
+	// 2. A billing cap keeps the status it arrived with: topping up clears it, so a 429 would only invite a retry.
+	if (upstreamStatus !== undefined && (upstreamStatus === 402 || isBillingCapAnswer(upstreamStatus, message))) {
+		return bucketStatus(upstreamStatus, message);
+	}
 
-	// 2. Status code embedded in the message. Requires a contextual keyword
+	// 3. Status code embedded in the message. Requires a contextual keyword
 	// (`HTTP`, `API error`, `status`, …) or a leading `(NNN)` token so we
 	// don't trip on incidental three-digit numbers ("took 200ms").
 	const embedded = extractEmbeddedStatus(message);
 	if (embedded !== undefined) return bucketStatus(embedded, message);
 
-	// 3. Word-boundaried substring heuristics.
+	// 4. Word-boundaried substring heuristics.
 	if (/\baborted\b|\babort signal\b/i.test(message)) {
 		return { status: 499, type: "request_aborted", message };
 	}
@@ -97,6 +105,22 @@ function extractEmbeddedStatus(message: string): number | undefined {
 	if (!raw) return undefined;
 	const code = Number.parseInt(raw, 10);
 	return Number.isFinite(code) && code >= 100 && code < 600 ? code : undefined;
+}
+
+/**
+ * The numeric HTTP status a thrown value carries in its own `status`,
+ * `statusCode` or `response.status` field. Message text is never parsed here:
+ * step 3 ({@link extractEmbeddedStatus}) owns that.
+ */
+function ownHttpStatus(value: unknown): number | undefined {
+	if (!isRecord(value)) return undefined;
+	const response = isRecord(value.response) ? value.response.status : undefined;
+	for (const candidate of [value.status, value.statusCode, response]) {
+		if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 100 && candidate <= 599) {
+			return candidate;
+		}
+	}
+	return undefined;
 }
 
 export type UpstreamFailureKind =

@@ -117,6 +117,68 @@ describe("auth-gateway classifyGatewayError", () => {
 		expect(c.status).toBe(502);
 		expect(c.type).toBe("upstream_error");
 	});
+
+	it("keeps a billing cap at its upstream status, thrown or answered", () => {
+		const anthropic = "Your credit balance is too low to access the Anthropic API.";
+		expect(classifyGatewayError(new ProviderHttpError("out of credit", 402)).status).toBe(402);
+		expect(classifyGatewayError(new ProviderHttpError(anthropic, 400)).status).toBe(400);
+		expect(classifyGatewayError(new Error("out of credit"), 402).status).toBe(402);
+		expect(classifyGatewayError(new Error(anthropic), 400).status).toBe(400);
+	});
+
+	it("still answers a real usage or rate limit with 429 when the upstream status is known", () => {
+		expect(classifyGatewayError(new Error("usage_limit_reached"), 429).status).toBe(429);
+		expect(classifyGatewayError(new Error("too many requests, back off"), 429).status).toBe(429);
+		expect(
+			classifyGatewayError(
+				new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min."),
+				429,
+			).status,
+		).toBe(429);
+	});
+
+	it("answers 429 for `rate limit exceeded` text with a 400 status, since it is not a billing cap", () => {
+		expect(classifyGatewayError(new Error("rate limit exceeded"), 400).status).toBe(429);
+	});
+
+	it("answers 429 for `usage_limit_reached` text with a 500 status, since it is not a billing cap", () => {
+		expect(classifyGatewayError(new Error("usage_limit_reached"), 500).status).toBe(429);
+	});
+
+	it("answers 429 for Codex usage-limit text with a 503 status, since it is not a billing cap", () => {
+		const codexCap = "You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.";
+		expect(classifyGatewayError(new Error(codexCap), 503).status).toBe(429);
+	});
+
+	it("reads the status from `statusCode`, `response.status` or `cause`, so a thrown billing cap keeps it", () => {
+		const outOfCredit = "out of credit";
+		const cases = [
+			Object.assign(new Error(outOfCredit), { statusCode: 402 }),
+			Object.assign(new Error(outOfCredit), { response: { status: 402 } }),
+			new Error(outOfCredit, { cause: { status: 402 } }),
+		];
+		for (const err of cases) {
+			expect(classifyGatewayError(err).status).toBe(402);
+		}
+	});
+
+	it("answers 429 for `rate limit exceeded; error: 500` with no status field, since the message status is not read in step 1", () => {
+		const err = new Error("rate limit exceeded; error: 500");
+		expect(classifyGatewayError(err).type).toBe("rate_limit_error");
+		expect(classifyGatewayError(err).status).toBe(429);
+	});
+
+	it("pins `out of credit, error: 402` with no status field at 502, since step 1 reads no message text and step 3 finds no keyword", () => {
+		expect(classifyGatewayError(new Error("out of credit, error: 402")).status).toBe(502);
+	});
+
+	it("keeps a billing cap at its upstream status when the message embeds a 5xx, since step 2 runs before step 3", () => {
+		expect(classifyGatewayError("HTTP 500: credit balance is too low", 400).status).toBe(400);
+	});
+
+	it("answers 429 for `rate limit exceeded` with `status: 0`, since a status outside 100-599 is not read in step 1", () => {
+		expect(classifyGatewayError(Object.assign(new Error("rate limit exceeded"), { status: 0 })).status).toBe(429);
+	});
 });
 
 const classifierModel = buildModel({
