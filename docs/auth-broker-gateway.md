@@ -146,23 +146,6 @@ The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using
 
 ## auth-gateway
 
-### Container boot
-
-`Dockerfile.gateway` is based on the `pi-runtime` stage in `Dockerfile`. Build both images from the repository root:
-
-```sh
-podman build --target pi-runtime -f Dockerfile -t oh-my-pi/pi:dev .
-podman build -f Dockerfile.gateway -t compass-gateway:dev .
-```
-
-Keep the host-owned `0600` bearer outside the checkout so image builds cannot copy it. Mount it read-only:
-
-```sh
-podman run --rm --stop-timeout 25 -p 127.0.0.1:4100:4000 -v "$HOME/.omp/auth-gateway.token:/run/compass/gateway.token:ro" -e OMP_AUTH_BROKER_URL -e OMP_AUTH_BROKER_TOKEN compass-gateway:dev
-```
-
-The entrypoint reads one non-empty bearer token from `COMPASS_GATEWAY_TOKEN_FILE` before it starts `auth-gateway serve`. Defaults are `/run/compass/gateway.token`, `0.0.0.0:4000`, and a 20-second SIGTERM drain. Set the container stop timeout to 25 seconds. Shutdown has one owner: the drain runs as a postmortem cleanup step, the entrypoint raises the postmortem deadline to the drain plus 2 seconds, and the process exits `143` after SIGTERM. The current CLI still requires `OMP_AUTH_BROKER_URL` and `OMP_AUTH_BROKER_TOKEN` (or equivalent config); boot does not supply a broker URL. Root inside rootless Podman can read a host-owned `0600` read-only token mount without changing its permissions.
-
 ### CLI
 
 ```
@@ -175,8 +158,6 @@ omp auth-gateway check   [--strict] [--json]
 
 - `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It fetches a live snapshot, wraps it in `RemoteAuthCredentialStore`, and constructs `AuthStorage` with the configured account pool and account policies. Unlike normal client discovery, gateway startup does not use the encrypted snapshot cache. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely. Use that flag only on trusted loopback listeners; it does not enforce a loopback bind.
 - Logs attribute requests to the socket peer address. Behind a trusted reverse proxy, pass `--trust-proxy-headers` to use `X-Forwarded-For` / `X-Real-IP` for authenticated requests; unauthorized requests are always logged with the socket peer. An authenticated request that also carries the gateway token in its URL or in a forwarded, logged, or identity header is rejected with `400` before any credential lookup.
-- Embedders of `startAuthGateway` pass `authorize(req)`, which returns the caller (`{ agentAccountId }`) or `null` for `401`; a throw answers `503`. The gateway confines only the `Authorization: Bearer` token, so it answers `401` when an authorizer admits a request without one. The CLI uses `bearerTokenAuthorizer(tokens)`. With `resolveStorage(caller)` set, each caller's requests select only from its tenant's `AuthStorage`, keyed on `ownerUserId` when the authorizer sets it (a throw answers `503`), and retained provider session state and provider session ids are kept per caller. `/v1/models` lists the process-wide catalog for every caller.
-- Wrapping the authorizer in `withEnrollToken(token, authorize)` admits that token as the enroll caller. The enroll caller reaches only `/internal/enroll/*`: `GET providers` lists each enrollable provider's `pasteCodeFlow` and `subscriptionTosTier`, `POST authorize-url` takes `{provider, state, redirectUri, pkceChallenge}`, and `POST exchange` takes `{provider, code, state, redirectUri, pkceVerifier}` and returns `{credential}`. A rejected code answers `422`, bad input `400`, a provider rate limit `503`, and a provider failure (including a refused gateway client) `502` or `504`; the provider's response is never logged. Agent bearers get `401` on these routes, and the enroll token gets `401` on every other authenticated route (`/healthz` and CORS preflight stay public). Enroll responses carry no CORS grant.
 - `token` manages the token file; `--regenerate` requires a running gateway to restart before accepting the replacement. `status` checks the local token file and an authenticated broker snapshot; it does not probe the gateway listener.
 - `check` constructs its own broker-backed store and probes the credentials the gateway would use, without calling a running gateway. Without `--strict` it uses provider usage probes. `--strict` additionally tries suitable bundled chat models and can consume quota; providers with no suitable candidate (including pi-native forwarding, Bedrock, Vertex, and Cursor transports) cannot be completion-probed.
 
@@ -223,7 +204,7 @@ The model id is read from the top-level `model` field for foreign wire formats a
 
 Chat routes reject non-chat models with a `400` that names the route to use instead (`Model typesafe/jev-latest is a judge model; use POST /v1/systemone`). `GET /v1/models` marks such rows with `kind` (`judge` | `image` | `tts` | `stt` | `embedding` | `rerank` | `video`); absent means chat.
 
-The served catalog includes bundled, cached, and broker-discovered models. The gateway ignores the host's `models.yml` overrides/custom models so local base URLs, headers, and keys cannot redirect broker-backed traffic. Providers listed in `disabledProviders` of the gateway's effective settings (the same `config.yml` that supplies `auth.accountPolicies`) are neither discovered, advertised, nor routable, and `check` skips their credentials. The gateway rebuilds the catalog every 15 minutes and checks credential changes every 10 seconds; credential changes force online discovery. Provider-qualified IDs are unambiguous; bare IDs use the first matching registry entry. Model-list rows also include `api`, `display_name`, `input_modalities`, available `context_length`/`max_output_tokens`, and `supports_tools: false` when explicitly unsupported.
+The served catalog includes bundled, cached, and broker-discovered models. The gateway ignores the host's `models.yml` overrides/custom models so local base URLs, headers, and keys cannot redirect broker-backed traffic. It rebuilds the catalog every 15 minutes and checks credential changes every 10 seconds; credential changes force online discovery. Provider-qualified IDs are unambiguous; bare IDs use the first matching registry entry. Model-list rows also include `api`, `display_name`, `input_modalities`, available `context_length`/`max_output_tokens`, and `supports_tools: false` when explicitly unsupported.
 
 Live OpenRouter discovery covers image and Decisions rosters, `/embeddings/models`, `/videos/models`, and rerank-flagged `/models` rows. Speech/transcription models use catalog kinds and seeds. Bundled fallbacks and `kind-apis` runner mappings are authored in `packages/catalog/src/compat/rules/providers/openrouter.kdl`. Per-search, per-second, and per-character billing have no catalog cost axis, so those rows carry zero token cost and the provider-reported `cost` in the response is authoritative.
 
@@ -320,18 +301,6 @@ The gateway uses the same broker URL/token resolution and account-pool environme
 | `retry.usageReservePct` | `10` | Default protected remaining-quota percentage when an account has no `reservePct` override. |
 
 Broker connection values come from the agent's main config file, not project settings. Account policies/reserve use effective settings (including project/explicit config layers). Long-lived SDK sessions follow policy changes and can replace the credential store in place when effective broker settings change; failed changes leave the current store active.
-
-#### How sessions choose and keep an account
-
-When a provider has account policies, OMP ranks its accounts whenever it selects or reconsiders one (not on every request: a warm explicit pin, or a sole account, skips ranking). In order, an account loses when it is blocked (hit a limit), outside a required plan, past its renewable allowance, or inside its reserve; then Codex accounts with an untouched 5-hour window are preferred, accounts whose 5-hour window is at least 85% used fall back, accounts with a usage report beat accounts whose report could not be fetched, and only then does higher `priority` win. Ties go to the account whose quota would otherwise expire unused soonest. So `priority` orders healthy, measured accounts; it does not override reserve or the safety checks before it.
-
-That ranking picks the account for a **new** session. A running session remembers the account it used last (its pin) and keeps it while the pin is warm, so the provider's prompt cache and signed reasoning stay valid:
-
-- Anthropic pins go cold after an hour without a request; other providers' pins stay warm indefinitely. A cold or blocked pin re-ranks.
-- A warm pin moves only away from a bad account: when the pinned account enters its reserve and another account is measured outside its own reserve, or when its allowance is spent and an unblocked sibling still has allowance.
-- A warm pin does not move back when a higher-priority account recovers. New sessions use the recovered account; running ones stay where they are until one of the cases above applies.
-- An account the user chose explicitly for a session is never moved by ranking or reserve. It is still skipped while blocked, after a failed token refresh, or when it fails a required plan check; the session then falls through to a sibling.
-- Pins are saved with the session. A resumed session restores its pin with its original last-use time, and subagents start on their parent's pins.
 
 ### Token files
 

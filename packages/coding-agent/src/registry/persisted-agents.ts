@@ -341,10 +341,7 @@ async function readPersistedAgentMetadata(
 				hasSessionInit = true;
 				createdAt ??= timestampOf(record.timestamp);
 				if (typeof record.task === "string") activity = summarizePersistedTask(record.task);
-				const systemPrompt = Array.isArray(record.systemPrompt)
-					? record.systemPrompt.join("\n\n")
-					: record.systemPrompt;
-				const inferred = typeof systemPrompt === "string" ? inferBundledAgent(systemPrompt) : {};
+				const inferred = typeof record.systemPrompt === "string" ? inferBundledAgent(record.systemPrompt) : {};
 				history = {
 					...history,
 					...inferred,

@@ -22,8 +22,6 @@ interface DownloadProgress {
 	guid: string;
 	state: "inProgress" | "completed" | "canceled";
 	receivedBytes: number;
-	/** Saved location on completion; tabs share one download directory per browser context, so this can differ from ours. */
-	filePath?: string;
 }
 
 interface PendingDownload extends DownloadStarted {
@@ -43,7 +41,6 @@ export class DownloadManager {
 	readonly #page: Page;
 	readonly #defaultDirectory: string;
 	#directory?: string;
-	#arming?: Promise<void>;
 	#session?: CDPSession;
 	#frameId?: string;
 	readonly #pending = new Map<string, PendingDownload>();
@@ -74,19 +71,9 @@ export class DownloadManager {
 		this.#directory = resolved;
 	}
 
-	/** Enabling started by a `wait()` that has not yet applied; settles once downloads are tracked. */
-	get arming(): Promise<void> | undefined {
-		return this.#arming;
-	}
-
 	/** Wait for the next unclaimed completed download. */
 	async wait(signal?: AbortSignal): Promise<BrowserDownload> {
-		if (!this.#directory) {
-			this.#arming ??= this.enable().finally(() => {
-				this.#arming = undefined;
-			});
-			await this.#arming;
-		}
+		if (!this.#session) await this.enable();
 		const ready = this.#unclaimed.shift();
 		if (ready) return { ...ready };
 		if (signal?.aborted) throw signal.reason;
@@ -145,15 +132,16 @@ export class DownloadManager {
 				this.#rejectNext(new ToolError(`Download canceled: ${pending.url}`));
 				return;
 			}
-			void this.#complete(pending, event.filePath);
+			void this.#complete(pending);
 		};
 		session.on("Browser.downloadWillBegin", this.#willBegin);
 		session.on("Browser.downloadProgress", this.#progress);
 		this.#session = session;
 	}
 
-	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
-		const downloadPath = filePath ?? path.join(this.#directory ?? this.#defaultDirectory, pending.suggestedFilename);
+	async #complete(pending: PendingDownload): Promise<void> {
+		const directory = this.#directory ?? this.#defaultDirectory;
+		const downloadPath = path.join(directory, pending.suggestedFilename);
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
 				await fs.stat(downloadPath);

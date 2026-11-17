@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use image::{Rgba, RgbaImage};
+use image::{RgbaImage, imageops};
 use x11rb::{
 	connection::Connection,
 	errors::ReplyError,
@@ -16,7 +16,7 @@ use x11rb::{
 
 use crate::desktop::{
 	error::{CoreResult, DesktopError},
-	frame::{FrameGeometry, compose},
+	frame::FrameGeometry,
 	types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 };
 
@@ -297,16 +297,17 @@ impl X11Capture {
 					.map(|display| display.pixel_y.saturating_add(display.pixel_height))
 					.max()
 					.unwrap_or(1);
-				let composite = compose(
-					width,
-					height,
-					Rgba([0; 4]),
-					displays.iter().map(|display| {
-						let image =
-							self.capture_root(display.x, display.y, display.width, display.height)?;
-						Ok((image, display.pixel_x, display.pixel_y))
-					}),
-				)?;
+				let mut composite = RgbaImage::new(width, height);
+				for display in &displays {
+					let image =
+						self.capture_root(display.x, display.y, display.width, display.height)?;
+					imageops::replace(
+						&mut composite,
+						&image,
+						i64::from(display.pixel_x),
+						i64::from(display.pixel_y),
+					);
+				}
 				let frame = FrameGeometry::for_displays(&displays);
 				Ok((composite, frame))
 			},

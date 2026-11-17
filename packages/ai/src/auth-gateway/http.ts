@@ -8,9 +8,7 @@ import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import * as os from "node:os";
 import { getInstallId } from "@oh-my-pi/pi-utils";
 import type { Api, Model } from "../types";
-import { deterministicUuid } from "../utils/deterministic-id";
 import type { ClientUsageIdentity } from "../usage";
-import type { AgentCaller, AuthGatewayAuthorizer, CallerIdentity, EnrollCaller } from "./types";
 
 const JSON_HEADERS = {
 	"Content-Type": "application/json",
@@ -76,21 +74,26 @@ function decodeUrlLeniently(location: string): string {
 	});
 }
 
-/** Keep the admitting bearer out of URL and forwarded/logged request fields. */
-export function hasMisplacedBearer(req: Request, url: URL, token: string): boolean {
+/** Keep configured gateway credentials out of URL and forwarded/logged request fields. */
+export function hasMisplacedBearer(req: Request, url: URL, tokens: ReadonlySet<string>): boolean {
+	if (tokens.size === 0) return false;
 	const location = url.pathname + url.search;
-	if (location.includes(token) || decodeUrlLeniently(location).includes(token)) return true;
-	for (const [name, value] of req.headers) {
-		if (
-			(PASSTHROUGH_HEADER_NAMES[name] ||
-				name.startsWith("x-stainless-") ||
-				name.startsWith("x-omp-") ||
-				name === "x-forwarded-for" ||
-				name === "x-real-ip" ||
-				name === "forwarded") &&
-			value.includes(token)
-		) {
-			return true;
+	const decodedLocation = decodeUrlLeniently(location);
+	const headers = req.headers;
+	for (const token of tokens) {
+		if (location.includes(token) || decodedLocation.includes(token)) return true;
+		for (const [name, value] of headers) {
+			if (
+				(PASSTHROUGH_HEADER_NAMES[name] ||
+					name.startsWith("x-stainless-") ||
+					name.startsWith("x-omp-") ||
+					name === "x-forwarded-for" ||
+					name === "x-real-ip" ||
+					name === "forwarded") &&
+				value.includes(token)
+			) {
+				return true;
+			}
 		}
 	}
 	return false;
@@ -118,91 +121,21 @@ export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 const TOKEN_ENCODER = new TextEncoder();
 
-/** The bearer token from `Authorization`, or `undefined` when none (or a blank one) is presented. */
-export function presentedBearer(req: Request): string | undefined {
-	const token = req.headers
-		.get("authorization")
-		?.match(/^Bearer\s+(.+)$/i)?.[1]
-		.trim();
-	return token ? token : undefined;
-}
-
-/**
- * The one caller every request is admitted as under shared bearer tokens. The
- * NUL in its id keeps any real account from colliding with it.
- */
-export const SHARED_TOKEN_CALLER: AgentCaller = Object.freeze({ kind: "agent", agentAccountId: "\u0000shared" });
-
-/**
- * The caller an empty token set admits. The server matches it by reference: its
- * bearer, if any, was never checked, so there is no credential to keep out of the URL.
- */
-export const UNAUTHENTICATED_CALLER: AgentCaller = Object.freeze({ kind: "agent", agentAccountId: "\u0000shared" });
-
-/** The one enrollment caller; {@link withEnrollToken} admits the server's enroll token as it. */
-export const ENROLL_CALLER: EnrollCaller = Object.freeze({ kind: "enroll" });
-
-/** A non-empty id with no NUL: the reserved shared id carries one, so no real id can collide with it. */
-function isAccountId(value: unknown): value is string {
-	return typeof value === "string" && value !== "" && !value.includes("\u0000");
-}
-
-/**
- * Whether an authorizer result names a caller. Anything else (`undefined`, `{}`, an
- * unknown kind, an empty or NUL-bearing id or owner) is answered 401, never mapped to a default caller.
- */
-export function isCallerIdentity(value: unknown): value is CallerIdentity {
-	if (value === SHARED_TOKEN_CALLER || value === UNAUTHENTICATED_CALLER || value === ENROLL_CALLER) return true;
-	if (typeof value !== "object" || value === null || !("kind" in value) || value.kind !== "agent") return false;
-	if (!("agentAccountId" in value) || !isAccountId(value.agentAccountId)) return false;
-	return !("ownerUserId" in value) || value.ownerUserId === undefined || isAccountId(value.ownerUserId);
-}
-
-/**
- * The session id providers key their process-wide caches by. Per-account callers
- * get their own namespace, so two agents sending the same key never share one;
- * the shared caller keeps the key verbatim so existing caches stay warm.
- */
-export function callerSessionId(caller: AgentCaller, sessionId: string): string {
-	if (caller.agentAccountId === SHARED_TOKEN_CALLER.agentAccountId) return sessionId;
-	return deterministicUuid(`${caller.agentAccountId}\u0000${sessionId}`);
-}
-
-/**
- * Admits the server's enroll token as {@link ENROLL_CALLER} and hands every other
- * request to `authorize`. The compare is timing-safe, including across lengths.
- */
-export function withEnrollToken(enrollToken: string, authorize: AuthGatewayAuthorizer): AuthGatewayAuthorizer {
-	// A presented bearer is trimmed, so a padded token could never match: refuse it here, not as a silent 401.
-	if (!enrollToken || enrollToken.trim() !== enrollToken) {
-		throw new Error("enroll token must be non-empty with no surrounding whitespace");
+export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
+	if (tokens.size === 0) return true;
+	const header = req.headers.get("authorization");
+	if (!header) return false;
+	const match = header.match(/^Bearer\s+(.+)$/i);
+	if (!match) return false;
+	const presented = TOKEN_ENCODER.encode(match[1].trim());
+	// Iterate every allowed token regardless of early hits so the result
+	// timing reflects the full set, not the position of the match.
+	let ok = false;
+	for (const tok of tokens) {
+		const expected = TOKEN_ENCODER.encode(tok);
+		if (timingSafeEqual(presented, expected)) ok = true;
 	}
-	const expected = TOKEN_ENCODER.encode(enrollToken);
-	return req => {
-		const bearer = presentedBearer(req);
-		if (bearer !== undefined && timingSafeEqual(TOKEN_ENCODER.encode(bearer), expected)) return ENROLL_CALLER;
-		return authorize(req);
-	};
-}
-
-/**
- * Authorizer for a static shared-token set: any listed token admits the request
- * as {@link SHARED_TOKEN_CALLER}. An empty set admits every request as {@link UNAUTHENTICATED_CALLER}.
- */
-export function bearerTokenAuthorizer(tokens: Iterable<string>): AuthGatewayAuthorizer {
-	const allowed = [...new Set(tokens)].map(token => TOKEN_ENCODER.encode(token));
-	return req => {
-		if (allowed.length === 0) return UNAUTHENTICATED_CALLER;
-		const bearer = presentedBearer(req);
-		if (bearer === undefined) return null;
-		const presented = TOKEN_ENCODER.encode(bearer);
-		// Compare against every token so timing doesn't reveal which one matched.
-		let ok = false;
-		for (const expected of allowed) {
-			if (timingSafeEqual(presented, expected)) ok = true;
-		}
-		return ok ? SHARED_TOKEN_CALLER : null;
-	};
+	return ok;
 }
 
 /**

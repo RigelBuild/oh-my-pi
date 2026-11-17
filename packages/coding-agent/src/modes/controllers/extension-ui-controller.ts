@@ -300,19 +300,13 @@ export class ExtensionUiController {
 			switchSession: async sessionPath => {
 				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
-				let modelFallbackWarning: string | undefined;
-				const result = await this.ctx.session.switchSession(sessionPath, {
-					onModelFallback: warning => {
-						modelFallbackWarning = warning;
-					},
-				});
+				const result = await this.ctx.session.switchSession(sessionPath);
 				if (!result) {
 					return { cancelled: true };
 				}
 				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 				return { cancelled: false };
 			},
 		};
@@ -525,18 +519,12 @@ export class ExtensionUiController {
 			switchSession: async sessionPath => {
 				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
-				let modelFallbackWarning: string | undefined;
-				const result = await this.ctx.session.switchSession(sessionPath, {
-					onModelFallback: warning => {
-						modelFallbackWarning = warning;
-					},
-				});
+				const result = await this.ctx.session.switchSession(sessionPath);
 				if (!result) {
 					return { cancelled: true };
 				}
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
-				if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 				return { cancelled: false };
 			},
 		};

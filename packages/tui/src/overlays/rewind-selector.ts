@@ -83,7 +83,6 @@ export interface RewindSelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
-	expandThinkingBlocks?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** Sibling branch paths of `entryId`'s turn (excluding the turn itself). */
@@ -227,7 +226,6 @@ export class RewindSelectorComponent implements Component {
 			cwd: this.deps.cwd,
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
-			expandThinkingBlocks: this.deps.expandThinkingBlocks,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});

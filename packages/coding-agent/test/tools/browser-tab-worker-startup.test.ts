@@ -21,7 +21,10 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-// Headful Chromium needs a display; keep this E2E opt-in.
+// Headful launches additionally need a display; `CHROMIUM_AVAILABLE` only
+// checks headless CDP on Linux, which does not require an X server.
+// Never open a desktop window during ordinary test runs; exercise this manual
+// viewport smoke test only with OMP_TEST_VISIBLE_BROWSER=1.
 const VISIBLE_BROWSER_AVAILABLE = process.env.OMP_TEST_VISIBLE_BROWSER === "1" && (await visibleBrowserAvailable());
 
 class FakeStartupWorker {
@@ -66,6 +69,7 @@ const initPayload = {
 	mode: "headless" as const,
 	browserWSEndpoint: "ws://127.0.0.1/devtools/browser/test",
 	safeDir: "/tmp/omp-puppeteer",
+	timeoutMs: 1_000,
 };
 
 describe("browser tab worker startup", () => {
@@ -132,7 +136,7 @@ describe("browser tab worker startup", () => {
 		// 5 s remain -> guard min(10 s, 5 s / 3) = 1.67 s -> floored to 2 s.
 		// A fresh (un-carried) budget would guard for 10 s.
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
-	}, 30_000);
+	});
 });
 
 describe("browser init budget exhaustion", () => {
@@ -147,22 +151,20 @@ describe("browser init budget exhaustion", () => {
 
 		await expect(pending).rejects.toThrow("Timed out waiting for tab worker setup");
 		expect(performance.now() - started).toBeLessThan(3_000);
-	}, 30_000);
+	});
 });
 
 describe("browser init deadline carry-over", () => {
 	let sharedHeadless: BrowserHandle | undefined;
 
-	// Bound this real Chromium launch separately from the browser tool timeout.
 	beforeAll(async () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	}, 180_000);
+	});
 
-	// Bound teardown because killing a wedged browser can take several seconds.
 	afterAll(async () => {
 		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	}, 30_000);
+	});
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"counts caller time already spent before acquisition against the worker-init budget",
@@ -363,7 +365,6 @@ describe("OMP-owned browser input", () => {
 });
 
 describe("visible OMP-owned browser tabs", () => {
-	// Direct Chromium launches have no browser-tool timeout to separate from their test bounds.
 	it.skipIf(!VISIBLE_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
@@ -411,7 +412,7 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		180_000,
+		45_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps deterministic viewport emulation for hidden launches",
@@ -437,6 +438,6 @@ describe("visible OMP-owned browser tabs", () => {
 				}
 			}
 		},
-		180_000,
+		45_000,
 	);
 });

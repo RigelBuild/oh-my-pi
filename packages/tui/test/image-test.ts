@@ -34,13 +34,7 @@ tui.addChild(new Spacer(1));
 
 if (dims) {
 	tui.addChild(
-		new Image(
-			base64Data,
-			"image/png",
-			{ fallbackColor: s => `\x1b[33m${s}\x1b[0m` },
-			{ maxWidthCells: 60, budget: tui.imageBudget },
-			dims,
-		),
+		new Image(base64Data, "image/png", { fallbackColor: s => `\x1b[33m${s}\x1b[0m` }, { maxWidthCells: 60 }, dims),
 	);
 } else {
 	tui.addChild(new Text("Could not parse image dimensions", 1, 0));

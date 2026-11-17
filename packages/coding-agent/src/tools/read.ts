@@ -56,12 +56,7 @@ import {
 	truncateHeadBytes,
 	truncateLine,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import {
-	buildLineEntriesWithBlockContext,
-	lineEntriesToPlainText,
-	spansCoverEveryLine,
-	warmBlockContext,
-} from "../utils/block-context";
+import { buildLineEntriesWithBlockContext, lineEntriesToPlainText } from "../utils/block-context";
 import { isCpuProfilePath, renderCpuProfile } from "../utils/cpuprofile";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { loadImageInput, loadSvgImageInput } from "../utils/image-loading";
@@ -1388,7 +1383,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (bridgePromise !== undefined) {
 			try {
 				const bridgeText = await bridgePromise;
-				const bridgeResult = await buildInMemoryMultiRangeResult(this.session, bridgeText, ranges, {
+				const bridgeResult = buildInMemoryMultiRangeResult(this.session, bridgeText, ranges, {
 					details: markMarkdownContentType(
 						this.session,
 						{ resolvedPath: absolutePath, suffixResolution },
@@ -1483,9 +1478,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		let outputText: string;
 		if (!rawSelector && fullLines && visibleSpans.length > 0) {
-			if (buffered && !spansCoverEveryLine(visibleSpans, fullLines.length)) {
-				await warmBlockContext({ path: absolutePath, text: buffered.normalizedText });
-			}
 			const entries = buildLineEntriesWithBlockContext(
 				fullLines,
 				visibleSpans,
@@ -2136,7 +2128,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (bridgePromise !== undefined) {
 						try {
 							const bridgeText = await bridgePromise;
-							const bridgeResult = await buildInMemoryTextResult(this.session, bridgeText, offset, limit, {
+							const bridgeResult = buildInMemoryTextResult(this.session, bridgeText, offset, limit, {
 								details: markMarkdownContentType(
 									this.session,
 									{ resolvedPath: absolutePath, suffixResolution },
@@ -2261,17 +2253,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const totalSelectedLines = totalFileLines - startLine;
 					const wasTruncated = reachedEof && (collectedLines.length < totalSelectedLines || stoppedByByteLimit);
 					const firstLineExceedsLimit = firstLineByteLength !== undefined && firstLineByteLength > maxBytesForRead;
-					if (
-						bracketContextFullLines &&
-						buffered &&
-						!firstLineExceedsLimit &&
-						!spansCoverEveryLine(
-							[{ startLine: startLineDisplay, endLine: displayedEndLine }],
-							bracketContextFullLines.length,
-						)
-					) {
-						await warmBlockContext({ path: absolutePath, text: buffered.normalizedText });
-					}
 					const omittedSelectedLine = omittedRequestedLine(
 						byteLimitLine,
 						requestedStart,

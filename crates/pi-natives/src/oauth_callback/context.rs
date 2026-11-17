@@ -22,13 +22,8 @@ use crate::task::CancelToken;
 
 #[cfg(any(unix, test))]
 const COMMAND_OUTPUT_LIMIT: u64 = 1024 * 1024;
-// Helper commands usually finish within milliseconds, so polling starts fast
-// and backs off; a slow command then costs at most 10 wakeups per second, each
-// with a try_wait and two metadata calls.
 #[cfg(any(unix, test))]
-const COMMAND_POLL_INITIAL: Duration = Duration::from_millis(5);
-#[cfg(any(unix, test))]
-const COMMAND_POLL_MAX: Duration = Duration::from_millis(100);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(20);
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Filesystem and process context for one callback registration transaction.
@@ -131,7 +126,6 @@ impl Context {
 		};
 
 		let wait_result = (|| -> Result<std::process::ExitStatus> {
-			let mut poll_interval = COMMAND_POLL_INITIAL;
 			loop {
 				self.check()?;
 				let stdout_len = file_len(&stdout_path)?;
@@ -145,8 +139,7 @@ impl Context {
 				{
 					return Ok(status);
 				}
-				thread::sleep(poll_interval);
-				poll_interval = (poll_interval * 2).min(COMMAND_POLL_MAX);
+				thread::sleep(COMMAND_POLL_INTERVAL);
 			}
 		})();
 		let status = match wait_result {

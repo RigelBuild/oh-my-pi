@@ -24,13 +24,7 @@ import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
 import { base64ImageNode } from "../native/blobs";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
-import {
-	type DescribeContext,
-	type NativeChild,
-	type NativeNode,
-	type NativeUiEvent,
-	rootToggleExpanded,
-} from "../native/node";
+import { type NativeChild, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { Memo } from "../native/memo";
 
 // OSC 133 shell integration: marks prompt zones for terminal multiplexers.
@@ -143,8 +137,6 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	readonly #tokens: RegExp;
 	#reaction: string | undefined;
 	#native: NativeNode | undefined;
-	/** The terminal's clock {@link #native} was described with. */
-	#nativeHour12: boolean | undefined;
 
 	constructor(text: string, options: UserBubbleOptions = {}) {
 		super();
@@ -192,20 +184,17 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	 * agent's reaction are chips at the bottom-right, so a reaction landing
 	 * later updates the frame in place, even deep in scrollback.
 	 */
-	override describe(cx?: DescribeContext): NativeNode {
-		// The terminal's clock: Bun's own default locale ignores the user's.
-		const hour12 = cx?.hour12;
-		if (this.#native && this.#nativeHour12 === hour12) return this.#native;
-		this.#nativeHour12 = hour12;
+	override describe(): NativeNode {
+		if (this.#native) return this.#native;
 		const children: NativeChild[] = [];
 		if (!this.#synthetic && hasTranscriptActions()) {
 			const tools: NativeChild[] = [];
 			if (this.#timestamp !== undefined) {
 				const at = new Date(this.#timestamp);
 				tools.push(
-					text([span(at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12 }), "dim mono")], {
+					text([span(at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), "dim mono")], {
 						role: "omp.user.time",
-						title: at.toLocaleString([], { hour12 }),
+						title: at.toLocaleString(),
 					}),
 				);
 			}

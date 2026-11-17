@@ -90,12 +90,12 @@ interface NormalizedEstimateValue {
 	imageTokens: number;
 }
 
-function normalizeRemoteCompactionEstimateValue(value: unknown, dropEncrypted = true): NormalizedEstimateValue {
+function normalizeRemoteCompactionEstimateValue(value: unknown): NormalizedEstimateValue {
 	if (Array.isArray(value)) {
 		const normalized: unknown[] = [];
 		let imageTokens = 0;
 		for (const item of value) {
-			const result = normalizeRemoteCompactionEstimateValue(item, dropEncrypted);
+			const result = normalizeRemoteCompactionEstimateValue(item);
 			normalized.push(result.value);
 			imageTokens += result.imageTokens;
 		}
@@ -123,23 +123,12 @@ function normalizeRemoteCompactionEstimateValue(value: unknown, dropEncrypted = 
 		// Opaque encrypted reasoning/compaction state: its local base64 size far
 		// exceeds what the provider bills, so it stays out of the fit estimate
 		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
-		if (dropEncrypted && key === "encrypted_content" && typeof item === "string") continue;
-		const result = normalizeRemoteCompactionEstimateValue(item, dropEncrypted);
+		if (key === "encrypted_content" && typeof item === "string") continue;
+		const result = normalizeRemoteCompactionEstimateValue(item);
 		normalized[key] = result.value;
 		imageTokens += result.imageTokens;
 	}
 	return { value: normalized, imageTokens };
-}
-
-/**
- * Tokens of stored Responses replacement history. Retained `input_image` parts
- * count at their image estimate rather than as base64 text; everything else,
- * opaque compaction state included, counts as serialized.
- */
-export function countResponsesHistoryTokens(items: unknown[], tokenizer: Tokenizer): number {
-	const normalized = normalizeRemoteCompactionEstimateValue(items, false);
-	const serialized = stringifyJson(normalized.value);
-	return (serialized === undefined ? 0 : tokenizer.countTokens(serialized)) + normalized.imageTokens;
 }
 
 export interface TrimRemoteCompactionInputResult {

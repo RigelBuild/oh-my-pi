@@ -10,7 +10,6 @@ import type { CDPSession, Page } from "puppeteer-core";
 import { resizeImage } from "../../utils/image-resize";
 import { buildChangedFrameContactSheetPng, requireMediaBinary, runFfmpeg } from "../../utils/video";
 import { resolveToCwd } from "../path-utils";
-import { readPageViewport } from "./launch";
 import type { RunOutput } from "./run-output";
 
 const DEFAULT_FPS = 30;
@@ -302,7 +301,15 @@ class CdpRecordingSource implements RecordingFrameSource {
 	}
 
 	async viewport(signal?: AbortSignal): Promise<{ width: number; height: number }> {
-		return await readPageViewport(this.#page, signal);
+		return (
+			this.#page.viewport() ??
+			(await untilAborted(signal, () =>
+				this.#page.evaluate(() => {
+					const pageGlobal = globalThis as unknown as { innerWidth: number; innerHeight: number };
+					return { width: pageGlobal.innerWidth, height: pageGlobal.innerHeight };
+				}),
+			))
+		);
 	}
 
 	async start(params: RecordingFrameSourceStartParams, signal?: AbortSignal): Promise<void> {

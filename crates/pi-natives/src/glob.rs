@@ -263,12 +263,11 @@ fn run_glob(
 /// directory, the glob pattern is invalid, or cancellation/timeout is
 /// triggered.
 #[napi]
-pub fn glob<'env>(
-	env: &'env Env,
+pub fn glob(
 	options: GlobOptions<'_>,
 	#[napi(ts_arg_type = "((error: Error | null, match: GlobMatch) => void) | undefined | null")]
 	on_match: Option<ThreadsafeFunction<GlobMatch>>,
-) -> Result<PromiseRaw<'env, GlobResult>> {
+) -> task::Promise<GlobResult> {
 	let GlobOptions {
 		pattern,
 		path,
@@ -292,7 +291,7 @@ pub fn glob<'env>(
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
 
-	task::filesystem(env, "glob", ct, filesystem, move |filesystem, ct| {
+	task::blocking("glob", ct, move |ct| {
 		run_glob(
 			GlobConfig {
 				root: iofs::resolve_search_dir(&filesystem, &path)?,

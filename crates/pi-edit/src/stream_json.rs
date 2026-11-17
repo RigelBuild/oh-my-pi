@@ -95,56 +95,50 @@ pub fn snapshot_from_text(text: &str, raw_input: bool, finished: bool) -> ArgSna
 		};
 	}
 
-	// One strict parse decides `complete`; only a partial buffer is repaired.
-	let (value, complete) = match serde_json::from_str::<serde_json::Value>(text) {
-		Ok(value) => (Some(value), true),
-		Err(_) => (repair_streaming_json(text), finished),
+	let complete = finished || serde_json::from_str::<serde_json::Value>(text).is_ok();
+	let Some(value) = parse_streaming_json(text) else {
+		return ArgSnapshot { complete, ..ArgSnapshot::default() };
 	};
-	let Some(serde_json::Value::Object(mut object)) = value else {
+	let Some(object) = value.as_object() else {
 		return ArgSnapshot { complete, ..ArgSnapshot::default() };
 	};
 
 	let (lexical_has_edits, edits_start) = find_edits_array(text);
 	let closed = edits_start.map_or_else(Vec::new, |start| edit_object_closed_flags(text, start));
-	let has_edits = lexical_has_edits || object.contains_key("edits");
-	let edits = match object.remove("edits") {
-		Some(serde_json::Value::Array(entries)) => entries
-			.into_iter()
-			.filter_map(|entry| match entry {
-				serde_json::Value::Object(entry) => Some(entry),
-				_ => None,
-			})
-			.enumerate()
-			.map(|(index, mut entry)| EditEntry {
-				op:          take_string(&mut entry, "op"),
-				rename:      take_string(&mut entry, "rename"),
-				diff:        take_string(&mut entry, "diff"),
-				old_string:  take_string(&mut entry, "old_string"),
-				new_string:  take_string(&mut entry, "new_string"),
-				replace_all: entry
-					.get("replace_all")
-					.and_then(serde_json::Value::as_bool),
-				closed:      closed.get(index).copied().unwrap_or(false),
-			})
-			.collect(),
-		_ => Vec::new(),
-	};
-	// A present `input` wins even when it is not a string.
-	let input = match object.remove("input") {
-		Some(value) => into_string(value),
-		None => take_string(&mut object, "_input"),
-	};
+	let edits = object
+		.get("edits")
+		.and_then(serde_json::Value::as_array)
+		.into_iter()
+		.flatten()
+		.filter_map(serde_json::Value::as_object)
+		.enumerate()
+		.map(|(index, entry)| EditEntry {
+			op:          string_field(entry, "op"),
+			rename:      string_field(entry, "rename"),
+			diff:        string_field(entry, "diff"),
+			old_string:  string_field(entry, "old_string"),
+			new_string:  string_field(entry, "new_string"),
+			replace_all: entry
+				.get("replace_all")
+				.and_then(serde_json::Value::as_bool),
+			closed:      closed.get(index).copied().unwrap_or(false),
+		})
+		.collect();
 
 	ArgSnapshot {
-		path: take_string(&mut object, "path"),
-		input,
-		old_string: take_string(&mut object, "old_string"),
-		new_string: take_string(&mut object, "new_string"),
+		path: string_field(object, "path"),
+		input: object
+			.get("input")
+			.or_else(|| object.get("_input"))
+			.and_then(serde_json::Value::as_str)
+			.map(ToOwned::to_owned),
+		old_string: string_field(object, "old_string"),
+		new_string: string_field(object, "new_string"),
 		replace_all: object
 			.get("replace_all")
 			.and_then(serde_json::Value::as_bool),
 		edits,
-		has_edits,
+		has_edits: lexical_has_edits || object.contains_key("edits"),
 		complete,
 	}
 }
@@ -153,40 +147,24 @@ pub fn snapshot_from_text(text: &str, raw_input: bool, finished: bool) -> ArgSna
 /// objects and dropping a dangling trailing key/comma, then parse it.
 /// Returns `None` when even the repaired text is not valid JSON.
 pub fn parse_streaming_json(text: &str) -> Option<serde_json::Value> {
-	serde_json::from_str(text)
-		.ok()
-		.or_else(|| repair_streaming_json(text))
-}
-
-/// [`parse_streaming_json`] for text that already failed a strict parse.
-fn repair_streaming_json(text: &str) -> Option<serde_json::Value> {
-	let trimmed = text.trim_start();
-	if trimmed.is_empty() {
+	let text = text.trim_start();
+	if text.is_empty() {
 		return None;
 	}
-	// Unicode whitespace JSON rejects (such as U+00A0) still trims away.
-	if trimmed.len() != text.len()
-		&& let Ok(value) = serde_json::from_str(trimmed)
-	{
+	if let Ok(value) = serde_json::from_str(text) {
 		return Some(value);
 	}
-	let mut parser = RepairParser::new(trimmed);
+
+	let mut parser = RepairParser::new(text);
 	let repaired = parser.value()?;
 	serde_json::from_str(&repaired).ok()
 }
 
-fn into_string(value: serde_json::Value) -> Option<String> {
-	match value {
-		serde_json::Value::String(text) => Some(text),
-		_ => None,
-	}
-}
-
-fn take_string(
-	object: &mut serde_json::Map<String, serde_json::Value>,
-	key: &str,
-) -> Option<String> {
-	object.remove(key).and_then(into_string)
+fn string_field(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+	object
+		.get(key)
+		.and_then(serde_json::Value::as_str)
+		.map(ToOwned::to_owned)
 }
 
 struct RepairParser<'a> {
@@ -495,17 +473,11 @@ fn find_edits_array(text: &str) -> (bool, Option<usize>) {
 				if object_depth != 1 || array_depth != 0 {
 					continue;
 				}
-				// Only a key (a string followed by `:`) can be `edits`; values,
-				// however long, are never decoded.
-				let mut after = skip_ascii_whitespace(bytes, end);
-				if bytes.get(after) != Some(&b':') {
+				let Ok(key) = serde_json::from_str::<String>(&text[start..end]) else {
 					continue;
-				}
-				let raw = &text[start..end];
-				let is_edits = raw == "\"edits\""
-					|| (raw.contains('\\')
-						&& serde_json::from_str::<String>(raw).is_ok_and(|key| key == "edits"));
-				if !is_edits {
+				};
+				let mut after = skip_ascii_whitespace(bytes, end);
+				if key != "edits" || bytes.get(after) != Some(&b':') {
 					continue;
 				}
 				after = skip_ascii_whitespace(bytes, after + 1);

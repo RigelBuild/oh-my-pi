@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-ai",
-	"version": "18.6.2",
+	"version": "18.6.0",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"keywords": [
 		"ai",
@@ -78,11 +78,6 @@
 			"types": "./src/auth-broker/index.ts",
 			"import": "./src/auth-broker/index.ts"
 		},
-		"./compass": {
-			"types": "./src/compass/index.ts",
-			"import": "./src/compass/index.ts"
-		},
-
 		"./auth-broker/*": {
 			"types": "./src/auth-broker/*.ts",
 			"import": "./src/auth-broker/*.ts"

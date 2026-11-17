@@ -64,11 +64,8 @@ pub(crate) fn park_on<F: Future>(fut: F) -> F::Output {
 /// Per-facade state inherited by everything opened through it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Scope {
-	pub(crate) cancel:        Option<CancellationToken>,
-	pub(crate) closes:        Option<Arc<CloseTracker>>,
-	/// Mode bits cleared from host creations; see
-	/// [`crate::Fs::with_creation_mask`].
-	pub(crate) creation_mask: Option<u32>,
+	pub(crate) cancel: Option<CancellationToken>,
+	pub(crate) closes: Option<Arc<CloseTracker>>,
 }
 
 impl Scope {

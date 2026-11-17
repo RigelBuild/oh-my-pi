@@ -145,40 +145,11 @@ export interface AuthGatewayFormatModule {
 	formatError(status: number, type: string, message: string): Response;
 }
 
-/** An agent admitted on its own bearer. */
-export interface AgentCaller {
-	kind: "agent";
-	/** The agent the request belongs to; retained provider sessions are kept per agent. */
-	agentAccountId: string;
-	/**
-	 * The tenant that owns the agent. Agents of one owner share a credential pool,
-	 * so `resolveStorage` keys on this when it is set.
-	 */
-	ownerUserId?: string;
-}
-
-/** The server's enrollment caller: admitted on `/internal/enroll/*` only, and refused everywhere else. */
-export interface EnrollCaller {
-	kind: "enroll";
-}
-
-/** The caller a request was admitted as. */
-export type CallerIdentity = AgentCaller | EnrollCaller;
-
-/**
- * Admits a request: the caller it belongs to, or `null` to answer 401. A throw
- * answers 503, so a verifier outage never reads as a bad credential. Admit only
- * on the `Authorization: Bearer` token: the gateway keeps that token out of the
- * URL and logged headers, and answers 401 to an admission that carried none.
- * Honor `req.signal` and bound any remote call; a timeout should throw.
- */
-export type AuthGatewayAuthorizer = (req: Request) => CallerIdentity | null | Promise<CallerIdentity | null>;
-
 export interface AuthGatewayServerOptions {
 	/** Listen address. Default `127.0.0.1:4000`. */
 	bind?: string;
-	/** Inbound auth. `bearerTokenAuthorizer` gives the static shared-token behavior. */
-	authorize: AuthGatewayAuthorizer;
+	/** Accept any of these bearer tokens. Empty allows unauthenticated calls. */
+	bearerTokens: string[];
 	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
 	trustProxyHeaders?: boolean;
 	/** Version surfaced on `/healthz`. */
@@ -189,6 +160,5 @@ export interface AuthGatewayServerHandle {
 	url: string;
 	port: number;
 	hostname: string;
-	/** Drain active responses for at most this long; omitted means immediate close. */
-	close(drainMs?: number): Promise<void>;
+	close(): Promise<void>;
 }

@@ -89,10 +89,9 @@ function recorderDefinition(session: ToolSession, calls: unknown[]): EvalPrelude
 	};
 }
 
-// Bound disposal of VM contexts and kernel sessions.
 afterAll(async () => {
 	await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
-}, 30_000);
+});
 
 describe("browser JavaScript facade", () => {
 	it("builds handles, chains, markers, and direct values against the shipped VM prelude", async () => {
@@ -345,9 +344,8 @@ describe("browser facade Chromium helper E2E", () => {
 			runInContext(prelude.javascript, context);
 
 			try {
-				// Keep the browser tool timeout below this test's runner timeout.
 				await runInContext(
-					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__, timeout: 45 }); })()",
+					"(async () => { globalThis.__e2eTab = await browser.open({ name: __name__, url: __url__ }); })()",
 					context,
 				);
 				await runInContext('__e2eTab.click("text/Go")', context);
@@ -381,6 +379,6 @@ describe("browser facade Chromium helper E2E", () => {
 					.catch(() => undefined);
 			}
 		},
-		90_000,
+		30_000,
 	);
 });

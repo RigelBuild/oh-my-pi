@@ -13,7 +13,7 @@
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
-import { isLoopbackHost, parseBind } from "../utils/parse-bind";
+import { parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	ClientUsageReportRequest,
@@ -58,7 +58,7 @@ export interface AuthBrokerServerOptions {
 	storage: AuthStorage;
 	/** Listen address; accepts `host:port` or just `port`. */
 	bind?: string;
-	/** Accept any of these bearer tokens. Empty disables auth only on a loopback bind; elsewhere every route but healthz returns 401. */
+	/** Accept any of these bearer tokens. Empty disables auth (loopback only). */
 	bearerTokens: string[];
 	/** Broker version string surfaced on `/v1/healthz`. */
 	version?: string;
@@ -100,8 +100,8 @@ function empty(status: number, headers?: Record<string, string>): Response {
 	return new Response(null, { status, headers });
 }
 
-function isAuthorized(req: Request, tokens: ReadonlySet<string>, openWhenEmpty: boolean): boolean {
-	if (tokens.size === 0) return openWhenEmpty;
+function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
+	if (tokens.size === 0) return true;
 	const header = req.headers.get("authorization");
 	if (!header) return false;
 	const match = header.match(/^Bearer\s+(.+)$/i);
@@ -631,7 +631,6 @@ function serveSnapshotStream(
 export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_BROKER_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
-	const openWhenEmpty = isLoopbackHost(bind.hostname);
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 	const externalChangePollMs = opts.externalChangePollMs ?? DEFAULT_EXTERNAL_CHANGE_POLL_MS;
@@ -660,7 +659,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
 				}
-				if (!isAuthorized(req, tokens, openWhenEmpty)) {
+				if (!isAuthorized(req, tokens)) {
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
 					return json(401, { error: "unauthorized" });
 				}

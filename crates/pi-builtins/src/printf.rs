@@ -43,13 +43,8 @@ impl builtins::Command for PrintfCommand {
 			)
 			.await?;
 		} else {
-			// uucore writes every literal format byte on its own, so batch them:
-			// one write per call (or per 64 KiB) instead of one per byte. Flush
-			// before reporting a formatting error so partial output still lands.
-			let mut stdout = std::io::BufWriter::with_capacity(64 * 1024, context.stdout());
-			let formatted = format(self.format_and_args.as_slice(), &mut stdout);
-			stdout.flush()?;
-			formatted?;
+			format(self.format_and_args.as_slice(), context.stdout())?;
+			context.stdout().flush()?;
 		}
 
 		Ok(ExecutionResult::success())

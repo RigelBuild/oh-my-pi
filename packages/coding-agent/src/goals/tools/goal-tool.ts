@@ -1,11 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolTier,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 
 import { prompt } from "@oh-my-pi/pi-utils";
 
@@ -61,9 +55,6 @@ function validateCreateParams(params: GoalToolInput): { objective: string; token
 
 export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	readonly name = "goal";
-	/** Goal ops touch only session state: `get` reads it; the rest change the goal, so `always-ask` still prompts. */
-	readonly approval = (args: unknown): ToolTier =>
-		args !== null && typeof args === "object" && "op" in args && args.op === "get" ? "read" : "write";
 	readonly label = "Goal";
 	readonly description = prompt.render(goalDescription);
 	readonly parameters = goalSchema;

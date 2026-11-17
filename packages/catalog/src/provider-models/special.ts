@@ -1,7 +1,7 @@
 import { logger, once } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../build";
 import { apiRouteFor } from "../compat/behavior";
-import { providerEntry, seedModels } from "../compat/providers";
+import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import {
@@ -62,7 +62,7 @@ export function openaiCodexModelManagerOptions(
 	return {
 		providerId: "openai-codex",
 		cacheProviderId: resolveModelCacheProviderId("openai-codex", { baseUrl }),
-		dynamicModelsAuthoritative: providerEntry("openai-codex")?.dynamicModelsAuthoritative === true,
+		dynamicModelsAuthoritative: true,
 		...(resolveAccounts
 			? {
 					fetchDynamicModels: async () => {

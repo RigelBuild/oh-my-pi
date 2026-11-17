@@ -17,8 +17,6 @@ target/
 
 # Environment
 .env
-/gateway.token
-/auth-gateway.token
 .venv
 
 # Editors

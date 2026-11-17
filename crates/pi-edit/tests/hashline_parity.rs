@@ -359,8 +359,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		snapshot
 			.seen_lines
 			.expect("seen")
-			.iter()
-			.copied()
+			.into_iter()
 			.collect::<Vec<_>>(),
 		vec![1]
 	);
@@ -369,7 +368,11 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 	let shared_text = "shared\n";
 	let shared_tag = shared.record(&path, shared_text, None);
 	shared.record(&other, shared_text, None);
-	let mut matches = shared.paths_with_hash(&shared_tag);
+	let mut matches = shared
+		.find_by_hash(&shared_tag)
+		.into_iter()
+		.map(|snapshot| snapshot.path)
+		.collect::<Vec<_>>();
 	matches.sort();
 	assert_eq!(
 		matches,
@@ -405,7 +408,7 @@ fn snapshot_store_matches_snapshot_contract_cases() {
 		.seen_lines
 		.expect("seen lines");
 	assert_eq!(
-		seen.iter().copied().collect::<Vec<_>>(),
+		seen.into_iter().collect::<Vec<_>>(),
 		vec![1, 2],
 		"still fuses identical repeated reads of one colliding text onto one snapshot"
 	);

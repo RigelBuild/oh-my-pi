@@ -2,42 +2,6 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- `startAuthGateway` takes an `authorize(req)` function in place of `bearerTokens`. It returns the caller's identity (`{ kind: "agent", agentAccountId }` or the enroll caller) or `null` to answer 401; a throw answers 503. Any result that is not an identity with a non-empty id, or an admission with no `Authorization: Bearer` token, also answers 401. Use `bearerTokenAuthorizer(tokens)` to keep the shared-token behavior.
-- `createAuthGatewayRouter(...).route` takes the admitted agent caller as a required third argument. Pass `SHARED_TOKEN_CALLER` for a single-tenant transport.
-- `CallerIdentity` is a union of `AgentCaller` (`kind: "agent"`) and `EnrollCaller` (`kind: "enroll"`). An agent result without `kind: "agent"` answers 401.
-
-### Added
-
-- Added per-model `compat.statefulResponses` to enable or disable stored Responses chaining (`previous_response_id` with `store: true`) for one endpoint without the official-only request fields that `compat.officialEndpoint` implies ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
-- Added Snowflake Cortex with browser OAuth, token refresh, PAT environment authentication, and streaming Claude/OpenAI models with local tool execution ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
-- `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
-- Added `CompassAuthCredentialStore` for versioned credential-pool reads and compare-and-swap updates through the Compass gateway. Writes name the serving agent, so the server can confine them to that agent's pool.
-- Added `resolveStorage(caller)` to the auth-gateway options, which serves each admitted caller from its tenant's credential pool (keyed on the optional `CallerIdentity.ownerUserId`, else `agentAccountId`); a throw answers 503. Retained provider session state and the session id providers see are kept per caller.
-- Added the provider-enrollment routes `GET /internal/enroll/providers`, `POST /internal/enroll/authorize-url` and `POST /internal/enroll/exchange`. They build the authorize URL and exchange the code statelessly from the server's state and PKCE material. `withEnrollToken(token, authorize)` admits a server enroll token as the enroll caller, which reaches only these routes; agents get 401 there, and the enroll caller gets 401 on every other authenticated route. Enroll responses carry no CORS grant.
-
-### Changed
-
-- Reduced CPU spent on thinking-loop detection while streaming long reasoning ([#14284](https://github.com/can1357/oh-my-pi/pull/14284) by [@abilliontokens](https://github.com/abilliontokens)).
-- Added `recordAffinity: false` to credential resolution options, selecting as the session would without pinning the choice to that session ([#14512](https://github.com/can1357/oh-my-pi/pull/14512) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Codex native-lane steering rejections (`unsupported_native_inflight_message`) now classify as retryable from their error text alone, matching the provider's own classification, and `AIError.isCodexSteerRejection()` identifies them so the agent retry can stay on the same model ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
-- Fixed replayed Responses and Codex history, including persisted Codex user/developer and assistant items, sending `detail: "original"` images to endpoints whose `supportsImageDetailOriginal` is off ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
-- Fixed thinking in turns kept after Anthropic native compaction being rejected or dropped on the next request ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Claude usage being re-polled every 10 seconds while Anthropic rate-limits the account; a failed refresh now waits a minute before trying again ([#14515](https://github.com/can1357/oh-my-pi/pull/14515) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Devin requests skipping the `onPayload` hook, so payload capture now sees each Devin chat request and a returned replacement is what gets sent ([#14506](https://github.com/can1357/oh-my-pi/pull/14506) by [@will-bogusz](https://github.com/will-bogusz))
-- An OpenAI Responses turn whose connection drops mid-stream can now recover the finished answer from the provider (on hosts that store results, such as Muse Code) instead of re-running the whole turn and discarding the reasoning already done. Storage is opt-in: pass `storeResponses: true`, set `PI_MUSE_STORE_RESPONSES=1`, or set a process-wide default with `configureProviderStoreResponses` ([#14293](https://github.com/can1357/oh-my-pi/pull/14293) and [#14534](https://github.com/can1357/oh-my-pi/pull/14534) by [@abilliontokens](https://github.com/abilliontokens)).
-- An auth broker started with no bearer tokens now serves credential routes only on a loopback bind (`127.0.0.0/8`, `::1`, `localhost`); on any other bind every route except `/v1/healthz` returns 401.
-
-## [18.6.1] - 2026-10-04
-
-### Fixed
-
-- Fixed compatibility with Command Code DeepSeek and other DeepSeek-family models by preserving the reasoning context required for warm OpenAI Responses sessions and correctly handling incomplete DSML tool-call wrappers in visible output.
-
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

@@ -118,11 +118,8 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 	let input1 = open_input(file1, host)?;
 	let input2 = open_input(file2, host)?;
 	let cancel = host.cancel_flag();
-	// One write per line on pipes, block-buffered into files; created before
-	// the readers, as it method-borrows `host`.
-	let mut out = host.stdout_writer();
 
-	let operated = match (input1, input2) {
+	match (input1, input2) {
 		(Some(input1), Some(input2)) => operate(
 			BufReader::new(input1),
 			file1,
@@ -130,7 +127,7 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut out,
+			&mut host.stdout,
 		),
 		(None, Some(input2)) => operate(
 			BufReader::new(&mut host.stdin),
@@ -139,7 +136,7 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut out,
+			&mut host.stdout,
 		),
 		(Some(input1), None) => operate(
 			BufReader::new(input1),
@@ -148,14 +145,10 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut out,
+			&mut host.stdout,
 		),
 		(None, None) => unreachable!("two stdin operands were rejected above"),
-	};
-	// Output before a failure still lands, ahead of the error message.
-	let flushed = out.flush().map_err(|err| Error::Msg(err.to_string()));
-	operated?;
-	flushed
+	}
 }
 
 fn operate(

@@ -11,8 +11,7 @@
  * `rows` fallback node rendered through `render(cx.cols)`.
  *
  * See `packages/wire/src/tsp.ts` for the wire vocabulary and
- * the Tern SDK's Surface Protocol reference (`docs/sdk/src/protocol` in the
- * Stencil repository, https://docs.stencil.so/tern/protocol/) for the spec.
+ * `crates/tern/SURFACE_PROTOCOL.md` (Stencil repository) for the spec.
  */
 import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
@@ -77,12 +76,6 @@ export interface DescribeContext {
 	readonly reduceMotion: boolean;
 	/** The terminal's appearance is dark. */
 	readonly dark: boolean;
-	/**
-	 * The user's system reads a 12-hour clock (`false`: 24-hour); `undefined`
-	 * when the terminal doesn't say. Pass it as `hour12` when formatting times:
-	 * the process's own default locale may not know.
-	 */
-	readonly hour12?: boolean;
 	/** Whether the terminal renders `kind` natively (else describe something simpler or let it fall back). */
 	supports(kind: TspKind): boolean;
 	/**

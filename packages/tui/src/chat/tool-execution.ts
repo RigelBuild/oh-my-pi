@@ -1639,12 +1639,7 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{
-							...resolveImageOptions(),
-							budget: this.#ui.imageBudget,
-							imageKey: `te${this.#instanceId}:${i}`,
-							requestRender: () => this.#ui.requestRender(),
-						},
+						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
 					);
 					this.#imageComponents.push(imageComponent);
 					this.addChild(imageComponent);

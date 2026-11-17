@@ -52,21 +52,17 @@ import {
 	resolveGatewayApiKey,
 } from "./dispatch";
 import {
-	callerSessionId,
 	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
 	hasMisplacedBearer,
-	isCallerIdentity,
+	isAuthorized,
 	json,
-	presentedBearer,
 	resolveClientIdentity,
 	resolvePeer,
-	UNAUTHENTICATED_CALLER,
 	withCors,
 } from "./http";
 import { handleEmbeddings } from "./routes/embeddings";
-import { ENROLL_PATH_PREFIX, handleEnroll } from "./routes/enroll";
 import { handleImageEdits, handleImageGenerations } from "./routes/images";
 import { handleRerank } from "./routes/rerank";
 import { handleSpeech } from "./routes/speech";
@@ -76,7 +72,6 @@ import { handleVideoContent, handleVideoPoll, handleVideoSubmit } from "./routes
 import { AuthGatewaySessionStateStore } from "./session-state";
 import type {
 	AuthGatewayServerHandle,
-	AgentCaller,
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
 } from "./types";
@@ -261,7 +256,6 @@ async function handleFormatEndpoint(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
-	caller: AgentCaller,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -347,7 +341,7 @@ async function handleFormatEndpoint(
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
 	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	const sessionId = callerSessionId(caller, clientKey ?? deriveSessionId(parsed.modelId, parsed.context));
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.promptCacheKey = sessionId;
 
 	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
@@ -368,7 +362,6 @@ async function handleFormatEndpoint(
 	// it, so it MUST be released on every exit path.
 	const lease = sessionStates.acquire({
 		clientKey,
-		agentAccountId: caller.agentAccountId,
 		model,
 		context: parsed.context,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
@@ -507,7 +500,6 @@ async function handlePiNative(
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
-	caller: AgentCaller,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -546,10 +538,8 @@ async function handlePiNative(
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
-	const sessionId = callerSessionId(caller, clientKey ?? deriveSessionId(parsed.modelId, parsed.context));
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.sessionId = sessionId;
-	const clientCacheKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	if (clientCacheKey !== undefined) parsed.options.promptCacheKey = callerSessionId(caller, clientCacheKey);
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
@@ -562,7 +552,6 @@ async function handlePiNative(
 	// request is done with it, so it MUST be released on every exit path.
 	const lease = sessionStates.acquire({
 		clientKey,
-		agentAccountId: caller.agentAccountId,
 		model,
 		context: parsed.context,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
@@ -798,9 +787,6 @@ const LOGGABLE_PATHS: Record<string, true> = {
 	"/v1/rerank": true,
 	"/v1/videos": true,
 	"/v1/models": true,
-	"/internal/enroll/providers": true,
-	"/internal/enroll/authorize-url": true,
-	"/internal/enroll/exchange": true,
 };
 
 /** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
@@ -808,18 +794,10 @@ function loggablePath(pathname: string): string {
 	return Object.hasOwn(FORMAT_ROUTES, pathname) || Object.hasOwn(LOGGABLE_PATHS, pathname) ? pathname : "<unrouted>";
 }
 
-/** An injected callback's error class, never its message, which may echo a credential. */
-function errorName(error: unknown): string {
-	return error instanceof Error ? error.name : typeof error;
-}
-
 /** The gateway's `/v1/*` routes, for a transport that has already admitted the caller. */
 export interface AuthGatewayRouter {
-	/**
-	 * Answers one request; `peer` names the caller in logs and `caller` selects
-	 * the credential pool. Never rejects: a crashed route answers 500.
-	 */
-	route(req: Request, peer: string, caller: AgentCaller): Promise<Response>;
+	/** Answers one request; `peer` names the caller in logs. Never rejects: a crashed route answers 500. */
+	route(req: Request, peer: string): Promise<Response>;
 	/**
 	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
 	 * workflows), whose sockets and timers would otherwise keep the process alive.
@@ -833,100 +811,87 @@ export interface AuthGatewayRouter {
  */
 export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
 	const sessionStates = new AuthGatewaySessionStateStore();
-	const route = async (req: Request, peer: string, caller: AgentCaller): Promise<Response> => {
+	const route = async (req: Request, peer: string): Promise<Response> => {
 		const pathname = new URL(req.url).pathname;
 		try {
-			// The model catalog touches no credentials, so it skips the pool lookup.
-			if (req.method === "GET" && pathname === "/v1/models") {
-				return handleModelsList(opts);
-			}
-			let scoped = opts;
-			if (opts.resolveStorage) {
-				try {
-					scoped = { ...opts, storage: await opts.resolveStorage(caller) };
-				} catch (error) {
-					logger.warn("auth-gateway credential pool unavailable", {
-						path: loggablePath(pathname),
-						peer,
-						error: errorName(error),
-					});
-					return json(503, { error: "credential pool unavailable" });
-				}
-				if (req.signal.aborted) return new Response(null, { status: 499 });
-			}
 			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
 			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
 			// same client struct.
 			if (req.method === "GET" && pathname === "/v1/usage") {
-				return await handleUsage(scoped.storage, req.signal);
+				return await handleUsage(opts.storage, req.signal);
 			}
 
 			// Per-credential auth probe — diagnoses which row in a multi-account
 			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
 			// credentials, so we need a separate endpoint that captures errors.
 			if (req.method === "GET" && pathname === "/v1/credentials/check") {
-				return await handleCredentialsCheck(scoped.storage, req.signal);
+				return await handleCredentialsCheck(opts.storage, req.signal);
 			}
 
 			// Provider-format dispatch.
 			const formatRoute = FORMAT_ROUTES[pathname];
 			if (formatRoute && req.method === "POST") {
-				return await handleFormatEndpoint(formatRoute, scoped, req, peer, sessionStates, caller);
+				return await handleFormatEndpoint(formatRoute, opts, req, peer, sessionStates);
 			}
 
 			// Pi-native fast path. Same auth + provider plumbing as the
 			// foreign-wire routes, just without the wire-format translation.
 			if (req.method === "POST" && pathname === "/v1/pi/stream") {
-				return await handlePiNative(scoped, req, peer, sessionStates, caller);
+				return await handlePiNative(opts, req, peer, sessionStates);
 			}
 
 			// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
 			// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
 			// reach the same handler through their Decisions path.
 			if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
-				return await handleSystemOne(scoped, req, peer);
+				return await handleSystemOne(opts, req, peer);
 			}
 
 			// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
 			// (JSON), and OpenAI multipart / OpenRouter JSON edits.
 			if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
-				return await handleImageGenerations(scoped, req, peer);
+				return await handleImageGenerations(opts, req, peer);
 			}
 			if (req.method === "POST" && pathname === "/v1/images/edits") {
-				return await handleImageEdits(scoped, req, peer);
+				return await handleImageEdits(opts, req, peer);
 			}
 
 			// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
 			if (req.method === "POST" && pathname === "/v1/audio/speech") {
-				return await handleSpeech(scoped, req, peer);
+				return await handleSpeech(opts, req, peer);
 			}
 
 			// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
 			if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
-				return await handleTranscriptions(scoped, req, peer);
+				return await handleTranscriptions(opts, req, peer);
 			}
 
 			// Embeddings, OpenAI wire (OpenRouter is compatible).
 			if (req.method === "POST" && pathname === "/v1/embeddings") {
-				return await handleEmbeddings(scoped, req, peer);
+				return await handleEmbeddings(opts, req, peer);
 			}
 
 			// Rerank, OpenRouter wire.
 			if (req.method === "POST" && pathname === "/v1/rerank") {
-				return await handleRerank(scoped, req, peer);
+				return await handleRerank(opts, req, peer);
 			}
 
 			// Video generation, OpenRouter's asynchronous wire: submit, then poll
 			// and download by the gateway-issued job id (stateless — the id
 			// encodes provider, model, and upstream job).
 			if (req.method === "POST" && pathname === "/v1/videos") {
-				return await handleVideoSubmit(scoped, req, peer);
+				return await handleVideoSubmit(opts, req, peer);
 			}
 			const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
 			if (videoJob) {
 				const gatewayId = decodeURIComponent(videoJob[1]);
 				const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
-				return await handler(scoped, req, peer, gatewayId);
+				return await handler(opts, req, peer, gatewayId);
+			}
+
+			// Model catalog.
+			if (req.method === "GET" && pathname === "/v1/models") {
+				return handleModelsList(opts);
 			}
 
 			// Route-table miss: no format module to defer to, so we emit a
@@ -945,23 +910,9 @@ export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGate
 	return { route, close: () => sessionStates.close() };
 }
 
-/** Enrollment routes for an admitted enroll caller. Never rejects: a crash answers 500 and logs only its class. */
-async function enrollRoute(
-	req: Request,
-	pathname: string,
-	fetchImpl: AuthGatewayRouteOptions["fetch"],
-): Promise<Response> {
-	try {
-		return await handleEnroll(req, pathname, fetchImpl);
-	} catch (error) {
-		logger.error("auth-gateway enrollment route crashed", { path: loggablePath(pathname), error: errorName(error) });
-		return json(500, { error: "internal error" });
-	}
-}
-
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
-	const authorize = opts.authorize;
+	const tokens = new Set<string>(opts.bearerTokens);
 	const version = opts.version;
 	const router = createAuthGatewayRouter(opts);
 
@@ -981,27 +932,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			if (req.method === "GET" && pathname === "/healthz") {
 				return withCors(json(200, { ok: true, version }), req);
 			}
-			let admitted: unknown;
-			try {
-				admitted = await authorize(req);
-			} catch (error) {
-				// The error text may echo the presented credential, so only its class is logged.
-				logger.warn("auth-gateway authorizer failed", {
-					method: req.method,
-					path: loggablePath(pathname),
-					peer: socketPeer,
-					error: errorName(error),
-				});
-				return withCors(json(503, { error: "authorization unavailable" }), req);
-			}
-			const bearer = admitted === UNAUTHENTICATED_CALLER ? undefined : presentedBearer(req);
-			// Only an `Authorization: Bearer` admission can be confined, so any other is refused.
-			// Each class reaches only its own surface: enroll callers `/internal/enroll/*`, agents the rest.
-			if (
-				!isCallerIdentity(admitted) ||
-				(bearer === undefined && admitted !== UNAUTHENTICATED_CALLER) ||
-				(admitted.kind === "enroll") !== pathname.startsWith(ENROLL_PATH_PREFIX)
-			) {
+			if (!isAuthorized(req, tokens)) {
 				logger.info("auth-gateway request unauthorized", {
 					method: req.method,
 					path: loggablePath(pathname),
@@ -1009,14 +940,11 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				});
 				return withCors(json(401, { error: "unauthorized" }), req);
 			}
-			if (bearer !== undefined && hasMisplacedBearer(req, url, bearer)) {
+			if (hasMisplacedBearer(req, url, tokens)) {
 				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
 			}
-			if (req.signal.aborted) return new Response(null, { status: 499 });
-			// Server-to-server only: enroll responses carry live credentials, so no browser CORS grant.
-			if (admitted.kind === "enroll") return await enrollRoute(req, pathname, opts.fetch);
 			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
-			return withCors(await router.route(req, peer, admitted), req);
+			return withCors(await router.route(req, peer), req);
 		},
 		// Max-out Bun's idle timeout. Long thinking-budget calls can sit idle
 		// for minutes before the first token arrives; the default kills them.
@@ -1029,26 +957,11 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 		url: `http://${boundHost}:${boundPort}`,
 		port: boundPort,
 		hostname: boundHost,
-		close: async (drainMs?: number) => {
-			if (drainMs === undefined) {
-				await server.stop(true);
-			} else if (!Number.isFinite(drainMs)) {
-				throw new RangeError("drainMs must be a finite duration no greater than 2147483647 ms");
-			} else if (drainMs <= 0) {
-				await server.stop(true);
-			} else {
-				if (drainMs > 2_147_483_647) {
-					throw new RangeError("drainMs must be a finite duration no greater than 2147483647 ms");
-				}
-				const deadline = setTimeout(() => void server.stop(true), drainMs);
-				try {
-					await server.stop();
-				} finally {
-					clearTimeout(deadline);
-				}
-			}
-			// Retained provider sessions own sockets and timers; close them after
-			// requests complete or the listener force-stops.
+		close: async () => {
+			server.stop(true);
+			// Drain after the listener is down: the retained provider states own
+			// sockets and timers (Codex WebSockets, GitLab Duo workflows), so the
+			// process can't settle until each one is closed.
 			router.close();
 		},
 	};

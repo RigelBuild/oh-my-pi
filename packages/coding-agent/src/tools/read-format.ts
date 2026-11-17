@@ -18,13 +18,7 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import {
-	buildLineEntriesWithBlockContext,
-	type LineEntry,
-	lineEntriesToPlainText,
-	spansCoverEveryLine,
-	warmBlockContext,
-} from "../utils/block-context";
+import { buildLineEntriesWithBlockContext, type LineEntry, lineEntriesToPlainText } from "../utils/block-context";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { formatPathRelativeToCwd } from "./path-utils";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
@@ -277,12 +271,12 @@ export interface InMemoryTextOptions {
  * {@link buildInMemoryMultiRangeResult} and everything else to
  * {@link buildInMemoryTextResult}. Raw mode is derived from the selector.
  */
-export async function buildInMemorySelectorResult(
+export function buildInMemorySelectorResult(
 	session: ToolSession,
 	text: string,
 	parsed: ParsedSelector,
 	options: Omit<InMemoryTextOptions, "raw">,
-): Promise<AgentToolResult<ReadToolDetails>> {
+): AgentToolResult<ReadToolDetails> {
 	const raw = isRawSelector(parsed);
 	const totalLines = countSplitLines(text, raw);
 	const sel = resolveTailSelector(parsed, totalLines);
@@ -293,13 +287,13 @@ export async function buildInMemorySelectorResult(
 	return buildInMemoryTextResult(session, text, offset, limit, { ...options, raw });
 }
 
-export async function buildInMemoryTextResult(
+export function buildInMemoryTextResult(
 	session: ToolSession,
 	text: string,
 	offset: number | undefined,
 	limit: number | undefined,
 	options: InMemoryTextOptions,
-): Promise<AgentToolResult<ReadToolDetails>> {
+): AgentToolResult<ReadToolDetails> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
 	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
@@ -358,15 +352,6 @@ export async function buildInMemoryTextResult(
 	const joinSelectedLines = (): string => allLines.slice(startLine, endLine).join("\n");
 	const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
 	const truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
-	// Any display short of the whole text shows block context around it.
-	if (
-		!rawDisplay &&
-		options.sourcePath &&
-		!truncation.firstLineExceedsLimit &&
-		(startLine > 0 || endLine < totalLines || truncation.truncated)
-	) {
-		await warmBlockContext({ path: options.sourcePath, text });
-	}
 
 	const shouldAddHashLines = displayMode.hashLines;
 	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
@@ -497,12 +482,12 @@ export async function buildInMemoryTextResult(
  * so the model can correct the next call. No leading/trailing context is
  * added — multi-range callers always specify exact bounds.
  */
-export async function buildInMemoryMultiRangeResult(
+export function buildInMemoryMultiRangeResult(
 	session: ToolSession,
 	text: string,
 	ranges: readonly LineRange[],
 	options: Omit<InMemoryTextOptions, "ignoreResultLimits">,
-): Promise<AgentToolResult<ReadToolDetails>> {
+): AgentToolResult<ReadToolDetails> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
 	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
@@ -546,9 +531,6 @@ export async function buildInMemoryMultiRangeResult(
 	if (options.raw === true) {
 		outputText = rawParts.length > 0 ? rawParts.join("\n\n…\n\n") : "";
 	} else if (visibleSpans.length > 0) {
-		if (options.sourcePath && !spansCoverEveryLine(visibleSpans, totalLines)) {
-			await warmBlockContext({ path: options.sourcePath, text });
-		}
 		const entries = buildLineEntriesWithBlockContext(allLines, visibleSpans, { path: options.sourcePath, text });
 		if (shouldAddHashLines) seenLines = lineNumbersFromEntries(entries);
 		const firstLine = entries.find(entry => entry.kind === "line");

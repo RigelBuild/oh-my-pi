@@ -119,10 +119,10 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
  * top-level items and `message.content[]`. Avoids a deep tree walk/clone of
  * every history node on providers that reject native-resolution images.
  */
-function clampReplayItemImageDetail<TItem extends { type?: unknown; detail?: unknown; content?: unknown }>(
-	item: TItem,
+function clampReplayItemImageDetail(
+	item: Record<string, unknown>,
 	supportsImageDetailOriginal: boolean,
-): TItem {
+): Record<string, unknown> {
 	if (supportsImageDetailOriginal) return item;
 
 	if (item.type === "input_image" && item.detail === "original") {
@@ -140,21 +140,6 @@ function clampReplayItemImageDetail<TItem extends { type?: unknown; detail?: unk
 		return { ...record, detail: "auto" };
 	});
 	return changed ? { ...item, content } : item;
-}
-
-/** Clamp replayed images without changing item identities or other native replay fields. */
-export function clampOpenAIResponsesImageDetailForReplay<
-	TItem extends { type?: unknown; detail?: unknown; content?: unknown },
->(items: TItem[], supportsImageDetailOriginal: boolean): TItem[] {
-	if (supportsImageDetailOriginal) return items;
-	let clamped: TItem[] | undefined;
-	for (let index = 0; index < items.length; index++) {
-		const item = items[index]!;
-		const clampedItem = clampReplayItemImageDetail(item, supportsImageDetailOriginal);
-		if (clampedItem !== item && !clamped) clamped = items.slice(0, index);
-		clamped?.push(clampedItem);
-	}
-	return clamped ?? items;
 }
 
 function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
@@ -235,7 +220,7 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 	options: OpenAIResponsesReplaySanitizeOptions = {},
 ): ResponseInput {
 	const replayItems = dropMalformedOpenAIResponsesToolCalls(items);
-	const supportsImageDetailOriginal = options.supportsImageDetailOriginal === true;
+	const supportsImageDetailOriginal = options.supportsImageDetailOriginal !== false;
 	const computerLinkedReasoningItems =
 		options.supportsComputerUse === false
 			? undefined

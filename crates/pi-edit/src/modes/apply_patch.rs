@@ -327,6 +327,14 @@ fn stage_entries(
 	Ok(staged)
 }
 
+fn extract_added_lines(text: &str) -> String {
+	text
+		.split('\n')
+		.filter_map(|line| line.strip_prefix('+').filter(|_| !line.starts_with("+++ ")))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
 fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 	let mut order = Vec::<String>::new();
 	let mut groups = HashMap::<String, Vec<String>>::new();
@@ -385,7 +393,7 @@ fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<File
 	let mut file_ops = Vec::new();
 	for entry in entries {
 		if let Some(diff) = &entry.diff {
-			let added = super::added_lines(diff.split('\n')).unwrap_or_default();
+			let added = extract_added_lines(diff);
 			if !added.is_empty() {
 				if !digests.contains_key(&entry.path) {
 					order.push(entry.path.clone());
@@ -467,7 +475,6 @@ impl ModeEngine for ApplyPatchEngine {
 					files,
 					self.allow_fuzzy,
 					self.fuzzy_threshold,
-					false,
 					false,
 				)
 			})

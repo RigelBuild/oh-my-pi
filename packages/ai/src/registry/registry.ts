@@ -6,7 +6,6 @@ import { bedrockMantleTransport } from "./bedrock-mantle";
 import { buildProviderDefinition, type ProviderTransport } from "./build";
 import { cloudflareAiGatewayTransport } from "./cloudflare-ai-gateway";
 import { museCodeTransport } from "./muse-code";
-import { snowflakeTransport } from "./snowflake";
 import type { ProviderDefinition } from "./types";
 
 /**
@@ -19,12 +18,6 @@ const TRANSPORTS: Record<string, ProviderTransport> = {
 	"bedrock-mantle": bedrockMantleTransport,
 	"cloudflare-ai-gateway": cloudflareAiGatewayTransport,
 	"muse-code": museCodeTransport,
-	snowflake: snowflakeTransport,
-};
-
-const SUBSCRIPTION_TOS_TIERS: Readonly<Record<string, "restricted">> = {
-	anthropic: "restricted",
-	"openai-codex": "restricted",
 };
 
 /**
@@ -36,7 +29,7 @@ const SUBSCRIPTION_TOS_TIERS: Readonly<Record<string, "restricted">> = {
  * from this registry.
  */
 export const PROVIDER_REGISTRY: readonly ProviderDefinition[] = authProviders().map(policy =>
-	buildProviderDefinition(policy, TRANSPORTS[policy.id], SUBSCRIPTION_TOS_TIERS[policy.id]),
+	buildProviderDefinition(policy, TRANSPORTS[policy.id]),
 );
 
 const BY_ID: Record<string, ProviderDefinition> = Object.fromEntries(PROVIDER_REGISTRY.map(p => [p.id, p]));

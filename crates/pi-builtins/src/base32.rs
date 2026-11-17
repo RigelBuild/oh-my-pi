@@ -778,19 +778,15 @@ mod fast_decode {
 				return Err(BaseError::new("error: invalid input"));
 			}
 
-			// Decode a full chunk at a time: flushing every complete block as it
-			// arrives would write 5 bytes per 8 input characters.
 			if supports_partial_decode {
-				if buffer.len() >= decode_in_chunks_of_size {
-					flush_ready_chunks(
-						&mut buffer,
-						decode_in_chunks_of_size,
-						valid_multiple,
-						supports_fast_decode_and_encode,
-						&mut decoded_buffer,
-						output,
-					)?;
-				}
+				flush_ready_chunks(
+					&mut buffer,
+					decode_in_chunks_of_size,
+					valid_multiple,
+					supports_fast_decode_and_encode,
+					&mut decoded_buffer,
+					output,
+				)?;
 			} else if buffer.len() == decode_in_chunks_of_size {
 				decode_in_chunks_to_buffer(
 					supports_fast_decode_and_encode,
@@ -899,19 +895,15 @@ mod fast_decode {
 					return Err(BaseError::new("error: invalid input"));
 				}
 
-				// Decode a full chunk at a time: flushing every complete block as
-				// it arrives would write 5 bytes per 8 input characters.
 				if supports_partial_decode {
-					if buffer.len() >= decode_in_chunks_of_size {
-						flush_ready_chunks(
-							&mut buffer,
-							decode_in_chunks_of_size,
-							valid_multiple,
-							supports_fast_decode_and_encode,
-							&mut decoded_buffer,
-							output,
-						)?;
-					}
+					flush_ready_chunks(
+						&mut buffer,
+						decode_in_chunks_of_size,
+						valid_multiple,
+						supports_fast_decode_and_encode,
+						&mut decoded_buffer,
+						output,
+					)?;
 				} else if buffer.len() == decode_in_chunks_of_size {
 					decode_in_chunks_to_buffer(
 						supports_fast_decode_and_encode,

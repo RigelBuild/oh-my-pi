@@ -118,12 +118,9 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
-	disabledProviderIds,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
-	resolveSessionModelSelector,
-	sessionModelDiscoveryProviders,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
@@ -322,7 +319,6 @@ import {
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
-import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -405,13 +401,7 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
-import {
-	cleanupEmptyMoveSession,
-	copySessionArtifacts,
-	extractSessionInit,
-	type PersistedSessionInit,
-	type SessionManager,
-} from "./session-manager";
+import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -453,7 +443,6 @@ import {
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
 	cfgProvidersAntigravityEndpoint,
-	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
 	cfgSkillful,
@@ -463,8 +452,7 @@ import {
 	cfgTierOpenai,
 	cfgProvidersAnthropicSlowMode,
 } from "./settings";
-import { type AnthropicSlowModeController, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
-import type { UsageLimitState } from "./usage-limit";
+import { type AnthropicSlowModeController, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 import { cfgInterruptMode } from "../modes/settings";
 import { cfgFollowUpMode } from "../modes/settings";
 import { cfgSteeringMode } from "../modes/settings";
@@ -902,8 +890,6 @@ export class AgentSession implements SettingsScope {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
-	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
-	readonly #allowSessionModelFallback: boolean;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
 	/** In-flight vision descriptions that gate prompt admission; abort() cancels them. */
@@ -988,8 +974,6 @@ export class AgentSession implements SettingsScope {
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
 	 *  change should drop them. */
 	#sessionGeneration = 0;
-	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
-	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
 	/** Settles when switchSession commits or restores its previous generation on rollback.
 	 *  newSession never rolls its generation back, so it does not delay stale aside/SDK calls. */
 	#sessionGenerationSettled: Promise<void> | undefined;
@@ -1478,7 +1462,6 @@ export class AgentSession implements SettingsScope {
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
-		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#extensionRoots =
 			config.extensionRoots ??
 			(() => ({
@@ -1923,7 +1906,6 @@ export class AgentSession implements SettingsScope {
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
-		this.agent.setOnModelCallSystemPrompt(prompt => this.#recordModelCallSystemPrompt(prompt));
 		this.#obfuscator = config.obfuscator;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
@@ -2163,35 +2145,6 @@ export class AgentSession implements SettingsScope {
 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
-			buildLiveProviderContext: async (summarized, retained, signal) => {
-				// compact() rebuilds the previous summary message; send the live
-				// agent's own one. Conversion caches and the shared date/cwd reminder
-				// key on message identity, so a copy would re-root the reminder state
-				// the live turns depend on and re-render the bytes they sent.
-				const liveSummary = this.agent.state.messages[0];
-				const first = summarized[0];
-				const history =
-					first?.role === "compactionSummary" &&
-					liveSummary?.role === "compactionSummary" &&
-					liveSummary.timestamp === first.timestamp
-						? [liveSummary, ...summarized.slice(1)]
-						: summarized;
-				// Transform the whole history as the live turn does, then cut it:
-				// provider transforms (inline imaging, image budgets) decide per
-				// request, so a separately transformed prefix can differ.
-				const prefixLength = (await this.convertMessagesToLlm(history, signal)).length;
-				const live = await this.agent.buildSideRequestContext(
-					await this.convertMessagesToLlm([...history, ...retained], signal),
-				);
-				// Date/cwd reminder controls are the only messages the transforms
-				// insert: count past them, and leave out any at the cut, so the kept
-				// turns follow the summarized range directly.
-				let cut = 0;
-				for (let counted = 0; cut < live.messages.length && counted < prefixLength; cut++) {
-					if (!isDateCwdReminderControl(live.messages[cut]!)) counted++;
-				}
-				return { ...live, messages: live.messages.slice(0, cut) };
-			},
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
@@ -5910,39 +5863,6 @@ export class AgentSession implements SettingsScope {
 		return this.agent.state.systemPrompt;
 	}
 
-	/**
-	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
-	 * its model calls are built from, appending a newer one when either changes: signed thinking is
-	 * bound to the system prompt and tools, so cold revival must replay them. A per-turn override is
-	 * stored as the base its hook was given, since the revived turn re-runs the hook. Transcripts
-	 * without a `session_init` are left alone.
-	 */
-	#recordModelCallSystemPrompt(prompt: string[]): void {
-		const sessionFile = this.sessionManager.getSessionFile();
-		let cached = this.#sessionInit;
-		if (!cached || cached.sessionFile !== sessionFile) {
-			cached = { sessionFile, init: extractSessionInit(this.sessionManager.getEntries()) };
-			this.#sessionInit = cached;
-		}
-		const { init } = cached;
-		if (!init) return;
-		const base = this.#tools.baseOfSystemPrompt(prompt);
-		const items = this.#workPoolYieldItems;
-		const persistedItems = init.workPoolYieldItems ?? [];
-		if (
-			base.length === init.systemPrompt.length &&
-			base.every((block, index) => block === init.systemPrompt[index]) &&
-			items.length === persistedItems.length &&
-			items.every(
-				(item, index) => item.id === persistedItems[index]?.id && item.index === persistedItems[index]?.index,
-			)
-		) {
-			return;
-		}
-		cached.init = { ...init, systemPrompt: base, workPoolYieldItems: items.length > 0 ? [...items] : undefined };
-		this.sessionManager.appendSessionInit(cached.init);
-	}
-
 	/** Marks streamed text as committed or buffered for turn-recovery replay decisions. */
 	setTextOutputCommitted(committed: boolean): void {
 		this.#textOutputCommitted = committed;
@@ -7486,7 +7406,7 @@ export class AgentSession implements SettingsScope {
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
 					if (basePreparation.commit?.() === false) return undefined;
 					if (result?.systemPrompt !== undefined) {
-						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
+						this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
 					} else {
 						this.#tools.clearTurnSystemPromptOverride();
 						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
@@ -8658,18 +8578,17 @@ export class AgentSession implements SettingsScope {
 	 *  kept (abort()'s #extractQueuedAdvisorCards preserves them as visible advice) and every other
 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
-	 *  fires while agent.hasQueuedMessages()). `forInterrupt` also withdraws input the run already
-	 *  dequeued but never recorded — live-steered into the aborted response, or taken for its next
-	 *  model call — and treats it as queued ahead of the rest (it was queued first).
+	 *  fires while agent.hasQueuedMessages()). `forInterrupt` also withdraws live-steered input the
+	 *  aborted response took but never recorded, returning it first (it was queued first).
 	 *  Plain Alt+Up dequeue preserves those non-user steers. */
 	clearQueue(options?: { forInterrupt?: boolean }): {
 		steering: RestoredQueuedMessage[];
 		followUp: RestoredQueuedMessage[];
 	} {
-		const withdrawn = options?.forInterrupt ? this.agent.withdrawUndeliveredQueuedMessages() : undefined;
-		const steeringAll = [...(withdrawn?.steering ?? []), ...this.agent.peekSteeringQueue()];
-		const followUpAll = [...(withdrawn?.followUp ?? []), ...this.agent.peekFollowUpQueue()];
-		const steering = steeringAll.filter(isUserAuthoredQueuedMessage).map(toRestoredQueuedMessage);
+		const steeringAll = this.agent.peekSteeringQueue();
+		const followUpAll = this.agent.peekFollowUpQueue();
+		const withdrawn = options?.forInterrupt ? this.agent.withdrawLiveSteering() : [];
+		const steering = [...withdrawn, ...steeringAll].filter(isUserAuthoredQueuedMessage).map(toRestoredQueuedMessage);
 		const followUp = followUpAll.filter(isUserAuthoredQueuedMessage).map(toRestoredQueuedMessage);
 		const keep: (m: AgentMessage) => boolean = options?.forInterrupt
 			? isAdvisorCard
@@ -8748,22 +8667,13 @@ export class AgentSession implements SettingsScope {
 	 * duplicates.
 	 */
 	removeQueuedMessage(text: string, queue: "steering" | "followUp"): boolean {
-		return this.takeQueuedMessage(text, queue) !== undefined;
-	}
-
-	/**
-	 * {@link removeQueuedMessage}, returning the removed message as editor-restorable
-	 * content (its chip text and images); undefined when nothing matched.
-	 */
-	takeQueuedMessage(text: string, queue: "steering" | "followUp"): RestoredQueuedMessage | undefined {
 		const selected = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
 		const index = this.#findQueuedUserMessage(selected, text);
-		if (index < 0) return undefined;
+		if (index < 0) return false;
 
-		const removed = selected[index];
 		this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(selected, index));
 		this.#reconcileQueuedMessageDrain();
-		return toRestoredQueuedMessage(removed);
+		return true;
 	}
 
 	/**
@@ -8960,13 +8870,6 @@ export class AgentSession implements SettingsScope {
 			// Record what this rebuild published for future rollbacks: the live set
 			// as of success. Then drain any wake parked while pooled.
 			this.#lastPublishedWorkPoolYieldItems = this.#workPoolYieldItems.map(item => ({ ...item }));
-			// Persist the contract now: a batch-end clear makes no model call, and a
-			// cold revival must not restore the finished batch's items. Only once a
-			// model call has resolved this transcript's session_init; before that,
-			// the executor has not written it yet.
-			if (this.#sessionInit?.init && this.#sessionInit.sessionFile === this.sessionManager.getSessionFile()) {
-				this.#recordModelCallSystemPrompt(this.#tools.baseSystemPrompt);
-			}
 			// A deferred wake may be parked while pooled; now that the fresh
 			// contract is published, let it wake (or stay parked when pooled).
 			this.#resumeStrandedIrcAsides();
@@ -9694,17 +9597,8 @@ export class AgentSession implements SettingsScope {
 	 * off an Anthropic model.
 	 */
 	getAnthropicSlowModeLabel(): string | undefined {
-		return formatUsageLimitLabel(this.getUsageLimitState());
-	}
-
-	/**
-	 * Usage-limit stage of the active model's account (wrap-up allowance or
-	 * low-priority lane); undefined outside both stages. Claude subscriptions
-	 * are the only producer today.
-	 */
-	getUsageLimitState(): UsageLimitState | undefined {
 		if (this.model?.provider !== "anthropic") return undefined;
-		return this.getAnthropicSlowModeLane()?.status(
+		return this.getAnthropicSlowModeLane()?.statusLabel(
 			undefined,
 			cfgProvidersAnthropicSlowMode.get(this.settings) === "auto",
 		);
@@ -9772,27 +9666,7 @@ export class AgentSession implements SettingsScope {
 		return family && isServiceTierForFamily(family, "flex") ? { kind: "flex", family } : undefined;
 	}
 
-	/** Whether `/slow` applies to the active model (flex tier or Claude low priority). */
-	isSlowModeSupported(): boolean {
-		return this.#slowModeTarget() !== undefined;
-	}
-
-	/**
-	 * Where `/slow` for the active model is stored: `global` for the persisted
-	 * config every session shares (`providers.anthropic.slowMode`), `session`
-	 * for this session's flex service tier; undefined without a slow mode.
-	 */
-	getSlowModeScope(): "session" | "global" | undefined {
-		const target = this.#slowModeTarget();
-		if (!target) return undefined;
-		return target.kind === "anthropic" ? "global" : "session";
-	}
-
-	/**
-	 * Reports whether `/slow` is on for the active model. `false` when the
-	 * active model has no slow mode, even while another provider's persisted
-	 * setting (`providers.anthropic.slowMode`) stays on.
-	 */
+	/** Reports whether `/slow` is on for the active model. */
 	isSlowModeEnabled(): boolean {
 		const target = this.#slowModeTarget();
 		if (!target) return false;
@@ -10710,8 +10584,7 @@ export class AgentSession implements SettingsScope {
 			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
 		};
 		return {
-			replyText:
-				args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim(), args.replyMaxBytes),
+			replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
 			assistantMessage: sanitizedMessage,
 		};
 	}
@@ -10792,14 +10665,6 @@ export class AgentSession implements SettingsScope {
 	 * Switch to a different session file.
 	 * Aborts current operation, loads messages, restores model/thinking.
 	 * Listeners are preserved and will continue receiving events.
-	 *
-	 * When none of the target session's saved models can be restored, the switch
-	 * throws `Could not restore model <provider/id>` and the current session stays
-	 * active; as with a rejected cwd change, `session_before_switch` has already
-	 * run and any in-flight turn has already been aborted (the target's models are
-	 * only known once its file is loaded). A session created with `allowSessionModelFallback` (and
-	 * `retry.modelFallback` on) instead keeps its current model and reports a
-	 * warning. Reloading the current session keeps the current model.
 	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
 	async switchSession(
@@ -10808,24 +10673,8 @@ export class AgentSession implements SettingsScope {
 			onCwdChange?: (newCwd: string, previousCwd: string) => Promise<boolean>;
 			/** Collab snapshot adoption keeps the guest's process cwd and marks the replica runtime-only. */
 			preserveLocalCwd?: boolean;
-			/**
-			 * Use this model instead of the target's saved one, like an explicit
-			 * `--model` at startup, and record it in the session when it differs.
-			 */
-			model?: Model;
-			/** Keep the current model without restoring the target's (collab replicas mirror the host's model). */
-			keepModel?: boolean;
-			/**
-			 * Receives the model fallback warning after the switch commits, instead of a
-			 * `notice` event; for hosts that re-render the transcript after switching.
-			 */
-			onModelFallback?: (warning: string) => void;
 		},
 	): Promise<boolean> {
-		const explicitModel = options?.model;
-		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
-			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
-		}
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
@@ -10919,9 +10768,6 @@ export class AgentSession implements SettingsScope {
 				// still observe message_end, then mute before swapping files.
 				await this.#advisors.drainAndDetachRecorders();
 			}
-			// The file may be reloaded at the same path with a different latest contract (or the
-			// switch rolled back via restoreState); re-read it on the next model call either way.
-			this.#sessionInit = undefined;
 			await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
@@ -10952,28 +10798,6 @@ export class AgentSession implements SettingsScope {
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
-			// Resolve the target's model before announcing the switch, so an
-			// unrestorable one rolls back before any hook sees the target session.
-			const targetModelStrings = getRestorableSessionModels(
-				sessionContext.models,
-				this.sessionManager.getLastModelChangeRole(),
-			);
-			let targetModel = explicitModel;
-			let modelFallbackWarning: string | undefined;
-			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
-				targetModel = await this.#resolveSessionModel(targetModelStrings);
-				if (!targetModel && switchingToDifferentSession) {
-					// Like startup resume: never hand the transcript to a model the
-					// session did not choose unless a UI can say so.
-					if (!this.#allowSessionModelFallback || !cfgRetryModelFallback.get(this.settings)) {
-						throw new Error(`Could not restore model ${targetModelStrings[0]}`);
-					}
-					const currentModel = this.model;
-					modelFallbackWarning = currentModel
-						? `Could not restore model ${targetModelStrings[0]}. Using ${currentModel.provider}/${currentModel.id}`
-						: `Could not restore model ${targetModelStrings[0]}`;
-				}
-			}
 			const didReloadConversationChange =
 				previousSessionContext !== undefined &&
 				didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
@@ -10999,26 +10823,35 @@ export class AgentSession implements SettingsScope {
 				this.#closeAllProviderSessions("session reload");
 			}
 
-			if (targetModel) {
-				const currentModel = this.model;
-				const shouldResetProviderState =
-					switchingToDifferentSession ||
-					(currentModel !== undefined &&
-						(currentModel.provider !== targetModel.provider ||
-							currentModel.id !== targetModel.id ||
-							currentModel.api !== targetModel.api));
-				if (shouldResetProviderState) {
-					await this.#setModelWithProviderSessionReset(targetModel);
-				} else {
-					this.agent.setModel(targetModel);
+			// Restore model if saved
+			const targetModelStrings = getRestorableSessionModels(
+				sessionContext.models,
+				this.sessionManager.getLastModelChangeRole(),
+			);
+			if (targetModelStrings.length > 0) {
+				const availableModels = this.#modelRegistry.getAvailable();
+				let match: Model | undefined;
+				for (const targetModelStr of targetModelStrings) {
+					const slashIdx = targetModelStr.indexOf("/");
+					if (slashIdx <= 0) continue;
+					const provider = targetModelStr.slice(0, slashIdx);
+					const modelId = targetModelStr.slice(slashIdx + 1);
+					match = availableModels.find(m => m.provider === provider && m.id === modelId);
+					if (match) break;
 				}
-				// Saved selectors may carry a thinking suffix; compare resolved models.
-				const savedModel =
-					targetModelStrings.length > 0
-						? resolveSessionModelSelector(this.#modelRegistry, targetModelStrings[0])?.model
-						: undefined;
-				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
-					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
+				if (match) {
+					const currentModel = this.model;
+					const shouldResetProviderState =
+						switchingToDifferentSession ||
+						(currentModel !== undefined &&
+							(currentModel.provider !== match.provider ||
+								currentModel.id !== match.id ||
+								currentModel.api !== match.api));
+					if (shouldResetProviderState) {
+						await this.#setModelWithProviderSessionReset(match);
+					} else {
+						this.agent.setModel(match);
+					}
 				}
 			}
 
@@ -11111,10 +10944,6 @@ export class AgentSession implements SettingsScope {
 			}
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
-			if (modelFallbackWarning) {
-				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
-				else this.emitNotice("warning", modelFallbackWarning);
-			}
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -11198,31 +11027,6 @@ export class AgentSession implements SettingsScope {
 			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
 			throw error;
 		}
-	}
-
-	/**
-	 * First restorable saved session model, resolved like startup resume: when
-	 * none is in the catalog, refresh the discovery-backed providers among them
-	 * once and retry.
-	 */
-	async #resolveSessionModel(selectors: readonly string[]): Promise<Model | undefined> {
-		const resolve = (): Model | undefined => {
-			for (const selector of selectors) {
-				const restored = resolveSessionModelSelector(this.#modelRegistry, selector);
-				if (restored) return restored.model;
-			}
-			return undefined;
-		};
-		const restored = resolve();
-		if (restored) return restored;
-		const providers = sessionModelDiscoveryProviders(
-			this.#modelRegistry,
-			selectors,
-			disabledProviderIds(this.settings),
-		);
-		if (providers.size === 0) return undefined;
-		await this.#modelRegistry.refreshDiscoverableProviders(providers, "online-if-uncached");
-		return resolve();
 	}
 
 	/**

@@ -283,7 +283,6 @@ export class CredentialHealth implements HealthApi {
 		const results: CredentialHealthResult[] = [];
 		for (const row of stored) {
 			options?.signal?.throwIfAborted();
-			if (options?.excludeProviders?.has(row.provider)) continue;
 			const base: CredentialHealthResult = {
 				id: row.id,
 				provider: row.provider,

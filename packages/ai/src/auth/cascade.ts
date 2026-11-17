@@ -356,9 +356,7 @@ export class KeyCascade implements KeysApi {
 			credential => credential.source === "login" && !this.isKeylessFallback(provider, credential),
 		);
 		if (loginApiKeySelection) {
-			if (options?.recordAffinity !== false) {
-				this.#deps.affinity.record(provider, sessionId, "api_key", loginApiKeySelection.index);
-			}
+			this.#deps.affinity.record(provider, sessionId, "api_key", loginApiKeySelection.index);
 			const credentialId = onCredentialId
 				? this.#deps.pool.entries(provider)[loginApiKeySelection.index]?.id
 				: undefined;
@@ -384,9 +382,7 @@ export class KeyCascade implements KeysApi {
 			credential => credential.source !== "login",
 		);
 		if (apiKeySelection) {
-			if (options?.recordAffinity !== false) {
-				this.#deps.affinity.record(provider, sessionId, "api_key", apiKeySelection.index);
-			}
+			this.#deps.affinity.record(provider, sessionId, "api_key", apiKeySelection.index);
 			const credentialId = onCredentialId ? this.#deps.pool.entries(provider)[apiKeySelection.index]?.id : undefined;
 			const apiKey = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
 			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);

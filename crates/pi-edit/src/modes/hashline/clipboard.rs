@@ -1,7 +1,5 @@
 //! Clipboard edit resolution (`packages/hashline/src/clipboard.ts`).
 
-use std::borrow::Cow;
-
 use super::{
 	apply::EmptyPaste,
 	messages::{
@@ -103,7 +101,7 @@ fn read_register(
 
 fn write_register(
 	edit: &Edit,
-	file_lines: &[&str],
+	file_lines: &[String],
 	clipboard: &mut Clipboard,
 ) -> Result<(), EditError> {
 	let Edit::Cut { range, register, line_num, .. } = edit else {
@@ -116,10 +114,7 @@ fn write_register(
 			file_lines.len()
 		)));
 	}
-	let captured: Vec<String> = file_lines[(range.start.line - 1) as usize..range.end.line as usize]
-		.iter()
-		.map(|line| (*line).to_owned())
-		.collect();
+	let captured = file_lines[(range.start.line - 1) as usize..range.end.line as usize].to_vec();
 	if let Some(register) = register {
 		clipboard
 			.named
@@ -137,15 +132,15 @@ fn write_register(
 
 /// Lower cut/paste operations into inserts and deletes against the original
 /// file lines.
-pub fn resolve_clipboard_edits<'e>(
-	edits: &'e [Edit],
-	file_lines: &[&str],
+pub fn resolve_clipboard_edits(
+	edits: &[Edit],
+	file_lines: &[String],
 	clipboard: &mut Clipboard,
 	on_empty_paste: EmptyPaste,
 	on_warning: &mut dyn FnMut(String),
-) -> Result<Cow<'e, [Edit]>, EditError> {
+) -> Result<Vec<Edit>, EditError> {
 	if !has_clipboard_edit(edits) {
-		return Ok(Cow::Borrowed(edits));
+		return Ok(edits.to_vec());
 	}
 	let mut resolved = Vec::new();
 	let mut synth_index = 0;
@@ -218,7 +213,7 @@ pub fn resolve_clipboard_edits<'e>(
 			_ => resolved.push(edit.clone()),
 		}
 	}
-	Ok(Cow::Owned(resolved))
+	Ok(resolved)
 }
 
 /// Validate anonymous clipboard sequencing without mutating the supplied

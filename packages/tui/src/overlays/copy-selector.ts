@@ -274,7 +274,6 @@ export interface CopySelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
-	expandThinkingBlocks?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** Replaces the "Copy" header when the picker is reused for another purpose. */
@@ -380,7 +379,6 @@ export class CopySelectorComponent implements Component {
 			cwd: this.deps.cwd,
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
-			expandThinkingBlocks: this.deps.expandThinkingBlocks,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});
