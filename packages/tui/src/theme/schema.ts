@@ -6,22 +6,11 @@ import type { SpinnerFramesOverride } from "./symbols";
 
 export type ColorValue = string | number;
 
-/**
- * Tokens a theme is allowed to omit. They resolve to the terminal default
- * foreground, so `Theme.fg()` stays total for callers that paint a token a theme
- * never declared (e.g. a `modelTags.<role>.color` reference) while
- * `Theme.hasColor()` still reports them as unset.
- */
-export const OPTIONAL_THEME_COLOR_RECORD = {
-	assistantMessageText: true,
-} satisfies Partial<Record<ThemeColor, true>>;
-
 export interface ThemeJson {
 	$schema?: string;
 	name: string;
 	vars?: Record<string, ColorValue>;
-	colors: Omit<Record<ThemeColor | ThemeBg, ColorValue>, "thinkingMax" | keyof typeof OPTIONAL_THEME_COLOR_RECORD> &
-		Partial<Record<keyof typeof OPTIONAL_THEME_COLOR_RECORD, ColorValue>> & { thinkingMax?: ColorValue };
+	colors: Omit<Record<ThemeColor | ThemeBg, ColorValue>, "thinkingMax"> & { thinkingMax?: ColorValue };
 	export?: {
 		pageBg?: ColorValue;
 		cardBg?: ColorValue;
@@ -63,7 +52,6 @@ export type ThemeColor =
 	| "muted"
 	| "dim"
 	| "text"
-	| "assistantMessageText"
 	| "thinkingText"
 	| "userMessageText"
 	| "customMessageText"
@@ -127,7 +115,6 @@ const THEME_COLOR_RECORD = {
 	muted: true,
 	dim: true,
 	text: true,
-	assistantMessageText: true,
 	thinkingText: true,
 	userMessageText: true,
 	customMessageText: true,

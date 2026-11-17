@@ -6,27 +6,13 @@
  */
 import { parseFlag } from "@oh-my-pi/pi-utils";
 
-/** The Tern pane omp runs in. */
-export interface TernPane {
+/** Browser kind selecting a Tern browser PiP. */
+export interface TernKind {
+	kind: "tern";
 	/** The Tern daemon socket (`TERN_PANE_SOCKET`). */
 	socketPath: string;
 	/** The pane omp runs in (`TERN_PANE`), which owns the PiPs. */
 	pane: number;
-}
-
-/** Browser kind selecting a Tern browser PiP. */
-export interface TernKind extends TernPane {
-	kind: "tern";
-}
-
-/** The Tern pane omp runs in, or null outside Tern (`TERN_PANE_SOCKET` unset or `TERN_PANE` not a block id). */
-export function resolveTernPane(env: Record<string, string | undefined> = process.env): TernPane | null {
-	const socketPath = env.TERN_PANE_SOCKET?.trim();
-	const pane = env.TERN_PANE?.trim();
-	if (!socketPath || !pane || !/^\d+$/.test(pane)) return null;
-	const id = Number(pane);
-	if (!Number.isSafeInteger(id)) return null;
-	return { socketPath, pane: id };
 }
 
 /** Inputs of {@link resolveTernKind}. */
@@ -45,6 +31,10 @@ export function resolveTernKind(
 	env: Record<string, string | undefined> = process.env,
 ): TernKind | null {
 	if (!parseFlag(env.PI_BROWSER_TERN, options?.settingEnabled ?? true)) return null;
-	const pane = resolveTernPane(env);
-	return pane && { kind: "tern", ...pane };
+	const socketPath = env.TERN_PANE_SOCKET?.trim();
+	const pane = env.TERN_PANE?.trim();
+	if (!socketPath || !pane || !/^\d+$/.test(pane)) return null;
+	const id = Number(pane);
+	if (!Number.isSafeInteger(id)) return null;
+	return { kind: "tern", socketPath, pane: id };
 }

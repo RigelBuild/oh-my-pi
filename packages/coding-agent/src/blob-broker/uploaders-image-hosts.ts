@@ -163,6 +163,12 @@ function oauthBaseUrl(value: string): string {
 	return `${url.origin}${url.pathname}`;
 }
 
+function base64(data: ArrayBuffer): string {
+	let binary = "";
+	for (const byte of new Uint8Array(data)) binary += String.fromCharCode(byte);
+	return btoa(binary);
+}
+
 async function oauthSignature(
 	method: "GET" | "POST",
 	url: string,
@@ -184,7 +190,7 @@ async function oauthSignature(
 	const signatureBase = `${method}&${oauthEncode(oauthBaseUrl(url))}&${oauthEncode(normalized)}`;
 	const keyBytes = new TextEncoder().encode(`${oauthEncode(consumerSecret)}&${oauthEncode(tokenSecret)}`);
 	const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
-	return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signatureBase))).toBase64();
+	return base64(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signatureBase)));
 }
 
 async function oauthParameters(

@@ -1143,10 +1143,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const title = pathDisplay ? `Read ${pathDisplay}` : "Read";
 		let cachedWidth: number | undefined;
 		let cachedLines: string[] | undefined;
-		const dropCache = () => {
-			cachedWidth = undefined;
-			cachedLines = undefined;
-		};
 		const expanded = this.#expanded;
 		const component: Component = {
 			render: (width: number) => {
@@ -1168,8 +1164,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				cachedWidth = width;
 				return cachedLines;
 			},
-			invalidate: dropCache,
-			releaseRenderCaches: dropCache,
+			invalidate: () => {
+				cachedWidth = undefined;
+				cachedLines = undefined;
+			},
 		};
 		this.addChild(component);
 	}

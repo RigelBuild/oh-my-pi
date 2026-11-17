@@ -1,4 +1,4 @@
-import { type Api, IMAGE_GENERATION_APIS, type ImageGenerationApi, type Model } from "@oh-my-pi/pi-catalog/types";
+import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
 import { generateAntigravityImage } from "./google-antigravity";
 import { generateGoogleImage } from "./google-generative-ai";
@@ -14,11 +14,25 @@ export * from "./openai-images";
 export * from "./openrouter-images";
 export * from "./types";
 
-export type { ImageGenerationApi } from "@oh-my-pi/pi-catalog/types";
+/** Catalog APIs {@link generateImage} serves; the hosted Responses pair needs an explicit carrier model. */
+export type ImageGenerationApi =
+	| "openai-images"
+	| "openrouter-images"
+	| "google-generative-ai"
+	| "google-gemini-cli"
+	| "openai-responses"
+	| "openai-codex-responses";
 
 /** Whether a catalog API generates images through one of the pi-ai image clients. */
 export function isImageGenerationApi(api: Api): api is ImageGenerationApi {
-	return (IMAGE_GENERATION_APIS as readonly Api[]).includes(api);
+	return (
+		api === "openai-images" ||
+		api === "openrouter-images" ||
+		api === "google-generative-ai" ||
+		api === "google-gemini-cli" ||
+		api === "openai-responses" ||
+		api === "openai-codex-responses"
+	);
 }
 
 /** Generate (or edit, when `request.inputImages` is set) images through the transport selected by the model's `api`. */

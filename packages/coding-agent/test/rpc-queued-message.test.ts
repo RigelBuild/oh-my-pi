@@ -103,10 +103,9 @@ describe("RPC queued-message editing", () => {
 	test("queue_update mirrors get_state.queuedMessages, matches the removal invariant, and never repeats", async () => {
 		await client.start();
 
-		const updates: Array<{ steering: string[]; followUp: string[]; liveSteered: number }> = [];
+		const updates: Array<{ steering: string[]; followUp: string[] }> = [];
 		const unsubscribe = client.onSessionEvent(event => {
-			if (event.type === "queue_update")
-				updates.push({ steering: event.steering, followUp: event.followUp, liveSteered: event.liveSteered });
+			if (event.type === "queue_update") updates.push({ steering: event.steering, followUp: event.followUp });
 		});
 
 		try {
@@ -129,8 +128,8 @@ describe("RPC queued-message editing", () => {
 			for (const text of snapshot.followUp) {
 				expect(await client.removeQueuedMessage(text, "followUp")).toEqual({ removed: true });
 			}
-			expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
-			expect((await client.getState()).queuedMessages).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+			expect(updates.at(-1)).toEqual({ steering: [], followUp: [] });
+			expect((await client.getState()).queuedMessages).toEqual({ steering: [], followUp: [] });
 
 			// Requeue and let delivery (the next turn dequeuing it) drain the queue.
 			await client.followUp("delivered");
@@ -146,8 +145,8 @@ describe("RPC queued-message editing", () => {
 			} finally {
 				unsubscribeIdle();
 			}
-			expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
-			expect((await client.getState()).queuedMessages).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+			expect(updates.at(-1)).toEqual({ steering: [], followUp: [] });
+			expect((await client.getState()).queuedMessages).toEqual({ steering: [], followUp: [] });
 
 			// No duplicate identical consecutive events: every emitted snapshot
 			// differs from the one immediately before it.

@@ -113,9 +113,6 @@ export class LiveSessionController {
 	#phase: LivePhase = "connecting";
 	#inputLevel = 0;
 	#outputLevel = 0;
-	/** Last pair passed to `onLevels`; repeated identical levels are not re-emitted. */
-	#emittedInputLevel = -1;
-	#emittedOutputLevel = -1;
 	#activeDelegationId: string | undefined;
 	#userTranscript = "";
 	#assistantTranscript = "";
@@ -491,13 +488,8 @@ export class LiveSessionController {
 	}
 
 	#emitLevels(): void {
-		if (this.#inputLevel === this.#emittedInputLevel && this.#outputLevel === this.#emittedOutputLevel) return;
-		const input = this.#inputLevel;
-		const output = this.#outputLevel;
 		try {
-			this.#callbacks.onLevels(input, output);
-			this.#emittedInputLevel = input;
-			this.#emittedOutputLevel = output;
+			this.#callbacks.onLevels(this.#inputLevel, this.#outputLevel);
 		} catch (cause) {
 			this.#reportFailure(errorFrom(cause));
 		}

@@ -1,4 +1,3 @@
-import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	AuthAccountPolicies,
@@ -24,8 +23,6 @@ export function matchesAuthAccountSelector(selector: AuthAccountSelector, identi
 export class AccountPolicies {
 	#accountPolicies: AuthAccountPolicies;
 	#defaultReservePct: number;
-	/** Indexes of policies already warned as unmatched; validation runs on every selection. */
-	#warnedUnmatched = new Set<number>();
 
 	constructor(policies: AuthAccountPolicies, defaultReservePct: number | undefined) {
 		AccountPolicies.#validateAccountPolicyConfiguration(policies);
@@ -55,7 +52,6 @@ export class AccountPolicies {
 		for (const [provider, credentials] of storedCredentials) next.validateFor(provider, credentials);
 		this.#accountPolicies = next.#accountPolicies;
 		this.#defaultReservePct = next.#defaultReservePct;
-		this.#warnedUnmatched = next.#warnedUnmatched;
 	}
 
 	static #validateAccountPolicyConfiguration(accountPolicies: AuthAccountPolicies): void {
@@ -109,7 +105,6 @@ export class AccountPolicies {
 		}
 	}
 
-	/** Throw on ambiguous selectors for `provider`; a selector whose account is absent is inert and warns once. */
 	validateFor(provider: string, credentials: readonly AuthCredential[]): void {
 		const policies = this.#accountPolicies
 			.map((policy, index) => ({ policy, index }))
@@ -130,11 +125,7 @@ export class AccountPolicies {
 			}
 			const path = `auth.accountPolicies[${index}].account`;
 			if (matches.length === 0) {
-				if (!this.#warnedUnmatched.has(index)) {
-					this.#warnedUnmatched.add(index);
-					logger.warn("Account policy matches no stored OAuth account; ignoring it", { provider, path });
-				}
-				continue;
+				throw new AIError.ConfigurationError(`${path} matches no stored OAuth account for ${provider}`);
 			}
 			if (matches.length > 1) {
 				throw new AIError.ConfigurationError(

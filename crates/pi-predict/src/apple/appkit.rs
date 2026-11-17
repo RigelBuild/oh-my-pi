@@ -142,7 +142,9 @@ pub fn check(text: &str) -> anyhow::Result<Vec<SpellingRange>> {
 }
 
 fn strings(values: Option<Retained<NSArray<NSString>>>) -> Vec<String> {
-	values.map_or_default(|values| values.iter().map(|value| value.to_string()).collect())
+	values
+		.map(|values| values.iter().map(|value| value.to_string()).collect())
+		.unwrap_or_default()
 }
 
 /// Language macOS identifies for a word range, honoring automatic language

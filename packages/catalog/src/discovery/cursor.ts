@@ -882,8 +882,7 @@ function buildRichCursorLane(
 			cursorRequiresDataRetention: details.requiresDataRetention,
 			cursorSupportsAgent: details.supportsAgent,
 			cursorSupportsSandboxing: details.supportsSandboxing,
-			// Not marked `isProviderDefault`: Cursor keeps its bundled startup default, so
-			// the account default only picks the lane's default wire id and the badge.
+			isProviderDefault,
 			isRecommended: isProviderDefault || details.defaultOn,
 			description:
 				variant?.tagline ??

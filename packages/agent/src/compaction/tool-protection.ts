@@ -11,15 +11,9 @@ export type ProtectedToolMatcher = string | ((context: ProtectedToolContext) => 
 
 const SKILL_INTERNAL_URL_PREFIX = "skill://";
 
-/** Map tool-call ids to their calls across `entries[start, end)` (later calls win). */
-export function collectToolCallsById(
-	entries: readonly SessionEntry[],
-	start = 0,
-	end = entries.length,
-): Map<string, AgentToolCall> {
+export function collectToolCallsById(entries: readonly SessionEntry[]): Map<string, AgentToolCall> {
 	const toolCalls = new Map<string, AgentToolCall>();
-	for (let i = start; i < end; i++) {
-		const entry = entries[i];
+	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "assistant") continue;

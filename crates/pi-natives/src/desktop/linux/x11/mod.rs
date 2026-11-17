@@ -13,7 +13,6 @@ use input::X11Input;
 use super::ax::AtSpiAx;
 use crate::desktop::{
 	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
-	control::OperationToken,
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
@@ -49,13 +48,6 @@ impl Backend for X11Backend {
 			ax: self.ax.is_some(),
 			background_window_input: true,
 			takeover: true,
-			applications: crate::desktop::applications::supported(),
-			menus: self.ax.is_some(),
-			held_input: true,
-			spaces: false,
-			global_escape: std::env::var_os("WAYLAND_DISPLAY").is_none()
-				&& !std::env::var("XDG_SESSION_TYPE")
-					.is_ok_and(|session| session.eq_ignore_ascii_case("wayland")),
 			capture_permission: if displays.is_ok() {
 				"granted"
 			} else {
@@ -70,8 +62,6 @@ impl Backend for X11Backend {
 			}
 			.to_string(),
 			display_count: displays.map_or(0, |items| u32::try_from(items.len()).unwrap_or(u32::MAX)),
-			screen_locked: false,
-			display_asleep: false,
 		}
 	}
 
@@ -87,9 +77,8 @@ impl Backend for X11Backend {
 		&mut self,
 		target: &Target,
 		_caps: &CaptureCaps,
-		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)> {
-		self.capture.capture(target, selector)
+		self.capture.capture(target)
 	}
 
 	fn pointer(
@@ -98,20 +87,11 @@ impl Backend for X11Backend {
 		event: PointerEvent,
 		_frame: &FrameGeometry,
 		mode: DeliveryMode,
-		token: &OperationToken,
 	) -> CoreResult<()> {
-		token.check()?;
 		self.input.pointer(target, event, mode)
 	}
 
-	fn type_text(
-		&mut self,
-		target: &Target,
-		text: &str,
-		mode: DeliveryMode,
-		token: &OperationToken,
-	) -> CoreResult<()> {
-		token.check()?;
+	fn type_text(&mut self, target: &Target, text: &str, mode: DeliveryMode) -> CoreResult<()> {
 		self.input.type_text(target, text, mode)
 	}
 
@@ -120,44 +100,11 @@ impl Backend for X11Backend {
 		target: &Target,
 		keys: &[KeyName],
 		mode: DeliveryMode,
-		token: &OperationToken,
 	) -> CoreResult<()> {
-		token.check()?;
 		self.input.key_chord(target, keys, mode)
 	}
 
-	fn hold_keys(
-		&mut self,
-		target: &Target,
-		keys: &[KeyName],
-		duration: std::time::Duration,
-		mode: DeliveryMode,
-		token: &OperationToken,
-	) -> CoreResult<()> {
-		token.check()?;
-		self.input.hold_keys(target, keys, duration, mode)
-	}
-
-	fn menu_items(
-		&mut self,
-		window: &DesktopWindow,
-		path: &[String],
-	) -> CoreResult<Vec<crate::desktop::menus::DesktopMenuItem>> {
-		super::menus::items(window, path)
-	}
-
-	fn menu_select(
-		&mut self,
-		window: &DesktopWindow,
-		path: &[String],
-		token: &OperationToken,
-	) -> CoreResult<()> {
-		token.check()?;
-		super::menus::select(window, path)
-	}
-
-	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()> {
-		token.check()?;
+	fn raise_window(&mut self, id: &str) -> CoreResult<()> {
 		let window = id
 			.parse::<u32>()
 			.map_err(|_| DesktopError::window_not_found(format!("invalid X11 window id {id}")))?;

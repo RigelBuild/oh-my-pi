@@ -4,7 +4,7 @@
  * selection. Hand-rolled fixed-row virtualization (32px rows, spacer divs).
  */
 
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDurationMs } from "../data/formatters";
 import { EmptyState } from "../ui";
 import type { TraceMarker, TraceSpan, TraceTrack } from "../types";
@@ -25,8 +25,6 @@ export interface TranscriptListProps {
 	selection: string | null;
 	onSelect: (spanId: string) => void;
 	search: string;
-	/** Spans matching `search` (from the trace view); `null` when not searching. */
-	matchIds: ReadonlySet<string> | null;
 	traceStart: number;
 }
 
@@ -51,26 +49,20 @@ export function buildTranscriptRows(tracks: TraceTrack[]): TranscriptRow[] {
 	return rows;
 }
 
-export const TranscriptList = memo(function TranscriptList({
-	tracks,
-	selection,
-	onSelect,
-	search,
-	matchIds,
-	traceStart,
-}: TranscriptListProps) {
+export function TranscriptList({ tracks, selection, onSelect, search, traceStart }: TranscriptListProps) {
 	const colors = useTraceTheme();
 	const containerRef = useRef<HTMLDivElement>(null);
 	const [scrollTop, setScrollTop] = useState(0);
 
 	const allRows = useMemo(() => buildTranscriptRows(tracks), [tracks]);
 	const rows = useMemo(() => {
-		if (!matchIds) return allRows;
 		const needle = search.trim().toLowerCase();
-		return allRows.filter(row =>
-			row.span ? matchIds.has(row.span.id) : (row.marker?.label ?? "").toLowerCase().includes(needle),
-		);
-	}, [allRows, search, matchIds]);
+		if (!needle) return allRows;
+		return allRows.filter(row => {
+			const text = row.span ? `${row.span.label} ${row.span.detail ?? ""}` : (row.marker?.label ?? "");
+			return text.toLowerCase().includes(needle);
+		});
+	}, [allRows, search]);
 
 	// Scroll the selected row into view when selection changes externally.
 	useEffect(() => {
@@ -143,4 +135,4 @@ export const TranscriptList = memo(function TranscriptList({
 			{rows.length === 0 && <EmptyState title="No matching events" />}
 		</div>
 	);
-});
+}

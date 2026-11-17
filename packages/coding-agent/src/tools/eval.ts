@@ -43,7 +43,7 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
-import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/eval";
+import { upsertStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -65,7 +65,7 @@ import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./setti
 export type EvalLanguageToken = "py" | "js";
 const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
 const EVAL_LANGUAGE_RUNTIME: Record<EvalLanguageToken, string> = {
-	py: '"py": Python with IPython-style magics (not IPython)',
+	py: '"py": IPython',
 	js: '"js": Bun',
 };
 const EVAL_LANGUAGE_NAME: Record<EvalLanguageToken, string> = {
@@ -334,7 +334,6 @@ async function resolveBackend(
 		}
 		return { backend: pythonBackend };
 	}
-	if (language !== "js") throw new ToolError(`Unsupported eval language: ${String(language)}`);
 	if (!allowJs) throw new ToolError("JavaScript backend is disabled (PI_JS=0 or eval.js = false).");
 	return { backend: jsBackend };
 }
@@ -517,12 +516,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		onUpdate?: AgentToolUpdateCallback,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const validated = evalSchema(params);
-		if (validated instanceof type.errors) {
-			throw new ToolError(`Validation failed for tool "eval": ${validated.summary}`);
-		}
-		params = validated;
-
 		const shadowCell = this.#shadowCells.get(_toolCallId);
 		this.#shadowCells.delete(_toolCallId);
 		if (this.#proxyExecutor) {
@@ -535,7 +528,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const session = this.session;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
-		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : params.language;
+		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : "js";
 		// Bound backend discovery by the eval cell's own timeout and abort signal:
 		// the cell IdleTimeout is armed only later in #runCells, so a hung runtime
 		// probe would otherwise wedge the whole turn (issue #9466).
@@ -807,7 +800,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const jsonOutputs: unknown[] = [];
 			const images: ImageContent[] = [];
-			const callStatus: StatusEventLog = {};
+			const statusEvents: EvalStatusEvent[] = [];
 			// Oversized displays land in `jsonOutputs` as bounded previews and stream
 			// their full value to the output artifact. Until the artifact write is
 			// confirmed (see `commitDisplaySpills`), the full value is kept here so a
@@ -840,12 +833,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const cellOutputs: string[] = [];
 			// The cell currently inside backend.execute(). Streamed stdout is
 			// appended to its rendered `output` live so a long-running cell (e.g. a
-			// sleep loop) shows progress instead of nothing until it returns. Its
-			// live output is the suffix of the aggregate `tailBuffer` streamed since
-			// the cell started (`chars` UTF-16 units), sliced only when an update is
-			// emitted; on completion the authoritative `cellResult.output` (below)
-			// overwrites this live tail.
-			let activeLiveCell: { result: EvalCellResult; chars: number } | undefined;
+			// sleep loop) shows progress instead of nothing until it returns. A
+			// dedicated per-cell tail buffer keeps attribution correct and avoids
+			// double-counting against the aggregate `tailBuffer`; on completion the
+			// authoritative `cellResult.output` (below) overwrites this live tail.
+			let activeLiveCell: { result: EvalCellResult; buf: TailBuffer } | undefined;
+
+			const appendTail = (text: string) => {
+				tailBuffer.append(text);
+			};
 
 			const buildUpdateDetails = (): EvalToolDetails => {
 				const details: EvalToolDetails = {
@@ -862,9 +858,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				if (images.length > 0) {
 					details.images = images;
 				}
-				if (callStatus.statusEvents) {
-					details.statusEvents = callStatus.statusEvents;
-					details.statusEventsElided = callStatus.statusEventsElided;
+				if (statusEvents.length > 0) {
+					details.statusEvents = statusEvents;
 				}
 				if (notice) {
 					details.notice = notice;
@@ -880,12 +875,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				if (!updateTimer) return;
 				clearTimeout(updateTimer);
 				updateTimer = undefined;
-				const text = tailBuffer.text();
-				if (activeLiveCell) {
-					const { chars } = activeLiveCell;
-					activeLiveCell.result.output = chars >= text.length ? text : text.slice(text.length - chars);
-				}
-				emitUpdate?.(text, buildUpdateDetails());
+				emitUpdate?.(tailBuffer.text(), buildUpdateDetails());
 			};
 			const pushUpdate = () => {
 				if (!emitUpdate || updateTimer) return;
@@ -903,8 +893,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),
 				onChunk: chunk => {
-					tailBuffer.append(chunk);
-					if (activeLiveCell) activeLiveCell.chars += chunk.length;
+					appendTail(chunk);
+					if (activeLiveCell) {
+						activeLiveCell.buf.append(chunk);
+						activeLiveCell.result.output = activeLiveCell.buf.text();
+					}
 					pushUpdate();
 				},
 			});
@@ -938,10 +931,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				cellResult.status = "running";
 				cellResult.output = "";
 				cellResult.statusEvents = undefined;
-				cellResult.statusEventsElided = undefined;
 				cellResult.exitCode = undefined;
 				cellResult.durationMs = undefined;
-				activeLiveCell = { result: cellResult, chars: 0 };
+				activeLiveCell = { result: cellResult, buf: new TailBuffer(DEFAULT_MAX_BYTES * 2) };
 				pushUpdate();
 
 				const startTime = Date.now();
@@ -971,7 +963,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 								idle?.resume();
 								return;
 							}
-							recordStatusEvent(cellResult, {
+							cellResult.statusEvents ??= [];
+							upsertStatusEvent(cellResult.statusEvents, {
 								...event,
 								resolvedThinkingLevel: parseConfiguredThinkingLevel(
 									typeof event.resolvedThinkingLevel === "string" ? event.resolvedThinkingLevel : undefined,
@@ -988,7 +981,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				}
 				const durationMs = Date.now() - startTime;
 
-				const cellStatus: StatusEventLog = {};
+				const cellStatusEvents: EvalStatusEvent[] = [];
 				const cellDisplayTexts: string[] = [];
 				const cellImageNotes: string[] = [];
 				let cellHasMarkdown = false;
@@ -1007,23 +1000,18 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						}
 					}
 					if (output.type === "image") {
-						// Computer frames have a matching native input coordinate space. Generic
-						// display resizing must not change it; provider-boundary safety still applies.
-						if (output.detail === "original") {
-							images.push(output);
-							continue;
-						}
-						const resized = await resizeImage(output, { excludeWebP });
-						const data = resized.data;
+						const resized = await resizeImage(
+							{
+								type: "image",
+								data: output.data,
+								mimeType: output.mimeType,
+							},
+							{ excludeWebP },
+						);
 						const image: ImageContent = {
 							type: "image",
-							data,
+							data: resized.data,
 							mimeType: resized.mimeType,
-							...(output.detail === undefined ? {} : { detail: output.detail }),
-							// Remote references are valid only while the bytes remain unchanged.
-							...(data === output.data && resized.mimeType === output.mimeType
-								? { url: output.url, providerFile: output.providerFile }
-								: {}),
 						};
 						images.push(image);
 						const dimensionNote = formatDimensionNote(resized);
@@ -1040,8 +1028,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 									: undefined,
 							),
 						};
-						recordStatusEvent(callStatus, event);
-						recordStatusEvent(cellStatus, event);
+						upsertStatusEvent(statusEvents, event);
+						upsertStatusEvent(cellStatusEvents, event);
 					}
 					if (output.type === "markdown") {
 						cellHasMarkdown = true;
@@ -1064,13 +1052,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				cellResult.output = cellOutput;
 				cellResult.exitCode = result.exitCode;
 				cellResult.durationMs = durationMs;
-				cellResult.statusEvents = cellStatus.statusEvents;
-				cellResult.statusEventsElided = cellStatus.statusEventsElided;
+				cellResult.statusEvents = cellStatusEvents.length > 0 ? cellStatusEvents : undefined;
 				cellResult.hasMarkdown = cellHasMarkdown || undefined;
 
 				if (cellOutput) {
 					cellOutputs.push(cellOutput);
-					tailBuffer.append(cellOutput);
+					appendTail(cellOutput);
 				}
 
 				if (result.cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
@@ -1091,8 +1078,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						languages,
 						cells: cellResults,
 						jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
-						statusEvents: callStatus.statusEvents,
-						statusEventsElided: callStatus.statusEventsElided,
+						statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 						isError: true,
 					};
 					if (notice) details.notice = notice;
@@ -1126,8 +1112,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				languages,
 				cells: cellResults,
 				jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
-				statusEvents: callStatus.statusEvents,
-				statusEventsElided: callStatus.statusEventsElided,
+				statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 			};
 			if (notice) details.notice = notice;
 
@@ -1174,7 +1159,6 @@ async function summarizeFinal(
 		artifactError: rawSummary.artifactError,
 		columnDroppedBytes: rawSummary.columnDroppedBytes,
 		columnTruncatedLines: rawSummary.columnTruncatedLines,
-		columnTruncatedRange: rawSummary.columnTruncatedRange,
 		columnMax: rawSummary.columnMax,
 	};
 }

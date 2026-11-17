@@ -11,10 +11,8 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 		Some(
 			"pr"
 				| "issue"
-				| "run"
-				| "workflow"
-				| "repo"
-				| "api"
+				| "run" | "workflow"
+				| "repo" | "api"
 				| "search"
 				| "release"
 				| "codespace"

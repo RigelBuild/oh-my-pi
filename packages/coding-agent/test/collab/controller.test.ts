@@ -671,7 +671,7 @@ describe("interactive collaboration startup", () => {
 		const send = CollabSocket.prototype.send;
 		const capture = spyOn(CollabSocket.prototype, "send").mockImplementation(
 			function (this: CollabSocket, frame, targetPeer) {
-				if (typeof frame !== "string" && frame.t === "hello") transport = this;
+				if (frame.t === "hello") transport = this;
 				return send.call(this, frame, targetPeer);
 			},
 		);

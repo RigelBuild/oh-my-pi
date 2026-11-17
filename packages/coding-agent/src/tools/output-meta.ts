@@ -41,10 +41,6 @@ export interface LimitsInput {
 	headLimit?: number;
 	columnMax?: number;
 	columnUnit?: "bytes" | "chars";
-	/** First and last lines the column cap cut, for the `:raw` recovery selector. */
-	columnLines?: { first: number; last: number };
-	/** Target the `:raw:<first>-<last>` recovery selector is appended to. */
-	columnSelectorBase?: string;
 }
 
 // =============================================================================
@@ -198,9 +194,7 @@ export class OutputMetaBuilder {
 		// when the output is otherwise complete (`truncated === false`). The sink
 		// enforces the cap in UTF-8 bytes, so the notice must say "bytes".
 		if (summary.columnMax != null && summary.columnMax > 0 && (summary.columnTruncatedLines ?? 0) > 0) {
-			this.columnTruncated(summary.columnMax, "bytes", summary.artifactId, summary.artifactElidedBytes, {
-				lines: summary.columnTruncatedRange,
-			});
+			this.columnTruncated(summary.columnMax, "bytes", summary.artifactId, summary.artifactElidedBytes);
 		}
 		if (!summary.truncated) return this;
 
@@ -335,10 +329,7 @@ export class OutputMetaBuilder {
 			this.headLimit(limits.headLimit);
 		}
 		if (limits.columnMax !== undefined) {
-			this.columnTruncated(limits.columnMax, limits.columnUnit, undefined, undefined, {
-				lines: limits.columnLines,
-				selectorBase: limits.columnSelectorBase,
-			});
+			this.columnTruncated(limits.columnMax, limits.columnUnit);
 		}
 		return this;
 	}
@@ -370,20 +361,14 @@ export class OutputMetaBuilder {
 	 * into that artifact; the rendered notice then advertises it as a recovery
 	 * pointer (see {@link formatOutputNotice}), matching the tail-truncation notice.
 	 * `artifactElidedBytes` marks an artifact the size cap cut to a head/tail sample.
-	 * `recovery.lines` (first to last cut line) lets the notice name the
-	 * `<selectorBase>:raw:<first>-<last>` read that returns those lines whole;
-	 * the base defaults to `artifact://<artifactId>`.
 	 */
 	columnTruncated(
 		maxColumn: number,
 		unit: "bytes" | "chars" = "chars",
 		artifactId?: string,
 		artifactElidedBytes?: number,
-		recovery?: { lines?: { first: number; last: number }; selectorBase?: string },
 	): this {
 		if (maxColumn <= 0) return this;
-		// Lines matter only with a target the recovery selector can read them from.
-		const lines = artifactId || recovery?.selectorBase !== undefined ? recovery?.lines : undefined;
 		this.#meta.limits = {
 			...this.#meta.limits,
 			columnTruncated: {
@@ -391,8 +376,6 @@ export class OutputMetaBuilder {
 				unit,
 				artifactId,
 				...(artifactId && artifactElidedBytes ? { artifactElidedBytes } : {}),
-				...(lines ? { lines } : {}),
-				...(lines && recovery?.selectorBase !== undefined ? { selectorBase: recovery.selectorBase } : {}),
 			},
 		};
 		return this;

@@ -1,5 +1,5 @@
 import {
-	type Focusable,
+	type Component,
 	Editor,
 	Ellipsis,
 	matchesKey,
@@ -11,9 +11,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../index";
-import { compositeLineAt } from "../render/composite";
-import { wrapLiteralLine } from "../utils";
-import { editorKey } from "../chrome/keybinding-hints";
+import { appKey, editorKey } from "../chrome/keybinding-hints";
 import { formatKeyHint, formatKeyHints, type KeybindingsManager } from "../app-keybindings";
 import type { Keybinding } from "../keybindings";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -38,19 +36,11 @@ import {
 	topBorder,
 	topBorderSplit,
 } from "../chrome/overlay-box";
-import { appExternalEditorKey, matchesAppExternalEditor } from "../keybinding-matchers";
+import { matchesAppExternalEditor } from "../keybinding-matchers";
 import type { KeyName } from "../key-hint-format";
 import { item, keyed, node, row as rowNode, span, text } from "../native/describe";
 import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
-import {
-	escCloseButton,
-	hintsRow,
-	itemIndex,
-	type NativeHint,
-	noteSpans,
-	overlayCard,
-	selectList,
-} from "../native/overlay";
+import { hintsRow, itemIndex, type NativeHint, noteSpans, overlayCard, selectList } from "../native/overlay";
 
 function fit(text: string, width: number): string {
 	if (width <= 0) return "";
@@ -70,8 +60,6 @@ export interface AnnotationOverlayCallbacks {
 	onWarning?(message: string): void;
 	/** Open the draft in the host's editor and invoke `commit` with its result. */
 	onAnnotationExternalEditor?(draft: string, commit: (text: string | null) => void): void | Promise<void>;
-	/** Open the current source in the host's editor. The overlay stays open. */
-	onExternalEditor?(): void | Promise<void>;
 }
 
 export interface CodeReviewOverlayCallbacks extends AnnotationOverlayCallbacks {
@@ -106,8 +94,7 @@ interface CommittedTextAnnotation {
 interface RenderedDiffBody {
 	lines: string[];
 	renderedRowBySource: number[];
-	sourceIndexByRenderedRow: Array<number | undefined>;
-	selectedSourceLines: Array<string | undefined>;
+	selectedSourceLines: string[];
 }
 
 interface RenderedBody {
@@ -149,8 +136,7 @@ function sanitizeStatusText(text: string): string {
 		.trim();
 }
 
-/** Splits a text source into the overlay's 1-based annotatable lines. */
-export function splitTextLines(text: string): string[] {
+function splitTextLines(text: string): string[] {
 	return text.split(/\r\n|\n|\r/);
 }
 
@@ -159,8 +145,7 @@ function isTextSource(value: readonly ReviewDiffFile[] | TextReviewSource): valu
 }
 
 /** A fullscreen, annotated diff picker that only relies on public OMP APIs. */
-export class AnnotationOverlay implements Focusable {
-	focused = false;
+export class AnnotationOverlay implements Component {
 	#scrollView: ScrollView;
 	#editor: Editor;
 	#focus: FocusRegion = "files";
@@ -174,8 +159,6 @@ export class AnnotationOverlay implements Focusable {
 	#editingAnnotationIndex: number | undefined;
 	#annotationChooser: AnnotationChooser | undefined;
 	#externalOperation = false;
-	/** Set once {@link replaceTextSource} runs; the paste result then carries the edited text. */
-	#textSourceEdited = false;
 	#finished = false;
 	#annotations: CommittedAnnotation[] = [];
 	#textAnnotations: CommittedTextAnnotation[] = [];
@@ -184,11 +167,9 @@ export class AnnotationOverlay implements Focusable {
 	#actions: readonly string[] = CODE_REVIEW_ACTIONS;
 	#textSource: TextReviewSource | undefined;
 	#textLines: readonly string[] = [];
-	#viewportDriven = false;
-	/** Last viewport move went toward the end, so a viewport resting at its maximum offset selects the last visible row. */
-	#viewportTowardEnd = false;
-	#renderedRowBySource: readonly number[] = [];
-	#staticRenderedDiffBodies = new WeakMap<ReviewDiffFile, { width: number; body: RenderedDiffBody }>();
+	#textViewportDriven = false;
+	#textRenderedRowBySource: readonly number[] = [];
+	#staticRenderedDiffBodies = new WeakMap<ReviewDiffFile, RenderedDiffBody>();
 	/** Bumped on every annotation change (each one pushes an undo snapshot) and on undo. */
 	#annotationRev = 0;
 	#nativeBody: NativeBody | undefined;
@@ -285,14 +266,13 @@ export class AnnotationOverlay implements Focusable {
 		});
 		this.#editor.setBorderVisible(false);
 		this.#editor.setPromptGutter("> ");
+		this.#editor.setUseTerminalCursor(false);
+		// Keep the editor's CURSOR_MARKER for terminal cursor placement, but
+		// replace its visible end-of-input caret with a stable blank cell.
+		this.#editor.cursorOverride = " ";
 		this.#editor.setScrollbarVisible(true);
 		this.#editor.onSubmit = value => this.#commitAnnotation(value);
 		this.#resetSourceCursor();
-	}
-
-	/** Keep the nested editor's cursor mode aligned with the overlay focus target. */
-	setUseTerminalCursor(useTerminalCursor: boolean): void {
-		this.#editor.setUseTerminalCursor(useTerminalCursor);
 	}
 
 	invalidate(): void {
@@ -309,61 +289,6 @@ export class AnnotationOverlay implements Focusable {
 
 	getTextAnnotations(): TextReviewAnnotation[] {
 		return this.#textAnnotations.map(entry => ({ ...entry.annotation }));
-	}
-
-	/** Repo-relative path of the diff file under the cursor, if this is a code review. */
-	reviewFilePath(): string | undefined {
-		const file = this.#files[this.#fileIndex];
-		if (!file) return undefined;
-		return file.newPath ?? file.oldPath ?? file.path;
-	}
-
-	/** Current text-source bytes, including edits applied by {@link replaceTextSource}. */
-	textSourceText(): string | undefined {
-		return this.#textSource?.text;
-	}
-
-	/**
-	 * Replace the text under review. Line notes whose quote still sits on the
-	 * same row stay; a quote that moved to exactly one row is retargeted;
-	 * every other line note is dropped. Returns how many were dropped.
-	 */
-	replaceTextSource(text: string): number {
-		if (!this.#textSource) return 0;
-		this.#textSource = { ...this.#textSource, text };
-		this.#textSourceEdited = true;
-		this.#textLines = splitTextLines(text);
-		this.#viewportDriven = false;
-		this.#sourceIndex = Math.min(this.#sourceIndex, Math.max(0, this.#textLines.length - 1));
-		let dropped = 0;
-		const kept: CommittedTextAnnotation[] = [];
-		for (const entry of this.#textAnnotations) {
-			if (entry.annotation.scope !== "line") {
-				kept.push(entry);
-				continue;
-			}
-			const quote = entry.annotation.quote;
-			if (this.#textLines[entry.sourceIndex] === quote) {
-				kept.push(entry);
-				continue;
-			}
-			const matches = this.#textLines.flatMap((line, index) => (line === quote ? [index] : []));
-			const only = matches.length === 1 ? matches[0] : undefined;
-			if (only !== undefined) {
-				kept.push({
-					sourceIndex: only,
-					annotation: { ...entry.annotation, line: only + 1 },
-				});
-				continue;
-			}
-			dropped++;
-		}
-		this.#textAnnotations = kept;
-		// Earlier snapshots hold notes anchored to the old text; undo must not resurrect them.
-		this.#undoStack = [];
-		this.#annotationRev++;
-		this.#nativeBody = undefined;
-		return dropped;
 	}
 
 	handleInput(data: string): void {
@@ -385,11 +310,7 @@ export class AnnotationOverlay implements Focusable {
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.cancel")) {
-			this.#escape();
-			return;
-		}
-		if (this.#callbacks.onExternalEditor && matchesAppExternalEditor(data)) {
-			void this.#openSourceEditor();
+			this.#finish(undefined);
 			return;
 		}
 		if (data === "A" && (this.#focus === "files" || this.#focus === "diff")) {
@@ -439,13 +360,6 @@ export class AnnotationOverlay implements Focusable {
 		} else {
 			(this.#callbacks as CodeReviewOverlayCallbacks).onComplete(result as CodeReviewOverlayResult | undefined);
 		}
-	}
-
-	/** Esc, by state: leave the note chooser, drop the note draft, else close the review. */
-	#escape(): void {
-		if (this.#annotationChooser) this.#annotationChooser = undefined;
-		else if (this.#annotating) this.#cancelAnnotation();
-		else this.#finish(undefined);
 	}
 
 	#cycleFocus(direction: number): void {
@@ -503,48 +417,34 @@ export class AnnotationOverlay implements Focusable {
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.pageUp")) {
-			if (this.#tui.nativeRendering && !this.#textSource) {
-				this.#moveSourceCursor(-Math.max(1, this.#bodyHeight - 1));
-			} else {
+			if (this.#textSource) {
 				this.#scrollView.page(-1);
-				this.#viewportDriven = true;
-				this.#viewportTowardEnd = false;
-				this.#syncCursorToViewport();
+				this.#textViewportDriven = true;
+				this.#syncTextCursorToViewport();
+			} else {
+				this.#moveSourceCursor(-Math.max(1, this.#bodyHeight - 1));
 			}
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.pageDown")) {
-			if (this.#tui.nativeRendering && !this.#textSource) {
-				this.#moveSourceCursor(Math.max(1, this.#bodyHeight - 1));
-			} else {
+			if (this.#textSource) {
 				this.#scrollView.page(1);
-				this.#viewportDriven = true;
-				this.#viewportTowardEnd = true;
-				this.#syncCursorToViewport();
+				this.#textViewportDriven = true;
+				this.#syncTextCursorToViewport();
+			} else {
+				this.#moveSourceCursor(Math.max(1, this.#bodyHeight - 1));
 			}
 			return;
 		}
 		if (data === "g" || matchesKey(data, "home")) {
 			this.#sourceIndex = 0;
-			if (this.#textSource || this.#tui.nativeRendering) {
-				this.#viewportDriven = false;
-			} else {
-				this.#scrollView.scrollToTop();
-				this.#viewportDriven = true;
-				this.#viewportTowardEnd = false;
-			}
+			this.#textViewportDriven = false;
 		} else if (data === "G" || matchesKey(data, "end")) {
 			this.#sourceIndex = Math.max(
 				0,
 				(this.#textSource ? this.#textLines.length : this.#currentSourceRows().length) - 1,
 			);
-			if (this.#textSource || this.#tui.nativeRendering) {
-				this.#viewportDriven = false;
-			} else {
-				this.#scrollView.scrollToBottom();
-				this.#viewportDriven = true;
-				this.#viewportTowardEnd = true;
-			}
+			this.#textViewportDriven = false;
 		}
 	}
 
@@ -578,7 +478,6 @@ export class AnnotationOverlay implements Focusable {
 			this.#finish({
 				action: "paste",
 				annotations: this.getTextAnnotations(),
-				...(this.#textSourceEdited ? { editedText: this.#textSource.text } : {}),
 			});
 		} else {
 			this.#finish({
@@ -602,7 +501,6 @@ export class AnnotationOverlay implements Focusable {
 
 	#resetSourceCursor(): void {
 		this.#sourceIndex = 0;
-		this.#viewportDriven = false;
 	}
 
 	#currentFile(): ReviewDiffFile | undefined {
@@ -613,20 +511,20 @@ export class AnnotationOverlay implements Focusable {
 		const file = this.#currentFile();
 		return file ? file.rows.filter(isSourceRow) : [];
 	}
-	#syncCursorToViewport(): void {
-		if (this.#renderedRowBySource.length === 0) return;
+	#syncTextCursorToViewport(): void {
+		if (!this.#textSource || this.#textRenderedRowBySource.length === 0) return;
 		const viewportTop = this.#scrollView.getScrollOffset();
 		const viewportBottom = viewportTop + Math.max(0, this.#bodyHeight - 1);
 		let topSourceIndex = 0;
 		let lastVisibleSourceIndex = 0;
-		for (let index = 1; index < this.#renderedRowBySource.length; index++) {
-			const renderedRow = this.#renderedRowBySource[index];
+		for (let index = 1; index < this.#textRenderedRowBySource.length; index++) {
+			const renderedRow = this.#textRenderedRowBySource[index];
 			if (renderedRow === undefined || renderedRow > viewportBottom) break;
 			lastVisibleSourceIndex = index;
 			if (renderedRow <= viewportTop) topSourceIndex = index;
 		}
-		// A short pane has no scroll range, so paging toward the end must still reach the last row.
-		const atBottom = this.#viewportTowardEnd && viewportTop >= this.#scrollView.getMaxScrollOffset();
+		const atBottom =
+			this.#scrollView.getMaxScrollOffset() > 0 && viewportTop === this.#scrollView.getMaxScrollOffset();
 		this.#sourceIndex = atBottom ? lastVisibleSourceIndex : topSourceIndex;
 	}
 
@@ -634,7 +532,7 @@ export class AnnotationOverlay implements Focusable {
 		const rowCount = this.#textSource ? this.#textLines.length : this.#currentSourceRows().length;
 		if (rowCount === 0) return;
 		this.#sourceIndex = Math.max(0, Math.min(rowCount - 1, this.#sourceIndex + delta));
-		this.#viewportDriven = false;
+		if (this.#textSource) this.#textViewportDriven = false;
 	}
 
 	#startAnnotation(scope: AnnotationScope, existingIndex?: number): void {
@@ -897,22 +795,6 @@ export class AnnotationOverlay implements Focusable {
 		}
 	}
 
-	async #openSourceEditor(): Promise<void> {
-		const openEditor = this.#callbacks.onExternalEditor;
-		if (this.#externalOperation || !openEditor) return;
-		this.#externalOperation = true;
-		try {
-			await openEditor();
-		} catch (error) {
-			this.#callbacks.onWarning?.(
-				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		} finally {
-			this.#externalOperation = false;
-			this.#tui.requestRender(true);
-		}
-	}
-
 	#annotationCount(fileIndex: number): number {
 		let count = 0;
 		for (const entry of this.#annotations) if (entry.fileIndex === fileIndex) count++;
@@ -927,7 +809,7 @@ export class AnnotationOverlay implements Focusable {
 				lines: [this.#theme.fg("dim", "No reviewable files")],
 				renderedRowBySource: [],
 			};
-		const staticBody = this.#getStaticRenderedBody(file, contentWidth);
+		const staticBody = this.#getStaticRenderedBody(file);
 		const lines: string[] = [];
 		const renderedRowBySource: number[] = [];
 
@@ -939,10 +821,12 @@ export class AnnotationOverlay implements Focusable {
 			}
 		}
 
+		let sourceIndex = 0;
 		for (let staticRow = 0; staticRow < staticBody.lines.length; staticRow++) {
-			const currentSourceIndex = staticBody.sourceIndexByRenderedRow[staticRow];
+			const currentSourceIndex =
+				staticBody.renderedRowBySource[sourceIndex] === staticRow ? sourceIndex++ : undefined;
 			let renderedLine = staticBody.lines[staticRow] ?? "";
-			if (currentSourceIndex !== undefined && staticBody.renderedRowBySource[currentSourceIndex] === staticRow) {
+			if (currentSourceIndex !== undefined) {
 				// Line notes belong immediately before their source row. This keeps
 				// the selected row and all notes in a stable, readable order.
 				for (const entry of this.#annotations) {
@@ -955,10 +839,12 @@ export class AnnotationOverlay implements Focusable {
 					}
 				}
 				renderedRowBySource[currentSourceIndex] = lines.length;
-			}
-			if (this.#focus === "diff" && currentSourceIndex === this.#sourceIndex) {
-				renderedLine = staticBody.selectedSourceLines[staticRow] ?? renderedLine;
-				renderedLine = this.#theme.bg("selectedBg", fit(renderedLine, contentWidth));
+				if (this.#focus === "diff" && currentSourceIndex === this.#sourceIndex) {
+					renderedLine = this.#theme.bg(
+						"selectedBg",
+						fit(staticBody.selectedSourceLines[currentSourceIndex] ?? "", contentWidth),
+					);
+				}
 			}
 			lines.push(truncateToWidth(renderedLine, contentWidth));
 		}
@@ -984,7 +870,8 @@ export class AnnotationOverlay implements Focusable {
 			}
 			renderedRowBySource[sourceIndex] = lines.length;
 			const displayLine = replaceTabs(sanitizeText(sourceLine));
-			const visualRows = wrapLiteralLine(displayLine, textWidth);
+			const wrapped = wrapTextWithAnsi(displayLine, textWidth);
+			const visualRows = wrapped.length > 0 ? wrapped : [""];
 			for (const [rowIndex, visualRow] of visualRows.entries()) {
 				const selected = this.#focus === "diff" && sourceIndex === this.#sourceIndex;
 				const gutter =
@@ -998,63 +885,47 @@ export class AnnotationOverlay implements Focusable {
 		return { lines, renderedRowBySource };
 	}
 
-	#getStaticRenderedBody(file: ReviewDiffFile, contentWidth: number): RenderedDiffBody {
-		const normalizedWidth = Math.max(1, Math.floor(contentWidth));
+	#getStaticRenderedBody(file: ReviewDiffFile): RenderedDiffBody {
 		const cached = this.#staticRenderedDiffBodies.get(file);
-		if (cached?.width === normalizedWidth) return cached.body;
+		if (cached) return cached;
 		const lines: string[] = [];
 		const renderedRowBySource: number[] = [];
-		const sourceIndexByRenderedRow: Array<number | undefined> = [];
-		const selectedSourceLines: Array<string | undefined> = [];
-		const pushStaticLine = (line: string) => {
-			lines.push(line);
-			sourceIndexByRenderedRow.push(undefined);
-			selectedSourceLines.push(undefined);
-		};
+		const selectedSourceLines: string[] = [];
 		if (file.isBinary) {
-			pushStaticLine(this.#theme.fg("dim", "Binary diff; no annotatable source rows"));
+			lines.push(this.#theme.fg("dim", "Binary diff; no annotatable source rows"));
 		} else if (file.rows.length === 0) {
-			pushStaticLine(this.#theme.fg("dim", "No diff hunks; this may be a rename-only change"));
+			lines.push(this.#theme.fg("dim", "No diff hunks; this may be a rename-only change"));
 		} else {
 			let sourceIndex = 0;
 			for (const diffRow of file.rows) {
 				if (!isSourceRow(diffRow)) {
-					pushStaticLine(
+					lines.push(
 						this.#theme.fg(diffRow.kind === "hunk" ? "accent" : "dim", replaceTabs(sanitizeText(diffRow.raw))),
 					);
 					continue;
 				}
+				renderedRowBySource[sourceIndex] = lines.length;
 				const marker = diffRow.kind === "added" ? "+" : diffRow.kind === "removed" ? "-" : " ";
 				const lineNumber = diffRow.kind === "removed" ? diffRow.oldLine : (diffRow.newLine ?? diffRow.oldLine);
-				const prefix = `${marker}${String(lineNumber ?? "").padStart(4)} `;
-				const prefixWidth = visibleWidth(prefix);
-				const contentColor: DiffColor =
+				const suffix = `${marker}${String(lineNumber ?? "").padStart(4)} ${replaceTabs(sanitizeText(diffRow.content))}`;
+				const color: DiffColor =
 					diffRow.kind === "added"
 						? "toolDiffAdded"
 						: diffRow.kind === "removed"
 							? "toolDiffRemoved"
 							: "toolDiffContext";
-				const sourceContent = replaceTabs(sanitizeText(diffRow.content));
-				const contentWidthForRow = Math.max(1, normalizedWidth - SOURCE_SELECTION_GUTTER_WIDTH - prefixWidth);
-				const visualRows = wrapLiteralLine(sourceContent, contentWidthForRow);
-				const firstRenderedRow = lines.length;
-				renderedRowBySource[sourceIndex] = firstRenderedRow;
-				for (const [rowIndex, visualRow] of visualRows.entries()) {
-					const first = rowIndex === 0;
-					const gutter = " ".repeat(SOURCE_SELECTION_GUTTER_WIDTH);
-					const continuationPrefix = " ".repeat(prefixWidth);
-					const prefixForRow = first ? this.#theme.fg(contentColor, prefix) : continuationPrefix;
-					const selectedGutter = first ? fit(`${this.#theme.nav.cursor} `, SOURCE_SELECTION_GUTTER_WIDTH) : gutter;
-					const styledRow = this.#theme.fg(contentColor, visualRow);
-					lines.push(`${gutter}${prefixForRow}${styledRow}`);
-					sourceIndexByRenderedRow.push(sourceIndex);
-					selectedSourceLines.push(`${selectedGutter}${prefixForRow}${styledRow}`);
-				}
+				const coloredSuffix = this.#theme.fg(color, suffix);
+				const gutter = " ".repeat(SOURCE_SELECTION_GUTTER_WIDTH);
+				selectedSourceLines[sourceIndex] = `${fit(
+					`${this.#theme.nav.cursor} `,
+					SOURCE_SELECTION_GUTTER_WIDTH,
+				)}${coloredSuffix}`;
+				lines.push(`${gutter}${coloredSuffix}`);
 				sourceIndex++;
 			}
 		}
-		const body = { lines, renderedRowBySource, sourceIndexByRenderedRow, selectedSourceLines };
-		this.#staticRenderedDiffBodies.set(file, { width: normalizedWidth, body });
+		const body = { lines, renderedRowBySource, selectedSourceLines };
+		this.#staticRenderedDiffBodies.set(file, body);
 		return body;
 	}
 
@@ -1156,7 +1027,6 @@ export class AnnotationOverlay implements Focusable {
 	}
 
 	#renderFooter(width: number, maxChooserRows = Number.POSITIVE_INFINITY): string[] {
-		this.#editor.focused = this.focused && this.#annotating;
 		if (this.#annotationChooser) {
 			return this.#renderAnnotationChooser(width, maxChooserRows);
 		}
@@ -1172,7 +1042,9 @@ export class AnnotationOverlay implements Focusable {
 				`${editorKey("tui.input.newLine")} newline`,
 				`${this.#key("tui.select.cancel")} cancel`,
 			];
-			hints.push(`${formatKeyHint(appExternalEditorKey())} editor`);
+			const externalEditorKey = appKey(this.#keybindings, "app.editor.external");
+			if (externalEditorKey) hints.push(`${externalEditorKey} editor`);
+			this.#editor.focused = true;
 			return [caption, ...this.#editor.render(width), this.#theme.fg("dim", hints.join(" · "))];
 		}
 		return [this.#theme.fg("dim", this.#helpText())];
@@ -1223,23 +1095,16 @@ export class AnnotationOverlay implements Focusable {
 				: this.#focus === "diff"
 					? `${upDown} line · ${formatKeyHint("shift")} faster · ${this.#key("tui.select.pageUp")}/${this.#key("tui.select.pageDown")} · ${formatKeyHints(["g", "shift+g"])} ends · ${formatKeyHint("a")} line note · ${formatKeyHint("shift+a")} ${this.#textSource ? "text" : "file"} note · ${editNote}`
 					: `${upDown} select · ${confirm} confirm`;
-		const editorHint = this.#callbacks.onExternalEditor ? ` · ${formatKeyHint(appExternalEditorKey())} editor` : "";
-		return `${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions${editorHint} · ${this.#key("tui.select.cancel")} cancel`;
+		return `${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions · ${this.#key("tui.select.cancel")} cancel`;
 	}
 
-	#ensureCursorVisible(renderedRowBySource: readonly number[]): boolean {
-		this.#renderedRowBySource = renderedRowBySource;
-		if (this.#viewportDriven) {
-			const sourceIndex = this.#sourceIndex;
-			if (!this.#annotating && !this.#annotationChooser) this.#syncCursorToViewport();
-			return this.#sourceIndex !== sourceIndex;
-		}
+	#ensureCursorVisible(renderedRowBySource: readonly number[]): void {
+		if (this.#textSource && this.#textViewportDriven) return;
 		const rowIndex = renderedRowBySource[this.#sourceIndex];
-		if (rowIndex === undefined) return false;
+		if (rowIndex === undefined) return;
 		const offset = this.#scrollView.getScrollOffset();
 		if (rowIndex < offset) this.#scrollView.setScrollOffset(rowIndex);
 		else if (rowIndex >= offset + this.#bodyHeight) this.#scrollView.setScrollOffset(rowIndex - this.#bodyHeight + 1);
-		return false;
 	}
 
 	#sidebarWidth(width: number): number {
@@ -1252,31 +1117,19 @@ export class AnnotationOverlay implements Focusable {
 		);
 	}
 
-	#sidebarStart(rows: number): number {
-		return Math.max(0, Math.min(this.#fileIndex - Math.floor(rows / 2), Math.max(0, this.#files.length - rows)));
-	}
-
-	#renderSidebarBadge(file: ReviewDiffFile, count: number): string {
-		const changes = ` +${file.linesAdded}/-${file.linesRemoved}`;
-		const annotations = count ? ` ✎${count}` : "";
-		return this.#theme.fg("dim", changes) + (annotations ? this.#theme.fg("warning", annotations) : "");
-	}
-
-	#sidebarLabelWidth(file: ReviewDiffFile, count: number, width: number): number {
-		const badge = this.#renderSidebarBadge(file, count);
-		return Math.max(0, width - visibleWidth(badge) - 2);
-	}
-
 	#renderSidebar(rows: number, width: number): string[] {
-		const start = this.#sidebarStart(rows);
+		const start = Math.max(
+			0,
+			Math.min(this.#fileIndex - Math.floor(rows / 2), Math.max(0, this.#files.length - rows)),
+		);
 		return Array.from({ length: rows }, (_, rowIndex) => {
 			const index = start + rowIndex;
 			const file = this.#files[index];
 			if (!file) return "";
 			const selected = index === this.#fileIndex;
 			const count = this.#annotationCount(index);
-			const badge = this.#renderSidebarBadge(file, count);
-			const available = this.#sidebarLabelWidth(file, count, width);
+			const badge = `${this.#theme.fg("dim", ` +${file.linesAdded}/-${file.linesRemoved}`)}${count ? this.#theme.fg("warning", ` ✎${count}`) : ""}`;
+			const available = Math.max(0, width - visibleWidth(badge) - 2);
 			const label = truncateToWidth(sanitizeStatusText(displayFileLabel(file)), available, Ellipsis.Unicode);
 			const cursor = selected ? (this.#focus === "files" ? "› " : "▎ ") : "  ";
 			const line = fit(`${cursor}${label}${badge}`, width);
@@ -1286,59 +1139,13 @@ export class AnnotationOverlay implements Focusable {
 		});
 	}
 
-	#revealSelectedFile(output: string[], width: number): void {
-		const file = this.#currentFile();
-		if (
-			!file ||
-			!this.#sidebarShown ||
-			this.#textSource ||
-			this.#focus !== "files" ||
-			this.#annotating ||
-			this.#annotationChooser
-		) {
-			return;
-		}
-
-		const pathColumn = 4;
-		const lineWidth = Math.max(0, width - pathColumn - 1);
-		if (lineWidth === 0) return;
-
-		const selectedRow = 1 + this.#fileIndex - this.#sidebarStart(this.#bodyHeight + 1);
-		const interiorTop = 1;
-		const lastBodyRow = this.#bodyHeight + 1;
-		const interiorRows = lastBodyRow - interiorTop + 1;
-		if (selectedRow < interiorTop || selectedRow > lastBodyRow || interiorRows <= 0) return;
-
-		const label = replaceTabs(sanitizeStatusText(displayFileLabel(file)));
-		if (!label) return;
-		const count = this.#annotationCount(this.#fileIndex);
-		if (visibleWidth(label) <= this.#sidebarLabelWidth(file, count, this.#sidebarWidth(width))) return;
-
-		let wrapped = wrapTextWithAnsi(label, lineWidth);
-		if (wrapped.length > interiorRows) {
-			wrapped = wrapped.slice(-interiorRows);
-			wrapped[0] = truncateToWidth(`…${wrapped[0] ?? ""}`, lineWidth, Ellipsis.Omit);
-		}
-		const overlayTop = Math.max(interiorTop, Math.min(selectedRow, lastBodyRow - wrapped.length + 1));
-		const overlayWidth = Math.min(lineWidth, Math.max(0, ...wrapped.map(visibleWidth)) + 1);
-		for (const [index, line] of wrapped.entries()) {
-			const highlighted = this.#theme.bg("selectedBg", this.#theme.bold(fit(line, overlayWidth)));
-			const targetRow = overlayTop + index;
-			const baseLine = output[targetRow];
-			if (overlayWidth > 0 && baseLine !== undefined) {
-				output[targetRow] = compositeLineAt(baseLine, highlighted, pathColumn, overlayWidth, width);
-			}
-		}
-	}
-
 	describe(): NativeNode {
 		// The terminal lays out the file sidebar; diffs always have one, text never does.
 		this.#sidebarShown = !this.#textSource;
 		if (!this.#sidebarShown && this.#focus === "files") this.#focus = "diff";
 		// Page size for PgUp/PgDn, matching the rendered body height.
-		const terminalHeight = this.#tui.terminal.rows;
-		this.#bodyHeight = Math.max(MIN_BODY_ROWS, terminalHeight - (this.#actions.length + 8));
-		this.#editor.focused = this.focused && this.#annotating;
+		this.#bodyHeight = Math.max(MIN_BODY_ROWS, (process.stdout.rows || 40) - (this.#actions.length + 8));
+		this.#editor.focused = this.#annotating;
 		const body = this.#describeBodyItems();
 		const chooser = this.#annotationChooser;
 		const sig = [
@@ -1359,10 +1166,7 @@ export class AnnotationOverlay implements Focusable {
 			role: this.#textSource ? "omp.overlay.annotateText.lines" : "omp.overlay.codeReview.diff",
 			tone: this.#focus === "diff" ? "accent" : undefined,
 		});
-		// The header row ends in a clickable `esc` at the top right.
-		const title = node("col", { grow: 1, min: { w: 0 } }, [this.#describeHeader()], "title");
-		const head = keyed(rowNode([title, escCloseButton()], { gap: "md", align: "center" }), "head");
-		const main = node("col", { grow: 1 }, [head, lines], "main");
+		const main = node("col", { grow: 1 }, [this.#describeHeader(), lines], "main");
 		if (this.#sidebarShown) {
 			const files = selectList(
 				"files",
@@ -1411,10 +1215,6 @@ export class AnnotationOverlay implements Focusable {
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#finished || this.#externalOperation) return;
-		if (event.type === "action" && event.act === "close") {
-			this.#escape();
-			return;
-		}
 		if (event.type !== "select" && event.type !== "activate") return;
 		const activate = event.type === "activate";
 		const leaf = leafKey(event.key);
@@ -1444,7 +1244,7 @@ export class AnnotationOverlay implements Focusable {
 				if (index < 0 || index >= rowCount) return;
 				this.#focus = "diff";
 				this.#sourceIndex = index;
-				this.#viewportDriven = false;
+				this.#textViewportDriven = false;
 				if (activate) this.#focus = "actions";
 				return;
 			}
@@ -1604,7 +1404,7 @@ export class AnnotationOverlay implements Focusable {
 						this.#hint("tui.input.submit", "save"),
 						this.#hint("tui.input.newLine", "newline"),
 						this.#hint("tui.select.cancel", "cancel"),
-						{ keys: [appExternalEditorKey()], label: "editor" },
+						this.#hint("app.editor.external", "editor"),
 					],
 					"annotateHints",
 				),
@@ -1630,7 +1430,6 @@ export class AnnotationOverlay implements Focusable {
 							editNote,
 						]
 					: [upDown("select"), this.#hint("tui.select.confirm", "confirm")];
-		if (this.#callbacks.onExternalEditor) hints.push({ keys: [appExternalEditorKey()], label: "editor" });
 		hints.push(key("u", "undo"), key("tab", "regions"), this.#hint("tui.select.cancel", "cancel"));
 		return [hintsRow(hints)];
 	}
@@ -1646,14 +1445,14 @@ export class AnnotationOverlay implements Focusable {
 	}
 
 	render(width: number): readonly string[] {
-		const terminalHeight = this.#tui.terminal.rows;
+		const terminalHeight = process.stdout.rows || 40;
 		this.#sidebarShown = this.#textSource ? false : this.#canShowSidebar(width);
 		if (!this.#sidebarShown && this.#focus === "files") this.#focus = "diff";
 		const sidebarWidth = this.#sidebarShown ? this.#sidebarWidth(width) : 0;
 		const innerWidth = Math.max(1, width - 4);
 		const bodyWidth = this.#sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
 		this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, terminalHeight - 12)));
-		this.#editor.focused = this.focused && this.#annotating;
+		this.#editor.focused = this.#annotating;
 		const chooserBaseRows = terminalHeight - (this.#actions.length + 7);
 		const chooserFooterRows = this.#annotationChooser
 			? Math.max(0, Math.min(chooserBaseRows, Math.max(3, chooserBaseRows - MIN_BODY_ROWS)))
@@ -1664,15 +1463,14 @@ export class AnnotationOverlay implements Focusable {
 		this.#bodyHeight = this.#annotationChooser
 			? Math.max(0, availableBodyRows)
 			: Math.max(MIN_BODY_ROWS, availableBodyRows);
-		const bodyContentWidth = Math.max(1, bodyWidth - 1);
-		let renderedBody = this.#renderBody(bodyContentWidth);
+		const renderedBody = this.#renderBody(this.#textSource ? Math.max(1, bodyWidth - 1) : bodyWidth);
 		this.#scrollView.setLines(renderedBody.lines);
 		this.#scrollView.setHeight(this.#bodyHeight);
-		if (this.#ensureCursorVisible(renderedBody.renderedRowBySource)) {
-			renderedBody = this.#renderBody(bodyContentWidth);
-			this.#scrollView.setLines(renderedBody.lines);
-			this.#renderedRowBySource = renderedBody.renderedRowBySource;
+		if (this.#textSource) {
+			this.#textRenderedRowBySource = renderedBody.renderedRowBySource;
+			if (this.#textViewportDriven) this.#syncTextCursorToViewport();
 		}
+		this.#ensureCursorVisible(renderedBody.renderedRowBySource);
 		const body = this.#scrollView.render(bodyWidth);
 		const output: string[] = [];
 		if (this.#sidebarShown) {
@@ -1694,7 +1492,6 @@ export class AnnotationOverlay implements Focusable {
 		output.push(divider(width));
 		for (const footerLine of footer) output.push(row(footerLine, width));
 		output.push(bottomBorder(width));
-		this.#revealSelectedFile(output, width);
 		return output;
 	}
 }

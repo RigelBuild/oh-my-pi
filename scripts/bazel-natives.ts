@@ -9,8 +9,8 @@
  *   - host        the single addon matching this machine (x64 hosts pick
  *                 modern vs baseline via AVX2 detection; a musl Bun gets the
  *                 musl addon)
- *   - all         every shipped addon (linux hosts cross-build all of them)
- *   - darwin-all  both darwin addons
+ *   - linux-all   every addon buildable from a linux-x64 host (incl. win32)
+ *   - darwin-all  both darwin addons (mac hosts only)
  *
  * One `bazel build` covers all requested targets; outputs are located via
  * `bazel cquery --output=files` (falling back to the bazel-bin path convention)
@@ -24,7 +24,8 @@
  * for plain host iteration. Bazel is opt-in for host via
  * `OMP_NATIVE_BUILD_BACKEND=bazel` or by passing extra bazel args after `--`;
  * explicit //:natives-* targets and aggregates always build through bazel.
- * Release CI builds every addon through that path on Linux.
+ * Release CI uses that path except for Windows ARM64, which builds `host`
+ * natively on its GitHub-hosted runner.
  *
  * Windows hosts: the msvc cc toolchain in bazel/toolchains/msvc only supports
  * linux/mac exec hosts (its clang-cl+xwin wrappers replace the MSVC a Windows
@@ -32,8 +33,8 @@
  * always uses the local napi build there (against installed VS Build Tools);
  * every other target on a win32 host fails fast with guidance.
  *
- * Note: musl addons intentionally reuse the plain linux-<arch> filenames, so an
- * `all` copy overwrites the gnu addon with the musl one (and vice versa);
+ * Note: musl addons intentionally reuse the plain linux-<arch> filenames, so a
+ * `linux-all` copy overwrites the gnu addon with the musl one (and vice versa);
  * CI jobs that ship files always request an explicit disjoint target set.
  *
  * Every install stamps packages/natives/package.json#version into the addon's
@@ -64,9 +65,7 @@ export const ADDON_OUTPUTS: Record<string, string> = {
 
 /** Aggregate filegroups → their member addon targets (mirrors BUILD.bazel). */
 export const AGGREGATE_TARGETS: Record<string, string[]> = {
-	all: [
-		"darwin-arm64",
-		"darwin-x64-baseline",
+	"linux-all": [
 		"linux-arm64",
 		"linux-musl-arm64",
 		"linux-musl-x64-baseline",

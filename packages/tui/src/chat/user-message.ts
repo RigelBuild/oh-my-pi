@@ -1,5 +1,4 @@
-import { applyBackgroundToLine, padding, stripTerminalSequences, visibleWidth } from "../utils";
-import type { AnimationFrame, TranscriptPresentationTarget } from "../chrome/transcript-container";
+import { applyBackgroundToLine, padding, visibleWidth } from "../utils";
 import { type Component, Container } from "../tui";
 import { Disclosure } from "../components/disclosure";
 import { Markdown } from "../components/markdown";
@@ -58,7 +57,7 @@ const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAN
 
 /** How a user bubble styles its prose and chips (see {@link userBubbleColor}). */
 export interface UserBubbleOptions {
-	/** Filesystem paths for attached image chips, indexed by chip number. */
+	/** Materialized `file://` targets per attached image, indexed by chip number. */
 	imageLinks?: readonly (string | undefined)[];
 	/** The message's attached images in chip order (`#1` first); a native bubble shows them. */
 	images?: readonly ImageContent[];
@@ -125,8 +124,7 @@ export function userBubbleColor(
  * (see {@link ReactionTarget}) drawn right-aligned in the bubble's top padding row;
  * a live-steered message carries a `*` marker left-aligned in the same row.
  */
-export class UserMessageComponent extends Container implements ReactionTarget, TranscriptPresentationTarget {
-	#allocation = Number.POSITIVE_INFINITY;
+export class UserMessageComponent extends Container implements ReactionTarget {
 	// Memoized OSC 133 zone wrapping keyed on the underlying container render
 	// (same source ref ⇒ identical rows ⇒ reuse the wrapped copy). Keeps this
 	// component reference-stable for the transcript's incremental assembly and
@@ -177,12 +175,6 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		});
 		markdown.setIgnoreTight(true);
 		this.addChild(markdown);
-	}
-
-	override releaseRenderCaches(): void {
-		this.#zoneSource = undefined;
-		this.#zoneLines = undefined;
-		super.releaseRenderCaches();
 	}
 
 	setReaction(emoji: string): void {
@@ -289,46 +281,10 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		return applyBackgroundToLine(` ${marker}${padding(gap)}${emoji}`, width, this.#bgColor);
 	}
 
-	/** Apply the transcript allocator's current viewport reservation. */
-	setTranscriptAllocation(rows: number, _frame?: AnimationFrame): void {
-		this.#allocation = Math.max(0, Math.trunc(rows));
-	}
-
-	isTranscriptBlockFinalized(): boolean {
-		return true;
-	}
-
-	/**
-	 * Single-row emergency representation for the overflow transcript layout:
-	 * renders the first content line instead of the blank top padding row, and
-	 * omits OSC 133 shell integration markers so moving live blocks across the
-	 * viewport does not leave stale prompt marks on lines it no longer occupies.
-	 */
-	renderTranscriptBlockEmergencyRow(width: number): string | undefined {
-		return this.#selectEmergencyRow(super.render(width));
-	}
-
-	#selectEmergencyRow(lines: readonly string[]): string | undefined {
-		if (lines.length === 0) return undefined;
-		if (lines.length >= 3) {
-			for (let i = 1; i < lines.length - 1; i++) {
-				if (stripTerminalSequences(lines[i]!).trim().length > 0) {
-					return lines[i];
-				}
-			}
-			return lines[1];
-		}
-		return lines[0];
-	}
-
 	override render(width: number): readonly string[] {
 		const lines = super.render(width);
 		if (lines.length === 0) {
 			return lines;
-		}
-		if (this.#allocation === 1) {
-			const emergency = this.#selectEmergencyRow(lines);
-			if (emergency !== undefined) return [emergency];
 		}
 		if (this.#zoneSource === lines && this.#zoneLines !== undefined) {
 			return this.#zoneLines;
@@ -379,10 +335,6 @@ class SyntheticSummary implements Component {
 
 	constructor(summary: string) {
 		this.#summary = summary;
-	}
-
-	releaseRenderCaches(): void {
-		this.#cache = undefined;
 	}
 
 	invalidate(): void {
@@ -471,10 +423,6 @@ export class CollapsedSyntheticMessageComponent implements Component {
 
 	invalidate(): void {
 		this.#disclosure.invalidate();
-	}
-
-	releaseRenderCaches(): void {
-		this.#disclosure.releaseRenderCaches();
 	}
 
 	dispose(): void {

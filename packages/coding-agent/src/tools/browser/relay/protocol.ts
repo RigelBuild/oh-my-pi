@@ -26,8 +26,7 @@ export type RelayRpcRequest =
 	| { op: "attach"; tabId: number }
 	| { op: "detach"; tabId: number }
 	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
-	/** `active: false` opens the tab without selecting it; absent keeps Chrome's default (selected). */
-	| { op: "createTab"; url: string; active?: boolean }
+	| { op: "createTab"; url: string }
 	| { op: "removeTab"; tabId: number }
 	| { op: "activateTab"; tabId: number }
 	/** Add tabs to the per-window omp group (created/reused by title), remembering prior membership. */

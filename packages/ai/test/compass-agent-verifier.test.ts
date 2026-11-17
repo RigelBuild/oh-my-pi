@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createCompassAgentVerifier, probeCompassDoor } from "@oh-my-pi/pi-ai/compass";
-import type { AgentCaller, AuthGatewayAuthorizer } from "@oh-my-pi/pi-ai/auth-gateway";
+import type { AgentCaller } from "@oh-my-pi/pi-ai/auth-gateway";
 
 const SERVICE_TOKEN = "service-secret";
 const AGENT_TOKEN = "agent-secret";
 const RESPONSE = { agentAccountId: "agent-1", ownerUserId: "owner-1" };
 
 interface RpcCall {
-	input: string | URL | Request;
+	input: RequestInfo | URL;
 	init: RequestInit | undefined;
 	body: unknown;
 }
@@ -16,7 +16,7 @@ function response(body: unknown, status = 200): Response {
 	return Response.json(body, { status });
 }
 
-function verifier(fetcher: typeof fetch): AuthGatewayAuthorizer {
+function verifier(fetcher: typeof fetch) {
 	return createCompassAgentVerifier({
 		baseUrl: "https://compass.example/",
 		token: SERVICE_TOKEN,
@@ -25,16 +25,15 @@ function verifier(fetcher: typeof fetch): AuthGatewayAuthorizer {
 }
 
 function makeFetch(answer: (call: RpcCall) => Response | Promise<Response>, calls: RpcCall[]): typeof fetch {
-	return Object.assign(
-		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			const body: unknown = JSON.parse(String(init?.body));
-			const call: RpcCall = { input, init, body };
-			calls.push(call);
-			return answer(call);
-		},
-		{ preconnect: fetch.preconnect },
-	);
+	return async (input, init) => {
+		const body: unknown = JSON.parse(String(init?.body));
+		const call: RpcCall = { input, init, body };
+		calls.push(call);
+		return answer(call);
+	};
 }
+
+const EMPTY_CALLER_ID_FIELDS: readonly ("agentAccountId" | "ownerUserId")[] = ["agentAccountId", "ownerUserId"];
 
 describe("Compass agent verifier", () => {
 	test("returns null without a bearer and makes no call", async () => {
@@ -77,7 +76,6 @@ describe("Compass agent verifier", () => {
 		expect(await authorize(req)).toBeNull();
 		expect(calls).toHaveLength(1);
 	});
-
 	test("verifies the bearer on every request without caching", async () => {
 		const calls: RpcCall[] = [];
 		const authorize = verifier(makeFetch(() => response(RESPONSE), calls));
@@ -90,8 +88,9 @@ describe("Compass agent verifier", () => {
 		expect(calls).toHaveLength(2);
 	});
 
-	for (const message of ["unauthenticated", "invalid agent token but not exact"]) {
-		test(`throws for a different unauthenticated response: ${message}`, async () => {
+	test.each(["unauthenticated", "invalid agent token but not exact"])(
+		"throws for a different unauthenticated response: %s",
+		async message => {
 			const calls: RpcCall[] = [];
 			const authorize = verifier(makeFetch(() => response({ code: "unauthenticated", message }, 401), calls));
 			const req = new Request("https://gateway.example/v1/models", {
@@ -100,9 +99,8 @@ describe("Compass agent verifier", () => {
 
 			await expect(authorize(req)).rejects.toThrow();
 			expect(calls).toHaveLength(1);
-		});
-	}
-
+		},
+	);
 	test("throws when Compass reports unavailable", async () => {
 		const calls: RpcCall[] = [];
 		const authorize = verifier(makeFetch(() => response({ code: "unavailable", message: "offline" }, 503), calls));
@@ -125,7 +123,7 @@ describe("Compass agent verifier", () => {
 			headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
 		});
 
-		const error = await Promise.resolve(authorize(req)).then(
+		const error = await authorize(req).then(
 			() => null,
 			value => value,
 		);
@@ -151,13 +149,14 @@ describe("Compass agent verifier", () => {
 
 	test("throws when the remote call times out", async () => {
 		const calls: RpcCall[] = [];
-		const fetcher = makeFetch(call => {
-			const signal = call.init?.signal;
+		const fetcher: typeof fetch = async (_input, init) => {
+			calls.push({ input: "", init, body: undefined });
+			const signal = init?.signal;
 			if (!signal) throw new Error("missing timeout signal");
-			return new Promise<Response>((_resolve, reject) => {
+			return await new Promise<Response>((_resolve, reject) => {
 				signal.addEventListener("abort", () => reject(signal.reason), { once: true });
 			});
-		}, calls);
+		};
 		const authorize = createCompassAgentVerifier({
 			baseUrl: "https://compass.example",
 			token: SERVICE_TOKEN,
@@ -175,13 +174,16 @@ describe("Compass agent verifier", () => {
 	test("cancels the remote call when the incoming request aborts", async () => {
 		const calls: RpcCall[] = [];
 		let remoteSignal: AbortSignal | null | undefined;
-		const fetcher = makeFetch(call => {
-			remoteSignal = call.init?.signal;
+		const fetcher: typeof fetch = async (input, init) => {
+			const body: unknown = JSON.parse(String(init?.body));
+			const call: RpcCall = { input, init, body };
+			calls.push(call);
+			remoteSignal = init?.signal;
 			if (!remoteSignal) throw new Error("missing request signal");
-			return new Promise<Response>((_resolve, reject) => {
+			return await new Promise<Response>((_resolve, reject) => {
 				remoteSignal?.addEventListener("abort", () => reject(remoteSignal?.reason), { once: true });
 			});
-		}, calls);
+		};
 		const authorize = verifier(fetcher);
 		const controller = new AbortController();
 		const req = new Request("https://gateway.example/v1/models", {
@@ -197,20 +199,9 @@ describe("Compass agent verifier", () => {
 		expect(calls).toHaveLength(1);
 	});
 
-	test("rejects a successful response with an empty agentAccountId", async () => {
+	test.each(EMPTY_CALLER_ID_FIELDS)("rejects a successful response with an empty %s", async field => {
 		const calls: RpcCall[] = [];
-		const authorize = verifier(makeFetch(() => response({ ...RESPONSE, agentAccountId: "" }), calls));
-		const req = new Request("https://gateway.example/v1/models", {
-			headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
-		});
-
-		await expect(authorize(req)).rejects.toThrow();
-		expect(calls).toHaveLength(1);
-	});
-
-	test("rejects a successful response with an empty ownerUserId", async () => {
-		const calls: RpcCall[] = [];
-		const authorize = verifier(makeFetch(() => response({ ...RESPONSE, ownerUserId: "" }), calls));
+		const authorize = verifier(makeFetch(() => response({ ...RESPONSE, [field]: "" }), calls));
 		const req = new Request("https://gateway.example/v1/models", {
 			headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
 		});
@@ -259,7 +250,7 @@ describe("Compass agent verifier", () => {
 		const req = new Request("https://gateway.example/v1/models", {
 			headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
 		});
-		const error = await Promise.resolve(authorize(req)).then(
+		const error = await authorize(req).then(
 			() => null,
 			value => value,
 		);

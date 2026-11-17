@@ -13,7 +13,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { instrumentedCompleteSimple, resolveTelemetry, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
@@ -22,7 +22,6 @@ import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	expandRoleAlias,
-	extractExplicitThinkingSelector,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
@@ -40,12 +39,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import {
-	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
-	shouldDisableReasoning,
-	toReasoningEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { JsStatusEvent } from "./js/shared/types";
 
 import { cfgDisabledProviders } from "../config/model-settings";
@@ -142,14 +136,11 @@ interface CompletionCandidate {
 function reasoningForCandidate(
 	tier: CompletionTier,
 	model: Model<Api>,
-	level?: ConfiguredThinkingLevel,
+	level?: ThinkingLevel,
 	parent?: Pick<CompletionCandidate, "reasoning" | "disableReasoning">,
 ): Pick<CompletionCandidate, "reasoning" | "disableReasoning"> {
-	// "auto" is a session-level selector; completion() has no per-prompt
-	// classifier, so it follows the tier default just like an omitted suffix.
-	const normalizedLevel = level === AUTO_THINKING ? undefined : level;
-	if (shouldDisableReasoning(normalizedLevel)) return { reasoning: undefined, disableReasoning: true };
-	const explicit = toReasoningEffort(normalizedLevel);
+	if (shouldDisableReasoning(level)) return { reasoning: undefined, disableReasoning: true };
+	const explicit = toReasoningEffort(level);
 	if (explicit !== undefined) {
 		return { reasoning: clampThinkingLevelForModel(model, explicit), disableReasoning: false };
 	}
@@ -210,8 +201,9 @@ function appendFallbackCandidates(
 	expanded: Set<string>,
 	out: CompletionCandidate[],
 ): void {
-	// Explicit primary effort seeds root inheritance; nested calls fold in
-	// each candidate's inherited effort.
+	// The expansion outcome follows the inherited effort for bare entries,
+	// so qualify the visit: the root call has no parent and keeps the bare
+	// selector key, while nested calls fold in the inherited effort.
 	const visit = parent ? `${selector}|${parent.disableReasoning ? "off" : (parent.reasoning ?? "inherit")}` : selector;
 	if (expanded.has(visit)) return;
 	expanded.add(visit);
@@ -243,29 +235,11 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
-	const resolve = (
-		pattern: string | undefined,
-	): { model: Model<Api>; selector: string; configuredEffort?: ConfiguredThinkingLevel } | undefined => {
+	const resolve = (pattern: string | undefined): { model: Model<Api>; selector: string } | undefined => {
 		if (!pattern) return undefined;
 		const selector = expandRoleAlias(pattern, session.settings);
 		const model = resolveModelFromString(selector, available, matchPreferences);
-		if (!model) return undefined;
-		const configuredEffort =
-			tier === "slow"
-				? extractExplicitThinkingSelector(selector, session.settings, {
-						isLiteralModelId: (provider, id) => {
-							const normalizedProvider = provider?.trim().toLowerCase();
-							const normalizedId = id.trim().toLowerCase();
-							return available.some(
-								candidate =>
-									(normalizedProvider === undefined ||
-										candidate.provider.trim().toLowerCase() === normalizedProvider) &&
-									candidate.id.trim().toLowerCase() === normalizedId,
-							);
-						},
-					})
-				: undefined;
-		return { model, selector, configuredEffort };
+		return model ? { model, selector } : undefined;
 	};
 	const primary =
 		tier === "default"
@@ -274,16 +248,10 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	if (!primary) return [];
 
 	const candidates: CompletionCandidate[] = [
-		{
-			selector: primary.selector,
-			model: primary.model,
-			...reasoningForCandidate(tier, primary.model, primary.configuredEffort),
-		},
+		{ selector: primary.selector, model: primary.model, ...reasoningForCandidate(tier, primary.model) },
 	];
 	const retry = cfgRetry.get(session.settings);
 	if (!retry.enabled || !retry.modelFallback) return candidates;
-	const primaryLevel = primary.configuredEffort === AUTO_THINKING ? undefined : primary.configuredEffort;
-	const inheritPrimary = shouldDisableReasoning(primaryLevel) || toReasoningEffort(primaryLevel) !== undefined;
 
 	appendFallbackCandidates(
 		{
@@ -299,7 +267,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 		},
 		primary.selector,
 		primary.model,
-		inheritPrimary ? candidates[0] : undefined,
+		undefined,
 		tier,
 		new Set([candidateIdentity(primary.model, candidates[0])]),
 		new Set(),

@@ -1,12 +1,7 @@
-//! `git` builtin layering opt-in behavior over the git binary.
+//! `git` builtin that creates linked worktrees through [`pi_vcs`].
 //!
-//! Registered only when a layer is on (see [`GitLayers`]), each through a
-//! variable truthy in the session or process environment:
-//!
-//! - `PI_SMART_GIT`: `git worktree add` creates linked worktrees through
-//!   [`pi_vcs`], described below.
-//! - `PI_GIT_GUARD`: commands that discard or move work in a shared checkout
-//!   are refused before git runs; see [`guard`].
+//! Opt-in: registered only when `PI_SMART_GIT` is truthy in the session or
+//! process environment.
 //!
 //! `git worktree add` checks out every file of the target commit. pi-vcs
 //! instead copy-on-write clones the source checkout (APFS `clonefile`, Linux
@@ -25,8 +20,6 @@
 //! points that set up an upstream, bare/reftable/submodule repositories, env
 //! redirection, and any invocation git would reject — runs the git binary with
 //! the original arguments, so git keeps reporting its own errors.
-
-mod guard;
 
 use std::{
 	io::{self, Write as _},
@@ -66,39 +59,21 @@ const LONG_OPTIONS: [&str; 10] = [
 	"relative-paths",
 ];
 
-/// Behavior the `git` builtin layers over the binary.
-#[derive(Clone, Copy, Debug)]
-pub struct GitLayers {
-	/// Serve `git worktree add` through copy-on-write clones (`PI_SMART_GIT`).
-	pub smart_worktree: bool,
-	/// Refuse commands that discard or move shared work (`PI_GIT_GUARD`).
-	pub guard:          bool,
+/// Creates the `git` builtin registration.
+pub fn git_builtin<SE: ShellExtensions>() -> Registration<SE> {
+	builtins::builtin::<GitCommand, SE>()
 }
 
-/// Creates the `git` builtin registration for `layers`, or `None` when no
-/// layer is on and `git` stays the plain binary.
-pub fn git_builtin<SE: ShellExtensions>(layers: GitLayers) -> Option<Registration<SE>> {
-	Some(match (layers.smart_worktree, layers.guard) {
-		(false, false) => return None,
-		(true, false) => builtins::builtin::<GitCommand<true, false>, SE>(),
-		(false, true) => builtins::builtin::<GitCommand<false, true>, SE>(),
-		(true, true) => builtins::builtin::<GitCommand<true, true>, SE>(),
-	})
-}
-
-/// Runs git through the enabled [`GitLayers`]: the guard first, then
-/// in-process worktree creation.
+/// Runs git, creating linked worktrees in-process via copy-on-write clones.
 #[derive(Parser)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
-struct GitCommand<const SMART_WORKTREE: bool, const GUARD: bool> {
+struct GitCommand {
 	/// Arguments forwarded to git.
 	#[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
 	args: Vec<String>,
 }
 
-impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
-	for GitCommand<SMART_WORKTREE, GUARD>
-{
+impl builtins::Command for GitCommand {
 	type Error = Error;
 
 	/// Bypasses clap: every argument belongs to git.
@@ -115,19 +90,14 @@ impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
 	) -> impl Future<Output = Result<ExecutionResult, Error>> + Send {
 		let args = self.args.clone();
 		async move {
-			if GUARD && let Some(refusal) = guard::Review::of(context.shell, &args).refusal().await? {
-				let _ = context.stderr().write_all(refusal.as_bytes());
-				return Ok(ExecutionResult::new(guard::REFUSED_EXIT));
-			}
-			if SMART_WORKTREE
-				&& let Some(request) = AddRequest::parse(&args)
+			if let Some(request) = AddRequest::parse(&args)
 				&& !git_env_redirected(context.shell)
 			{
 				let cwd = context.shell.working_dir().to_owned();
 				let filesystem = context.shell.filesystem().clone();
-				// Planning and cloning are synchronous filesystem work. They are
-				// not abandoned on cancellation: a half-registered
-				// worktree is worse than a late one.
+				// Planning and cloning are synchronous filesystem work. They are not
+				// abandoned on cancellation: a half-registered worktree is worse than a
+				// late one.
 				let outcome = tokio::task::spawn_blocking(move || request.create(&cwd, &filesystem))
 					.await
 					.map_err(|err| Error::from(ErrorKind::ThreadingError(err)))?;
@@ -333,8 +303,7 @@ impl AddRequest {
 			return Ok(None);
 		}
 		let worktrees = repo.worktrees()?;
-		// A registered worktree whose directory is gone needs git's `-f`
-		// handling.
+		// A registered worktree whose directory is gone needs git's `-f` handling.
 		if worktrees.iter().any(|entry| entry.path == path) {
 			return Ok(None);
 		}
@@ -345,8 +314,7 @@ impl AddRequest {
 				.any(|entry| entry.branch.as_deref() == Some(full.as_str()))
 		};
 		let branch_exists = |branch: &str| repo.ref_exists(&format!("refs/heads/{branch}"));
-		// Whether creating a branch at `start` stays untracked, as pi-vcs creates
-		// it.
+		// Whether creating a branch at `start` stays untracked, as pi-vcs creates it.
 		let untracked = |start: &str| match self.track {
 			Some(false) => Ok(true),
 			_ => creates_untracked_branch(&repo, start),
@@ -408,8 +376,7 @@ impl AddRequest {
 				(Some(branch), name.clone(), false, Preparing::NewBranch(name))
 			}
 		};
-		// Covers unborn HEAD and names that are not commits (trees, blobs,
-		// typos).
+		// Covers unborn HEAD and names that are not commits (trees, blobs, typos).
 		let start = branch
 			.as_ref()
 			.map_or(target.as_str(), |branch| branch.start.as_str());
@@ -631,8 +598,7 @@ fn creates_untracked_branch(repo: &GitRepo, start: &str) -> pi_vcs::Result<bool>
 	if matches!(repo.config_get("branch.autoSetupMerge")?.as_deref(), Some("always" | "inherit")) {
 		return Ok(false);
 	}
-	// `@{upstream}` forms and remote-tracking branches set up tracking by
-	// default.
+	// `@{upstream}` forms and remote-tracking branches set up tracking by default.
 	Ok(!start.contains("@{")
 		&& !start.starts_with("refs/remotes/")
 		&& !repo.ref_exists(&format!("refs/remotes/{start}"))?)
@@ -769,7 +735,7 @@ mod tests {
 	/// `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` are left alone: gix reads those
 	/// from the process environment, so the helper must see them too.
 	#[cfg(unix)]
-	pub(super) fn git(dir: &Path, args: &[&str]) -> String {
+	fn git(dir: &Path, args: &[&str]) -> String {
 		let output = std::process::Command::new("git")
 			.args(args)
 			.current_dir(dir)
@@ -786,7 +752,7 @@ mod tests {
 	/// Repository with one commit, an ignored build cache, and a
 	/// `post-checkout` hook that records its arguments and directory.
 	#[cfg(unix)]
-	pub(super) fn fixture() -> (tempfile::TempDir, PathBuf) {
+	fn fixture() -> (tempfile::TempDir, PathBuf) {
 		use std::os::unix::fs::PermissionsExt as _;
 
 		let temp = tempfile::tempdir().expect("tempdir");
@@ -824,27 +790,21 @@ mod tests {
 		(temp, repo)
 	}
 
-	/// Runs `command` in a one-shot shell with the builtin layers whose
-	/// variables (`PI_SMART_GIT`, `PI_GIT_GUARD`) are in `layers` on, the
-	/// others off.
+	/// Runs `command` in a one-shot shell, with the builtin enabled through
+	/// `PI_SMART_GIT` when `smart`.
 	///
 	/// The shell exports the test process's environment, where any
 	/// `GIT_CONFIG*` variable would hand every `git` call to the binary and
 	/// leave the builtin untested, so the command unsets them first. Setting
 	/// the process environment instead would race the other tests' threads.
 	#[cfg(unix)]
-	pub(super) async fn run_with(
-		repo: &Path,
-		command: &str,
-		layers: &[&str],
-	) -> (Option<i32>, String) {
+	async fn run_with(repo: &Path, command: &str, smart: bool) -> (Option<i32>, String) {
 		let (tx, rx) = flume::unbounded::<String>();
-		let flags = ["PI_SMART_GIT", "PI_GIT_GUARD"]
-			.map(|name| (name.to_owned(), if layers.contains(&name) { "1" } else { "0" }.to_owned()));
+		let flag = if smart { "1" } else { "0" };
 		let options = crate::ShellExecuteOptions {
 			command: format!("unset -v \"${{!GIT_CONFIG@}}\"; {command}"),
 			cwd: Some(repo.to_string_lossy().into_owned()),
-			session_env: Some(flags.into()),
+			session_env: Some([("PI_SMART_GIT".to_owned(), flag.to_owned())].into()),
 			..Default::default()
 		};
 		let result = crate::execute_shell(options, Some(tx), crate::cancel::CancelToken::default())
@@ -855,7 +815,7 @@ mod tests {
 
 	#[cfg(unix)]
 	async fn run(repo: &Path, command: &str) -> (Option<i32>, String) {
-		run_with(repo, command, &["PI_SMART_GIT"]).await
+		run_with(repo, command, true).await
 	}
 
 	/// Without `PI_SMART_GIT`, `git` is the plain binary: no clone, so the
@@ -864,7 +824,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn worktree_add_is_plain_git_unless_opted_in() {
 		let (_temp, repo) = fixture();
-		let (code, output) = run_with(&repo, "git worktree add ../wt", &[]).await;
+		let (code, output) = run_with(&repo, "git worktree add ../wt", false).await;
 		assert_eq!(code, Some(0), "{output}");
 		let wt = repo.parent().expect("parent").join("wt");
 		assert!(wt.join("tracked.txt").exists(), "git checked out the worktree");

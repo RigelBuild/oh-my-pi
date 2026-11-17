@@ -412,16 +412,7 @@ function buildCompactionV2Headers(
 			: {
 					"content-type": "application/json",
 					...resolveOpenAIRequestSetup(
-						{
-							provider: model.provider,
-							id: model.id,
-							baseUrl: model.baseUrl,
-							headers: model.headers,
-							compat: {
-								sessionHeader:
-									model.compat && "sessionHeader" in model.compat ? model.compat.sessionHeader : undefined,
-							},
-						},
+						{ provider: model.provider, id: model.id, baseUrl: model.baseUrl, headers: model.headers },
 						{ apiKey, messages: [], sessionId: request.sessionId ?? routingSessionId, promptCacheSessionId },
 					).headers,
 				};

@@ -73,11 +73,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 		showError: () => {},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: {
-			dispatchSessionEvent: () => Promise.resolve(),
-			takeDisplaceableComponents: () => [],
-			resetTranscriptAnchors: () => {},
-		},
+		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
 		syncRunningSubagentBadge: () => {},
 		eventBus,
 		subagentEventBus: eventBus,

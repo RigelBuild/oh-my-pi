@@ -1,5 +1,5 @@
 import * as AIError from "../error";
-import { getEnvApiKey } from "../env-api-key";
+import { getEnvApiKey } from "../stream";
 import type { Context, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import { applyInferenceHeaders } from "./inference-headers";

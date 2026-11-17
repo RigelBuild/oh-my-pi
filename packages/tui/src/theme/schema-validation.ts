@@ -13,7 +13,6 @@ const themeColorsSchema = type({
 	muted: "string | number",
 	dim: "string | number",
 	text: "string | number",
-	"assistantMessageText?": "string | number",
 	thinkingText: "string | number",
 	selectedBg: "string | number",
 	userMessageBg: "string | number",

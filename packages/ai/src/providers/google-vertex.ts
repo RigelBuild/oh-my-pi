@@ -27,6 +27,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 		model,
 		options,
 		api: "google-vertex",
+		retainTextSignature: true,
 		prepare: async (): Promise<GoogleGenAIRequestPlan> => {
 			const apiKey = resolveApiKey(options);
 			const params = buildGoogleGenerateContentParams(model, context, options ?? {});

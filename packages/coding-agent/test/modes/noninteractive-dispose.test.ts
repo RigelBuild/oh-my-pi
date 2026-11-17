@@ -43,7 +43,6 @@ describe("print mode disposes the session before terminating", () => {
 			},
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
-			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => {
@@ -123,7 +122,6 @@ describe("print mode disposes the session before terminating", () => {
 				onPersistenceNotice: () => () => {},
 			},
 			getLastAssistantMessage: () => abortedMsg,
-			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,

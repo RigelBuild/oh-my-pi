@@ -288,12 +288,7 @@ function collect(winners: WinnerTable, pick: (rule: CompiledRule) => Record<stri
 	return out;
 }
 
-/**
- * Sized above the bundled catalog (~5.6k targets) plus discovered rows so a
- * catalog-wide buildModel pass (discovery, then merge rebuilding the same ids)
- * hits instead of thrashing. Entries share rule values: a few hundred bytes each.
- */
-const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
+const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 512 });
 
 function keyPart(value: string | undefined): string {
 	return value === undefined ? "-1:" : `${value.length}:${value}`;

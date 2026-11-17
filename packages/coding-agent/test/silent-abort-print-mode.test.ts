@@ -57,7 +57,6 @@ function createMockSession(
 		extensionRunner: undefined,
 		subscribe: () => () => {},
 		prompt: async () => {},
-		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => true,

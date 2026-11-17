@@ -6,7 +6,6 @@ import {
 	inheritReferenceThinking,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
-import { runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
 import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig } from "./model-patch";
@@ -83,7 +82,6 @@ export function buildCustomModelOverlay(
 		api,
 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
 		name: modelDef.name,
-		kind: modelDef.kind ?? runnerApiKind(api),
 		reasoning: modelDef.reasoning,
 		thinking: modelDef.thinking,
 		input: modelDef.input,
@@ -129,7 +127,6 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
-		kindConfig: resolvedModel.kind,
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),

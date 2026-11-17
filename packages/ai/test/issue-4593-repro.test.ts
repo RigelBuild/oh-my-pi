@@ -1,5 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as BedrockProvider from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
+import { describe, expect, it, vi } from "bun:test";
 import { setBedrockProviderModule, streamBedrock } from "@oh-my-pi/pi-ai/providers/register-builtins";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -20,9 +19,6 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 // loaded machine. Budgets are tens of milliseconds — wide enough that a noisy
 // virtualized CI runner cannot make a single scheduling hiccup span a full
 // idle budget.
-
-// The transport override is process-global: put the built-in back so later files stream for real.
-afterEach(() => setBedrockProviderModule(BedrockProvider));
 
 function createModel(): Model<"bedrock-converse-stream"> {
 	return buildModel({

@@ -131,7 +131,6 @@ async function runPrintModeCore(
 	signalTeardownActive: () => boolean,
 ): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
-	session.disableStopTimeTodoReminders();
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
 	// multi-MB agent_end) can be dropped when the process exits before the pipe

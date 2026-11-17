@@ -2,8 +2,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
 	Container,
-	FuzzyQuery,
-	FuzzyText,
+	fuzzyMatch,
 	Input,
 	matchesKey,
 	Spacer,
@@ -54,7 +53,7 @@ import { shortenPath } from "../render/render-utils";
 import { canonicalizeMessage } from "../chat/thinking-display";
 import { resolveAssistantErrorPresentation } from "../chat/transcript-render-helpers";
 import { OverlayPanel, PanelDivider } from "../chrome/overlay-box";
-import { TreeView, type TreeAncestor, type TreeRow } from "../components/tree-view";
+import { TreeView, type TreeRow } from "../components/tree-view";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKeys, interruptKey } from "../chrome/keybinding-hints";
 import type { TspPickerItem, TspPickerProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
@@ -211,8 +210,6 @@ class TreeList implements Component {
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
 	#containsActive: Map<TreeSelectorNode, boolean> = new Map();
-	/** Prepared search text per node; rebuilt when the node's label changes. */
-	#searchTextCache = new WeakMap<TreeSelectorNode, { label: string | undefined; text: FuzzyText }>();
 
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
@@ -256,7 +253,6 @@ class TreeList implements Component {
 			getChildren: node => this.#orderedChildren(node),
 			getChildDepth: (_node, row, children) =>
 				children.length > 1 || (this.#multipleRoots && row.parentKey === undefined) ? row.depth + 1 : row.depth,
-			compactSameDepthAncestors: true,
 			theme,
 			filter: this.#buildFilter(),
 			maxRows: maxVisibleLines,
@@ -377,11 +373,7 @@ class TreeList implements Component {
 	#buildFilter(): (node: TreeSelectorNode, row: TreeRow<TreeSelectorNode, string>) => boolean {
 		const filterMode = this.#filterMode;
 		const leafId = this.currentLeafId;
-		const searchTokens = this.getSearchQuery()
-			.toLowerCase()
-			.split(/\s+/)
-			.filter(Boolean)
-			.map(token => new FuzzyQuery(token));
+		const searchTokens = this.getSearchQuery().toLowerCase().split(/\s+/).filter(Boolean);
 		return node => {
 			const entry = node.entry;
 			const isCurrentLeaf = entry.id === leafId;
@@ -443,21 +435,12 @@ class TreeList implements Component {
 
 			// Apply fuzzy search filter
 			if (searchTokens.length > 0) {
-				const nodeText = this.#getFuzzyText(node);
-				return searchTokens.every(token => token.match(nodeText).matches);
+				const nodeText = this.#getSearchableText(node);
+				return searchTokens.every(token => fuzzyMatch(token, nodeText).matches);
 			}
 
 			return true;
 		};
-	}
-
-	/** Prepared fuzzy text for a node's searchable content, built once per label. */
-	#getFuzzyText(node: TreeSelectorNode): FuzzyText {
-		const cached = this.#searchTextCache.get(node);
-		if (cached !== undefined && cached.label === node.label) return cached.text;
-		const text = new FuzzyText(this.#getSearchableText(node));
-		this.#searchTextCache.set(node, { label: node.label, text });
-		return text;
 	}
 
 	/** Get searchable text content from a node */
@@ -894,26 +877,23 @@ class TreeList implements Component {
 		// Linear rows reuse their branch head's depth. Existing sibling
 		// gutters remain visible; terminal gutters remain terminated.
 
-		// Branch points that can draw a gutter, indexed by rendered level: the
-		// ancestor list is as deep as the conversation, so it is scanned once
-		// per row rather than once per prefix cell.
-		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-		const gutterByLevel: (TreeAncestor<string> | undefined)[] = new Array(renderedIndent);
-		for (const ancestor of row.ancestors) {
-			if (ancestor.siblingCount <= 1) continue;
-			if (this.#multipleRoots && this.#rootIds.has(ancestor.key)) continue;
-			const level = ancestor.depth - 1 - scrollOffset;
-			if (level >= 0 && level < renderedIndent && gutterByLevel[level] === undefined) {
-				gutterByLevel[level] = ancestor;
-			}
-		}
 		// Build prefix char by char, placing gutters and connector at their positions
 		const totalChars = renderedIndent * 3;
 		const prefixChars: string[] = [];
 		for (let i = 0; i < totalChars; i++) {
 			const level = Math.floor(i / 3);
+			const originalDepth = level + scrollOffset;
 			const posInLevel = i % 3;
-			const gutterAncestor = gutterByLevel[level];
+
+			// An ancestor branch point draws its gutter at its own depth minus
+			// one — the level its connector occupied. Session roots never emit
+			// gutters; their connectors are suppressed.
+			const gutterAncestor = row.ancestors.find(
+				ancestor =>
+					ancestor.depth - 1 === originalDepth &&
+					ancestor.siblingCount > 1 &&
+					!(this.#multipleRoots && this.#rootIds.has(ancestor.key)),
+			);
 			if (gutterAncestor) {
 				// Gutters follow standard tree semantics: `│` only while more
 				// siblings continue below, space below a `└─`.
@@ -1056,12 +1036,12 @@ class TreeList implements Component {
 	}
 
 	#extractContent(content: unknown): string {
-		return this.#joinTextContent(content, SEARCH_TEXT_LIMIT);
+		return this.#joinTextContent(content).slice(0, SEARCH_TEXT_LIMIT);
 	}
 
-	/** Concatenate text blocks, stopping as soon as `limit` characters exist. */
-	#joinTextContent(content: unknown, limit = Number.POSITIVE_INFINITY): string {
-		if (typeof content === "string") return content.length > limit ? content.slice(0, limit) : content;
+	/** Concatenate every text block (or return a string as-is) with no length cap. */
+	#joinTextContent(content: unknown): string {
+		if (typeof content === "string") return content;
 		if (Array.isArray(content)) {
 			let result = "";
 			for (const c of content) {
@@ -1074,7 +1054,6 @@ class TreeList implements Component {
 					typeof c.text === "string"
 				) {
 					result += c.text;
-					if (result.length >= limit) return result.slice(0, limit);
 				}
 			}
 			return result;

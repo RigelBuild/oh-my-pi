@@ -366,7 +366,6 @@ type ForwardedOptions = Pick<
 	| "streamIdleTimeoutMs"
 	| "streamFirstEventTimeoutMs"
 	| "maxTokens"
-	| "waitForTerminalDrain"
 > & { apiKey: string; headers: Record<string, string> };
 
 /** One resolved request attempt, shared by every wire encoder. */
@@ -581,7 +580,6 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
 					streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
 					maxTokens: options?.maxTokens ?? scope.model.maxTokens ?? undefined,
-					waitForTerminalDrain: options?.waitForTerminalDrain,
 					headers: {
 						...buildIdentityHeaders({
 							upstream: scope.upstream,

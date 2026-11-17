@@ -75,25 +75,13 @@ function validateGitSpec(spec: string): void {
 }
 
 function gitInstallSpec(original: string, source: GitSource): string {
-	// bun resolves GitHub specs natively (shorthand → tarball, inline-credential
-	// URLs → git clone with those credentials); forward them untouched.
-	if (source.host === "github.com") {
+	if (/^github:/i.test(original) || !/^[a-z]+:[^/]/i.test(original)) {
 		return original;
 	}
-	const withRef = !source.ref || source.repo.includes("#") ? source.repo : `${source.repo}#${source.ref}`;
-	if (/^(https?|ssh):\/\//i.test(withRef) && !/^git\+/i.test(withRef)) {
-		// bun auto-detects git only for GitHub-hosted URLs — prefix `git+` so any
-		// git host is cloned via git instead of being misread as an npm tarball
-		// (e.g. private CodeHub instances).
-		//
-		// Inline userinfo credentials (`https://user:token@host/...`) are
-		// deliberately not forwarded: `bun install` persists the spec verbatim
-		// into plugins/package.json and bun.lock, and a long-lived repository
-		// token must not land in those user files. Private repos authenticate
-		// via SSH, a git credential helper, or .netrc instead.
-		return `git+${withRef}`;
+	if (!source.ref || source.repo.includes("#")) {
+		return source.repo;
 	}
-	return withRef;
+	return `${source.repo}#${source.ref}`;
 }
 
 function findGitPackageName(source: GitSource, deps: Record<string, string>): string | undefined {

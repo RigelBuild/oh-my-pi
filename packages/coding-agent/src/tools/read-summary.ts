@@ -5,7 +5,6 @@ import { isMarkdownPath } from "@oh-my-pi/pi-tui/theme";
 import type { ClientBridge } from "../session/client-bridge";
 import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { ensureGrammar } from "../utils/grammars";
 import { countTextLines } from "./read-format";
 import { formatReadSummary } from "@oh-my-pi/pi-tui/tools/read";
 import { throwIfAborted } from "./tool-errors";
@@ -98,12 +97,9 @@ export async function trySummarize(
 		const cacheKey = `${absolutePath}\0${languagePath ?? ""}\0${Bun.hash(code)}\0${minBodyLines},${minCommentLines},${unfoldUntilLines},${unfoldLimitLines}`;
 		const memoized = cache.get(cacheKey);
 		if (memoized !== undefined) return memoized || null;
-		const summaryPath = languagePath ?? absolutePath;
-		await ensureGrammar({ path: summaryPath });
-		throwIfAborted(signal);
 		const result = await summarizeCodeAsync({
 			code,
-			path: summaryPath,
+			path: languagePath ?? absolutePath,
 			minBodyLines,
 			minCommentLines,
 			unfoldUntilLines,

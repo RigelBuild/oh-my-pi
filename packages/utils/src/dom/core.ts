@@ -1,7 +1,7 @@
 /** Behavior-compatible reimplementation of linkedom's used surface. */
 
-import { parseFragment, parseInto } from "./parser";
-import { closestMatching, hasClassToken, matchesSelector, querySelectorAllFrom, querySelectorFrom } from "./selector";
+import { parseFragment } from "./parser";
+import { matchesSelector, querySelectorAllFrom } from "./selector";
 
 /** DOM node type constants. */
 export const enum NodeType {
@@ -83,32 +83,29 @@ type EventListener = ((event: Event) => void) | { handleEvent(event: Event): voi
 
 /** Minimal event-target implementation used by DOM nodes and window. */
 export class EventTarget {
-	/** Allocated on the first `addEventListener`; most nodes never get listeners. */
-	#listeners: Map<string, Set<EventListener>> | undefined;
+	#listeners = new Map<string, Set<EventListener>>();
 
 	/** Register an event listener. */
 	addEventListener(type: string, listener: EventListener | null): void {
 		if (!listener) return;
-		const listenerMap = (this.#listeners ??= new Map());
-		let listeners = listenerMap.get(type);
+		let listeners = this.#listeners.get(type);
 		if (!listeners) {
 			listeners = new Set();
-			listenerMap.set(type, listeners);
+			this.#listeners.set(type, listeners);
 		}
 		listeners.add(listener);
 	}
 
 	/** Remove an event listener. */
 	removeEventListener(type: string, listener: EventListener | null): void {
-		if (listener) this.#listeners?.get(type)?.delete(listener);
+		if (listener) this.#listeners.get(type)?.delete(listener);
 	}
 
 	/** Dispatch an event to listeners and optionally through node ancestors. */
 	dispatchEvent(event: Event): boolean {
 		if (!event.target) event.target = this;
 		event.currentTarget = this;
-		const listeners = this.#listeners?.get(event.type);
-		for (const listener of listeners ? Array.from(listeners) : []) {
+		for (const listener of Array.from(this.#listeners.get(event.type) ?? [])) {
 			if (typeof listener === "function") listener.call(this, event);
 			else listener.handleEvent(event);
 			if (event.propagationStopped) break;
@@ -119,9 +116,6 @@ export class EventTarget {
 		return !event.defaultPrevented;
 	}
 }
-
-/** Index of a node in its parent's `childNodes`, or -1; bound to Node's private index hint. */
-let indexInParent: (node: Node) => number;
 
 /** Base class for the implemented DOM tree. */
 export class Node extends EventTarget {
@@ -135,17 +129,7 @@ export class Node extends EventTarget {
 	readonly nodeName: string;
 	parentNode: Node | null = null;
 	ownerDocument: Document | null;
-	/** Allocated on first access or insertion, so leaf nodes (text, comments, attributes) usually never allocate. */
-	#childNodes: Node[] | undefined;
-	/** Last known index in the parent's `childNodes`; always verified before use, so a stale value only costs a rescan. */
-	#index = 0;
-
-	static {
-		indexInParent = node => {
-			const siblings = node.#siblings();
-			return siblings ? node.#indexIn(siblings) : -1;
-		};
-	}
+	childNodes: Node[] = [];
 
 	constructor(nodeType: number, nodeName: string, ownerDocument: Document | null = null) {
 		super();
@@ -154,105 +138,28 @@ export class Node extends EventTarget {
 		this.ownerDocument = ownerDocument;
 	}
 
-	/** Child nodes in tree order. */
-	get childNodes(): Node[] {
-		this.#childNodes ??= [];
-		return this.#childNodes;
-	}
-
-	set childNodes(value: Node[]) {
-		this.#childNodes = value;
-	}
-
-	/** Whether this node has any children (without allocating a child list). */
-	hasChildNodes(): boolean {
-		return this.#childNodes !== undefined && this.#childNodes.length > 0;
-	}
-
 	/** First child node, if present. */
 	get firstChild(): Node | null {
-		return this.#childNodes?.[0] ?? null;
+		return this.childNodes[0] ?? null;
 	}
 
 	/** Last child node, if present. */
 	get lastChild(): Node | null {
-		const children = this.#childNodes;
-		return children ? (children[children.length - 1] ?? null) : null;
+		return this.childNodes[this.childNodes.length - 1] ?? null;
 	}
 
 	/** Previous node with the same parent. */
 	get previousSibling(): Node | null {
-		const siblings = this.#siblings();
-		if (!siblings) return null;
-		const index = this.#indexIn(siblings);
-		return index > 0 ? siblings[index - 1] : null;
+		if (!this.parentNode) return null;
+		const index = this.parentNode.childNodes.indexOf(this);
+		return index > 0 ? this.parentNode.childNodes[index - 1] : null;
 	}
 
 	/** Next node with the same parent. */
 	get nextSibling(): Node | null {
-		const siblings = this.#siblings();
-		if (!siblings) return null;
-		const index = this.#indexIn(siblings);
-		return index >= 0 ? (siblings[index + 1] ?? null) : null;
-	}
-
-	/** The parent's child list, without allocating one. */
-	#siblings(): Node[] | undefined {
-		const parent = this.parentNode;
-		return parent ? parent.#childNodes : undefined;
-	}
-
-	/** Locate this node in `siblings` via the index hint, re-indexing all siblings on a miss. */
-	#indexIn(siblings: Node[]): number {
-		const hint = this.#index;
-		if (siblings[hint] === this) return hint;
-		if (siblings[hint + 1] === this) return ++this.#index;
-		if (hint > 0 && siblings[hint - 1] === this) return --this.#index;
-		let found = -1;
-		for (let index = 0; index < siblings.length; index++) {
-			const sibling = siblings[index];
-			sibling.#index = index;
-			if (found < 0 && sibling === this) found = index;
-		}
-		if (found >= 0) this.#index = found;
-		return found;
-	}
-
-	/** Index of a child in this node's `childNodes`, or -1. */
-	#childIndex(child: Node): number {
-		const children = this.#childNodes;
-		if (!children) return -1;
-		return child?.parentNode === this ? child.#indexIn(children) : children.indexOf(child);
-	}
-
-	/** Move every child of a fragment into this node at `index` (append for null). */
-	#adoptChildren(fragment: DocumentFragment, index: number | null): void {
-		const moved = fragment.#childNodes;
-		if (!moved?.length) return;
-		if (moved.some(nested => nested.parentNode !== fragment || nested instanceof DocumentFragment)) {
-			// Inconsistent fragment state: keep the one-at-a-time semantics.
-			const reference = index === null ? null : (this.#childNodes?.[index] ?? null);
-			for (const nested of Array.from(moved)) {
-				if (reference === null) this.appendChild(nested);
-				else this.insertBefore(nested, reference);
-			}
-			return;
-		}
-		const document = this.documentForCreation();
-		const nodes = moved.slice();
-		moved.length = 0;
-		const children = (this.#childNodes ??= []);
-		const tail = index === null ? [] : children.splice(index);
-		for (const node of nodes) {
-			node.parentNode = this;
-			node.setOwnerDocument(document);
-			node.#index = children.length;
-			children.push(node);
-		}
-		for (const node of tail) {
-			node.#index = children.length;
-			children.push(node);
-		}
+		if (!this.parentNode) return null;
+		const index = this.parentNode.childNodes.indexOf(this);
+		return index >= 0 ? (this.parentNode.childNodes[index + 1] ?? null) : null;
 	}
 
 	/** Connectedness to a document. */
@@ -271,11 +178,7 @@ export class Node extends EventTarget {
 
 	/** Text contained by this node. */
 	get textContent(): string | null {
-		const children = this.#childNodes;
-		if (!children?.length) return "";
-		const only = children[0];
-		if (children.length === 1 && only instanceof Text) return only.data;
-		return collectText(children);
+		return this.childNodes.map(child => child.textContent ?? "").join("");
 	}
 
 	set textContent(value: string | null) {
@@ -293,48 +196,44 @@ export class Node extends EventTarget {
 		const node: Node = child;
 		if (node === this || node.contains(this)) throw new Error("The new child is an ancestor of this node");
 		if (child instanceof DocumentFragment) {
-			this.#adoptChildren(child, null);
+			for (const nested of Array.from(child.childNodes)) this.appendChild(nested);
 			return child;
 		}
 		child.parentNode?.removeChild(child);
 		child.parentNode = this;
 		child.setOwnerDocument(this.documentForCreation());
-		const children = (this.#childNodes ??= []);
-		node.#index = children.length;
-		children.push(child);
+		this.childNodes.push(child);
 		return child;
 	}
 
 	/** Insert a node before a current child, or append for null. */
 	insertBefore<T extends Node>(child: T, reference: Node | null): T {
 		if (reference === null) return this.appendChild(child);
-		const index = this.#childIndex(reference);
+		const index = this.childNodes.indexOf(reference);
 		if (index < 0) throw new Error("The reference node is not a child of this node");
 		if (child instanceof DocumentFragment) {
-			this.#adoptChildren(child, index);
+			for (const nested of Array.from(child.childNodes)) this.insertBefore(nested, reference);
 			return child;
 		}
 		child.parentNode?.removeChild(child);
 		child.parentNode = this;
 		child.setOwnerDocument(this.documentForCreation());
-		const node: Node = child;
-		node.#index = index;
 		this.childNodes.splice(index, 0, child);
 		return child;
 	}
 
 	/** Replace a current child with another node. */
 	replaceChild<T extends Node>(child: Node, previous: T): T {
-		const index = this.#childIndex(previous);
+		const index = this.childNodes.indexOf(previous);
 		if (index < 0) throw new Error("The node to replace is not a child of this node");
 		this.removeChild(previous);
-		this.insertBefore(child, this.#childNodes?.[index] ?? null);
+		this.insertBefore(child, this.childNodes[index] ?? null);
 		return previous;
 	}
 
 	/** Remove a current child. */
 	removeChild<T extends Node>(child: T): T {
-		const index = this.#childIndex(child);
+		const index = this.childNodes.indexOf(child);
 		if (index < 0) throw new Error("The node to remove is not a child of this node");
 		this.childNodes.splice(index, 1);
 		child.parentNode = null;
@@ -343,9 +242,8 @@ export class Node extends EventTarget {
 
 	/** Replace all children with nodes or strings. */
 	replaceChildren(...children: Array<Node | string>): void {
-		const previous = this.#childNodes;
-		if (previous) for (const child of previous) child.parentNode = null;
-		this.#childNodes = undefined;
+		for (const child of this.childNodes) child.parentNode = null;
+		this.childNodes = [];
 		this.append(...children);
 	}
 
@@ -391,7 +289,7 @@ export class Node extends EventTarget {
 	/** Clone this node, optionally including descendants. */
 	cloneNode(deep = false): Node {
 		const clone = new Node(this.nodeType, this.nodeName, this.ownerDocument);
-		if (deep && this.#childNodes) for (const child of this.#childNodes) clone.appendChild(child.cloneNode(true));
+		if (deep) for (const child of this.childNodes) clone.appendChild(child.cloneNode(true));
 		return clone;
 	}
 
@@ -404,7 +302,7 @@ export class Node extends EventTarget {
 		const nodes: Node[] = [];
 		const visit = (node: Node): void => {
 			nodes.push(node);
-			for (const child of node.#childNodes ?? []) visit(child);
+			for (const child of node.childNodes) visit(child);
 		};
 		visit(root);
 		return nodes.indexOf(this) < nodes.indexOf(other) ? 4 : 2;
@@ -412,8 +310,7 @@ export class Node extends EventTarget {
 
 	setOwnerDocument(document: Document): void {
 		if (this.nodeType !== NodeType.DOCUMENT) this.ownerDocument = document;
-		const children = this.#childNodes;
-		if (children) for (const child of children) child.setOwnerDocument(document);
+		for (const child of this.childNodes) child.setOwnerDocument(document);
 	}
 
 	documentForCreation(): Document {
@@ -520,11 +417,7 @@ export class NamedNodeMap extends Array<Attr> {
 	/** Find an attribute case-insensitively. */
 	getNamedItem(name: string): Attr | null {
 		const normalized = name.toLowerCase();
-		for (let index = 0; index < this.length; index++) {
-			const attr = this[index];
-			if (attr.name === normalized || attr.name.toLowerCase() === normalized) return attr;
-		}
-		return null;
+		return this.find(attr => attr.name.toLowerCase() === normalized) ?? null;
 	}
 
 	/** Set an attribute object and return the prior one. */
@@ -587,7 +480,7 @@ export class DOMTokenList implements Iterable<string> {
 
 	/** Whether a class token exists. */
 	contains(token: string): boolean {
-		return hasClassToken(this.#element.className, token);
+		return this.#tokens().includes(token);
 	}
 
 	/** Toggle a class token. */
@@ -625,20 +518,15 @@ export class DOMTokenList implements Iterable<string> {
 
 /** Mutable inline style declaration. */
 export class CSSStyleDeclaration {
-	/** Allocated on the first non-empty declaration. */
-	#values: Map<string, string> | undefined;
-	/** Serialized declarations; `undefined` after a change until the next read. */
-	#cssText: string | undefined = "";
+	#values = new Map<string, string>();
 
 	/** Serialized declarations. */
 	get cssText(): string {
-		this.#cssText ??= this.#values ? [...this.#values].map(([name, value]) => `${name}: ${value};`).join(" ") : "";
-		return this.#cssText;
+		return [...this.#values].map(([name, value]) => `${name}: ${value};`).join(" ");
 	}
 
 	set cssText(value: string) {
-		this.#values?.clear();
-		this.#cssText = undefined;
+		this.#values.clear();
 		for (const declaration of value.split(";")) {
 			const colon = declaration.indexOf(":");
 			if (colon > 0) this.setProperty(declaration.slice(0, colon).trim(), declaration.slice(colon + 1).trim());
@@ -647,24 +535,19 @@ export class CSSStyleDeclaration {
 
 	/** Read a CSS property. */
 	getPropertyValue(name: string): string {
-		return this.#values?.get(name) ?? "";
+		return this.#values.get(name) ?? "";
 	}
 
 	/** Set a CSS property. */
 	setProperty(name: string, value: string | null, _priority?: string): void {
-		if (value === null || value === "") {
-			if (this.#values?.delete(name)) this.#cssText = undefined;
-			return;
-		}
-		this.#values ??= new Map();
-		this.#values.set(name, String(value));
-		this.#cssText = undefined;
+		if (value === null || value === "") this.#values.delete(name);
+		else this.#values.set(name, String(value));
 	}
 
 	/** Remove and return a CSS property. */
 	removeProperty(name: string): string {
 		const value = this.getPropertyValue(name);
-		if (this.#values?.delete(name)) this.#cssText = undefined;
+		this.#values.delete(name);
 		return value;
 	}
 }
@@ -672,23 +555,15 @@ export class CSSStyleDeclaration {
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
-/** An element's inline style when one has been created; bound to Element's private field. */
-let inlineStyleOf: (element: Element) => CSSStyleDeclaration | undefined;
-
 /** DOM element with attributes, selectors, and HTML serialization. */
 export class Element extends Node {
 	readonly localName: string;
 	readonly tagName: string;
 	readonly namespaceURI: string | null;
 	readonly qualifiedName: string;
-	/** Attribute, class-list and style objects are created on first use. */
-	#attributes: NamedNodeMap | undefined;
-	#classList: DOMTokenList | undefined;
-	#style: CSSStyleDeclaration | undefined;
-
-	static {
-		inlineStyleOf = element => element.#style;
-	}
+	readonly attributes = new NamedNodeMap();
+	readonly classList: DOMTokenList;
+	readonly style = new CSSStyleDeclaration();
 
 	constructor(tagName: string, ownerDocument: Document | null = null, namespaceURI: string | null = HTML_NAMESPACE) {
 		const localName = tagName.toLowerCase();
@@ -698,67 +573,34 @@ export class Element extends Node {
 		this.tagName = qualified;
 		this.qualifiedName = tagName;
 		this.namespaceURI = namespaceURI;
-	}
-
-	/** Attribute collection. */
-	get attributes(): NamedNodeMap {
-		this.#attributes ??= new NamedNodeMap();
-		return this.#attributes;
-	}
-
-	/** Class token list over the `class` attribute. */
-	get classList(): DOMTokenList {
-		this.#classList ??= new DOMTokenList(this);
-		return this.#classList;
-	}
-
-	/** Inline style declaration. */
-	get style(): CSSStyleDeclaration {
-		this.#style ??= new CSSStyleDeclaration();
-		return this.#style;
-	}
-
-	/** Whether the element has any attribute objects (without allocating the collection). */
-	hasAttributes(): boolean {
-		return this.#attributes !== undefined && this.#attributes.length > 0;
+		this.classList = new DOMTokenList(this);
 	}
 
 	/** Element children. */
 	get children(): Element[] {
-		return childElements(this);
+		return this.childNodes.filter((child): child is Element => child instanceof Element);
 	}
 
 	/** First element child. */
 	get firstElementChild(): Element | null {
-		return firstElementIn(this);
+		return this.children[0] ?? null;
 	}
 
 	/** Last element child. */
 	get lastElementChild(): Element | null {
-		return lastElementIn(this);
+		const children = this.children;
+		return children[children.length - 1] ?? null;
 	}
 
 	/** Previous sibling that is an element. */
 	get previousElementSibling(): Element | null {
-		const index = indexInParent(this);
-		if (index < 0) return null;
-		const siblings = (this.parentNode as Node).childNodes;
-		for (let position = index - 1; position >= 0; position--) {
-			const sibling = siblings[position];
-			if (sibling instanceof Element) return sibling;
-		}
+		for (let node = this.previousSibling; node; node = node.previousSibling) if (node instanceof Element) return node;
 		return null;
 	}
 
 	/** Next sibling that is an element. */
 	get nextElementSibling(): Element | null {
-		const index = indexInParent(this);
-		if (index < 0) return null;
-		const siblings = (this.parentNode as Node).childNodes;
-		for (let position = index + 1; position < siblings.length; position++) {
-			const sibling = siblings[position];
-			if (sibling instanceof Element) return sibling;
-		}
+		for (let node = this.nextSibling; node; node = node.nextSibling) if (node instanceof Element) return node;
 		return null;
 	}
 
@@ -821,12 +663,13 @@ export class Element extends Node {
 
 	/** HTML contained inside this element. */
 	get innerHTML(): string {
-		return serializeChildren(this);
+		return this.childNodes.map(serializeNode).join("");
 	}
 
 	set innerHTML(value: string) {
 		this.replaceChildren();
-		parseInto(value, this.documentForCreation(), this);
+		for (const child of parseFragment(value, this.documentForCreation(), this.localName).childNodes.slice())
+			this.appendChild(child);
 	}
 
 	/** Serialized element and descendants. */
@@ -837,30 +680,26 @@ export class Element extends Node {
 	set outerHTML(value: string) {
 		const parent = this.parentNode;
 		if (!parent) return;
-		parent.insertBefore(parseFragment(value, this.documentForCreation()), this);
+		const fragment = parseFragment(value, this.documentForCreation(), this.parentElement?.localName);
+		for (const child of Array.from(fragment.childNodes)) parent.insertBefore(child, this);
 		parent.removeChild(this);
 	}
 
 	/** Read an attribute. */
 	getAttribute(name: string): string | null {
-		const style = this.#style;
-		if (style && name.toLowerCase() === "style") {
-			const cssText = style.cssText;
-			if (cssText) return cssText;
-		}
-		return this.#attributes?.getNamedItem(name)?.value ?? null;
+		if (name.toLowerCase() === "style" && this.style.cssText) return this.style.cssText;
+		return this.attributes.getNamedItem(name)?.value ?? null;
 	}
 
 	/** Read an attribute object. */
 	getAttributeNode(name: string): Attr | null {
-		return this.#attributes?.getNamedItem(name) ?? null;
+		return this.attributes.getNamedItem(name);
 	}
 
 	/** Whether an attribute exists. */
 	hasAttribute(name: string): boolean {
 		return (
-			(this.#attributes?.getNamedItem(name) ?? null) !== null ||
-			(this.#style !== undefined && name.toLowerCase() === "style" && Boolean(this.#style.cssText))
+			this.attributes.getNamedItem(name) !== null || (name.toLowerCase() === "style" && Boolean(this.style.cssText))
 		);
 	}
 
@@ -868,10 +707,9 @@ export class Element extends Node {
 	setAttribute(name: string, value: string): void {
 		const normalized = name.toLowerCase();
 		if (normalized === "style") this.style.cssText = String(value);
-		const attributes = this.attributes;
-		const existing = attributes.getNamedItem(normalized);
+		const existing = this.attributes.getNamedItem(normalized);
 		if (existing) existing.value = String(value);
-		else attributes.unshift(new Attr(name, String(value), this.ownerDocument));
+		else this.attributes.unshift(new Attr(name, String(value), this.ownerDocument));
 	}
 
 	/** Set a namespaced attribute. */
@@ -881,15 +719,14 @@ export class Element extends Node {
 
 	/** Remove an attribute. */
 	removeAttribute(name: string): void {
-		const attributes = this.#attributes;
-		const existing = attributes?.getNamedItem(name);
-		if (attributes && existing) attributes.splice(attributes.indexOf(existing), 1);
-		if (this.#style && name.toLowerCase() === "style") this.#style.cssText = "";
+		const existing = this.attributes.getNamedItem(name);
+		if (existing) this.attributes.splice(this.attributes.indexOf(existing), 1);
+		if (name.toLowerCase() === "style") this.style.cssText = "";
 	}
 
 	/** Find the first descendant matching a selector. */
 	querySelector(selector: string): Element | null {
-		return querySelectorFrom(this, selector);
+		return querySelectorAllFrom(this, selector, false)[0] ?? null;
 	}
 
 	/** Find all descendants matching a selector. */
@@ -904,7 +741,10 @@ export class Element extends Node {
 
 	/** Find the nearest matching ancestor including this element. */
 	closest(selector: string): Element | null {
-		return closestMatching(this, selector);
+		for (let element: Element | null = this; element; element = element.parentElement) {
+			if (element.matches(selector)) return element;
+		}
+		return null;
 	}
 
 	/** Descendant elements with a tag name. */
@@ -915,10 +755,9 @@ export class Element extends Node {
 	/** Descendant elements containing all requested class tokens. */
 	getElementsByClassName(classNames: string): Element[] {
 		const tokens = classNames.trim().split(/\s+/).filter(Boolean);
-		return querySelectorAllFrom(this, "*", false).filter(element => {
-			const className = element.className;
-			return tokens.every(token => hasClassToken(className, token));
-		});
+		return querySelectorAllFrom(this, "*", false).filter(element =>
+			tokens.every(token => element.classList.contains(token)),
+		);
 	}
 
 	/**
@@ -959,14 +798,11 @@ export class Element extends Node {
 		const clone =
 			this.ownerDocument?.createElementNS(this.namespaceURI, this.qualifiedName) ??
 			new Element(this.qualifiedName, null, this.namespaceURI);
-		const attributes = this.#attributes;
-		if (attributes) {
-			for (let index = attributes.length - 1; index >= 0; index--) {
-				const attr = attributes[index];
-				clone.setAttribute(attr.name, attr.value);
-			}
+		for (let index = this.attributes.length - 1; index >= 0; index--) {
+			const attr = this.attributes[index];
+			clone.setAttribute(attr.name, attr.value);
 		}
-		if (deep && this.hasChildNodes()) for (const child of this.childNodes) clone.appendChild(child.cloneNode(true));
+		if (deep) for (const child of this.childNodes) clone.appendChild(child.cloneNode(true));
 		return clone;
 	}
 }
@@ -1049,22 +885,23 @@ export class DocumentFragment extends Node {
 
 	/** Element children. */
 	get children(): Element[] {
-		return childElements(this);
+		return this.childNodes.filter((child): child is Element => child instanceof Element);
 	}
 
 	/** First element child. */
 	get firstElementChild(): Element | null {
-		return firstElementIn(this);
+		return this.children[0] ?? null;
 	}
 
 	/** Last element child. */
 	get lastElementChild(): Element | null {
-		return lastElementIn(this);
+		const children = this.children;
+		return children[children.length - 1] ?? null;
 	}
 
 	/** First matching descendant. */
 	querySelector(selector: string): Element | null {
-		return querySelectorFrom(this, selector);
+		return querySelectorAllFrom(this, selector, false)[0] ?? null;
 	}
 
 	/** All matching descendants. */
@@ -1089,12 +926,14 @@ export class HTMLTemplateElement extends HTMLElement {
 	}
 
 	override get innerHTML(): string {
-		return serializeChildren(this.content);
+		return this.content.childNodes.map(serializeNode).join("");
 	}
 
 	override set innerHTML(value: string) {
 		this.content.replaceChildren();
-		parseInto(value, this.documentForCreation(), this.content);
+		for (const child of parseFragment(value, this.documentForCreation(), "template").childNodes.slice()) {
+			this.content.appendChild(child);
+		}
 	}
 
 	override get textContent(): string {
@@ -1145,33 +984,33 @@ export class Document extends Node {
 
 	/** Root element of the document. */
 	get documentElement(): Element | null {
-		return firstElementIn(this);
+		return this.children[0] ?? null;
 	}
 
 	/** Element children. */
 	get children(): Element[] {
-		return childElements(this);
+		return this.childNodes.filter((child): child is Element => child instanceof Element);
 	}
 
 	/** HTML body, or a detached empty body when absent like linkedom. */
 	get body(): HTMLElement {
-		const body = querySelectorFrom(this, "body");
+		const body = this.querySelector("body");
 		return body instanceof HTMLElement ? body : this.createElement("body");
 	}
 
 	/** HTML head, or a detached empty head when absent. */
 	get head(): HTMLElement {
-		const head = querySelectorFrom(this, "head");
+		const head = this.querySelector("head");
 		return head instanceof HTMLElement ? head : this.createElement("head");
 	}
 
 	/** Document title text. */
 	get title(): string {
-		return querySelectorFrom(this, "title")?.textContent ?? "";
+		return this.querySelector("title")?.textContent ?? "";
 	}
 
 	set title(value: string) {
-		let title = querySelectorFrom(this, "title");
+		let title = this.querySelector("title");
 		if (!title) {
 			title = this.createElement("title");
 			this.head.appendChild(title);
@@ -1228,16 +1067,13 @@ export class Document extends Node {
 
 	/** Find the first element by id. */
 	getElementById(id: string): HTMLElement | null {
-		// Ids free of selector syntax compare directly; the rest keep the escaped-selector path's exact behaviour.
-		const element = SELECTOR_SAFE_ID.test(id)
-			? findElementById(this, id)
-			: querySelectorFrom(this, `#${cssEscapeIdentifier(id)}`);
+		const element = this.querySelector(`#${cssEscapeIdentifier(id)}`);
 		return element instanceof HTMLElement ? element : null;
 	}
 
 	/** Find the first matching descendant. */
 	querySelector(selector: string): Element | null {
-		return querySelectorFrom(this, selector);
+		return querySelectorAllFrom(this, selector, true)[0] ?? null;
 	}
 
 	/** Find all matching descendants. */
@@ -1253,10 +1089,7 @@ export class Document extends Node {
 	/** Descendant elements containing all class tokens. */
 	getElementsByClassName(classNames: string): Element[] {
 		const tokens = classNames.trim().split(/\s+/).filter(Boolean);
-		return this.querySelectorAll("*").filter(element => {
-			const className = element.className;
-			return tokens.every(token => hasClassToken(className, token));
-		});
+		return this.querySelectorAll("*").filter(element => tokens.every(token => element.classList.contains(token)));
 	}
 
 	/** Adopt a node into this document. */
@@ -1353,7 +1186,6 @@ const VOID_ELEMENTS: Record<string, true> = {
 	track: true,
 	wbr: true,
 };
-
 const BOOLEAN_ATTRIBUTES: Record<string, true> = {
 	allowfullscreen: true,
 	async: true,
@@ -1382,114 +1214,39 @@ const BOOLEAN_ATTRIBUTES: Record<string, true> = {
 	selected: true,
 };
 
-const TEXT_ESCAPE_PATTERN = /[&\u00a0<>]/;
-/** Ids whose escaped `#id` selector parses as one plain id compound (no combinators, lists, quotes or groups). */
-const SELECTOR_SAFE_ID = /^[^\s,>+~"'[\]()\\]+$/;
-
 function escapeText(value: string): string {
-	if (!TEXT_ESCAPE_PATTERN.test(value)) return value;
-	return value
-		.replace(/&/g, "&amp;")
-		.replace(/\u00a0/g, "&#160;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;");
+	return value.replace(/&/g, "&amp;").replace(/ /g, "&#160;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function escapeAttribute(value: string): string {
-	return value.includes('"') ? value.replace(/"/g, "&quot;") : value;
-}
-
-/** Serialize a node's children; `raw` emits text data unescaped (script/style content). */
-function serializeChildren(parent: Node, raw = false): string {
-	if (!parent.hasChildNodes()) return "";
-	let html = "";
-	for (const child of parent.childNodes) html += raw && child instanceof Text ? child.data : serializeNode(child);
-	return html;
+	return value.replace(/"/g, "&quot;");
 }
 
 /** Serialize a DOM node as HTML. */
 export function serializeNode(node: Node): string {
 	if (node instanceof Comment) return `<!--${node.data}-->`;
 	if (node instanceof Text) return node.serializeRaw ? node.data : escapeText(node.data);
-	if (node instanceof Document || node instanceof DocumentFragment) return serializeChildren(node);
+	if (node instanceof Document || node instanceof DocumentFragment) return node.childNodes.map(serializeNode).join("");
 	if (!(node instanceof Element)) return "";
-	let opening = `<${node.qualifiedName}`;
-	const hasAttributes = node.hasAttributes();
-	if (hasAttributes) {
-		for (const attr of node.attributes) {
-			opening +=
-				attr.value === "" && BOOLEAN_ATTRIBUTES[attr.name.toLowerCase()]
-					? ` ${attr.name}`
-					: ` ${attr.name}="${escapeAttribute(attr.value)}"`;
-		}
-	}
-	const cssText = inlineStyleOf(node)?.cssText;
-	if (cssText && !(hasAttributes && node.attributes.getNamedItem("style"))) {
-		opening += ` style="${escapeAttribute(cssText)}"`;
-	}
-	opening += ">";
+	const attributes = node.attributes
+		.map(attr =>
+			attr.value === "" && BOOLEAN_ATTRIBUTES[attr.name.toLowerCase()]
+				? ` ${attr.name}`
+				: ` ${attr.name}="${escapeAttribute(attr.value)}"`,
+		)
+		.join("");
+	const style =
+		node.style.cssText && !node.attributes.getNamedItem("style")
+			? ` style="${escapeAttribute(node.style.cssText)}"`
+			: "";
+	const opening = `<${node.qualifiedName}${attributes}${style}>`;
 	if (VOID_ELEMENTS[node.localName]) return opening;
 	const raw = node.localName === "script" || node.localName === "style";
-	const content = serializeChildren(node instanceof HTMLTemplateElement ? node.content : node, raw);
+	const childNodes = node instanceof HTMLTemplateElement ? node.content.childNodes : node.childNodes;
+	const content = raw
+		? childNodes.map(child => (child instanceof Text ? child.data : serializeNode(child))).join("")
+		: childNodes.map(serializeNode).join("");
 	return `${opening}${content}</${node.qualifiedName}>`;
-}
-
-function childElements(parent: Node): Element[] {
-	return parent.hasChildNodes() ? parent.childNodes.filter((child): child is Element => child instanceof Element) : [];
-}
-
-function firstElementIn(parent: Node): Element | null {
-	if (!parent.hasChildNodes()) return null;
-	for (const child of parent.childNodes) if (child instanceof Element) return child;
-	return null;
-}
-
-function lastElementIn(parent: Node): Element | null {
-	if (!parent.hasChildNodes()) return null;
-	const children = parent.childNodes;
-	for (let index = children.length - 1; index >= 0; index--) {
-		const child = children[index];
-		if (child instanceof Element) return child;
-	}
-	return null;
-}
-
-/** First descendant element in document order whose `id` equals `id`. */
-function findElementById(parent: Node, id: string): Element | null {
-	if (!parent.hasChildNodes()) return null;
-	for (const child of parent.childNodes) {
-		if (child instanceof Element && child.id === id) return child;
-		const found = findElementById(child, id);
-		if (found) return found;
-	}
-	return null;
-}
-
-/**
- * Concatenate descendant text iteratively, mirroring each node type's `textContent`: character data and
- * attributes contribute their value, documents nothing, templates their content fragment.
- */
-function collectText(children: Node[]): string {
-	let text = "";
-	const pending: Node[] = [];
-	for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
-	while (pending.length > 0) {
-		const node = pending.pop() as Node;
-		if (node instanceof Text) {
-			text += node.data;
-			continue;
-		}
-		if (node instanceof Attr) {
-			text += node.value;
-			continue;
-		}
-		if (node instanceof Document) continue;
-		const owner = node instanceof HTMLTemplateElement ? node.content : node;
-		if (!owner.hasChildNodes()) continue;
-		const nested = owner.childNodes;
-		for (let index = nested.length - 1; index >= 0; index--) pending.push(nested[index]);
-	}
-	return text;
 }
 
 function cssEscapeIdentifier(value: string): string {

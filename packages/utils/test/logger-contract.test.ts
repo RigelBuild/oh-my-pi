@@ -148,9 +148,6 @@ describe("central logger byte contract", () => {
 					cause: { name: "Error", message: "downstream", stack: "CAUSE_STACK" },
 				},
 			}),
-			expectedLine(result.pid, "error", "tojson-error", {
-				wrapped: { err: { name: "Error", message: "wrapped", stack: "WRAPPED_STACK" } },
-			}),
 		].join("");
 		expect(log.text).toBe(expected);
 		expect(log.text.endsWith(os.EOL)).toBe(true);
@@ -215,7 +212,6 @@ describe("central logger file level and batching", () => {
 			"level-warn",
 			"reserved-primary metadata-message",
 			"error-matrix",
-			"tojson-error",
 		]);
 	});
 

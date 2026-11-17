@@ -1,4 +1,4 @@
-import { createSyntheticToolResultMessage, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "./session-entries";
 
@@ -166,24 +166,8 @@ export function createInterruptedTurnAbortMessage(
 	};
 }
 
-/**
- * Whether a persisted process exit follows the branch's last message: the
- * branch's writer is gone, so resume recovery owns its interrupted tail.
- */
-export function sessionExitFollowsLastMessage(entries: readonly SessionEntry[]): boolean {
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const entry = entries[index]!;
-		if (entry.type === "message") return false;
-		if (readSessionExit(entry)) return true;
-	}
-	return false;
-}
-
-/** Pairs unresolved calls at the end of an interrupted turn with result messages. */
-export function createInterruptedToolResults(
-	entries: readonly SessionEntry[],
-	context: "process-exit" | "fork" = "process-exit",
-): ToolResultMessage[] {
+/** Pairs the last interrupted assistant turn's unresolved calls before resume builds model context. */
+export function createInterruptedToolResults(entries: readonly SessionEntry[]): ToolResultMessage[] {
 	let tail: AgentMessage | undefined;
 	let assistant: AssistantMessage | undefined;
 	for (let index = entries.length - 1; index >= 0; index--) {
@@ -195,21 +179,11 @@ export function createInterruptedToolResults(
 			break;
 		}
 	}
-	if (!assistant || (context !== "fork" && tail?.role !== "assistant" && tail?.role !== "toolResult")) return [];
-	const pendingById = new Map<string, PendingToolCallDiagnostic>();
-	for (const call of collectPendingToolCalls(entries)) {
-		if (call.toolCallId) pendingById.set(call.toolCallId, call);
-	}
+	if (!assistant || (tail?.role !== "assistant" && tail?.role !== "toolResult")) return [];
+	const pendingIds = new Set(collectPendingToolCalls(entries).map(call => call.toolCallId));
 	const results: ToolResultMessage[] = [];
 	for (const call of assistant.content) {
-		if (call.type !== "toolCall" || !pendingById.has(call.id)) continue;
-		const diagnostic = pendingById.get(call.id);
-		if (context === "fork" && assistant.stopReason === "length" && diagnostic?.startedAt === undefined) {
-			// A length stop retains its never-executed guard only without
-			// persisted evidence that the parent entered tool execution.
-			results.push(createSyntheticToolResultMessage(call, "length"));
-			continue;
-		}
+		if (call.type !== "toolCall" || !pendingIds.has(call.id)) continue;
 		results.push({
 			role: "toolResult",
 			toolCallId: call.id,
@@ -217,10 +191,7 @@ export function createInterruptedToolResults(
 			content: [
 				{
 					type: "text",
-					text:
-						context === "fork"
-							? "The parent session may still be running this tool; its outcome is unknown."
-							: "Previous OMP process exited before this tool returned; its outcome is unknown.",
+					text: "Previous OMP process exited before this tool returned; its outcome is unknown.",
 				},
 			],
 			isError: true,

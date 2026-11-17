@@ -40,7 +40,6 @@ import {
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
-import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -122,6 +121,10 @@ interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
 	cursor: number;
+}
+
+function quoteShellArg(value: string): string {
+	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function terminalState(state: DaemonSnapshot["state"]): boolean {
@@ -660,9 +663,7 @@ class DaemonBroker {
 				return this.#send(operation);
 			case "stop": {
 				const record = this.#record(operation.name);
-				if (operation.id === undefined || operation.id === record.snapshot.id) {
-					await this.#stopRecord(record, operation.timeoutMs);
-				}
+				await this.#stopRecord(record, operation.timeoutMs);
 				return { op: "stop", daemon: record.snapshot };
 			}
 			case "restart":
@@ -821,18 +822,13 @@ class DaemonBroker {
 		// cursor position or device attributes would block on the reply. Answer
 		// the queries from the output stream and write the replies to its stdin.
 		//
-		// On Windows ConPTY sits in between and forwards a program's probes
-		// rather than answering them (current conhost leaves replies to the
-		// terminal; older builds answer from the console buffer and never put
-		// the probe on this stream). ConPTY also sends queries of its own and
-		// consumes their replies: device attributes at session start and cursor
-		// resyncs later, all answered here. The one exception is its
-		// INHERIT_CURSOR handshake, the first `CSI 6 n` on the stream, which the
-		// PTY layer answers before the child owns stdin
-		// (crates/pi-natives/src/pty.rs). ConPTY consumes one report for it;
-		// replying again would put a second report on the program's stdin,
-		// where the console decodes it as a keypress.
-		const responder = new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });
+		// Cursor reports are the exception on Windows: ConPTY is itself a
+		// terminal, answering a program's own probes from the console, so the
+		// only `CSI 6 n` on this stream is ConPTY's INHERIT_CURSOR handshake at
+		// session start — answered by the PTY layer before the child owns stdin
+		// (crates/pi-natives/src/pty.rs). Replying here would put a second report
+		// on the program's stdin, where the console decodes it as a keypress.
+		const responder = new TerminalQueryResponder({ cursorPosition: process.platform !== "win32" });
 		const onChunk = (error: Error | null, chunk: string): void => {
 			if (generation !== record.generation) return;
 			if (error) record.log?.append(`PTY output error: ${error.message}\n`);
@@ -869,7 +865,7 @@ class DaemonBroker {
 			);
 		} else {
 			const argv = [record.spec.application, ...record.spec.args];
-			const command = `exec ${quotePosixArgv(argv)}`;
+			const command = `exec ${argv.map(quoteShellArg).join(" ")}`;
 			const shell = procmgr.getShellConfig().shell;
 			run = session.start({ command, shell, ...options }, onChunk, onStart);
 		}

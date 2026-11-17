@@ -14,7 +14,7 @@ import {
 	selectReviewChoice,
 	type ReviewPrRef,
 } from "../review";
-import { buildCodeReviewFeedback } from "../review/prompt";
+import { buildReviewPrompt, formatCodeReviewAnnotations } from "../review/prompt";
 import {
 	getReviewTargetIssue,
 	type LocalReviewKind,
@@ -190,10 +190,12 @@ async function finishCodeReview(
 	}
 	const result = await showOverlay(ctx, target);
 	if (!result) return undefined;
-	const review = result.action === "review";
-	const feedback = buildCodeReviewFeedback(target, result.annotations, review, focus);
-	if (review) return feedback;
-	if (feedback) ctx.ui.pasteToEditor(feedback);
+	const annotations = formatCodeReviewAnnotations(result.annotations, {
+		forReviewer: result.action === "review",
+		supplementalInstructions: focus,
+	});
+	if (result.action === "review") return buildReviewPrompt(target, annotations);
+	if (annotations) ctx.ui.pasteToEditor(annotations);
 	return undefined;
 }
 
@@ -279,7 +281,6 @@ export async function runAnnotateCommand(
 	if (!source) return undefined;
 	const result = await textDependencies.showTextReviewOverlay(ctx, source);
 	if (!result || result.annotations.length === 0) return undefined;
-	if (result.editedText !== undefined) source = { ...source, text: result.editedText };
 	let contextSummary: string | undefined;
 	if (shouldSummarizeTextReviewSource(source)) {
 		ctx.ui.setStatus("annotate-summary", "Rephrasing annotation source with the session model…");

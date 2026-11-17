@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import { isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
-import { encodeMessageFrame, MessageFramer, MessageFramingError } from "../jsonrpc/message-framing";
+import { MessageFramer, MessageFramingError } from "../jsonrpc/message-framing";
 import { ToolAbortError } from "../tools/tool-errors";
 import type {
 	DapCapabilities,
@@ -65,6 +65,7 @@ export class DapClient {
 	readonly #socket?: { end(): void };
 	#requestSeq = 0;
 	#pendingRequests = new Map<number, DapPendingRequest>();
+	#messageBuffer: Buffer = Buffer.alloc(0);
 	#isReading = false;
 	#disposed = false;
 	#lastActivity = Date.now();
@@ -519,13 +520,13 @@ export class DapClient {
 	 * exit-before-flush the client disposes itself and rethrows.
 	 */
 	async #writeMessage(message: DapRequestMessage | DapResponseMessage): Promise<void> {
-		const frame = encodeMessageFrame(message);
+		const content = JSON.stringify(message);
 		// write() returns a Promise while the pipe write is pending; it rejects (EPIPE) once the adapter is
 		// gone. Observe it before flush(), which may throw synchronously and would orphan the rejection.
 		let write: number | Promise<number>;
 		let flush: number | Promise<number> | undefined;
 		try {
-			write = this.#writeSink.write(frame);
+			write = this.#writeSink.write(`Content-Length: ${Buffer.byteLength(content, "utf-8")}\r\n\r\n${content}`);
 			if (write instanceof Promise) write.catch(() => {});
 			flush = this.#writeSink.flush();
 		} catch (error) {
@@ -602,7 +603,7 @@ export class DapClient {
 		this.#isReading = true;
 		const reader = this.#readable.getReader();
 
-		const framer = new MessageFramer(Buffer.alloc(0));
+		const framer = new MessageFramer(this.#messageBuffer);
 
 		let closeError: Error | undefined;
 		let framingFailed = false;
@@ -611,7 +612,7 @@ export class DapClient {
 				const { done, value } = await reader.read();
 				if (done) break;
 
-				framer.push(value);
+				framer.push(Buffer.from(value));
 
 				// Drain every complete message currently buffered.
 				for (const messageText of framer.drain(headerText => {
@@ -648,6 +649,8 @@ export class DapClient {
 			framingFailed = error instanceof MessageFramingError;
 			closeError = new Error(`DAP connection closed: ${toErrorMessage(error)}`);
 		} finally {
+			// Persist any unparsed remainder so a restarted reader resumes mid-message.
+			this.#messageBuffer = framer.remainder();
 			reader.releaseLock();
 			this.#isReading = false;
 		}

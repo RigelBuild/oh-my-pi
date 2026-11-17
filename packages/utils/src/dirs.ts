@@ -697,14 +697,12 @@ export function getRemoteDir(): string {
  * Expand a leading `~` and require an absolute result. Returns `undefined` for
  * empty/whitespace input or a path that is still relative after expansion.
  *
- * Worktree bases and the natives directory are process-global: a worktree base
- * is consumed by both creation (PR checkout, task isolation) and cleanup
- * (`omp worktree`), and every launch extracts or loads the native addon from
- * the same natives directory. A relative value would resolve against whatever
- * cwd happened to launch `omp`, so those readers could disagree — we refuse it
- * rather than silently bind it to cwd.
+ * A worktree base is process-global and consumed by both creation
+ * (PR checkout, task isolation) and cleanup (`omp worktree`). A relative value
+ * would resolve against whatever cwd happened to launch `omp`, so checkout and
+ * cleanup could disagree — we refuse it rather than silently bind it to cwd.
  */
-function resolveAbsoluteDir(value: string | undefined): string | undefined {
+function resolveWorktreeBase(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	if (!trimmed) return undefined;
 	let p = trimmed;
@@ -721,13 +719,13 @@ let worktreesDirOverride: string | undefined;
  * `worktree.base` setting in coding-agent; pass `undefined`/empty to clear and
  * fall back to `OMP_WORKTREE_DIR` or the `~/.omp/wt` default.
  *
- * `~` is expanded and a relative path is rejected (see {@link resolveAbsoluteDir}).
+ * `~` is expanded and a relative path is rejected (see {@link resolveWorktreeBase}).
  * Returns the absolute path that took effect, or `undefined` if the input was
  * cleared or rejected — callers can warn on a non-empty input that returns
  * `undefined`.
  */
 export function setWorktreesDir(dir: string | undefined): string | undefined {
-	worktreesDirOverride = resolveAbsoluteDir(dir);
+	worktreesDirOverride = resolveWorktreeBase(dir);
 	return worktreesDirOverride;
 }
 
@@ -739,7 +737,7 @@ export function setWorktreesDir(dir: string | undefined): string | undefined {
  * ignored and resolution falls through.
  */
 export function getWorktreesDir(): string {
-	return resolveAbsoluteDir(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
+	return resolveWorktreeBase(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
 }
 
 /** Get the SSH control socket directory (~/.omp/ssh-control). */
@@ -865,18 +863,9 @@ export function getFastembedRuntimeDir(): string {
 	return dirs.rootSubdir(path.join("cache", "fastembed-runtime"), "cache");
 }
 
-/**
- * Get the directory the native addon loads downloaded tree-sitter wasm grammars
- * from (`<natives dir>/grammars`, ~/.omp/natives/grammars). The natives loader
- * configures the addon with the same path.
- */
-export function getNativeGrammarsDir(): string {
-	return path.join(getNativesDir(), "grammars");
-}
-
-/** Get the natives directory. PI_NATIVES_DIR overrides the usual cache root; relative values are ignored. */
+/** Get the natives directory (~/.omp/natives). */
 export function getNativesDir(): string {
-	return resolveAbsoluteDir(process.env.PI_NATIVES_DIR) ?? dirs.rootSubdir("natives", "cache");
+	return dirs.rootSubdir("natives", "cache");
 }
 
 /** Get the stats database path (~/.omp/stats.db). */

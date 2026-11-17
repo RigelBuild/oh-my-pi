@@ -226,9 +226,7 @@ function findTagEnd(source: string, start: number, triple: boolean): number {
 
 function parseTemplate(source: string): Node[] {
 	const root: Node[] = [];
-	// `chained` marks a block opened by `{{else name …}}`: it has no closing tag of
-	// its own and closes with the block it chains from, as in Handlebars.
-	const stack: { node: BlockNode; target: Node[]; inverted: boolean; chained: boolean }[] = [];
+	const stack: { node: BlockNode; target: Node[]; inverted: boolean }[] = [];
 	let target = root;
 	let cursor = 0;
 	while (cursor < source.length) {
@@ -265,7 +263,7 @@ function parseTemplate(source: string): Node[] {
 				};
 				target.push(nested);
 				target = nested.body;
-				stack.push({ node: nested, target: parentTarget, inverted: false, chained: true });
+				stack.push({ node: nested, target: parentTarget, inverted: false });
 			}
 			continue;
 		}
@@ -279,13 +277,12 @@ function parseTemplate(source: string): Node[] {
 				inverted,
 			};
 			target.push(node);
-			stack.push({ node, target, inverted, chained: false });
+			stack.push({ node, target, inverted });
 			target = node.body;
 			continue;
 		}
 		if (raw.startsWith("/")) {
-			let current = stack.pop();
-			while (current?.chained) current = stack.pop();
+			const current = stack.pop();
 			if (!current || current.node.expression.name !== raw.slice(1).trim())
 				throw new Error(`Parse error: mismatched ${raw}`);
 			if (current.inverted) [current.node.body, current.node.inverse] = [current.node.inverse, current.node.body];

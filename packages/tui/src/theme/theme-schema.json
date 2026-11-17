@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (all required except thinkingMax and assistantMessageText)",
+			"description": "Theme color definitions (all required except thinkingMax)",
 			"required": [
 				"accent",
 				"border",
@@ -142,10 +142,6 @@
 				"text": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Default text color (usually empty string)"
-				},
-				"assistantMessageText": {
-					"$ref": "#/$defs/colorValue",
-					"description": "Assistant paragraph prose color (optional; empty string or omitted keeps the terminal default foreground)"
 				},
 				"thinkingText": {
 					"$ref": "#/$defs/colorValue",

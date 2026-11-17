@@ -1,6 +1,5 @@
 import * as path from "node:path";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { validateAgentToolArguments } from "./tool-arguments";
+import { type AssistantMessage, validateToolArguments } from "@oh-my-pi/pi-ai";
 import type {
 	AgentContext,
 	AgentLoopConfig,
@@ -713,10 +712,15 @@ export class SpeculativeOperationCoordinator {
 		}
 		let validatedArgs: Record<string, unknown>;
 		try {
-			validatedArgs = validateAgentToolArguments(tool, toolCall);
+			validatedArgs = validateToolArguments(tool, toolCall);
 		} catch {
-			this.ineligible(toolCall, "tool arguments are not valid", source, parentToolCallId);
-			return undefined;
+			// Lenience covers schema mismatches; a parse failure has no args to hand over.
+			if (!tool.lenientArgValidation || "__parseError" in toolCall.arguments) {
+				this.ineligible(toolCall, "tool arguments are not valid", source, parentToolCallId);
+				return undefined;
+			}
+			validatedArgs = { ...toolCall.arguments };
+			delete validatedArgs.__rawJson;
 		}
 		let executionArgs: Record<string, unknown>;
 		try {

@@ -7,19 +7,10 @@ import {
 	OPENAI_HEADERS,
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { parseImageMetadata, readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
-import { applySessionHeader } from "../providers/inference-headers";
-import {
-	errorMessage,
-	ImageApiError,
-	modelHeaders,
-	resolveOpenAIImageSize,
-	sniffBase64ImageMimeType,
-	toDataUrl,
-	usageFromWire,
-} from "./shared";
+import { errorMessage, ImageApiError, modelHeaders, resolveOpenAIImageSize, toDataUrl, usageFromWire } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -74,7 +65,6 @@ async function headers(
 	const result = new Headers(await modelHeaders(carrier, signal));
 	result.set("Content-Type", "application/json");
 	result.set("Authorization", `Bearer ${key}`);
-	applySessionHeader(result, carrier.compat, sessionId);
 	if (carrier.api === "openai-codex-responses" || carrier.provider === "openai-codex") {
 		const accountId = getCodexAccountId(key);
 		result.delete("x-api-key");
@@ -96,9 +86,10 @@ function collectResponse(response: HostedResponse): ImageGenerationResult {
 	const texts: string[] = [];
 	for (const output of response.output ?? []) {
 		if (output.type === "image_generation_call" && output.result) {
+			const bytes = Buffer.from(output.result, "base64");
 			images.push({
 				data: output.result,
-				mimeType: sniffBase64ImageMimeType(output.result) ?? "image/webp",
+				mimeType: parseImageMetadata(bytes)?.mimeType ?? "image/webp",
 				...(output.size ? { size: output.size } : {}),
 				...(output.quality ? { quality: output.quality } : {}),
 			});

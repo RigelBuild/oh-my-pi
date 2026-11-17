@@ -591,12 +591,10 @@ fn is_rake_keep_line(trimmed: &str) -> bool {
 			"passed"
 				| "failed"
 				| "error"
-				| "fail"
-				| "ok"
+				| "fail" | "ok"
 				| "finished"
 				| "assertion"
-				| "test"
-				| "failure"
+				| "test" | "failure"
 		)
 	})
 }

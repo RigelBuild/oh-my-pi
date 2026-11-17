@@ -11,7 +11,7 @@
  */
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { appleFmAvailability, appleFmCancel, appleFmGenerate } from "@oh-my-pi/pi-natives";
-import { parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import { parseStreamingJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
@@ -26,7 +26,7 @@ import type {
 	ToolChoice,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
-import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
+import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { decodeFoundationModelsArguments, toFoundationModelsSchema, toolWireSchema } from "../utils/schema";
 import { transformMessages } from "./transform-messages";
@@ -98,7 +98,6 @@ const CONTENT_BLOCKED_CODES: Record<string, true> = { guardrail_violation: true,
 
 type ToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }> & {
 	[kStreamingPartialJson]?: string;
-	[kStreamingLastParseLen]?: number;
 };
 
 /** Probes whether the on-device model can generate on this machine. */
@@ -343,13 +342,8 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 						}
 						const delta = event.arguments ?? "";
 						const block = output.content[index] as ToolCallBlock;
-						const partialJson = (block[kStreamingPartialJson] ?? "") + delta;
-						block[kStreamingPartialJson] = partialJson;
-						const throttled = parseStreamingJsonThrottled(partialJson, block[kStreamingLastParseLen] ?? 0);
-						if (throttled) {
-							block.arguments = throttled.value;
-							block[kStreamingLastParseLen] = throttled.parsedLen;
-						}
+						block[kStreamingPartialJson] = (block[kStreamingPartialJson] ?? "") + delta;
+						block.arguments = parseStreamingJson<Record<string, unknown>>(block[kStreamingPartialJson]);
 						stream.push({ type: "toolcall_delta", contentIndex: index, delta, partial: output });
 						firstTokenTime ??= performance.now();
 						break;

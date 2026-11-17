@@ -249,9 +249,7 @@ interface DisplayBraceNode {
 
 function classifySourceBraces(source: string): boolean[] {
 	const objects: boolean[] = [];
-	// Whether the current statement has seen `class`/`function`/`switch`, whose
-	// next `{` opens a block. A flag instead of a word list keeps each brace O(1).
-	let statementDeclaresBlock = false;
+	const statementWords: string[] = [];
 	let previousToken = "";
 	let previousWord = "";
 	let regexAllowed = true;
@@ -289,7 +287,7 @@ function classifySourceBraces(source: string): boolean[] {
 		if (isIdentifierStart(char)) {
 			const end = scanIdentifier(source, index);
 			const word = source.slice(index, end);
-			if (word === "class" || word === "function" || word === "switch") statementDeclaresBlock = true;
+			statementWords.push(word);
 			previousWord = word;
 			previousToken = word;
 			regexAllowed = REGEX_PREFIX_WORDS[word] === true;
@@ -309,7 +307,7 @@ function classifySourceBraces(source: string): boolean[] {
 				previousToken === ")" ||
 				previousToken === "}" ||
 				BLOCK_BRACE_WORDS[previousWord] === true ||
-				statementDeclaresBlock;
+				statementWords.some(word => word === "class" || word === "function" || word === "switch");
 			const isObject =
 				!isBlock &&
 				(previousToken === "=" ||
@@ -321,7 +319,7 @@ function classifySourceBraces(source: string): boolean[] {
 					previousToken === "" ||
 					OBJECT_PREFIX_WORDS[previousWord] === true);
 			objects.push(isObject);
-			if (isBlock) statementDeclaresBlock = false;
+			if (isBlock) statementWords.length = 0;
 			previousToken = "{";
 			previousWord = "";
 			regexAllowed = true;
@@ -336,7 +334,7 @@ function classifySourceBraces(source: string): boolean[] {
 			continue;
 		}
 		if (char === ";") {
-			statementDeclaresBlock = false;
+			statementWords.length = 0;
 			previousToken = ";";
 			previousWord = "";
 			regexAllowed = true;

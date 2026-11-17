@@ -8,8 +8,6 @@ use crate::desktop::{
 	types::DesktopWindow,
 };
 
-mod menus;
-
 pub struct AtSpiAx {
 	rt:         Runtime,
 	connection: atspi::AccessibilityConnection,
@@ -26,6 +24,10 @@ pub struct AtSpiWindow {
 	/// Screen and window-relative origins differ, so `window.x`/`window.y` are
 	/// global compositor coordinates. False also covers a window genuinely at
 	/// the global origin, which is indistinguishable over AT-SPI.
+	#[cfg_attr(
+		not(any(feature = "wayland-pipewire", test)),
+		expect(dead_code, reason = "only read by the pipewire capture crop")
+	)]
 	pub position_known: bool,
 }
 
@@ -170,8 +172,7 @@ impl AtSpiAx {
 				if dbus
 					.get_connection_unix_process_id(bus_name.clone().into())
 					.await
-					.ok()
-					== Some(pid)
+					.ok() == Some(pid)
 				{
 					matches.push(app);
 				}
@@ -252,8 +253,7 @@ impl AtSpiAx {
 		root: ObjectRefOwned,
 		depth: u8,
 	) -> Result<Option<ObjectRefOwned>, String> {
-		// Chromium/Electron frames report children that are the AT-SPI null
-		// object.
+		// Chromium/Electron frames report children that are the AT-SPI null object.
 		if depth > 40 || root.is_null() {
 			return Ok(None);
 		}
@@ -278,7 +278,7 @@ impl AtSpiAx {
 }
 
 fn atspi_window_id(frame: &ObjectRefOwned) -> String {
-	let name = frame.name().map_or_default(ToString::to_string);
+	let name = frame.name().map(ToString::to_string).unwrap_or_default();
 	format!("atspi:{name}:{}", frame.path())
 }
 

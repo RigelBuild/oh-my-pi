@@ -507,19 +507,15 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const items: Settings[] = [];
 	if (userConfig && userConfigPath) {
 		items.push({
-			path: userConfigPath,
-			data: userConfig,
-			level: "user",
+			...userConfig,
 			_source: createSourceMeta(PROVIDER_ID, userConfigPath, "user"),
-		});
+		} as Settings);
 	}
 	if (projectConfig) {
 		items.push({
-			path: projectConfigPath,
-			data: projectConfig,
-			level: "project",
+			...projectConfig,
 			_source: createSourceMeta(PROVIDER_ID, projectConfigPath, "project"),
-		});
+		} as Settings);
 	}
 
 	return { items, warnings };

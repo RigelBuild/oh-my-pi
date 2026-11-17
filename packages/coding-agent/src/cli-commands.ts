@@ -53,11 +53,6 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.agentsHelp,
 	},
 	{
-		name: "anonymize",
-		load: () => import("./commands/anonymize").then(m => m.default),
-		help: commandHelp.anonymizeHelp,
-	},
-	{
 		name: "bench",
 		load: () => import("./commands/bench").then(m => m.default),
 		help: commandHelp.benchHelp,

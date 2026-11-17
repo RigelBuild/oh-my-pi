@@ -32,7 +32,6 @@ import type {
 	AgentTypeStats,
 	AggregatedStats,
 	CostTimeSeriesPoint,
-	DailyActivityPoint,
 	FolderStats,
 	ModelPerformancePoint,
 	ModelStats,
@@ -180,7 +179,7 @@ const EXACT_DIRTY_SESSIONS = 512;
  */
 export function ensureRollupSchema(database: Database): void {
 	const readMeta = (key: string) =>
-		(database.query("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined)?.value;
+		(database.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined)?.value;
 	const fresh = readMeta(ROLLUP_VERSION_KEY) !== ROLLUP_VERSION;
 	// Steady state touches no schema: DDL on every open would contend with
 	// other omp processes writing the same database.
@@ -274,7 +273,7 @@ export function ensureRollupSchema(database: Database): void {
 				}
 			}
 			database
-				.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+				.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 				.run(TRIGGER_VERSION_KEY, TRIGGER_VERSION);
 			if (fresh) {
 				database.run(`
@@ -287,7 +286,7 @@ export function ensureRollupSchema(database: Database): void {
 				SELECT DISTINCT session_file FROM messages UNION SELECT DISTINCT session_file FROM tool_calls
 			`);
 				database
-					.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+					.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 					.run(ROLLUP_VERSION_KEY, ROLLUP_VERSION);
 			}
 		})
@@ -308,7 +307,7 @@ export function getRollupStatus(): RollupStatus {
 	const database = currentDb();
 	if (!database) return { dirtyHours: 0, dirtySessions: 0 };
 	return database
-		.query(
+		.prepare(
 			"SELECT (SELECT COUNT(*) FROM rollup_dirty) AS dirtyHours, (SELECT COUNT(*) FROM session_dirty) AS dirtySessions",
 		)
 		.get() as RollupStatus;
@@ -323,25 +322,25 @@ export function refreshRollupBatch(limit: number): number {
 	const database = currentDb();
 	if (!database) return 0;
 	const run = database.transaction(() => {
-		const buckets = database.query("SELECT bucket FROM rollup_dirty ORDER BY bucket DESC LIMIT ?").all(limit) as {
+		const buckets = database.prepare("SELECT bucket FROM rollup_dirty ORDER BY bucket DESC LIMIT ?").all(limit) as {
 			bucket: number;
 		}[];
-		const clearMessages = database.query("DELETE FROM message_rollup WHERE bucket = ?");
-		const clearTools = database.query("DELETE FROM tool_rollup WHERE bucket = ?");
-		const fillMessages = database.query(`
+		const clearMessages = database.prepare("DELETE FROM message_rollup WHERE bucket = ?");
+		const clearTools = database.prepare("DELETE FROM tool_rollup WHERE bucket = ?");
+		const fillMessages = database.prepare(`
 			INSERT INTO message_rollup (${MESSAGE_ROLLUP_COLUMNS})
 			SELECT ${messageFacts("?1", "")}
 			FROM messages WHERE timestamp >= ?1 AND timestamp < ?1 + ${HOUR_MS}
 			GROUP BY ${MESSAGE_DIMENSIONS}
 		`);
-		const fillTools = database.query(`
+		const fillTools = database.prepare(`
 			INSERT INTO tool_rollup (${TOOL_ROLLUP_COLUMNS})
 			SELECT ${toolFacts("?1")}
 			FROM tool_calls t ${TOOL_JOIN}
 			WHERE t.timestamp >= ?1 AND t.timestamp < ?1 + ${HOUR_MS}
 			GROUP BY t.tool_name, t.model, t.provider
 		`);
-		const clean = database.query("DELETE FROM rollup_dirty WHERE bucket = ?");
+		const clean = database.prepare("DELETE FROM rollup_dirty WHERE bucket = ?");
 		for (const { bucket } of buckets) {
 			clearMessages.run(bucket);
 			clearTools.run(bucket);
@@ -352,16 +351,16 @@ export function refreshRollupBatch(limit: number): number {
 
 		// Transcripts are cheap (indexed by session_file); roll many per hour-batch.
 		const sessions = database
-			.query("SELECT session_file FROM session_dirty LIMIT ?")
+			.prepare("SELECT session_file FROM session_dirty LIMIT ?")
 			.all(limit * SESSIONS_PER_HOUR) as { session_file: string }[];
-		const clearSession = database.query("DELETE FROM session_rollup WHERE session_file = ?");
-		const fillSession = database.query(`
+		const clearSession = database.prepare("DELETE FROM session_rollup WHERE session_file = ?");
+		const fillSession = database.prepare(`
 			INSERT INTO session_rollup (${SESSION_ROLLUP_COLUMNS})
 			SELECT ${sessionFacts("m.")}
 			FROM messages m WHERE m.session_file = ?1
 			GROUP BY m.session_file
 		`);
-		const cleanSession = database.query("DELETE FROM session_dirty WHERE session_file = ?");
+		const cleanSession = database.prepare("DELETE FROM session_dirty WHERE session_file = ?");
 		for (const { session_file } of sessions) {
 			clearSession.run(session_file);
 			fillSession.run(session_file);
@@ -394,7 +393,7 @@ export async function refreshRollups(opts?: RefreshOptions): Promise<void> {
 		const elapsed = performance.now() - started;
 		if (elapsed < REFRESH_TARGET_MS / 2) batch = Math.min(REFRESH_MAX_BATCH, batch * 2);
 		else if (elapsed > REFRESH_TARGET_MS * 2) batch = Math.max(1, Math.floor(batch / 2));
-		if (opts?.onProgress) opts.onProgress(getRollupStatus().dirtyHours);
+		opts?.onProgress?.(getRollupStatus().dirtyHours);
 		await Bun.sleep(0);
 	}
 }
@@ -417,7 +416,7 @@ interface Source {
 
 function dirtyIsSmall(database: Database): boolean {
 	const row = database
-		.query(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM rollup_dirty LIMIT ${EXACT_DIRTY_LIMIT + 1})`)
+		.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM rollup_dirty LIMIT ${EXACT_DIRTY_LIMIT + 1})`)
 		.get() as {
 		n: number;
 	};
@@ -509,8 +508,7 @@ function queryMessages<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: num
 	if (!database) return [];
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = messageSource(database, normalizeCutoff(window.cutoff), fine);
-	// `query` caches the compiled statement: the SQL varies only over a small set of shapes.
-	return database.query(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
+	return database.prepare(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
 }
 
 function queryTools<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number }, select: string, tail = ""): T[] {
@@ -518,7 +516,7 @@ function queryTools<T>(window: Pick<RangeWindow, "cutoff"> & { bucketMs?: number
 	if (!database) return [];
 	const fine = window.bucketMs !== undefined && window.bucketMs < HOUR_MS;
 	const source = toolSource(database, normalizeCutoff(window.cutoff), fine);
-	return database.query(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
+	return database.prepare(`SELECT ${select} FROM (${source.sql}) f ${tail}`).all(...source.params) as T[];
 }
 
 function normalizeCutoff(cutoff: number | null | undefined): number | null {
@@ -806,25 +804,6 @@ export function getProviderHourlyBurn(cutoff: number | null = null): ProviderHou
 	}));
 }
 
-/**
- * Per-local-day request/token/cost totals since `cutoff`, oldest first, read
- * from the hourly rollup. Returns null when the local UTC offset is not a whole
- * hour (now or at `cutoff`), since hourly buckets then straddle local midnight,
- * or while the dirty backlog is too large for exact reads; callers then
- * aggregate the raw rows instead.
- */
-export function getDailyActivityFromRollup(cutoff: number): DailyActivityPoint[] | null {
-	if (new Date().getTimezoneOffset() % 60 !== 0 || new Date(cutoff).getTimezoneOffset() % 60 !== 0) return null;
-	const database = currentDb();
-	if (!database || !dirtyIsSmall(database)) return null;
-	return queryMessages<{ day: string; cost: number; requests: number; total_tokens: number | null }>(
-		{ cutoff },
-		`date(f.bucket / 1000, 'unixepoch', 'localtime') AS day, TOTAL(f.cost_total) AS cost,
-		 SUM(f.requests) AS requests, SUM(f.total_tokens) AS total_tokens`,
-		"GROUP BY day ORDER BY day",
-	).map(row => ({ day: row.day, cost: row.cost, requests: row.requests, totalTokens: row.total_tokens ?? 0 }));
-}
-
 /** Tokens/cost per bucket per provider. */
 export function getProviderTimeSeries({ cutoff, bucketMs }: RangeWindow): ProviderTimeSeriesPoint[] {
 	return queryMessages<{
@@ -876,7 +855,7 @@ export function getSessionRollups(): SessionRollupRow[] {
 	const database = currentDb();
 	if (!database) return [];
 	const { n } = database
-		.query(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM session_dirty LIMIT ${EXACT_DIRTY_SESSIONS + 1})`)
+		.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM session_dirty LIMIT ${EXACT_DIRTY_SESSIONS + 1})`)
 		.get() as { n: number };
 	const exact = n <= EXACT_DIRTY_SESSIONS;
 	const parts = [
@@ -890,7 +869,7 @@ export function getSessionRollups(): SessionRollupRow[] {
 		);
 	}
 	return database
-		.query(
+		.prepare(
 			`SELECT session_file AS sessionFile, requests, started_at AS startedAt, ended_at AS endedAt,
 			 total_tokens AS totalTokens, cost_total AS costTotal, unpriced AS unpricedRequests, models,
 			 tool_calls AS toolCalls

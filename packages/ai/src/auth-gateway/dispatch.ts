@@ -11,7 +11,7 @@ import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
-import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
+import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
@@ -19,31 +19,6 @@ import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AgentCaller, AuthGatewayServerOptions } from "./types";
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
-
-export interface FailoverContext {
-	/** The inbound request, as an opaque token; the fork reads no identity from it. */
-	readonly req: Request;
-	/** `candidateKey` of every candidate tried or skipped so far, including the current one. */
-	readonly tried: ReadonlySet<string>;
-	/** Aborted once the gateway stops waiting for `next`: request abort, deadline, or request end. */
-	readonly signal?: AbortSignal;
-}
-
-export interface CandidateFailoverOptions {
-	/** The candidate after `ctx.tried`, without side effects; `undefined` if none. A rejection means none. */
-	next(modelId: string, ctx: FailoverContext): Promise<Model<Api> | undefined>;
-	/**
-	 * Called once per failed attempt that the classifier marks eligible for failover, and for setup
-	 * failures. Never for a skipped candidate, an abort, or a terminal stop such as a 400. Must not throw.
-	 */
-	onFailure(model: Model<Api>, failure: UpstreamFailure, ctx: FailoverContext): void;
-	/**
-	 * Request deadline in ms from request start; default 120_000. On expiry no
-	 * attempt starts and a running credential setup is aborted (502 or SSE error),
-	 * with or without a follower. A started stream is never cut by it.
-	 */
-	deadlineMs?: number;
-}
 
 /** What the gateway's routes need, whatever transport carries the requests. */
 export interface AuthGatewayRouteOptions {
@@ -67,12 +42,8 @@ export interface AuthGatewayRouteOptions {
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
-	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
-	excludeProviders?: ReadonlySet<string>;
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
-	/** Chat routes retry an eligible pre-output failure on the next candidate, if any; unset keeps one attempt. */
-	candidateFailover?: CandidateFailoverOptions;
 }
 
 /** The HTTP server's options: the routes' plus its listener and inbound auth. */
@@ -117,11 +88,6 @@ export function resolveGatewayAccount(
 	return `key:${Bun.hash(apiKey).toString(36)}`;
 }
 
-/** A credential setup failure, tagged so a caller can tell a missing credential from a broken store. */
-export interface GatewaySetupFailure extends GatewayErrorClassification {
-	readonly setupReason: "no_credential" | "store_error";
-}
-
 /**
  * Resolve the credential for one request from broker-backed storage.
  *
@@ -137,21 +103,20 @@ export async function resolveGatewayApiKey(
 	sessionId: string,
 	signal: AbortSignal,
 	peer: string,
-): Promise<ResolvedApiKey | GatewaySetupFailure> {
+): Promise<ResolvedApiKey | GatewayErrorClassification> {
 	let apiKey: ResolvedApiKey | undefined;
 	try {
 		apiKey = await storage.keys.getWithCredential(model.provider, sessionId, modelKeyOptions(model, signal));
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return { ...classified, setupReason: "store_error" };
+		return classified;
 	}
 	if (apiKey) return apiKey;
 	return {
 		status: 401,
 		type: "authentication_error",
 		message: `No credential available for provider ${model.provider}`,
-		setupReason: "no_credential",
 	};
 }
 
@@ -238,11 +203,9 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  *   to a sibling (usage-limit block vs credential invalidation by error class).
  *
  * `lastKey` tracks the most recent bearer so the switch step invalidates the
- * credential that actually failed; a retry context's `previousKey` wins, since
- * concurrent operations sharing one resolver (split judgment chunks) each know
- * the bearer they sent. `onResolvedKey` observes every rotation; routes that
- * retain provider session state use it to re-key the account lease, one-shot
- * routes pass `undefined`.
+ * credential that actually failed. `onResolvedKey` observes every rotation;
+ * routes that retain provider session state use it to re-key the account
+ * lease, one-shot routes pass `undefined`.
  */
 export function buildGatewayApiKeyResolver(
 	storage: AuthStorage,
@@ -255,7 +218,7 @@ export function buildGatewayApiKeyResolver(
 	onResolvedKey?: (apiKey: string) => void,
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return async ({ lastChance, error, signal }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
@@ -276,7 +239,7 @@ export function buildGatewayApiKeyResolver(
 			model,
 			sessionId,
 			model.provider,
-			previousKey ?? lastKey,
+			lastKey,
 			error,
 			sig,
 			format,

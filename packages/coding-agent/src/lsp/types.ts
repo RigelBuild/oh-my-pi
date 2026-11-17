@@ -438,6 +438,7 @@ export interface LspClient {
 	dynamicCapabilityRegistrations?: Map<string, string>;
 	openFiles: Map<string, OpenFile>;
 	pendingRequests: Map<number | string, PendingRequest>;
+	messageBuffer: Uint8Array;
 	isReading: boolean;
 	/** Lifecycle state: "connecting" until initialize completes, then "ready"; "error" on init failure or reader death. */
 	status: "connecting" | "ready" | "error";

@@ -1,10 +1,6 @@
 import { tryParseJson } from "@oh-my-pi/pi-utils";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, formatIsoDate, htmlToBasicMarkdown, loadPage } from "./types";
-import { isNonJsonApiResponse, PlatformProbeCache } from "./utils";
-
-/** Forum bases known (not) to serve the Discourse JSON API; skips doomed API calls elsewhere. */
-const discourseBases = new PlatformProbeCache();
 
 interface DiscourseUser {
 	username?: string;
@@ -117,23 +113,16 @@ export const handleDiscourse: SpecialHandler = async (
 
 		const basePath = normalizeBasePath(topicMatch?.basePath ?? postMatch?.basePath ?? "");
 		const baseUrl = `${parsed.origin}${basePath}`;
-		if ((await discourseBases.get(baseUrl)) === false) return null;
 
 		let requestedPost: DiscoursePost | null = null;
 		let topicId = topicMatch?.topicId ?? null;
 
 		if (!topicId && postMatch) {
 			const postResult = await loadPage(buildPostUrl(baseUrl, postMatch.postId), { timeout, signal });
-			if (!postResult.ok) {
-				if (isNonJsonApiResponse(postResult)) discourseBases.record(baseUrl, false);
-				return null;
-			}
+			if (!postResult.ok) return null;
 
 			const postData = tryParseJson<DiscoursePostResponse>(postResult.content);
-			if (!postData) {
-				discourseBases.record(baseUrl, false);
-				return null;
-			}
+			if (!postData) return null;
 
 			if (!postData.topic_id) return null;
 			topicId = String(postData.topic_id);
@@ -143,21 +132,13 @@ export const handleDiscourse: SpecialHandler = async (
 		if (!topicId) return null;
 
 		const topicResult = await loadPage(buildTopicUrl(baseUrl, topicId), { timeout, signal });
-		if (!topicResult.ok) {
-			if (isNonJsonApiResponse(topicResult)) discourseBases.record(baseUrl, false);
-			return null;
-		}
+		if (!topicResult.ok) return null;
 
 		const topic = tryParseJson<DiscourseTopic>(topicResult.content);
-		if (!topic) {
-			discourseBases.record(baseUrl, false);
-			return null;
-		}
+		if (!topic) return null;
 
 		const title = topic.title || topic.fancy_title;
 		if (!title) return null;
-		// Only negatives gate requests; a positive overwrites a negative a concurrent request recorded.
-		discourseBases.record(baseUrl, true);
 
 		const fetchedAt = new Date().toISOString();
 

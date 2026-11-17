@@ -209,28 +209,9 @@ function jsonReplacer(_key: string, value: unknown): unknown {
 	return value;
 }
 
-// Values visited by the Error pre-scan before falling back to the replacer.
-const ERROR_SCAN_BUDGET = 128;
-
-/**
- * Whether `value` may contain an {@link Error} that {@link jsonReplacer} must
- * unwrap. Walks what `JSON.stringify` serializes (arrays and own enumerable
- * keys); objects with a `toJSON` other than `Date` may return an Error, and an
- * exhausted budget answers true.
- */
-function mayContainError(root: unknown): boolean {
-	const stack: unknown[] = [root];
-	let budget = ERROR_SCAN_BUDGET;
-	while (stack.length > 0) {
-		const value = stack.pop();
-		if (value === null || typeof value !== "object") continue;
-		if (value instanceof Error) return true;
-		if (--budget < 0) return true;
-		if (value instanceof Date) continue;
-		if ("toJSON" in value && typeof value.toJSON === "function") return true;
-		for (const child of Object.values(value)) stack.push(child);
-	}
-	return false;
+interface NormalizedLogInfo extends Record<string, unknown> {
+	level: LogLevel;
+	message: unknown;
 }
 
 function padTimestampPart(value: number, width = 2): string {
@@ -251,30 +232,33 @@ function formatLocalTimestamp(date: Date): string {
 
 const FORMAT_TOKEN_PATTERN = /%[scdjifoO%]/;
 
-/** Serialize one log record: timestamp, level, pid, message, then context fields. */
-function formatLogRecord(
+function normalizeLogInfo(
 	level: LogLevel,
 	message: string,
 	context: Record<string, unknown> | undefined,
-	timestamp: string,
-): string {
+): NormalizedLogInfo {
 	const metadata =
 		!FORMAT_TOKEN_PATTERN.test(message) && context !== null && typeof context === "object" ? context : undefined;
+	const info = Object.assign({}, metadata, { level, message }) as NormalizedLogInfo;
+	if (metadata?.message) info.message = `${message} ${metadata.message}`;
+	if (metadata?.stack) info.stack = metadata.stack;
+	if (metadata?.cause) info.cause = metadata.cause;
+	return info;
+}
+
+function formatLogInfo(info: NormalizedLogInfo): string {
+	const timestamp = formatLocalTimestamp(new Date());
+	info.timestamp = timestamp;
 	const entry: Record<string, unknown> = {
 		timestamp,
-		level,
+		level: info.level,
 		pid: process.pid,
-		message: metadata?.message ? `${message} ${metadata.message}` : message,
+		message: info.message,
 	};
-	if (metadata) {
-		for (const key of Object.keys(metadata)) {
-			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = metadata[key];
-		}
-		// An Error passed as the context carries these as non-enumerable fields.
-		if (metadata.stack) entry.stack = metadata.stack;
-		if (metadata.cause) entry.cause = metadata.cause;
+	for (const [key, value] of Object.entries(info)) {
+		if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = value;
 	}
-	return mayContainError(entry) ? JSON.stringify(entry, jsonReplacer) : JSON.stringify(entry);
+	return JSON.stringify(entry, jsonReplacer) as string;
 }
 
 /** Longest a buffered file record waits before it is written. */
@@ -377,9 +361,9 @@ function emitLocally(level: LogLevel, message: string, context: Record<string, u
 	const rank = LOG_LEVEL_RANK[level];
 	const file = rank <= transports.fileLevelRank ? transports.file : undefined;
 	if (!file && !transports.console) return;
-	const now = new Date();
-	const line = formatLogRecord(level, message, context, formatLocalTimestamp(now));
-	file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting, localDay(now));
+	const info = normalizeLogInfo(level, message, context);
+	const line = formatLogInfo(info);
+	file?.write(line, rank <= IMMEDIATE_FLUSH_RANK || exiting);
 	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
 

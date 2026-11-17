@@ -1,8 +1,6 @@
-import type { SessionHeader, SessionState } from "@oh-my-pi/pi-wire";
 import { LogOut, PanelRight } from "lucide-react";
 import type { ReactNode } from "react";
-import { memo } from "react";
-import type { ConnectionPhase } from "../../lib/client";
+import type { ConnectionPhase, GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
 import { OmpMark } from "./OmpMark";
 import { ThemeToggle } from "./ThemeToggle";
@@ -16,27 +14,15 @@ const PHASE_LABEL: Record<ConnectionPhase, string> = {
 };
 
 export interface HeaderBarProps {
-	header: SessionHeader | null;
-	state: SessionState | null;
-	phase: ConnectionPhase;
-	readOnly: boolean;
+	snapshot: GuestSnapshot;
 	subCount: number;
 	railOpen: boolean;
 	onToggleRail(): void;
 	onLeave(): void;
 }
 
-/** Memoized on its snapshot fields, so streaming frames that leave them untouched skip it. */
-export const HeaderBar = memo(function HeaderBar({
-	header,
-	state,
-	phase,
-	readOnly,
-	subCount,
-	railOpen,
-	onToggleRail,
-	onLeave,
-}: HeaderBarProps): ReactNode {
+export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave }: HeaderBarProps): ReactNode {
+	const { header, state, phase, readOnly } = snapshot;
 	const title = header?.title ?? state?.sessionName ?? "session";
 	const usage = state?.contextUsage;
 	let pct: number | null = null;
@@ -116,4 +102,4 @@ export const HeaderBar = memo(function HeaderBar({
 			</div>
 		</header>
 	);
-});
+}

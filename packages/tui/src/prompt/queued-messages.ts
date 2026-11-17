@@ -1,7 +1,7 @@
 import { Container } from "../tui";
 import { Spacer } from "../components/spacer";
 import { TruncatedText } from "../components/truncated-text";
-import { formatKeyHint, formatTooltipKey } from "../key-hint-format";
+import { formatKeyHint } from "../key-hint-format";
 import type { KeyId } from "../keys";
 import { kbd, node, text } from "../native/describe";
 import type { NativeNode, NativeUiEvent } from "../native/node";
@@ -39,10 +39,8 @@ export class QueuedMessagesBand extends Container {
 				this.addChild(new TruncatedText(theme.fg("dim", `  ${index + 1}. ${message}`), 1, 0));
 			}
 		}
-		this.addChild(
-			new TruncatedText(theme.fg("dim", `  ${theme.tree.hook} ${formatKeyHint(dequeueKey)} to edit`), 1, 0),
-		);
-		const editTitle = `Edit  ${formatTooltipKey(dequeueKey)}`;
+		const editKey = formatKeyHint(dequeueKey);
+		this.addChild(new TruncatedText(theme.fg("dim", `  ${theme.tree.hook} ${editKey} to edit`), 1, 0));
 
 		const count = groups.reduce((sum, group) => sum + group.messages.length, 0);
 		const pills: NativeNode[] = [];
@@ -72,7 +70,7 @@ export class QueuedMessagesBand extends Container {
 							role: "omp.queue.edit",
 							gap: "xs",
 							align: "center",
-							title: editTitle,
+							title: `Edit  ${editKey}`,
 							actions: { click: "queue.edit" },
 						},
 						[kbd(dequeueKey), text("Edit")],

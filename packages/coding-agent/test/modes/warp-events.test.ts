@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import * as terminalCapabilities from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
@@ -19,7 +19,6 @@ import { SILENT_ABORT_MARKER, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } 
 import { type ActiveTerminalHarness, startActiveTerminal } from "../helpers/active-terminal";
 
 const originalTerminalId = terminalCapabilities.TERMINAL.id;
-const originalTmux = Bun.env.TMUX;
 const originalProtocolVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
 const project = path.basename(process.cwd());
 const OSC_PREFIX = "\x1b]777;notify;warp://cli-agent;";
@@ -38,16 +37,6 @@ function restoreProtocolEnvironment(): void {
 	} else {
 		process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = originalProtocolVersion;
 	}
-}
-
-function setTmuxSession(active: boolean): void {
-	if (active) Bun.env.TMUX = "/tmp/tmux-test/default,1,0";
-	else delete Bun.env.TMUX;
-}
-
-function restoreTmuxEnvironment(): void {
-	if (originalTmux === undefined) delete Bun.env.TMUX;
-	else Bun.env.TMUX = originalTmux;
 }
 
 function createHandlers(): Map<string, RegisteredHandler> {
@@ -103,13 +92,8 @@ function bridgeContext(sessionId = "session-123", cwd = process.cwd()): Extensio
 	} as never as ExtensionContext;
 }
 
-beforeEach(() => {
-	delete Bun.env.TMUX;
-});
-
 afterEach(() => {
 	vi.restoreAllMocks();
-	restoreTmuxEnvironment();
 	restoreProtocolEnvironment();
 });
 
@@ -117,7 +101,7 @@ describe("Warp CLI-agent events", () => {
 	it("emits an exact OSC 777 stop event", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 
 		emitter?.emit({ event: "stop" });
@@ -147,7 +131,7 @@ describe("Warp CLI-agent events", () => {
 		it(`rings tmux outer BEL for attention event ${eventName}`, () => {
 			enableWarpProtocol();
 			const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-			setTmuxSession(true);
+			vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(true);
 			const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 
 			emitter?.emit({ event: eventName });
@@ -164,7 +148,7 @@ describe("Warp CLI-agent events", () => {
 		it(`does not ring tmux outer BEL for non-attention event ${eventName}`, () => {
 			enableWarpProtocol();
 			const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-			setTmuxSession(true);
+			vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(true);
 			const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 
 			emitter?.emit({ event: eventName });
@@ -180,7 +164,8 @@ describe("Warp CLI-agent events", () => {
 	it("leaves direct-terminal OSC unchanged without outer BEL after OSC terminator", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
+		const wrap = vi.spyOn(terminalCapabilities, "wrapTmuxPassthrough");
 		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 
 		for (const eventName of [...attentionEvents, ...nonAttentionEvents]) {
@@ -191,12 +176,13 @@ describe("Warp CLI-agent events", () => {
 			expect(written.endsWith("\x07")).toBe(true);
 			// Exactly one trailing BEL (OSC terminator), not an extra attention BEL.
 			expect(written.endsWith("\x07\x07")).toBe(false);
+			expect(wrap).not.toHaveBeenCalled();
 		}
 	});
 
 	it("creates an emitter from protocol version alone even when terminal id is base", () => {
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		enableWarpProtocol("base");
 
 		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
@@ -229,7 +215,7 @@ describe("Warp CLI-agent events", () => {
 	it("uses session cwd for envelope cwd and project", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const sessionCwd = "/tmp/session-project-root";
 		const sessionProject = path.basename(sessionCwd);
 
@@ -265,7 +251,7 @@ describe("Warp CLI-agent events", () => {
 	it("does not resubmit prompts for agent continuations", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const context = bridgeContext();
 		const sessionStart = handlers.get("session_start") as never as (
@@ -305,7 +291,7 @@ describe("Warp CLI-agent events", () => {
 	it("keeps the active query until queued follow-up begins", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const context = bridgeContext();
 		const sessionStart = handlers.get("session_start") as never as (
@@ -365,7 +351,7 @@ describe("Warp CLI-agent events", () => {
 	it("ignores agent-attributed user-role steers", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const context = bridgeContext();
 		const sessionStart = handlers.get("session_start") as never as (
@@ -400,7 +386,7 @@ describe("Warp CLI-agent events", () => {
 	it("treats user-attributed skill prompts as submissions", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const context = bridgeContext();
 		const sessionStart = handlers.get("session_start") as never as (
@@ -453,7 +439,7 @@ describe("Warp CLI-agent events", () => {
 	it("falls back to non-silent assistant errorMessage on empty stop responses", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const context = bridgeContext();
 		const sessionStart = handlers.get("session_start") as never as (
@@ -571,7 +557,7 @@ describe("Warp CLI-agent events", () => {
 	it("suppresses stop OSC when agent_end willContinue", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const context = bridgeContext();
 		const sessionStart = handlers.get("session_start") as never as (
@@ -625,7 +611,7 @@ describe("Warp CLI-agent events", () => {
 	it("caps prompt queries and stop responses at 200 Unicode code points without breaking JSON", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const context = bridgeContext();
 		const sessionStart = handlers.get("session_start") as never as (
@@ -659,7 +645,7 @@ describe("Warp CLI-agent events", () => {
 	it("rebuilds the emitter and resets prompt state after a session switch", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		let sessionId = "session-old";
 		const context = {
@@ -706,7 +692,7 @@ describe("Warp CLI-agent events", () => {
 	it("rebuilds the emitter and resets prompt state after a session branch", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		let sessionId = "session-old";
 		const context = {
@@ -753,7 +739,7 @@ describe("Warp CLI-agent events", () => {
 	it("maps approval requests to Warp permission requests", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-		setTmuxSession(false);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(false);
 		const handlers = createHandlers();
 		const sessionStart = handlers.get("session_start") as never as (
 			event: SessionStartEvent,
@@ -805,7 +791,7 @@ describe("Warp CLI-agent event routing", () => {
 		["tmux-wrapped", true],
 	] as const)("writes the %s OSC 777 through the active terminal, never straight to stdout", (_form, inTmux) => {
 		enableWarpProtocol();
-		setTmuxSession(inTmux);
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(inTmux);
 		harness = startActiveTerminal();
 		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
 

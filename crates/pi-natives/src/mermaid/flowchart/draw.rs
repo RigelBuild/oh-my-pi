@@ -328,7 +328,11 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 6] {
 	}
 	let label_canvas = draw_arrow_label(graph, edge);
 	let (path_canvas, lines_drawn, line_dirs) = draw_path(graph, &edge.path, edge.style);
-	let source_shape = graph.nodes.get(edge.from).map_or_default(|node| node.shape);
+	let source_shape = graph
+		.nodes
+		.get(edge.from)
+		.map(|node| node.shape)
+		.unwrap_or_default();
 	let box_start_canvas = draw_box_start(graph, &edge.path, source_shape);
 	let arrow_end_canvas = if edge.has_arrow_end {
 		match (lines_drawn.last(), line_dirs.last()) {
@@ -927,24 +931,15 @@ const fn is_border_char(c: char) -> bool {
 	matches!(
 		c,
 		'┌' | '┐'
-			| '└'
-			| '┘'
-			| '├'
-			| '┤'
-			| '┬'
-			| '┴'
-			| '┼'
-			| '│'
-			| '─'
-			| '╭'
-			| '╮'
-			| '╰'
-			| '╯'
-			| '+'
-			| '-'
-			| '|'
-			| '.'
-			| '\''
+			| '└' | '┘'
+			| '├' | '┤'
+			| '┬' | '┴'
+			| '┼' | '│'
+			| '─' | '╭'
+			| '╮' | '╰'
+			| '╯' | '+'
+			| '-' | '|'
+			| '.' | '\''
 			| ':'
 	)
 }

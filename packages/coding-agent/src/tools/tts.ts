@@ -18,7 +18,7 @@ import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 
-import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
+import { cfgTtsLocalVoice } from "../tts/settings";
 
 // Built-in voices per xAI Tier-1 docs (2026-05-16). xAI also accepts custom voice IDs,
 // so the schema does NOT enum-restrict voice_id; this constant only drives the description.
@@ -141,8 +141,7 @@ async function synthesizeLocal(
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
 	const voice = readLocalVoice(settingsInstance);
-	const speed = cfgTtsLocalSpeed.get(settingsInstance);
-	const audio = await ttsClient.synthesize(model.id, params.text, { voice, speed, signal });
+	const audio = await ttsClient.synthesize(model.id, params.text, { voice, signal });
 	if (!audio) {
 		return {
 			isError: true,

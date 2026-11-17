@@ -114,6 +114,4 @@ mod tests {
 	mod openai;
 	#[path = "qwen.rs"]
 	mod qwen;
-	#[path = "rank_table.rs"]
-	mod rank_table;
 }

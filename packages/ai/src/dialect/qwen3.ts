@@ -4,7 +4,6 @@ import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./qwen3.md" with { type: "text" };
 import { renderChatMlTranscript, renderToolResponseResults, stringifyJson } from "./rendering";
-import { TerminatorWait } from "./terminator-wait";
 import type {
 	DialectDefinition,
 	DialectRenderOptions,
@@ -33,7 +32,6 @@ export class Qwen3InbandScanner implements InbandScanner {
 	#name = "";
 	#started = false;
 	#thinking = "";
-	readonly #closeWait = new TerminatorWait();
 	readonly #parseThinking: boolean;
 
 	constructor(options: InbandScannerOptions = {}) {
@@ -42,15 +40,11 @@ export class Qwen3InbandScanner implements InbandScanner {
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
-		if (this.#closeWait.absorb(text)) return [];
-		this.#buffer = this.#closeWait.release(this.#buffer) + text;
-		const events = this.#consume(false);
-		if (this.#state === "tool" && this.#started) this.#closeWait.arm(TOOL_CLOSE, this.#buffer);
-		return events;
+		this.#buffer += text;
+		return this.#consume(false);
 	}
 
 	flush(): InbandScanEvent[] {
-		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#consume(true);
 	}
 
