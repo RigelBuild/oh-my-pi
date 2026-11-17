@@ -36,7 +36,6 @@ import {
 } from "../timeout";
 import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
 
-const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 const DEFAULT_SSE_RETRY_MS = 3_000;
 
 interface SSEResumeState {
@@ -65,6 +64,9 @@ async function waitForSSERetry(ms: number, signal: AbortSignal): Promise<void> {
 		signal.removeEventListener("abort", onAbort);
 	}
 }
+
+const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
+
 /**
  * Best-effort startup deadline for the optional Streamable HTTP GET SSE listener.
  *
@@ -202,9 +204,14 @@ export class HttpTransport implements MCPTransport {
 	}
 
 	/**
-	 * Start SSE listener for server-initiated messages.
-	 * Resolves once the SSE connection is established (or fails/unsupported).
-	 * Message reading continues in the background.
+	 * Start the optional GET SSE listener for server-initiated messages.
+	 *
+	 * Waits at most the startup budget so a server that never answers GET cannot hold
+	 * `connect()` (upstream #1460). When the budget expires the GET is NOT aborted: it
+	 * stays tracked on the connection, so `close()` aborts it, and when its headers
+	 * arrive they are attached if the connection is still current. Aborting it instead
+	 * would drop every server push that arrives after the budget. After the budget
+	 * nothing times the GET out: it lives until `close()` or a reconnect replaces the transport.
 	 */
 	async startSSEListener(): Promise<void> {
 		if (!this.#connected) return;
@@ -219,47 +226,38 @@ export class HttpTransport implements MCPTransport {
 			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
 
-		let response: Response | null;
-		let timedOut = false;
-		let startupFinished = false;
 		const connection = this.#sseConnection;
 		const startupTimeoutMs = resolveSSEConnectTimeoutMs(this.config.timeout);
 		const fetchPromise = this.#fetch({ method: "GET", signal: connection.signal }, generated);
-		const timeoutPromise =
-			startupTimeoutMs > 0
-				? new Promise<null>(resolve => {
-						setTimeout(() => {
-							if (!startupFinished) {
-								timedOut = true;
-								connection.abort();
-							}
-							resolve(null);
-						}, startupTimeoutMs);
-					})
-				: null;
-		try {
-			response = timeoutPromise === null ? await fetchPromise : await Promise.race([fetchPromise, timeoutPromise]);
-		} catch (error) {
-			if (this.#sseConnection === connection) this.#sseConnection = null;
-			if (error instanceof Error && error.name !== "AbortError" && !timedOut) {
-				this.onError?.(error);
-			}
-			return;
-		} finally {
-			startupFinished = true;
-		}
-		if (response === null) {
-			if (this.#sseConnection === connection) this.#sseConnection = null;
-			void fetchPromise.then(lateResponse => lateResponse.body?.cancel()).catch(() => {});
+		const attached = Promise.withResolvers<void>();
+		fetchPromise.then(
+			response => {
+				if (this.#sseConnection !== connection || !this.#connected) {
+					void response.body?.cancel().catch(() => {});
+				} else {
+					this.#attachSSEResponse(response, connection);
+				}
+				attached.resolve();
+			},
+			error => {
+				if (this.#sseConnection === connection) this.#sseConnection = null;
+				if (error instanceof Error && error.name !== "AbortError") this.onError?.(error);
+				attached.resolve();
+			},
+		);
+		if (startupTimeoutMs <= 0) {
+			await attached.promise;
 			return;
 		}
+		const budget = Promise.withResolvers<void>();
+		const timer = setTimeout(budget.resolve, startupTimeoutMs);
+		await Promise.race([attached.promise, budget.promise]);
+		clearTimeout(timer);
+	}
 
-		if (this.#sseConnection !== connection) {
-			await response.body?.cancel();
-			return;
-		}
+	#attachSSEResponse(response: Response, connection: AbortController): void {
 		if (response.status === 405 || !response.ok || !response.body) {
-			await response.body?.cancel();
+			void response.body?.cancel().catch(() => {});
 			if (this.#sseConnection === connection) this.#sseConnection = null;
 			return;
 		}
