@@ -125,12 +125,14 @@ def xwin_download(sha: str) -> str:
     downloads = []
     for call in re.findall(r"\bxwin_sysroot\((.*?)\)", module, re.S):
         arch = re.search(r'arch = "([^"]+)"', call)
+        arch_name = arch[1] if arch else "x86_64"
         sdk = re.search(r'sdk_version = "([^"]+)"', call)
         downloads.append(
-            f"retry xwin --accept-license --arch {arch[1] if arch else 'x86_64'}"
+            f"mkdir -p {REPO_CACHE}/xwin/{arch_name}\n"
+            f"retry xwin --accept-license --arch {arch_name}"
             f" --variant desktop --manifest-version {manifest}"
             + (f" --sdk-version {sdk[1]}" if sdk else "")
-            + f" --cache-dir {REPO_CACHE}/xwin download"
+            + f" --cache-dir {REPO_CACHE}/xwin/{arch_name} download"
         )
     if not downloads:
         sys.exit("omp_ci_template.py: no xwin_sysroot repositories in MODULE.bazel")

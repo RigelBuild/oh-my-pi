@@ -531,10 +531,13 @@ jobs:
          # The two jobs' target lists must together cover //:natives-all
          # exactly; a target added to the filegroup but to neither list would
          # otherwise silently never build or ship. Use a parse-only query: a
-         # cquery runs analysis, which fetches every repo the targets reach,
-         # including the xwin sysroot, and an earlier xwin unpack in the same
-         # job can make that fetch fail. The check needs only the BUILD srcs
-         # labels, so it skips the rc and the repo cache entirely.
+         # cquery runs analysis, which fetches every repo the targets reach.
+         # On the rigel.10 tag run that fetched both xwin sysroot repos
+         # (xwin_sysroot and xwin_sysroot_arm64) at once into one shared
+         # OMP_XWIN_CACHE_DIR, and the splats failed on a shared unpack dir
+         # (xwin "unable to remove invalid unpack dir", os error 39). The race
+         # is inferred from the log, not observed. The check needs only the
+         # BUILD srcs labels, so it skips the rc and the repo cache entirely.
          # Runs once (darwin-arm64 entry): the matrix equals the cross target list,
          # and the union of both lists equals //:natives-all srcs.
          - name: Check addon target lists cover natives-all
