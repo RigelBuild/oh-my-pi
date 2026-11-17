@@ -41,7 +41,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { getLatestRelease, isRigelBuildVersion, isSourceCheckout, managedInstallName } from "./cli/update-cli";
+import { getLatestRelease, isSourceCheckout, managedInstallName } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -238,21 +238,20 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
 }
 
-export async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
+async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!cfgStartupCheckUpdate.get(settings)) {
 		return;
 	}
 	try {
-		// A Rigel binary updates by reinstalling from GitHub releases, so `omp update` cannot help.
-		if (isCompiledBinary() && isRigelBuildVersion(currentVersion)) return;
 		// Checkouts update through git and a manager (Tern) updates its omp itself:
 		// "run omp update" would be wrong advice for both.
 		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
 		const channel = cfgUpdateChannel.get(settings);
-		// Compiled upstream binaries update from the build service; npm installs use npm.
+		// A compiled binary updates from the build service; naming the running
+		// version lets the service prepare the patch `omp update` will then use.
 		const { version } = isCompiledBinary()
 			? await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion })
-			: await getLatestRelease({ timeoutMs: 5_000, channel }, currentVersion);
+			: await getLatestRelease({ timeoutMs: 5_000, channel });
 		return Bun.semver.order(version, currentVersion) > 0 ? version : undefined;
 	} catch {
 		return undefined;

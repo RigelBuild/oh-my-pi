@@ -5,7 +5,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
 
 const VIRTUAL_NAMESPACE = "omp-legacy-pi-modules-build";
-const DEFAULT_PACKAGE_DIR = path.resolve(import.meta.dir, "..", "..");
+const packageDir = path.resolve(import.meta.dir, "..", "..");
 
 interface BundledPackage {
 	readonly dir: string;
@@ -90,12 +90,17 @@ function exportImportTarget(value: unknown): string | null {
 	if (isRecord(value) && typeof value.import === "string") return value.import;
 	return null;
 }
+
+function shimSpecifier(file: string): string {
+	return path.join(packageDir, "src", "extensibility", file);
+}
+
 /**
  * Derive the bundled legacy Pi module surface from current package exports.
  * Named wildcard exports are expanded from source. Only catalog's root catch-all
  * is safe to expand: other packages expose CLI entrypoints at that level.
  */
-export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR): Promise<BundledPiEntry[]> {
+export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	const entries: BundledPiEntry[] = [];
 	const seenKeys = new Set<string>();
 	const seenBindings = new Set<string>();
@@ -109,32 +114,24 @@ export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR):
 		entries.push({ key, binding, importSpecifier });
 	}
 
-	const codingAgentManifestPath = Bun.resolveSync("./package.json", packageDir);
-	const codingAgentManifest: unknown = await Bun.file(codingAgentManifestPath).json();
-	if (!isRecord(codingAgentManifest) || typeof codingAgentManifest.name !== "string") {
-		throw new Error(`Coding-agent package manifest has no name: ${codingAgentManifestPath}`);
-	}
-	const rigelInstall = codingAgentManifest.name === "@rigelbuild/omp-coding-agent";
 	for (const pkg of BUNDLED_PACKAGES) {
-		const packageName = pkg.dir === "agent" ? "agent-core" : pkg.dir;
-		const installedName = rigelInstall ? `@rigelbuild/omp-${packageName}` : `@oh-my-pi/pi-${packageName}`;
-		const canonicalName = `@oh-my-pi/pi-${packageName}`;
-		const manifestPath = Bun.resolveSync(`${installedName}/package.json`, packageDir);
+		const name = `@oh-my-pi/pi-${pkg.dir === "agent" ? "agent-core" : pkg.dir}`;
+		const manifestPath = Bun.resolveSync(`${name}/package.json`, packageDir);
 		const packageRoot = path.dirname(manifestPath);
 		const manifest: unknown = await Bun.file(manifestPath).json();
 		if (!isRecord(manifest) || typeof manifest.name !== "string") {
 			throw new Error(`Bundled Pi package manifest has no name: ${manifestPath}`);
 		}
 		const exportsField = isRecord(manifest.exports) ? manifest.exports : {};
-		const rootSpecifier = pkg.rootShim ? path.join(packageDir, "src", "extensibility", pkg.rootShim) : installedName;
-		addEntry(canonicalName, `bundled${pkg.identifier}`, rootSpecifier);
+		const rootSpecifier = pkg.rootShim ? shimSpecifier(pkg.rootShim) : manifest.name;
+		addEntry(manifest.name, `bundled${pkg.identifier}`, rootSpecifier);
 
 		for (const exportKey in exportsField) {
 			if (!exportKey.startsWith("./") || exportKey === "." || exportKey === "./build" || exportKey.includes("*"))
 				continue;
 			const subpath = exportKey.slice(2);
-			const key = `${canonicalName}/${subpath}`;
-			addEntry(key, bindingForSubpath(pkg.identifier, subpath), `${installedName}/${subpath}`);
+			const key = `${manifest.name}/${subpath}`;
+			addEntry(key, bindingForSubpath(pkg.identifier, subpath), key);
 		}
 
 		for (const exportKey in exportsField) {
@@ -173,8 +170,8 @@ export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR):
 					if (segments.some(segment => segment.startsWith(".") || segment.startsWith("_"))) continue;
 					if (!isSafeWildcardBasename(segments.at(-1) ?? "")) continue;
 					const subpath = `${pattern.exportPrefix}${basename}${pattern.exportSuffix}`;
-					const key = `${canonicalName}/${subpath}`;
-					addEntry(key, bindingForSubpath(pkg.identifier, subpath), `${installedName}/${subpath}`);
+					const key = `${manifest.name}/${subpath}`;
+					addEntry(key, bindingForSubpath(pkg.identifier, subpath), key);
 				}
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
@@ -182,11 +179,7 @@ export async function collectBundledPiEntries(packageDir = DEFAULT_PACKAGE_DIR):
 		}
 	}
 
-	addEntry(
-		TYPEBOX_MODULE_KEY,
-		"bundledTypeBoxShim",
-		path.join(packageDir, "src", "extensibility", TYPEBOX_COMPAT_MODULE),
-	);
+	addEntry(TYPEBOX_MODULE_KEY, "bundledTypeBoxShim", shimSpecifier(TYPEBOX_COMPAT_MODULE));
 	return entries;
 }
 

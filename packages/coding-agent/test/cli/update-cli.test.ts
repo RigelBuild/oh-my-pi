@@ -2,30 +2,13 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
 import { currentBuildHost } from "../../src/cli/build-service";
 import { fixedNpmRegistry } from "../../src/cli/npm-registry";
-import {
-	buildBunInstallArgs,
-	buildNpmInstallArgs,
-	getLatestRelease,
-	isRigelBuildVersion,
-	runUpdateCommand,
-} from "../../src/cli/update-cli";
+import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
 import { cfgUpdateChannel } from "../../src/modes/settings";
 
-describe("isRigelBuildVersion", () => {
-	it("matches only positive numbered Rigel build versions", () => {
-		expect(isRigelBuildVersion("18.9.2-rigel.1")).toBe(true);
-		expect(isRigelBuildVersion("18.9.2-rigel.12")).toBe(true);
-		expect(isRigelBuildVersion("18.9.2-rigel.0")).toBe(false);
-		expect(isRigelBuildVersion("18.9.2-rigel")).toBe(false);
-		expect(isRigelBuildVersion("18.9.2-canary.1")).toBe(false);
-	});
-});
 const npmjs = fixedNpmRegistry();
-// Upstream-path tests pin a non-Rigel running version, so they hold on a Rigel build too.
-const UPSTREAM = "18.9.2";
 
 type FetchInput = string | URL | Request;
 type FetchInit = RequestInit | BunFetchRequestInit;
@@ -89,90 +72,11 @@ describe("runUpdateCommand version source", () => {
 		quiet();
 		const requests = stubFetch(() => Response.json({ version: "999.0.0" }));
 
-		await runUpdateCommand({ force: false, check: true }, UPSTREAM);
+		await runUpdateCommand({ force: false, check: true });
 
 		expect(requests.length).toBeGreaterThan(0);
 		expect(requests.some(request => request.url.startsWith("https://build.test/"))).toBe(false);
 		for (const request of requests) expect(request.signal).toBeInstanceOf(AbortSignal);
-	});
-	it("looks up Rigel releases with the rigel dist-tag and pins every npm package", async () => {
-		vi.restoreAllMocks();
-		const requests = stubFetch(() => Response.json({ version: "18.9.2" }));
-
-		const release = await getLatestRelease({ registries: npmjs }, "18.9.2-rigel.1");
-
-		expect(requests.map(request => request.url)).toEqual([
-			"https://registry.npmjs.org/@rigelbuild%2fomp-coding-agent/rigel",
-		]);
-		expect(release.packages).toEqual({ pkg: "@rigelbuild/omp-coding-agent", natives: "@rigelbuild/omp-natives" });
-		const bunArgs = buildBunInstallArgs(release.version, "linux-x64", undefined, {}, "18.9.2-rigel.1");
-		const npmArgs = buildNpmInstallArgs(release.version, "linux-x64", undefined, {}, "18.9.2-rigel.1");
-		for (const args of [bunArgs, npmArgs]) {
-			expect(args).toContain("@rigelbuild/omp-coding-agent@18.9.2");
-			expect(args).toContain("@rigelbuild/omp-natives@18.9.2");
-			expect(args).toContain("@rigelbuild/omp-natives-linux-x64@18.9.2");
-		}
-	});
-
-	it("keeps the upstream latest lookup for non-Rigel versions", async () => {
-		vi.restoreAllMocks();
-		const requests = stubFetch(() => Response.json({ version: "19.0.0" }));
-
-		await getLatestRelease({ registries: npmjs }, "19.0.0");
-
-		expect(requests.map(request => request.url)).toEqual([
-			"https://registry.npmjs.org/@oh-my-pi%2fpi-coding-agent/latest",
-		]);
-	});
-	it("refuses a Rigel canary lookup", async () => {
-		await expect(getLatestRelease({ channel: "canary", registries: npmjs }, "18.9.2-rigel.1")).rejects.toThrow(
-			"Canary updates are not available for Rigel builds",
-		);
-	});
-
-	it("refuses a Rigel canary update with a non-zero exit", async () => {
-		await isolatePath();
-		const { logs } = quiet();
-		const requests = stubFetch(() => Response.json({ version: "19.0.0-canary.1" }));
-
-		await expect(
-			runUpdateCommand({ force: false, check: false, channel: "canary" }, "18.9.2-rigel.1"),
-		).rejects.toThrow("process.exit(1):");
-
-		expect(logs.some(line => line.includes("Canary updates are not available for Rigel builds"))).toBe(true);
-		expect(requests).toHaveLength(0);
-	});
-	it("refuses a persisted Rigel canary update", async () => {
-		await isolatePath();
-		const { logs } = quiet();
-		vi.spyOn(cfgUpdateChannel, "get").mockReturnValue("canary");
-		const requests = stubFetch(() => Response.json({ version: "18.9.2-canary.1" }));
-
-		await expect(runUpdateCommand({ force: false, check: true }, "18.9.2-rigel.1")).rejects.toThrow(
-			"process.exit(1):",
-		);
-
-		expect(logs.some(line => line.includes("Canary updates are not available for Rigel builds"))).toBe(true);
-		expect(requests).toHaveLength(0);
-	});
-
-	it.skipIf(process.platform === "win32")("does not query upstream builds for a Rigel binary", async () => {
-		const dir = await isolatePath();
-		const ompPath = path.join(dir, "omp");
-		await Bun.write(ompPath, "#!/bin/sh\necho omp/18.9.2-rigel.1\n");
-		await fs.chmod(ompPath, 0o755);
-		process.env.PI_BUILD_URL = "https://build.test";
-		const { logs } = quiet();
-		const requests = stubFetch(() => new Response(null, { status: 404 }));
-
-		await expect(runUpdateCommand({ force: false, check: false }, "18.9.2-rigel.1")).rejects.toThrow(
-			"process.exit(1):",
-		);
-
-		expect(
-			logs.some(line => line.includes("Rigel binary updates from the GitHub releases of RigelBuild/oh-my-pi")),
-		).toBe(true);
-		expect(requests).toHaveLength(0);
 	});
 
 	it.skipIf(process.platform === "win32")(
@@ -185,7 +89,7 @@ describe("runUpdateCommand version source", () => {
 			const next = "#!/bin/sh\necho omp/999.0.0\n";
 			const { target, fileName } = await currentBuildHost();
 			process.env.PI_BUILD_URL = "https://build.test";
-			const check = `https://build.test/api/products/omp/latest/${target}?channel=stable&from_version=${UPSTREAM}`;
+			const check = `https://build.test/api/products/omp/latest/${target}?channel=stable&from_version=${VERSION}`;
 			const { logs } = quiet();
 			const requests = stubFetch(url => {
 				if (url === check) {
@@ -199,26 +103,13 @@ describe("runUpdateCommand version source", () => {
 				return new Response(null, { status: 404 });
 			});
 
-			await runUpdateCommand({ force: false, check: false }, UPSTREAM);
+			await runUpdateCommand({ force: false, check: false });
 
 			expect(requests.map(request => request.url)).toEqual([check, "https://r2.test/omp"]);
 			expect(await Bun.file(ompPath).text()).toBe(next);
 			expect(logs.some(line => line.includes("Updated to 999.0.0"))).toBe(true);
 		},
 	);
-
-	it("reports Rigel update candidates from npm without build-service calls", async () => {
-		await isolatePath();
-		const { logs } = quiet();
-		const requests = stubFetch(() => Response.json({ version: "18.9.2" }));
-
-		await runUpdateCommand({ force: false, check: true }, "18.9.2-rigel.1");
-
-		expect(requests.map(request => request.url)).toEqual([
-			"https://registry.npmjs.org/@rigelbuild%2fomp-coding-agent/rigel",
-		]);
-		expect(logs.some(line => line.includes("New version available: 18.9.2"))).toBe(true);
-	});
 });
 
 describe("getLatestRelease rename pointers", () => {
@@ -258,7 +149,7 @@ describe("getLatestRelease rename pointers", () => {
 			},
 		});
 
-		const release = await getLatestRelease({ registries: npmjs }, UPSTREAM);
+		const release = await getLatestRelease({ registries: npmjs });
 
 		expect(release.version).toBe("999.1.0");
 		expect(release.dist).toBe("npm");
@@ -273,7 +164,7 @@ describe("getLatestRelease rename pointers", () => {
 			"@oh-my-pi/pi-coding-agent": { version: "999.0.0-canary.1" },
 		});
 
-		await getLatestRelease({ channel: "canary", registries: npmjs }, UPSTREAM);
+		await getLatestRelease({ channel: "canary", registries: npmjs });
 
 		expect(urls).toEqual(["https://registry.npmjs.org/@oh-my-pi%2fpi-coding-agent/canary"]);
 	});
@@ -286,7 +177,7 @@ describe("getLatestRelease rename pointers", () => {
 			},
 		});
 
-		const release = await getLatestRelease({ registries: npmjs }, UPSTREAM);
+		const release = await getLatestRelease({ registries: npmjs });
 
 		expect(urls).toHaveLength(1);
 		expect(release.version).toBe("999.0.0");
@@ -317,7 +208,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
+		const release = await getLatestRelease({ registries: feed });
 
 		expect(requests).toEqual([
 			{
@@ -326,54 +217,6 @@ describe("getLatestRelease configured registry", () => {
 			},
 		]);
 		expect(release.registry).toBe("https://npm.corp.example/api/npm/feed/");
-	});
-	it("uses the Rigel dist-tag when falling back to a full packument", async () => {
-		const urls: string[] = [];
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			Object.assign(
-				async (input: FetchInput) => {
-					const url = String(input);
-					urls.push(url);
-					if (url.endsWith("/rigel")) return new Response(null, { status: 404, statusText: "Not Found" });
-					return Response.json({
-						"dist-tags": { rigel: "18.9.2-rigel.1" },
-						versions: { "18.9.2-rigel.1": { version: "18.9.2-rigel.1" } },
-					});
-				},
-				{ preconnect: globalThis.fetch.preconnect },
-			),
-		);
-
-		const release = await getLatestRelease({ registries: feed }, "18.9.2-rigel.1");
-
-		expect(urls).toEqual([
-			"https://npm.corp.example/api/npm/feed/@rigelbuild%2fomp-coding-agent/rigel",
-			"https://npm.corp.example/api/npm/feed/@rigelbuild%2fomp-coding-agent",
-		]);
-		expect(release.version).toBe("18.9.2-rigel.1");
-	});
-	it("reports a missing Rigel dist-tag after feed shortcut fallback", async () => {
-		const urls: string[] = [];
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			Object.assign(
-				async (input: FetchInput) => {
-					const url = String(input);
-					urls.push(url);
-					if (url.endsWith("/rigel")) return new Response(null, { status: 404, statusText: "Not Found" });
-					return Response.json({
-						"dist-tags": { latest: "18.9.2" },
-						versions: { "18.9.2": { version: "18.9.2" } },
-					});
-				},
-				{ preconnect: globalThis.fetch.preconnect },
-			),
-		);
-
-		await expect(getLatestRelease({ registries: feed }, "18.9.2-rigel.1")).rejects.toThrow("missing dist-tags.rigel");
-		expect(urls).toEqual([
-			"https://npm.corp.example/api/npm/feed/@rigelbuild%2fomp-coding-agent/rigel",
-			"https://npm.corp.example/api/npm/feed/@rigelbuild%2fomp-coding-agent",
-		]);
 	});
 
 	it("falls back to the full packument when the feed does not serve the dist-tag shortcut", async () => {
@@ -393,7 +236,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
+		const release = await getLatestRelease({ registries: feed });
 
 		expect(urls).toEqual([
 			"https://npm.corp.example/api/npm/feed/@oh-my-pi%2fpi-coding-agent/latest",
@@ -418,7 +261,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
+		const release = await getLatestRelease({ registries: feed });
 
 		expect(urls).toEqual(["https://npm.corp.example/api/npm/feed/@oh-my-pi%2fpi-coding-agent/latest"]);
 		expect(release.version).toBe("999.3.0");
@@ -442,7 +285,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
+		const release = await getLatestRelease({ registries: feed });
 
 		expect(urls).toHaveLength(2);
 		expect(release.version).toBe("999.4.0");
@@ -465,7 +308,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		const release = await getLatestRelease({ registries: feed }, UPSTREAM);
+		const release = await getLatestRelease({ registries: feed });
 
 		expect(urls).toHaveLength(2);
 		expect(release.version).toBe("999.5.0");
@@ -488,7 +331,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		await expect(getLatestRelease({ registries: feed }, UPSTREAM)).rejects.toThrow("connection reset mid-body");
+		await expect(getLatestRelease({ registries: feed })).rejects.toThrow("connection reset mid-body");
 		expect(urls).toHaveLength(1);
 	});
 
@@ -503,7 +346,7 @@ describe("getLatestRelease configured registry", () => {
 			),
 		);
 
-		await expect(getLatestRelease({ channel: "canary", registries: feed }, UPSTREAM)).rejects.toThrow(
+		await expect(getLatestRelease({ channel: "canary", registries: feed })).rejects.toThrow(
 			"No canary release has been published",
 		);
 	});
@@ -526,7 +369,7 @@ describe("getLatestRelease proxy errors", () => {
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
 
-		const err = await getLatestRelease({ timeoutMs: 5000, registries: npmjs }, UPSTREAM).then(
+		const err = await getLatestRelease({ timeoutMs: 5000, registries: npmjs }).then(
 			() => null,
 			(e: unknown) => e as Error,
 		);
