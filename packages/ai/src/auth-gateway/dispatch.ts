@@ -235,6 +235,26 @@ export interface GatewaySetupFailure extends GatewayErrorClassification {
 }
 
 /**
+ * A usage-limit answer for a chat route: HTTP 429 `rate_limit_error`, with the
+ * retry delay when the provider's block end is known. Checked before
+ * {@link classifyGatewayError}, whose embedded-status parse would otherwise
+ * answer a usage cap that carries a 5xx as that 5xx. `undefined` for any other error.
+ */
+export function gatewayUsageLimitAnswer(
+	provider: string,
+	error: unknown,
+): { readonly failure: GatewayErrorClassification; readonly retryAfterMs?: number } | undefined {
+	const message = error instanceof Error ? error.message : String(error);
+	const status = extractHttpStatusFromError(error);
+	if (!(AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) return undefined;
+	const retryAfterMs = extractProviderRetryHint(provider, message);
+	return {
+		failure: { status: 429, type: "rate_limit_error", message },
+		...(retryAfterMs !== undefined && { retryAfterMs }),
+	};
+}
+
+/**
  * Resolve the credential for one request from broker-backed storage.
  *
  * pi-ai clients never consult `AuthStorage`; the gateway resolves the bearer

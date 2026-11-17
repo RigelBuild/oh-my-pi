@@ -64,6 +64,7 @@ import {
 	gatewayThinkingLoopRecorder,
 	observeAttemptLimitStatus,
 	gatewayUsageOutcome,
+	gatewayUsageLimitAnswer,
 	resolveGatewayModel,
 	gatewayRequestLogFields,
 	resolveGatewayAccount,
@@ -315,6 +316,22 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 
 function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
+}
+
+/** A usage-limit answer: 429, with `Retry-After` in whole seconds (rounded up) when the block end is known. */
+function usageLimitResponse(
+	route: { module: FormatModule },
+	usageLimit: { readonly failure: GatewayErrorClassification; readonly retryAfterMs?: number },
+): Response {
+	const response = route.module.formatError(
+		usageLimit.failure.status,
+		usageLimit.failure.type,
+		usageLimit.failure.message,
+	);
+	if (usageLimit.retryAfterMs !== undefined && usageLimit.retryAfterMs >= 0) {
+		response.headers.set("Retry-After", String(Math.ceil(usageLimit.retryAfterMs / 1000)));
+	}
+	return response;
 }
 
 /** Route that serves each non-chat catalog kind the gateway advertises. */
@@ -1238,6 +1255,11 @@ async function handleFormatEndpoint(
 				if (message.stopReason === "aborted") {
 					return route.module.formatError(499, "request_aborted", errorMessage);
 				}
+				const usageLimit = gatewayUsageLimitAnswer(
+					model.provider,
+					message.errorClassificationMessage ?? errorMessage,
+				);
+				if (usageLimit) return usageLimitResponse(route, usageLimit);
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1248,11 +1270,13 @@ async function handleFormatEndpoint(
 			);
 		} catch (error) {
 			if (controller.signal.aborted) return clientClosedResponse(route);
-			const classified = classifyGatewayError(error);
+			const usageLimit = gatewayUsageLimitAnswer(model.provider, error);
+			const classified = usageLimit?.failure ?? classifyGatewayError(error);
 			logGatewayRequestFailure(
 				gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
 				classified.status,
 			);
+			if (usageLimit) return usageLimitResponse(route, usageLimit);
 			return route.module.formatError(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
