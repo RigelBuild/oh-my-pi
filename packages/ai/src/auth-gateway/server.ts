@@ -1271,7 +1271,11 @@ async function handleFormatEndpoint(
 					model.provider,
 					message.errorClassificationMessage ?? errorMessage,
 				);
-				if (usageLimit) return usageLimitResponse(route.module.formatError, usageLimit);
+				if (usageLimit)
+					return usageLimitResponse(route.module.formatError, {
+						...usageLimit,
+						failure: { ...usageLimit.failure, message: errorMessage },
+					});
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1549,7 +1553,11 @@ async function handlePiNative(
 					model.provider,
 					message.errorClassificationMessage ?? errorMessage,
 				);
-				if (usageLimit) return usageLimitResponse(noStoreErrorResponse, usageLimit);
+				if (usageLimit)
+					return usageLimitResponse(noStoreErrorResponse, {
+						...usageLimit,
+						failure: { ...usageLimit.failure, message: errorMessage },
+					});
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return noStoreErrorResponse(classified.status, classified.type, errorMessage);
 			}
