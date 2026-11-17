@@ -504,7 +504,7 @@ jobs:
            id: cache
            uses: ./.github/actions/bazel-cache
            with:
-              scope: natives-cross-${{ matrix.target }}
+              scope: natives-cross
          - name: Build cross-target native addon
            id: build-cross
            timeout-minutes: 150
@@ -550,8 +550,9 @@ jobs:
                 exit 1
               fi
               # The matrix literal above must equal NATIVES_CROSS_TARGETS exactly.
-              matrix_list="natives-darwin-arm64 natives-darwin-x64-baseline natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-arm64 natives-win32-x64-baseline"
-              if [ "$(printf '%s\n' $matrix_list | sort)" != "$(printf '%s\n' $NATIVES_CROSS_TARGETS | sort)" ]; then
+              read -r -a matrix_list <<< "natives-darwin-arm64 natives-darwin-x64-baseline natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-arm64 natives-win32-x64-baseline"
+              read -r -a cross_list <<< "$NATIVES_CROSS_TARGETS"
+              if [ "$(printf '%s\n' "${matrix_list[@]}" | sort)" != "$(printf '%s\n' "${cross_list[@]}" | sort)" ]; then
                 echo "::error title=Cross matrix::native_addons_cross matrix must equal NATIVES_CROSS_TARGETS"
                 exit 1
               fi
@@ -573,7 +574,7 @@ jobs:
                  echo "::error::Darwin arm64 addon links the Swift runtime or FoundationModels directly"; exit 1
               fi
          - name: Save cross-target Bazel cache
-           if: always() && steps.build-cross.outcome == 'success' && github.ref == 'refs/heads/rigel-release' && steps.cache.outputs.save-needed == 'true'
+           if: always() && steps.build-cross.outcome == 'success' && matrix.target == 'natives-darwin-arm64' && github.ref == 'refs/heads/rigel-release' && steps.cache.outputs.save-needed == 'true'
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
               path: |
