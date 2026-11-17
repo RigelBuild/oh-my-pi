@@ -335,10 +335,19 @@ describe("auth-gateway: a usage cap answers 429 (RIG-10540)", () => {
 	it("keeps Anthropic's 'credit balance is too low' 400 at 400, not 429", async () => {
 		const gateway = await startGateway("", {
 			respond: () =>
-				new Response(JSON.stringify({ error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } }), {
-					status: 400,
-					headers: { "content-type": "application/json" },
-				}),
+				new Response(
+					JSON.stringify({
+						error: {
+							type: "invalid_request_error",
+							message:
+								"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+						},
+					}),
+					{
+						status: 400,
+						headers: { "content-type": "application/json" },
+					},
+				),
 		});
 		try {
 			const response = await sendChat(gateway.url);
