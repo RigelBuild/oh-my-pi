@@ -9,14 +9,10 @@ import { deterministicUuid } from "../../utils/deterministic-id";
 import {
 	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
-	emitGatewayUsage,
-	hasGatewayUsage,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
-	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
-import type { CallerIdentity } from "../types";
 
 interface ResolvedVideoRequest {
 	model: Model<Api>;
@@ -35,7 +31,6 @@ async function resolveVideoJob(
 	req: Request,
 	peer: string,
 	gatewayId: string,
-	caller: CallerIdentity,
 ): Promise<ResolvedVideoRequest | Response> {
 	const controller = mirrorRequestAbort(req);
 	if (controller.signal.aborted) return aborted();
@@ -46,8 +41,7 @@ async function resolveVideoJob(
 		const message = error instanceof Error ? error.message : String(error);
 		return videoServer.formatError(400, "invalid_request_error", message);
 	}
-	const model = await resolveGatewayModel(bootOpts.resolveModel, `${identity.provider}/${identity.modelId}`, caller);
-	if (controller.signal.aborted) return aborted();
+	const model = bootOpts.resolveModel(`${identity.provider}/${identity.modelId}`);
 	if (!model) {
 		return videoServer.formatError(
 			404,
@@ -102,33 +96,19 @@ function logVideoRequest(
 	});
 }
 
-// Report completed jobs on each poll; zero-cost, zero-token results remain observed only.
 function recordCompletedUsage(
 	bootOpts: AuthGatewayRouteOptions,
 	resolved: ResolvedVideoRequest,
 	req: Request,
 	job: VideoJob,
-	gatewayId: string,
 ): void {
 	if (job.status !== "completed" || job.usage === undefined) return;
-	const client = resolveClientIdentity(req.headers);
 	bootOpts.storage.usage.observe({
 		provider: resolved.model.provider,
 		model: resolved.model.id,
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		costUsd: job.usage.cost.total,
-		client,
-	});
-	if (!hasGatewayUsage(job.usage)) return;
-	// Poll credentials can differ from the credential that billed the submitted job.
-	emitGatewayUsage(bootOpts, {
-		requestId: gatewayId,
-		provider: resolved.model.provider,
-		model: resolved.model.id,
-		usage: job.usage,
-		outcome: "ok",
-		at: Date.now(),
-		client,
+		client: resolveClientIdentity(req.headers),
 	});
 }
 
@@ -137,7 +117,6 @@ export async function handleVideoSubmit(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
-	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -151,8 +130,7 @@ export async function handleVideoSubmit(
 		const message = error instanceof Error ? error.message : String(error);
 		return videoServer.formatError(400, "invalid_request_error", message);
 	}
-	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
-	if (controller.signal.aborted) return aborted();
+	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) return videoServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (model.api !== "openrouter-video") {
 		return videoServer.formatError(
@@ -212,16 +190,15 @@ export async function handleVideoPoll(
 	req: Request,
 	peer: string,
 	gatewayId: string,
-	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
-	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId, caller);
+	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId);
 	if (resolved instanceof Response) return resolved;
 	logVideoRequest(requestId, "poll", resolved.model, peer);
 	try {
 		const job = await pollVideo(resolved.model, resolved.upstreamId, videoOptions(bootOpts, resolved, peer));
-		recordCompletedUsage(bootOpts, resolved, req, job, gatewayId);
+		recordCompletedUsage(bootOpts, resolved, req, job);
 		return json(
 			200,
 			videoServer.encodePollResponse(job, req, gatewayId),
@@ -245,11 +222,10 @@ export async function handleVideoContent(
 	req: Request,
 	peer: string,
 	gatewayId: string,
-	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
-	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId, caller);
+	const resolved = await resolveVideoJob(bootOpts, req, peer, gatewayId);
 	if (resolved instanceof Response) return resolved;
 	logVideoRequest(requestId, "content", resolved.model, peer);
 	try {

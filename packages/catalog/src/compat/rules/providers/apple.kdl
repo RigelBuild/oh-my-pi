@@ -5,5 +5,4 @@
 provider "apple" {
 	default-model "on-device"
 	allow-unauthenticated #true
-	automatic-default #false
 }

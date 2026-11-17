@@ -4,17 +4,16 @@
  *
  * Same bearer auth, model resolution, broker credential lookup, and a/b/c
  * credential rotation as the chat routes, dispatched through
- * {@link NativeJudge} — pi-ai's client for every judgment API, which
- * translates to the resolved model's own wire (OpenAI Decisions, Workers AI)
- * — so 401 rotation and 429/529 backoff match omp's own judgments. A judgment
- * is one JSON round-trip: no stream, no provider session state. Most judgment
- * APIs report tokens only, so the cost is priced from the catalog model for the
- * response header and the broker's observed-usage ledger.
+ * {@link TypeSafeJudge} — pi-ai's client for this wire — so 401 rotation and
+ * 429/529 backoff match omp's own judgments. A judgment is one JSON
+ * round-trip: no stream, no provider session state. TypeSafe reports tokens
+ * only, so the cost is priced from the catalog model for the response header
+ * and the broker's observed-usage ledger.
  */
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
-import { createNativeJudge, isJudgmentApi } from "../../judgment/native";
+import { isJudgmentApi, TypeSafeJudge } from "../../judgment/typesafe";
 import * as systemOne from "../../providers/systemone-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
@@ -22,18 +21,14 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
-	resolveGatewayAccount,
 	resolveGatewayApiKey,
-	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
-import type { CallerIdentity } from "../types";
 
 export async function handleSystemOne(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
-	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -59,8 +54,7 @@ export async function handleSystemOne(
 		return systemOne.formatError(422, "invalid_request_error", message);
 	}
 
-	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
-	if (controller.signal.aborted) return aborted();
+	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
 		return systemOne.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
@@ -80,9 +74,8 @@ export async function handleSystemOne(
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
 
-	const judge = createNativeJudge(model, {
+	const judge = new TypeSafeJudge({
 		apiKey: buildGatewayApiKeyResolver(
 			bootOpts.storage,
 			model,
@@ -91,10 +84,11 @@ export async function handleSystemOne(
 			controller.signal,
 			"systemone",
 			peer,
-			resolvedKey => {
-				account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
-			},
 		),
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		baseUrl: model.baseUrl,
 		fetch: bootOpts.fetch,
 	});
 
@@ -109,20 +103,13 @@ export async function handleSystemOne(
 	});
 
 	try {
-		const result = await judge.judge(parsed.request, {
-			signal: controller.signal,
-			// A split judgment that fails still billed the chunks that succeeded.
-			onPartialUsage: usage => {
-				if (usage.cost.total === 0) calculateCost(model, usage);
-				recordGatewayUsage(bootOpts, model, client, usage, { requestId, outcome: "ok", account });
-			},
-		});
+		const result = await judge.judge(parsed.request, { signal: controller.signal });
 		// Encode before pricing: the body's `cost` means "upstream billed this"
 		// (OpenRouter), while the header and ledger carry the catalog estimate
 		// when the upstream reported tokens only (TypeSafe).
 		const body = systemOne.encodeResponse(result);
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
 		return json(200, body, gatewayResponseHeaders(model, { requestId, costUsd: result.usage.cost.total, startedAt }));
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();

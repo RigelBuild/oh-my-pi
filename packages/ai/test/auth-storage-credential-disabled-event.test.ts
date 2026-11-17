@@ -207,9 +207,7 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh("fetch failed: ECONNRESET");
 
-			await expect(authStorage.keys.getWithCredential("anthropic", "session-transient-failure")).rejects.toThrow(
-				"ECONNRESET",
-			);
+			await authStorage.keys.get("anthropic", "session-transient-failure");
 			expect(events).toHaveLength(0);
 		});
 

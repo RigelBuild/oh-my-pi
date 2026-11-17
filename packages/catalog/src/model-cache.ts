@@ -3,7 +3,6 @@
  * Replaces per-provider JSON files with a single cache.db.
  */
 import type { Database } from "bun:sqlite";
-import * as path from "node:path";
 import { getModelDbPath, isSqliteCorruptionError, logger, openSqliteDatabaseSync, VERSION } from "@oh-my-pi/pi-utils";
 import RULES from "./compat/rules.json" with { type: "json" };
 import type { Api, Model } from "./types";
@@ -47,19 +46,14 @@ function materializationPolicy(): string {
 	return cachedMaterializationPolicy;
 }
 
-interface CacheRowMeta {
+interface CacheRow {
 	provider_id: string;
 	version: number;
 	materialization_policy: string;
 	updated_at: number;
 	authoritative: number;
 	static_fingerprint: string;
-	/**
-	 * `Bun.hash` of `models`; empty for rows written before the column existed
-	 * (never equal). An in-place `UPDATE` of `models` that leaves the hash
-	 * untouched resets it to empty (`model_cache_models_hash_reset` trigger).
-	 */
-	models_hash: string;
+	models: string;
 	header_omitted_model_ids: string;
 	unrestorable_header_model_ids: string;
 	header_restore_version: number;
@@ -67,10 +61,6 @@ interface CacheRowMeta {
 	refresh_payload_updated_at: number | null;
 	refresh_updated_at: number | null;
 	refresh_authoritative: number | null;
-}
-
-interface CacheRow extends CacheRowMeta {
-	models: string;
 }
 
 /**
@@ -81,22 +71,14 @@ interface CacheRow extends CacheRowMeta {
  * the payload row's `updated_at`, so a payload rewritten by another binary
  * silently invalidates it.
  */
-const CACHE_ROW_FROM = `
+const SELECT_CACHE_ROW = `
+	SELECT m.*,
+		r.payload_updated_at AS refresh_payload_updated_at,
+		r.updated_at AS refresh_updated_at,
+		r.authoritative AS refresh_authoritative
 	FROM model_cache m
 	LEFT JOIN model_cache_refresh r ON r.provider_id = m.provider_id
 	WHERE m.provider_id = ?
-`;
-const CACHE_ROW_REFRESH_COLUMNS = `
-		r.payload_updated_at AS refresh_payload_updated_at,
-		r.updated_at AS refresh_updated_at,
-		r.authoritative AS refresh_authoritative`;
-const SELECT_CACHE_ROW = `SELECT m.*, ${CACHE_ROW_REFRESH_COLUMNS} ${CACHE_ROW_FROM}`;
-/** Scalar columns plus `models_hash`: validates a memoized parse without reading the multi-MB payload. */
-const SELECT_CACHE_ROW_META = `
-	SELECT m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
-		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids,
-		m.unrestorable_header_model_ids, m.header_restore_version, ${CACHE_ROW_REFRESH_COLUMNS}
-	${CACHE_ROW_FROM}
 `;
 
 /** Cumulative model-cache write counters for this process. */
@@ -167,11 +149,8 @@ let sharedDbPath: string | null = null;
 interface ReadRowCacheEntry {
 	/** `PRAGMA data_version` of the shared connection when validated; null for per-call connections. */
 	dataVersion: number | null;
-	/**
-	 * Scalar columns (plus `models_hash`) of the row the entry was parsed from;
-	 * null when the row was absent or rejected. Never the multi-MB payload itself.
-	 */
-	meta: CacheRowMeta | null;
+	/** Raw row the entry was parsed from; null when the row was absent or rejected. */
+	row: CacheRow | null;
 	entry: CacheEntry<Api> | null;
 }
 
@@ -203,7 +182,7 @@ function withFreshness<TApi extends Api>(
 }
 function invalidateReadRow(providerId: string, dbPath?: string): void {
 	try {
-		readRowCache.delete(readCacheKey(resolveCacheDb(dbPath).resolvedPath, providerId));
+		readRowCache.delete(readCacheKey(dbPath ?? getModelDbPath(), providerId));
 	} catch {
 		// Best-effort only; a missed invalidation just costs one extra parse.
 	}
@@ -234,7 +213,6 @@ function initializeDb(db: Database): void {
 			header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
 			unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
 			header_restore_version INTEGER NOT NULL DEFAULT 0,
-			models_hash TEXT NOT NULL DEFAULT '',
 			models TEXT NOT NULL
 		)
 	`);
@@ -247,17 +225,6 @@ function initializeDb(db: Database): void {
 		)
 	`);
 	migrateCacheSchema(db);
-	// `models_hash` is the only payload-change detector for the read memo and the
-	// unchanged-write skip. Writers here replace whole rows; this keeps an
-	// in-place edit of `models` by any other tool or binary from reusing a stale hash.
-	db.run(`
-		CREATE TRIGGER IF NOT EXISTS model_cache_models_hash_reset
-		AFTER UPDATE OF models ON model_cache
-		WHEN NEW.models_hash = OLD.models_hash
-		BEGIN
-			UPDATE model_cache SET models_hash = '' WHERE provider_id = NEW.provider_id;
-		END
-	`);
 }
 
 function closeSharedDb(): void {
@@ -313,22 +280,8 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 }
 
 function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
-	const { resolvedPath, shared } = resolveCacheDb(dbPath);
-	return runModelCacheDb(resolvedPath, shared, useDb);
-}
-
-/**
- * An explicit path naming the default `models.db` (e.g. the SDK passing
- * `getModelDbPath(agentDir)` for the default agent dir) shares the long-lived
- * handle, so it gets the `data_version` fast path instead of opening,
- * initializing and re-reading the row on every call.
- */
-function resolveCacheDb(dbPath: string | undefined): { resolvedPath: string; shared: boolean } {
-	const defaultPath = getModelDbPath();
-	if (dbPath === undefined || dbPath === defaultPath || path.resolve(dbPath) === path.resolve(defaultPath)) {
-		return { resolvedPath: defaultPath, shared: true };
-	}
-	return { resolvedPath: dbPath, shared: false };
+	const resolvedPath = dbPath ?? getModelDbPath();
+	return runModelCacheDb(resolvedPath, dbPath === undefined, useDb);
 }
 
 function migrateCacheSchema(db: Database): void {
@@ -352,12 +305,6 @@ function migrateCacheSchema(db: Database): void {
 			// old id-only header matcher from rows written after request-model
 			// header matching was introduced.
 			db.run("ALTER TABLE model_cache ADD COLUMN header_restore_version INTEGER NOT NULL DEFAULT 0");
-		}
-		if (!columns.some(column => column.name === "models_hash")) {
-			// Rows from older binaries keep '' (never equal), so they are re-read in
-			// full until the next write records their hash; no version bump needed.
-			// Older binaries rewriting a row via INSERT OR REPLACE reset it to ''.
-			db.run("ALTER TABLE model_cache ADD COLUMN models_hash TEXT NOT NULL DEFAULT ''");
 		}
 	} finally {
 		stmt.finalize();
@@ -472,14 +419,15 @@ export function readModelCache<TApi extends Api>(
 	dbPath?: string,
 ): CacheEntry<TApi> | null {
 	try {
+		const resolvedPath = dbPath ?? getModelDbPath();
+		const key = readCacheKey(resolvedPath, providerId);
 		// Monotonic change signal: same-shaped WAL overwrites after checkpoint
 		// can leave every size:mtime pair identical, so file metadata alone
 		// cannot invalidate. PRAGMA data_version increments on each committed
 		// write transaction visible to a new reader. It is only comparable
 		// across calls on the same connection, so it gates the no-query fast
 		// path for the shared handle only.
-		const { resolvedPath, shared } = resolveCacheDb(dbPath);
-		const key = readCacheKey(resolvedPath, providerId);
+		const shared = dbPath === undefined;
 		return runModelCacheDb(resolvedPath, shared, db => {
 			const dataVersion = shared ? dbDataVersion(db) : null;
 			const cached = readRowCache.get(key);
@@ -488,32 +436,34 @@ export function readModelCache<TApi extends Api>(
 				// cached row's updatedAt so a long-lived process goes stale.
 				return withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
 			}
-			// Any commit (to any provider's row) bumps data_version. Validate the
-			// memoized parse against the row's scalar columns and payload hash
-			// first; only a changed payload pays for the multi-MB `models` read.
-			let entry: CacheEntry<TApi> | null = null;
-			let meta: CacheRowMeta | null = null;
-			if (cached?.entry && cached.meta) {
-				meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
-				if (meta && meta.materialization_policy === materializationPolicy() && cacheRowsEqual(cached.meta, meta)) {
-					// Payload unchanged; only side-table freshness may have moved.
-					entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
-				} else {
-					meta = null;
-				}
+			// Any commit (to any provider's row) bumps data_version. Re-read this
+			// row, but reuse the parsed entry when its bytes are unchanged.
+			const stmt = db.query<CacheRow, [string]>(SELECT_CACHE_ROW);
+			let row: CacheRow | null;
+			try {
+				row = stmt.get(providerId);
+			} finally {
+				stmt.finalize();
 			}
-			if (entry === null) {
-				// One statement reads payload and scalars from the same snapshot.
-				const row = queryRow<CacheRow>(db, SELECT_CACHE_ROW, providerId);
+			let entry: CacheEntry<TApi> | null;
+			if (
+				cached?.entry &&
+				cached.row &&
+				row &&
+				row.materialization_policy === materializationPolicy() &&
+				cacheRowsEqual(cached.row, row)
+			) {
+				// Payload bytes unchanged; only side-table freshness may have moved.
+				entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, row), ttlMs, now);
+			} else {
 				entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
-				if (entry !== null && row !== null) {
-					// Drop the payload so the memo never pins the multi-MB `models` string.
-					const { models: _models, ...rowScalars } = row;
-					meta = rowScalars;
-				}
 			}
 			if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
-			readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
+			readRowCache.set(key, {
+				dataVersion,
+				row: entry === null ? null : row,
+				entry: entry as CacheEntry<Api> | null,
+			});
 			return entry;
 		});
 	} catch {
@@ -521,20 +471,8 @@ export function readModelCache<TApi extends Api>(
 	}
 }
 
-function queryRow<T>(db: Database, sql: string, providerId: string): T | null {
-	const stmt = db.query<T, [string]>(sql);
-	try {
-		return stmt.get(providerId);
-	} finally {
-		stmt.finalize();
-	}
-}
-
-/**
- * Whether two rows carry the same payload record (refresh side-row columns
- * excluded). Payloads compare by `models_hash`; rows without one never match.
- */
-function cacheRowsEqual(left: CacheRowMeta, right: CacheRowMeta): boolean {
+/** Whether two rows carry the same payload record (refresh side-row columns excluded). */
+function cacheRowsEqual(left: CacheRow, right: CacheRow): boolean {
 	return (
 		left.version === right.version &&
 		left.materialization_policy === right.materialization_policy &&
@@ -544,8 +482,7 @@ function cacheRowsEqual(left: CacheRowMeta, right: CacheRowMeta): boolean {
 		left.header_omitted_model_ids === right.header_omitted_model_ids &&
 		left.unrestorable_header_model_ids === right.unrestorable_header_model_ids &&
 		left.header_restore_version === right.header_restore_version &&
-		left.models_hash !== "" &&
-		left.models_hash === right.models_hash
+		left.models === right.models
 	);
 }
 
@@ -561,7 +498,7 @@ function rowState(row: StoredRowState): { updatedAt: number; authoritative: bool
 	return { updatedAt: row.updated_at, authoritative: row.authoritative === 1 };
 }
 
-function withRowState<TApi extends Api>(entry: CacheEntry<TApi>, row: StoredRowState): CacheEntry<TApi> {
+function withRowState<TApi extends Api>(entry: CacheEntry<TApi>, row: CacheRow): CacheEntry<TApi> {
 	const { updatedAt, authoritative } = rowState(row);
 	return entry.updatedAt === updatedAt && entry.authoritative === authoritative
 		? entry
@@ -711,8 +648,6 @@ export function writeModelCache<TApi extends Api>(
 			const serializedHeaderOmitted = JSON.stringify(headerOmittedModelIds);
 			const serializedUnrestorable = JSON.stringify(unrestorableHeaderModelIds);
 			const serializedModels = JSON.stringify(cachedModels);
-			// Length prefix: a collision would also need an equal payload size.
-			const modelsHash = `${serializedModels.length.toString(36)}:${Bun.hash(serializedModels).toString(36)}`;
 			const outcome = db
 				.transaction((): "skipped" | "refreshed" | "written" => {
 					const matchStmt = db.prepare<
@@ -727,7 +662,7 @@ export function writeModelCache<TApi extends Api>(
 						LEFT JOIN model_cache_refresh r ON r.provider_id = m.provider_id
 						WHERE m.provider_id = ? AND m.version = ? AND m.materialization_policy = ?
 							AND m.static_fingerprint = ? AND m.header_omitted_model_ids = ?
-							AND m.unrestorable_header_model_ids = ? AND m.header_restore_version = ? AND m.models_hash = ?`,
+							AND m.unrestorable_header_model_ids = ? AND m.header_restore_version = ? AND m.models = ?`,
 					);
 					let stored: StoredRowState | null;
 					try {
@@ -739,7 +674,7 @@ export function writeModelCache<TApi extends Api>(
 							serializedHeaderOmitted,
 							serializedUnrestorable,
 							HEADER_RESTORE_VERSION,
-							modelsHash,
+							serializedModels,
 						);
 					} finally {
 						matchStmt.finalize();
@@ -762,8 +697,8 @@ export function writeModelCache<TApi extends Api>(
 						`INSERT OR REPLACE INTO model_cache (
 							provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
 							header_omitted_model_ids, unrestorable_header_model_ids,
-							header_restore_version, models_hash, models
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+							header_restore_version, models
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 						[
 							providerId,
 							CACHE_SCHEMA_VERSION,
@@ -774,7 +709,6 @@ export function writeModelCache<TApi extends Api>(
 							serializedHeaderOmitted,
 							serializedUnrestorable,
 							HEADER_RESTORE_VERSION,
-							modelsHash,
 							serializedModels,
 						],
 					);

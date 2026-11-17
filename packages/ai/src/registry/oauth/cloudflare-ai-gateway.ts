@@ -1,4 +1,4 @@
-import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
+import { serializeCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import * as AIError from "../../error";
 import type { OAuthController } from "./types";
 
@@ -35,5 +35,5 @@ export async function loginCloudflareAiGateway(options: OAuthController): Promis
 	if (options.signal?.aborted) throw new AIError.LoginCancelledError();
 	if (!gatewayId.trim()) throw new AIError.ConfigurationError("Cloudflare AI Gateway ID is required");
 
-	return serializeCloudflareCredential({ token: apiKey, accountId, gatewayId });
+	return serializeCloudflareAiGatewayCredential(apiKey, accountId, gatewayId);
 }

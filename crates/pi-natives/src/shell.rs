@@ -126,7 +126,10 @@ impl From<ShellOptions> for CoreShellOptions {
 			session_env:   value.session_env,
 			snapshot_path: value.snapshot_path,
 			minimizer:     value.minimizer.map(Into::into),
-			filesystem:    value.filesystem.map_or_default(ShellFilesystem::into_fs),
+			filesystem:    value
+				.filesystem
+				.map(ShellFilesystem::into_fs)
+				.unwrap_or_default(),
 		}
 	}
 }
@@ -340,7 +343,10 @@ pub fn execute_shell<'env>(
 		timeout_ms:    options.timeout_ms,
 		snapshot_path: options.snapshot_path,
 		minimizer:     options.minimizer.map(Into::into),
-		filesystem:    options.filesystem.map_or_default(ShellFilesystem::into_fs),
+		filesystem:    options
+			.filesystem
+			.map(ShellFilesystem::into_fs)
+			.unwrap_or_default(),
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -421,7 +427,7 @@ impl BridgeItem for String {
 /// `busy` is held from the moment a chunk is taken until its batch has been
 /// forwarded, so an empty queue with `busy` clear really means no output is
 /// in transit (the PTY's stuck-open-slave check).
-pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
+pub(crate) async fn pump_chunks<T: BridgeItem>(
 	rx: flume::Receiver<T>,
 	stall_timeout: Duration,
 	busy: Option<&AtomicBool>,

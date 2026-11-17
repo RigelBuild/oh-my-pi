@@ -145,8 +145,7 @@ mod tests {
 				fs::metadata(callback)
 					.expect("read callback metadata")
 					.permissions()
-					.mode()
-					& 0o777,
+					.mode() & 0o777,
 				0o600
 			);
 		}

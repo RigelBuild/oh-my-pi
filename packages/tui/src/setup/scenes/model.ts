@@ -1,5 +1,4 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import type { SgrMouseEvent } from "../../mouse";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
@@ -115,7 +114,7 @@ class ModelSceneController implements SetupSceneController {
 		const { available, all, current } = this.#host.ctx.getModels();
 		const source = this.#host.ctx.modelSource;
 		const roles = resolveRoleAssignments(source, all, available);
-		const items = buildBrowserItems(available.filter(model => modelKind(model) === "chat"));
+		const items = buildBrowserItems(available);
 		sortModelItems(items, { roles, mruOrder: source.mruOrder });
 		this.#browser.setRoles(roles);
 		this.#browser.setMruOrder(source.mruOrder);

@@ -10,7 +10,6 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -20,7 +19,7 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
-import { $env, isBunTestRuntime, isCompiledBinary, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
+import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
@@ -39,9 +38,8 @@ import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
-import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { getLatestRelease, isRigelBuildVersion, isSourceCheckout, managedInstallName } from "./cli/update-cli";
+import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -238,22 +236,14 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
 }
 
-export async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
+async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!cfgStartupCheckUpdate.get(settings)) {
 		return;
 	}
 	try {
-		// A Rigel binary updates by reinstalling from GitHub releases, so `omp update` cannot help.
-		if (isCompiledBinary() && isRigelBuildVersion(currentVersion)) return;
-		// Checkouts update through git and a manager (Tern) updates its omp itself:
-		// "run omp update" would be wrong advice for both.
-		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
 		const channel = cfgUpdateChannel.get(settings);
-		// Compiled upstream binaries update from the build service; npm installs use npm.
-		const { version } = isCompiledBinary()
-			? await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion })
-			: await getLatestRelease({ timeoutMs: 5_000, channel }, currentVersion);
-		return Bun.semver.order(version, currentVersion) > 0 ? version : undefined;
+		const release = await getLatestRelease({ timeoutMs: 5_000, channel });
+		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
 	} catch {
 		return undefined;
 	}
@@ -756,10 +746,6 @@ async function runInteractiveMode(
 			}
 		}
 
-		if (!resuming && joinLink === undefined) {
-			await mode.maybeAutoCreateWorktree();
-		}
-
 		// `omp join <link>`: dispatch through the same builtin path as a typed
 		// `/join` so collab guards and error rendering stay in one place.
 		if (joinLink !== undefined) {
@@ -786,6 +772,7 @@ async function runInteractiveMode(
 	}
 
 	if (startupGoal !== undefined) {
+		session.maybeStartTitleGeneration(startupGoal);
 		try {
 			await mode.startGoalAtStartup(startupGoal);
 		} catch (error: unknown) {
@@ -794,6 +781,7 @@ async function runInteractiveMode(
 	}
 
 	if (initialMessage !== undefined) {
+		session.maybeStartTitleGeneration(initialMessage);
 		try {
 			using _keepalive = new EventLoopKeepalive();
 			// `steer` covers the race where the user submits a prompt of their own
@@ -808,6 +796,7 @@ async function runInteractiveMode(
 	}
 
 	for (const message of initialMessages) {
+		session.maybeStartTitleGeneration(message);
 		try {
 			using _keepalive = new EventLoopKeepalive();
 			await session.prompt(message, { streamingBehavior: "steer" });
@@ -908,37 +897,33 @@ async function moveMissingCwdSessionIfNeeded(
 		return { status: "not-needed" };
 	}
 
-	// A removed worktree of this checkout's repository: its session belongs here, no question to ask.
-	if (!(await SessionManager.isFromRemovedWorktree(session, cwd, sessionDir))) {
-		const movePromptResult = await askToMoveSession(session);
-		if (movePromptResult === "unavailable") {
-			throw new SessionResolutionError(
-				`Session "${sessionArg}" belongs to a directory that no longer exists (${sourceCwd}); run interactively to move it into the current project.`,
-			);
-		}
-		if (movePromptResult === "declined") {
-			return { status: "declined" };
-		}
+	const movePromptResult = await askToMoveSession(session);
+	if (movePromptResult === "unavailable") {
+		throw new SessionResolutionError(
+			`Session "${sessionArg}" belongs to a directory that no longer exists (${sourceCwd}); run interactively to move it into the current project.`,
+		);
 	}
-	return { status: "moved", manager: await openRelocatedSession(session, cwd, sessionDir) };
-}
+	if (movePromptResult === "declined") {
+		return { status: "declined" };
+	}
 
-/** {@link SessionManager.openRelocated} into `cwd`, reporting a live-writer refusal as a CLI error. */
-async function openRelocatedSession(
-	session: SessionInfo,
-	cwd: string,
-	sessionDir: string | undefined,
-): Promise<SessionManager> {
+	// Open anchored at the (now-missing) recorded cwd: `open` otherwise falls back
+	// to the launch cwd, which would make the `moveTo` below a no-op whenever the
+	// move target equals the current project dir. moveTo never chdirs, so the
+	// stale cwd is only a relocation source, not a directory we enter.
+	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
 	try {
-		return await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir);
+		await manager.moveTo(cwd, sessionDir);
 	} catch (err) {
 		if (!(err instanceof SessionMoveRefusedError)) throw err;
+		await manager.close();
 		// Its directory is gone, so it cannot be resumed in place either.
 		throw new SessionResolutionError(
 			err.message,
 			"Close the session in the other omp process, then resume it again.",
 		);
 	}
+	return { status: "moved", manager };
 }
 
 type ResumedProjectResult = { cwd: string; chdirFailed?: string };
@@ -1185,7 +1170,7 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 	parsed.continue = false;
 	parsed.messages.splice(messageIndex, 1);
 }
-const SESSION_NOT_FOUND_HINT =
+const FORK_NOT_FOUND_HINT =
 	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
 
 function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
@@ -1243,7 +1228,7 @@ export async function createSessionManager(
 		if (sessionId !== undefined && (await findLocalSessionById(sessionId, cwd, parsed.sessionDir))) {
 			throw new SessionResolutionError(`Session already exists with id "${sessionId}".`);
 		}
-		const forkOptions = { id: sessionId, repairInterruptedTail: true };
+		const forkOptions = sessionId === undefined ? undefined : { id: sessionId };
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
 			try {
@@ -1251,21 +1236,21 @@ export async function createSessionManager(
 			} catch (err) {
 				if (err instanceof SessionIdCollisionError) throw new SessionResolutionError(err.message);
 				if (err instanceof ForkSourceNotFoundError) {
-					throw new SessionResolutionError(err.message, SESSION_NOT_FOUND_HINT);
+					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
 				}
 				throw err;
 			}
 		}
 		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new SessionResolutionError(`Session "${forkSource}" not found.`, SESSION_NOT_FOUND_HINT);
+			throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 		}
 		try {
 			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, forkOptions);
 		} catch (err) {
 			if (err instanceof SessionIdCollisionError) throw new SessionResolutionError(err.message);
 			if (err instanceof ForkSourceNotFoundError) {
-				throw new SessionResolutionError(`Session "${forkSource}" not found.`, SESSION_NOT_FOUND_HINT);
+				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
 			}
 			throw err;
 		}
@@ -1283,18 +1268,14 @@ export async function createSessionManager(
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
-			try {
-				return await SessionManager.open(sessionArg, parsed.sessionDir, undefined, { throwIfMissing: true });
-			} catch (err) {
-				if (isEnoent(err) || isEnotdir(err)) {
-					throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
-				}
-				throw err;
-			}
+			return await SessionManager.open(sessionArg, parsed.sessionDir);
 		}
 		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
+			throw new SessionResolutionError(
+				`Session "${sessionArg}" not found.`,
+				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
+			);
 		}
 		if (match.scope === "local") {
 			const moveResult = await moveMissingCwdSessionIfNeeded(
@@ -1334,10 +1315,6 @@ export async function createSessionManager(
 	if (sessionId !== undefined) {
 		const existing = await findLocalSessionById(sessionId, cwd, parsed.sessionDir);
 		if (existing) {
-			// `--goal` seeds a fresh session only; reopening any saved session is a resume.
-			if (parsed.goal !== undefined) {
-				throw new CliUsageError("--goal requires a fresh session; --session-id names an existing session.");
-			}
 			// No breadcrumb until the lease is held, so a failed launch leaves it alone.
 			const manager = await SessionManager.open(existing, parsed.sessionDir, undefined, {
 				suppressBreadcrumb: true,
@@ -2241,16 +2218,8 @@ export async function runRootCommand(
 				stopStartupWatchdog();
 				process.exit(0);
 			}
-			try {
-				sessionManager = (await SessionManager.isFromRemovedWorktree(selected, cwd, parsedArgs.sessionDir))
-					? await openRelocatedSession(selected, cwd, parsedArgs.sessionDir)
-					: await SessionManager.open(selected.path);
-			} catch (error: unknown) {
-				if (error instanceof SessionResolutionError) exitForSessionResolutionError(error);
-				throw error;
-			}
+			sessionManager = await SessionManager.open(selected.path);
 			const previousCwd = cwd;
-			// A relocated session's `selected.cwd` is the removed worktree: missing, so the launch cwd stays.
 			const recordedCwd = selected.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
@@ -2309,8 +2278,6 @@ export async function runRootCommand(
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 		sessionOptions.allowSessionModelFallback = isInteractive;
 		sessionOptions.settingsApproval = isInteractive;
-		sessionOptions.tuiTranscript = isInteractive;
-		sessionOptions.autoTitle = isInteractive;
 		sessionOptions.settings = settingsInstance;
 		sessionOptions.onPrewalkWarning = warning => {
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });
@@ -2601,10 +2568,6 @@ export async function runRootCommand(
 			}
 
 			const modelRegistryError = modelRegistry.getError();
-			for (const warning of modelRegistry.drainConfigWarnings()) {
-				if (isInteractive) notifs.push({ kind: "warn", message: warning });
-				else process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
-			}
 			if (modelRegistryError) {
 				notifs.push({ kind: "error", message: modelRegistryError.message });
 			}

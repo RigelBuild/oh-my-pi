@@ -90,25 +90,17 @@ function buildHunks(prev: string, next: string): { hunks: EditHunk[]; a: string[
 	return { hunks, a, b };
 }
 
-/** Append `src[start, end)` to `out` without spreading. */
-function pushRange(out: string[], src: readonly string[], start: number, end: number): void {
-	for (let i = start; i < end; i++) out.push(src[i]);
-}
-
-/**
- * Post-image with the given hunks reverted to their pre-image lines. `set`
- * must be ascending; `out` is a scratch buffer reused across trials.
- */
-function revertHunks(a: string[], b: string[], hunks: EditHunk[], set: readonly number[], out: string[]): string {
-	out.length = 0;
+/** Post-image with the given hunks reverted to their pre-image lines. */
+function revertHunks(a: string[], b: string[], hunks: EditHunk[], set: readonly number[]): string {
+	const sorted = [...set].sort((x, y) => x - y);
+	const out: string[] = [];
 	let bi = 0;
-	for (const i of set) {
+	for (const i of sorted) {
 		const h = hunks[i];
-		pushRange(out, b, bi, h.bStart);
-		pushRange(out, a, h.aStart, h.aEnd);
+		out.push(...b.slice(bi, h.bStart), ...a.slice(h.aStart, h.aEnd));
 		bi = h.bEnd;
 	}
-	pushRange(out, b, bi, b.length);
+	out.push(...b.slice(bi));
 	return out.join("\n");
 }
 
@@ -120,94 +112,26 @@ function revertHunks(a: string[], b: string[], hunks: EditHunk[], set: readonly 
 function isolateCulpritHunks(path: string, a: string[], b: string[], hunks: EditHunk[]): number[] | undefined {
 	const n = hunks.length;
 	if (n === 0) return undefined;
-	const scratch: string[] = [];
-	const trial: number[] = [];
-	const parsesReverted = (set: readonly number[]): boolean =>
-		parsesSource(revertHunks(a, b, hunks, set, scratch), path);
-
 	for (let i = 0; i < n; i++) {
-		trial[0] = i;
-		trial.length = 1;
-		if (parsesReverted(trial)) return [i];
+		if (parsesSource(revertHunks(a, b, hunks, [i]), path)) return [i];
 	}
-
 	if (n <= MAX_PAIR_SEARCH_HUNKS) {
-		trial.length = 2;
 		for (let i = 0; i < n; i++) {
 			for (let j = i + 1; j < n; j++) {
-				trial[0] = i;
-				trial[1] = j;
-				if (parsesReverted(trial)) return [i, j];
+				if (parsesSource(revertHunks(a, b, hunks, [i, j]), path)) return [i, j];
 			}
 		}
 	}
-
-	const keepBits = new Uint8Array(Math.ceil(n / 8)).fill(0xff);
-	// Whether reverting exactly the current `keepBits` set is known to parse.
-	let keepParses = false;
+	const keep = new Set<number>(Array.from({ length: n }, (_, i) => i));
 	for (let i = 0; i < n; i++) {
-		trial.length = 0;
-		for (let k = 0; k < n; k++) {
-			if ((keepBits[k >>> 3] & (1 << (k & 7))) !== 0 && k !== i) trial.push(k);
-		}
-		if (parsesReverted(trial)) {
-			keepBits[i >>> 3] &= ~(1 << (i & 7));
-			keepParses = true;
-		}
-	}
-	const culprits: number[] = [];
-	for (let k = 0; k < n; k++) {
-		if ((keepBits[k >>> 3] & (1 << (k & 7))) !== 0) culprits.push(k);
+		const trial = new Set(keep);
+		trial.delete(i);
+		if (parsesSource(revertHunks(a, b, hunks, [...trial]), path)) keep.delete(i);
 	}
 	// Reverting every remaining hunk must parse (the full revert is the
 	// pre-image); an empty set would mean the pre-image itself is broken.
-	if (culprits.length === 0 || (!keepParses && !parsesReverted(culprits))) return undefined;
-	return culprits;
-}
-
-/** A repair region plus the post-image lines it was computed against. */
-interface ComputedRegion {
-	region: RepairRegion;
-	b: string[];
-}
-
-function computeRegion(snapshot: AppliedEditSnapshot): ComputedRegion | undefined {
-	const { path, prev, next } = snapshot;
-	const { hunks, a, b } = buildHunks(prev, next);
-	const culprits = isolateCulpritHunks(path, a, b, hunks);
-	if (!culprits) return undefined;
-
-	// `culprits` is ascending and hunks are ordered by position.
-	const first = hunks[culprits[0]];
-	const last = hunks[culprits[culprits.length - 1]];
-	const bStart = Math.max(0, first.bStart - CONTEXT_LINES);
-	const bEnd = Math.min(b.length, last.bEnd + CONTEXT_LINES);
-	if (bEnd - bStart > MAX_REGION_LINES) return undefined;
-
-	// Reference = post-image context with each culprit hunk's lines swapped for
-	// its pre-image lines, so splicing the reference reproduces the culprit
-	// reversion exactly (which parses by construction).
-	const ref: string[] = [];
-	let bi = bStart;
-	for (const i of culprits) {
-		const h = hunks[i];
-		pushRange(ref, b, bi, h.bStart);
-		pushRange(ref, a, h.aStart, h.aEnd);
-		bi = h.bEnd;
-	}
-	pushRange(ref, b, bi, bEnd);
-
-	const language = summarizeCode({ code: prev.length === 0 ? "\n" : prev, path }).language ?? "source";
-	return {
-		region: {
-			bStart,
-			bEnd,
-			brokenText: b.slice(bStart, bEnd).join("\n"),
-			referenceText: ref.join("\n"),
-			language,
-		},
-		b,
-	};
+	if (keep.size === 0 || !parsesSource(revertHunks(a, b, hunks, [...keep]), path)) return undefined;
+	return [...keep];
 }
 
 /**
@@ -216,17 +140,40 @@ function computeRegion(snapshot: AppliedEditSnapshot): ComputedRegion | undefine
  * {@link MAX_REGION_LINES} — callers fall back to the plain parse warning.
  */
 export function computeRepairRegion(snapshot: AppliedEditSnapshot): RepairRegion | undefined {
-	return computeRegion(snapshot)?.region;
+	const { path, prev, next } = snapshot;
+	const { hunks, a, b } = buildHunks(prev, next);
+	const culprits = isolateCulpritHunks(path, a, b, hunks);
+	if (!culprits) return undefined;
+
+	const hs = culprits.map(i => hunks[i]).sort((x, y) => x.bStart - y.bStart);
+	const bStart = Math.max(0, hs[0].bStart - CONTEXT_LINES);
+	const bEnd = Math.min(b.length, (hs.at(-1) as EditHunk).bEnd + CONTEXT_LINES);
+	if (bEnd - bStart > MAX_REGION_LINES) return undefined;
+
+	// Reference = post-image context with each culprit hunk's lines swapped for
+	// its pre-image lines, so splicing the reference reproduces the culprit
+	// reversion exactly (which parses by construction).
+	const ref: string[] = [];
+	let bi = bStart;
+	for (const h of hs) {
+		ref.push(...b.slice(bi, h.bStart), ...a.slice(h.aStart, h.aEnd));
+		bi = h.bEnd;
+	}
+	ref.push(...b.slice(bi, bEnd));
+
+	const language = summarizeCode({ code: prev.length === 0 ? "\n" : prev, path }).language ?? "source";
+	return {
+		bStart,
+		bEnd,
+		brokenText: b.slice(bStart, bEnd).join("\n"),
+		referenceText: ref.join("\n"),
+		language,
+	};
 }
 
 /** Replace the region's line span in the post-image with `text`. */
 function spliceRegion(b: string[], region: RepairRegion, text: string): string {
-	const out: string[] = [];
-	pushRange(out, b, 0, region.bStart);
-	const lines = text.split("\n");
-	pushRange(out, lines, 0, lines.length);
-	pushRange(out, b, region.bEnd, b.length);
-	return out.join("\n");
+	return [...b.slice(0, region.bStart), ...text.split("\n"), ...b.slice(region.bEnd)].join("\n");
 }
 
 /**
@@ -285,9 +232,9 @@ export async function repairParseRegression(
 	snapshot: AppliedEditSnapshot,
 	complete: (builtPrompt: string) => Promise<string>,
 ): Promise<RegionRepair | undefined> {
-	const computed = computeRegion(snapshot);
-	if (!computed) return undefined;
-	const { region, b } = computed;
+	const region = computeRepairRegion(snapshot);
+	if (!region) return undefined;
+	const b = snapshot.next.split("\n");
 	const normalizedReference = normalizeForRevertCheck(region.referenceText);
 
 	let previousAttempt: string | undefined;

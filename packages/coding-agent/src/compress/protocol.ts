@@ -70,8 +70,6 @@ export class CompressProtocol {
 	readonly #sourceWords: number;
 	readonly #sourceTokens: number;
 	readonly #drafts: CompressDraft[] = [];
-	/** Metrics per draft object, keyed on the text they measured: tokenizing a draft is the costly part. */
-	readonly #metrics = new WeakMap<CompressDraft, { text: string; metrics: CompressMetrics }>();
 	#reviewed = 0;
 	#approved = false;
 	#verdict: string | undefined;
@@ -117,20 +115,16 @@ export class CompressProtocol {
 		return this.#sourceTokens;
 	}
 
-	/** Size of `draft` against the source; measured once per draft text. */
+	/** Size of `draft` against the source. */
 	metrics(draft: CompressDraft): CompressMetrics {
-		const cached = this.#metrics.get(draft);
-		if (cached?.text === draft.text) return cached.metrics;
 		const draftTokens = this.#tokenizer.countTokens(draft.text);
-		const metrics: CompressMetrics = {
+		return {
 			sourceWords: this.#sourceWords,
 			draftWords: words(draft.text),
 			sourceTokens: this.#sourceTokens,
 			draftTokens,
 			ratio: this.#sourceTokens === 0 ? 0 : (this.#sourceTokens - draftTokens) / this.#sourceTokens,
 		};
-		this.#metrics.set(draft, { text: draft.text, metrics });
-		return metrics;
 	}
 
 	/** Record that the command has shown `round` back to the agent for a verdict. */

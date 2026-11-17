@@ -33,17 +33,14 @@ describe("/changelog", () => {
 		expect(versionHeadings(recent.chunks.join("\n"))).toEqual(
 			all
 				.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT)
-				.map(
-					entry =>
-						`## [${entry.major}.${entry.minor}.${entry.patch}${entry.prerelease ? `-${entry.prerelease}` : ""}]`,
-				)
+				.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`)
 				.reverse(),
 		);
 
 		const last = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog last", last.runtime);
 		expect(versionHeadings(last.chunks.join("\n"))).toEqual([
-			`## [${all[0]!.major}.${all[0]!.minor}.${all[0]!.patch}${all[0]!.prerelease ? `-${all[0]!.prerelease}` : ""}]`,
+			`## [${all[0]!.major}.${all[0]!.minor}.${all[0]!.patch}]`,
 		]);
 
 		const lastTwo = acpRuntime();
@@ -51,10 +48,7 @@ describe("/changelog", () => {
 		expect(versionHeadings(lastTwo.chunks.join("\n"))).toEqual(
 			all
 				.slice(0, 2)
-				.map(
-					entry =>
-						`## [${entry.major}.${entry.minor}.${entry.patch}${entry.prerelease ? `-${entry.prerelease}` : ""}]`,
-				)
+				.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`)
 				.reverse(),
 		);
 

@@ -1,19 +1,11 @@
-import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
 import { SendHorizontal, Square } from "lucide-react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
-import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
-import type { ConnectionPhase, GuestClient } from "../../lib/client";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import type { GuestClient, GuestSnapshot } from "../../lib/client";
 
 export interface ComposerProps {
 	client: GuestClient;
-	phase: ConnectionPhase;
-	readOnly: boolean;
-	/** Pending host-side UI request this guest can answer. */
-	uiRequest: CollabUiRequest | null;
-	/** Host agent turn in flight. */
-	working: boolean;
-	/** Prompts queued behind the running turn. */
-	queuedMessageCount: number;
+	snapshot: GuestSnapshot;
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
@@ -116,23 +108,17 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
 	);
 }
 
-/** Memoized on its snapshot fields, so streaming frames that leave them untouched skip it. */
-export const Composer = memo(function Composer({
-	client,
-	phase,
-	readOnly,
-	uiRequest,
-	working,
-	queuedMessageCount,
-}: ComposerProps): ReactNode {
+export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 	const [text, setText] = useState("");
 	const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
-	const live = phase === "live";
+	const live = snapshot.phase === "live";
+	const readOnly = snapshot.readOnly;
+	const uiRequest = snapshot.uiRequest;
 	const canPrompt = live && !readOnly;
-	const busy = working;
-	const queued = queuedMessageCount;
+	const busy = snapshot.working;
+	const queued = snapshot.state?.queuedMessageCount ?? 0;
 	const canSend = canPrompt && text.trim().length > 0;
 
 	useLayoutEffect(() => {
@@ -261,4 +247,4 @@ export const Composer = memo(function Composer({
 			</div>
 		</div>
 	);
-});
+}

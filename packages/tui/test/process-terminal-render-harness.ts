@@ -1,5 +1,5 @@
 import { vi } from "bun:test";
-import { type Component, TUI, type TUIStartOptions } from "@oh-my-pi/pi-tui";
+import { type Component, TUI } from "@oh-my-pi/pi-tui";
 import { ProcessTerminal, type ProcessTerminalOptions } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
@@ -77,7 +77,6 @@ export function createProcessTerminalRenderHarness(
 	initialColumns = 100,
 	initialRows = 30,
 	terminalOptions: ProcessTerminalOptions = { conpty: false },
-	startOptions?: TUIStartOptions,
 ): ProcessTerminalRenderHarness {
 	// This harness exercises the real ProcessTerminal I/O pipeline, so it opts
 	// out of the test-default headless suppression and restores the prior value
@@ -113,7 +112,7 @@ export function createProcessTerminalRenderHarness(
 	const probe = new WidthProbe();
 	tui.addChild(probe);
 	try {
-		tui.start(startOptions);
+		tui.start();
 	} catch (err) {
 		// A start() regression must not poison the worker with headless=false.
 		setTerminalHeadless(previousHeadless);

@@ -1,4 +1,3 @@
-import { TerminatorWait } from "./terminator-wait";
 import type { InbandScanEvent, InbandScanner } from "./types";
 
 const SECTION_OPEN = "<tool_calls>";
@@ -9,18 +8,13 @@ const ATTRIBUTE = /([A-Za-z_][\w.-]*)\s*=\s*("([^"]*)"|'([^']*)')/g;
 export class QwenXmlInbandScanner implements InbandScanner {
 	#buffer = "";
 	#insideSection = false;
-	readonly #closeWait = new TerminatorWait();
 
 	feed(chunk: string): InbandScanEvent[] {
-		if (this.#closeWait.absorb(chunk)) return [];
-		this.#buffer = this.#closeWait.release(this.#buffer) + chunk;
-		const events = this.#drain(false);
-		if (this.#insideSection) this.#closeWait.arm(SECTION_CLOSE, this.#buffer);
-		return events;
+		this.#buffer += chunk;
+		return this.#drain(false);
 	}
 
 	flush(): InbandScanEvent[] {
-		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#drain(true);
 	}
 

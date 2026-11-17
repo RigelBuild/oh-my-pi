@@ -8,19 +8,15 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
-	resolveGatewayAccount,
 	resolveGatewayApiKey,
-	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
-import type { CallerIdentity } from "../types";
 
 /** OpenAI-compatible `POST /v1/embeddings` gateway handler. */
 export async function handleEmbeddings(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
-	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -39,8 +35,7 @@ export async function handleEmbeddings(
 	}
 	if (controller.signal.aborted) return aborted();
 
-	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
-	if (controller.signal.aborted) return aborted();
+	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
 		return embeddings.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
@@ -59,7 +54,6 @@ export async function handleEmbeddings(
 	if ("status" in apiKey) {
 		return embeddings.formatError(apiKey.status, apiKey.type, apiKey.message);
 	}
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -81,14 +75,11 @@ export async function handleEmbeddings(
 				controller.signal,
 				"embeddings",
 				peer,
-				resolvedKey => {
-					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
-				},
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
 		return json(
 			200,
 			embeddings.encodeResponse(result, parsed.modelId),

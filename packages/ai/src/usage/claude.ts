@@ -1,12 +1,12 @@
+import { scheduler } from "node:timers/promises";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import { isAnthropicOAuthToken, toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import * as AIError from "../error";
 import {
 	type CredentialRankingContext,
 	type CredentialRankingStrategy,
 	resolveUsedFraction,
 	type UsageAmount,
-	type UsageCredential,
 	type UsageFetchContext,
 	type UsageFetchParams,
 	type UsageLimit,
@@ -15,7 +15,6 @@ import {
 	type UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { waitForRetry } from "../utils/retry-wait";
 import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
 import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
 import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
@@ -240,7 +239,11 @@ async function waitBeforeRetry(
 	if (attempt >= MAX_ATTEMPTS - 1) return false;
 	try {
 		const delayMs = retryDelayMs(attempt, retryAfter);
-		await waitForRetry(retryWait, delayMs, signal);
+		if (retryWait) {
+			await retryWait(delayMs, signal);
+		} else {
+			await scheduler.wait(delayMs, { signal });
+		}
 		return !signal?.aborted;
 	} catch (error) {
 		if (isAbortError(error, signal)) return false;
@@ -628,19 +631,12 @@ export function parseClaudeRateLimitHeaders(headers: Record<string, string>, now
 	};
 }
 
-function claudeUsageToken(credential: UsageCredential): string | undefined {
-	if (credential.type === "oauth") return credential.accessToken;
-	const apiKey = credential.apiKey;
-	return apiKey && isAnthropicOAuthToken(apiKey) ? apiKey : undefined;
-}
-
 async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== "anthropic") return null;
 	const credential = params.credential;
-	const accessToken = claudeUsageToken(params.credential);
-	if (!accessToken) return null;
+	if (credential.type !== "oauth" || !credential.accessToken) return null;
 
-	const headers = buildClaudeOAuthHeaders(accessToken, { beta: CLAUDE_USAGE_BETAS });
+	const headers = buildClaudeOAuthHeaders(credential.accessToken, { beta: CLAUDE_USAGE_BETAS });
 
 	let baseUrl: string | undefined;
 	let payload: ClaudeUsageResponse | null = null;
@@ -669,7 +665,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	const resetCreditList =
 		parseClaudeResetCreditsFromUsagePayload(payload, credential.orgId, baseUrl) ??
 		(await listClaudeResetCredits({
-			accessToken,
+			accessToken: credential.accessToken,
 			accountId: credential.accountId,
 			email: credential.email,
 			orgId: credential.orgId,
@@ -806,7 +802,7 @@ export const claudeUsageProvider: UsageProvider = {
 	failureBackoffMs: FAILURE_BACKOFF_MS,
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
-	supports: params => params.provider === "anthropic" && !!claudeUsageToken(params.credential),
+	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",
 };
 
 function getClaudeModelKind(context: CredentialRankingContext | undefined): ClaudeModelKind | undefined {

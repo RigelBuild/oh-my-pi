@@ -68,7 +68,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const routed = new Map<string, Model<Api>>();
 	const router = createAuthGatewayRouter({
 		storage,
-		resolveModel: (id, _caller) => routed.get(id),
+		resolveModel: id => routed.get(id),
 		listModels: () => registry.getAvailable(),
 	});
 	const route = async (req: Request): Promise<Response> => {

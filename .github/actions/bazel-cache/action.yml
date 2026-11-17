@@ -1,12 +1,48 @@
 name: "Compose bazel cache config"
 description: >
-   Uses the omp-kata cluster remote cache when credentials are available.
-   GitHub-hosted jobs restore and save a scope-keyed disk and repository cache.
+   Selects the CI cache backend and emits a bazelrc fragment. A shell probe
+   exposes the backend through step outputs before any action condition
+   uses it.
+
+   omp-kata jobs use the cluster remote cache. GitHub-hosted jobs use an
+   actions/cache-backed disk cache seeded by the bazel-cache-warm workflow
+   on the same runner image — cross-host action keys never hit, so the disk
+   cache is hosted-only and its key carries a schema version (v1 was
+   poisoned by a kata-produced export that silently missed every action).
+
+   The v3 key is <config hash>-<source hash>: config covers toolchain and
+   build settings, source covers crates/** + BUILD.bazel. Restores fall
+   back to the config-scoped prefix, then to a bare scope+os+arch prefix:
+   the config hash covers Cargo.toml/Cargo.lock, which every release
+   version bump rewrites, so without the bare fallback each release built
+   the darwin addons fully cold (~40-50 min on macos-15-intel; CI run
+   30357804722). A stale-config archive is safe — bazel keys every
+   action by content digest, so mismatched entries just miss — and the
+   refreshed archive is saved after the build (an exact hit suppresses
+   the save — without the source component the first archive for a config
+   generation would permanently shadow newer source states). Restored
+   entries untouched for 14 days are pruned before the build so
+   ever-seeding archives don't grow without bound.
+
+   Only rigel-release saves. actions/cache entries are scoped to the ref that
+   saved them: a run reads its own ref and the default branch, and a PR also
+   reads its base branch; sibling branches and other tags cannot read it. A
+   copy saved off rigel-release helps only its own ref, while still counting against the
+   shared 10 GB repo quota. A tag-dispatched release saved a ~5 GB darwin
+   archive under refs/tags/v18.2.10 and GitHub's LRU eviction then dropped
+   the release branch's darwin archives, so the next release built cold.
 
 inputs:
    scope:
       description: Disk-cache key discriminator shared by compatible consumers
       required: true
+   fallback-scope:
+      description: >
+         Optional scope whose newest archive is the last restore fallback
+         (e.g. the sibling darwin target on the same runner image, which
+         shares every exec-config action). Empty disables it.
+      required: false
+      default: ""
 
 outputs:
    rc:
@@ -16,7 +52,7 @@ outputs:
       description: Exact GitHub cache key for a later explicit save
       value: ${{ steps.backend.outputs.cache-key }}
    save-needed:
-      description: Whether a disk-cache build can save a new exact-key archive
+      description: Whether this run should save a new exact-key disk-cache archive (hosted, inexact restore, on rigel-release)
       value: ${{ steps.compose.outputs.save-needed }}
    remote:
       description: Whether the shell probe selected the cluster remote cache
@@ -41,17 +77,19 @@ runs:
              fi
              remote=true
            fi
-           if [ "$remote" != "true" ]; then
-             echo "::notice title=Bazel cache::No cluster remote-cache credentials on this runner; using the hosted disk cache."
-           fi
            key="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-$SOURCE_HASH"
            prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-"
            bare_prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-"
+           fallback_prefix=""
+           if [ -n "${{ inputs.fallback-scope }}" ]; then
+             fallback_prefix="bazel-disk-v3-${{ inputs.fallback-scope }}-${{ runner.os }}-${{ runner.arch }}-"
+           fi
            {
              echo "remote=$remote"
              echo "cache-key=$key"
              echo "cache-prefix=$prefix"
              echo "cache-bare-prefix=$bare_prefix"
+             echo "cache-fallback-prefix=$fallback_prefix"
            } >> "$GITHUB_OUTPUT"
 
       - name: Restore bazel disk cache
@@ -76,6 +114,7 @@ runs:
            restore-keys: |
               ${{ steps.backend.outputs.cache-prefix }}
               ${{ steps.backend.outputs.cache-bare-prefix }}
+              ${{ steps.backend.outputs.cache-fallback-prefix }}
 
       - name: Compose cache config
         id: compose
@@ -83,10 +122,11 @@ runs:
         env:
            REMOTE: ${{ steps.backend.outputs.remote }}
            RESTORE_HIT: ${{ steps.restore.outputs.cache-hit }}
+           ON_RELEASE: ${{ github.ref == 'refs/heads/rigel-release' }}
         run: |
            set -euo pipefail
            save_needed=false
-           if [ "$REMOTE" != "true" ] && [ "$RESTORE_HIT" != "true" ]; then
+           if [ "$REMOTE" != "true" ] && [ "$RESTORE_HIT" != "true" ] && [ "$ON_RELEASE" = "true" ]; then
              save_needed=true
            fi
 
@@ -131,7 +171,6 @@ runs:
                echo "common --config=ci"
                echo "common --disk_cache=$HOME/.cache/omp-bazel-disk"
                echo "common --repository_cache=$HOME/.cache/omp-bazel-repo"
-               echo "common --repo_env=OMP_XWIN_CACHE_DIR=$HOME/.cache/omp-bazel-repo/xwin"
              } > "$rc"
            fi
 

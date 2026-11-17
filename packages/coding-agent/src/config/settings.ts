@@ -39,7 +39,7 @@ import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../sessi
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { replaceFileAtomically } from "../utils/atomic-file";
 import { isRegisteredSearchEngine } from "../web/search/provider";
-import { stringifyYamlConfig, updateYamlConfigSource } from "@oh-my-pi/pi-utils/yaml-config";
+import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
 	type AnySetting,
 	all as allSettings,
@@ -125,10 +125,6 @@ function yamlGenerationsMatch(left: YamlGeneration, right: YamlGeneration): bool
 	}
 }
 
-function yamlSourceForWrite(loaded: LockedYamlLoadResult): string | undefined {
-	return loaded.settings !== null && loaded.generation.kind === "content" ? loaded.generation.source : undefined;
-}
-
 type MainYamlReadResult = {
 	settings: RawSettings | null;
 	configPath: string | null;
@@ -203,19 +199,6 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 		current = current[segment] as RawSettings;
 	}
 	current[segments[segments.length - 1]] = value;
-}
-
-/**
- * Assign `obj[key]` as an own property. Plain assignment of a parsed
- * `__proto__` key (an agent name, say) would replace the prototype instead,
- * silently dropping that entry.
- */
-function setOwn(obj: RawSettings, key: string, value: unknown): void {
-	if (key === "__proto__") {
-		Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
-	} else {
-		obj[key] = value;
-	}
 }
 
 /**
@@ -1110,10 +1093,9 @@ export class Settings {
 	 * Apply on-disk edits live: watch the directories holding config.yml, the
 	 * project settings files, and `--config` overlays, and run a debounced
 	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values). Arming a watch also schedules one reload, so
-	 * edits that landed before it went live are not lost. Only the persisting
-	 * process-global instance watches; other instances ignore the call. Stopped
-	 * by {@link stopWatching} / {@link cancelPendingSaves}.
+	 * layer's last good values). Only the persisting process-global instance watches; other
+	 * instances ignore the call. Stopped by {@link stopWatching} /
+	 * {@link cancelPendingSaves}.
 	 */
 	startWatching(): void {
 		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
@@ -1139,39 +1121,19 @@ export class Settings {
 			else targets.set(dir, new Set([name]));
 		};
 		const addFile = (file: string) => {
-			// Walk physically so every symlink hop (including profile/ancestor
-			// directory links) is observed, not just the logical file and final
-			// realpath. Physical directory keys also re-arm a watch after retargeting.
-			const absolute = path.resolve(file);
-			let dir = path.parse(absolute).root;
-			let segments = physicalTargetSegments(absolute);
-			let hops = 0;
-			while (segments.length > 0) {
-				const segment = segments.shift()!;
-				if (segment === "" || segment === ".") continue;
-				if (segment === "..") {
-					dir = path.dirname(dir);
-					continue;
-				}
-				const current = path.join(dir, segment);
-				if (segments.length === 0) addTarget(dir, segment);
-				try {
-					if (fs.lstatSync(current).isSymbolicLink()) {
-						addTarget(dir, segment);
-						if (++hops > MAX_SYMLINK_HOPS) return;
-						const target = fs.readlinkSync(current);
-						if (path.isAbsolute(target)) dir = path.parse(target).root;
-						segments = [...physicalTargetSegments(target), ...segments];
-					} else {
-						dir = current;
-					}
-				} catch {
-					// Watch the nearest existing parent, even when several
-					// directories or a symlink's referent are missing.
-					addTarget(dir, segment);
-					return;
-				}
+			const dir = path.dirname(file);
+			// A missing directory cannot be watched; watch its parent for the
+			// directory's creation instead (the next sync re-arms the real watch).
+			if (fs.existsSync(dir)) addTarget(dir, path.basename(file));
+			else addTarget(path.dirname(dir), path.basename(dir));
+			// Symlinked configs (dotfile managers) change at the link target.
+			let real: string;
+			try {
+				real = fs.realpathSync(file);
+			} catch {
+				return;
 			}
+			if (real !== file) addTarget(path.dirname(real), path.basename(real));
 		};
 		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
 		const projectCwd = path.resolve(this.#cwd);
@@ -1191,7 +1153,6 @@ export class Settings {
 	#syncFileWatchers(): void {
 		if (!this.#watchingFiles) return;
 		const targets = this.#configWatchTargets();
-		let armed = false;
 		for (const [dir, entry] of this.#fileWatchers) {
 			if (targets.has(dir)) continue;
 			entry.watcher.close();
@@ -1222,13 +1183,7 @@ export class Settings {
 				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
 			});
 			this.#fileWatchers.set(dir, { watcher, names });
-			armed = true;
 		}
-		// The sources were last read before this watch existed, and Bun arms macOS
-		// FSEvents asynchronously, so a write in between raises no event (a write
-		// right after a symlink retarget, or any edit during startup). Re-read once
-		// the watch is live; that reload's own sync arms nothing new, so it settles.
-		if (armed) this.#scheduleWatchReload();
 	}
 
 	#scheduleWatchReload(): void {
@@ -1358,13 +1313,7 @@ export class Settings {
 	async #reloadPersistedLayers(mode: PersistedReloadMode): Promise<void> {
 		const keepLastGood = mode === "keep-last-good";
 		for (;;) {
-			try {
-				await this.flush();
-			} catch (error) {
-				// The failed writes stay pending for the next flush and are re-applied over the
-				// layers read below, so an unwritable config never blocks a reload or reverts them.
-				logger.warn("Settings: reloading over unsaved changes", { error: String(error) });
-			}
+			await this.flush();
 			const mutationGeneration = this.#persistedMutationGeneration;
 
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
@@ -1383,15 +1332,10 @@ export class Settings {
 
 			const refreshed: LayerRefresh[] = [];
 			if (globalResult.status === "fulfilled") {
-				const { configPath } = globalResult.value;
-				// A config this instance moved aside as malformed reads as missing until a save
-				// recreates it; keep the last good layer instead of rebuilding it from pending writes.
-				const quarantined = this.#configPath !== null && this.#quarantinedYamlTargets.has(this.#configPath);
-				const settings = globalResult.value.settings ?? (quarantined ? structuredClone(this.#global) : {});
-				this.#applyPendingGlobalWrites(settings);
+				const { settings, configPath } = globalResult.value;
 				refreshed.push({
 					layer: "global",
-					settings,
+					settings: settings ?? {},
 					source: configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]),
 					commit: () => {
 						this.#configPath = configPath;
@@ -1400,7 +1344,6 @@ export class Settings {
 			}
 			if (projectResult.status === "fulfilled") {
 				const project = projectResult.value;
-				this.#applyPendingProjectWrites(project.settings);
 				refreshed.push({
 					layer: "project",
 					settings: project.settings,
@@ -1542,11 +1485,6 @@ export class Settings {
 
 	getAgentDir(): string {
 		return this.#agentDir;
-	}
-
-	/** Resolved absolute paths of the config overlays supplied to this instance. */
-	getConfigFiles(): readonly string[] {
-		return [...this.#configFiles];
 	}
 
 	/**
@@ -2453,12 +2391,10 @@ export class Settings {
 		if (rejectedWarnings) {
 			throw new Error(`Project settings failed to parse: ${rejectedWarnings.join("; ")}`);
 		}
-		// A native config this instance moved aside reads as missing until a save recreates it;
-		// keep its last good contents, as `#saveProjectNow` does.
 		const nativeProject = quarantineInvalid
 			? await this.#loadYaml(projectConfigPath)
 			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
-				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
+				{});
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
 			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
@@ -3556,23 +3492,6 @@ export class Settings {
 	// Saving
 	// ─────────────────────────────────────────────────────────────────────────
 
-	async #serializeYamlForWrite(
-		filePath: string,
-		settings: RawSettings,
-		baseSource?: string,
-	): Promise<string | undefined> {
-		if (baseSource === undefined) return stringifyYamlConfig(settings);
-		const update = await updateYamlConfigSource(baseSource, settings);
-		if (update.kind === "unchanged") return undefined;
-		if (update.kind === "unpreservable") {
-			throw new Error(
-				`Settings config cannot be updated in place: ${filePath}: ${update.reason}; ` +
-					"fix the file or move it aside (the pending change is kept for retry)",
-			);
-		}
-		return update.content;
-	}
-
 	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
 		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		let removeTemp = false;
@@ -3720,14 +3639,8 @@ export class Settings {
 				if (shouldWrite) {
 					// Merging pending changes can reproduce the file exactly (a change reverted before the
 					// debounce fired, an external edit that already holds the value): leave it untouched.
-					const baseSource = yamlSourceForWrite(loaded);
-					const content = await this.#serializeYamlForWrite(writePath, current, baseSource);
-					if (
-						content !== undefined &&
-						(baseSource !== undefined ||
-							loaded.generation.kind !== "content" ||
-							loaded.generation.source !== content)
-					) {
+					const content = stringifyYamlConfig(current);
+					if (loaded.generation.kind !== "content" || loaded.generation.source !== content) {
 						await this.#writeYamlAtomically(writePath, content);
 					}
 				}
@@ -3813,39 +3726,26 @@ export class Settings {
 	 * Notifies every setting whose effective value changed.
 	 */
 	#adoptSavedGlobal(saved: RawSettings, source: string): void {
-		this.#applyPendingGlobalWrites(saved);
+		if (this.#modifiedGlobalModelRoles.size > 0) {
+			const liveRoles = getByPath(this.#global, ["modelRoles"]);
+			const savedRoles = getByPath(saved, ["modelRoles"]);
+			const roles: Record<string, unknown> = isRecord(savedRoles) ? savedRoles : {};
+			for (const role of this.#modifiedGlobalModelRoles) {
+				if (isRecord(liveRoles) && Object.hasOwn(liveRoles, role)) roles[role] = liveRoles[role];
+				else delete roles[role];
+			}
+			setByPath(saved, ["modelRoles"], roles);
+		}
+		for (const segments of this.#modified.values()) {
+			const value = getByPath(this.#global, segments);
+			if (value === undefined) deleteByPath(saved, segments);
+			else setByPath(saved, segments, value);
+		}
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
 		this.#global = saved;
 		this.#rebuildMerged();
 		this.#fireChangesSince(previous);
-	}
-
-	/** Re-applies every global write still pending a save onto `target`, a global layer read from disk. */
-	#applyPendingGlobalWrites(target: RawSettings): void {
-		if (this.#modifiedGlobalModelRoles.size > 0) {
-			const liveRoles = getByPath(this.#global, ["modelRoles"]);
-			const targetRoles = getByPath(target, ["modelRoles"]);
-			const roles: Record<string, unknown> = isRecord(targetRoles) ? targetRoles : {};
-			for (const role of this.#modifiedGlobalModelRoles) {
-				if (isRecord(liveRoles) && Object.hasOwn(liveRoles, role)) roles[role] = liveRoles[role];
-				else delete roles[role];
-			}
-			setByPath(target, ["modelRoles"], roles);
-		}
-		for (const segments of this.#modified.values()) {
-			const value = getByPath(this.#global, segments);
-			if (value === undefined) deleteByPath(target, segments);
-			else setByPath(target, segments, value);
-		}
-	}
-
-	/** Re-applies every project model role still pending a save onto `target`, a project layer read from disk. */
-	#applyPendingProjectWrites(target: RawSettings): void {
-		const liveRoles = getByPath(this.#project, ["modelRoles"]);
-		for (const role of this.#modifiedProjectModelRoles) {
-			setByPath(target, ["modelRoles", role], isRecord(liveRoles) ? liveRoles[role] : undefined);
-		}
 	}
 
 	#queueProjectSave(): void {
@@ -3889,8 +3789,7 @@ export class Settings {
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
 
-				const content = await this.#serializeYamlForWrite(writePath, projectSettings, yamlSourceForWrite(loaded));
-				if (content !== undefined) await this.#writeYamlAtomically(writePath, content);
+				await this.#writeYamlAtomically(writePath, stringifyYamlConfig(projectSettings));
 				this.#projectFileSettings = structuredClone(projectSettings);
 				this.#quarantinedYamlTargets.delete(projectConfigPath);
 			});
@@ -3952,7 +3851,7 @@ export class Settings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
-			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
+			const baseVal = base[key];
 
 			if (override === undefined) continue;
 
@@ -3964,12 +3863,12 @@ export class Settings {
 				baseVal !== null &&
 				!Array.isArray(baseVal)
 			) {
-				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
+				result[key] = this.#deepMerge(baseVal as RawSettings, override as RawSettings);
 			} else {
-				setOwn(result, key, override);
+				result[key] = override;
 			}
 		}
-		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) setOwn(result, key, base[key]);
+		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) result[key] = base[key];
 		return result;
 	}
 }

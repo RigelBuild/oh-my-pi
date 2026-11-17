@@ -460,10 +460,8 @@ kbd {
 	gap: 8px;
 }
 
-@media (min-width: 901px) {
-	.btn.topbar-menu {
-		display: none;
-	}
+.topbar-menu {
+	display: none;
 }
 
 /* Sync progress hairline along the bottom edge of the topbar. */

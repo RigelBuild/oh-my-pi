@@ -3,7 +3,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { splitIntoChunks } from "./ci-test-chunks";
 
 type Mode =
 	| "all"
@@ -92,7 +91,6 @@ const fastWorkspacePackages = [
 	"packages/catalog",
 	"packages/ai",
 	"packages/snapcompact",
-	"packages/compass-gateway",
 	"packages/agent",
 	"packages/mnemopi",
 ];
@@ -217,6 +215,21 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 		command: ["bun", "test", ...extraArgs],
 		parallel,
 	};
+}
+
+/** Splits `files` into `count` contiguous groups whose sizes differ by at most one. */
+export function splitIntoChunks<T>(files: T[], count: number): T[][] {
+	if (!Number.isInteger(count) || count < 1) {
+		throw new Error(`Invalid chunk count ${count}`);
+	}
+	const chunks: T[][] = [];
+	let start = 0;
+	for (let i = 0; i < count; i++) {
+		const end = start + Math.floor(files.length / count) + (i < files.length % count ? 1 : 0);
+		if (end > start) chunks.push(files.slice(start, end));
+		start = end;
+	}
+	return chunks;
 }
 
 async function workspaceTestCommands(
@@ -456,13 +469,9 @@ async function runTestCommand(testCommand: TestCommand): Promise<void> {
 		// Watchdog, mirroring the parallel path: record that *we* killed the child,
 		// otherwise the resulting 137 is indistinguishable from an OOM kill.
 		let timedOut = false;
-		const killTimer = setTimeout(async () => {
+		const killTimer = setTimeout(() => {
 			timedOut = true;
-			try {
-				process.stdout.write(await describeStuckProcessTree(proc.pid));
-			} finally {
-				proc.kill("SIGKILL");
-			}
+			proc.kill("SIGKILL");
 		}, chunkTimeoutMs());
 		const exitCode = await proc.exited;
 		clearTimeout(killTimer);
@@ -529,70 +538,6 @@ function chunkTimeoutMs(): number {
 	return 600_000;
 }
 
-// What a watchdog-killed chunk was still doing, captured just before the
-// SIGKILL: every process left in the chunk's tree (the `bun test` coordinator,
-// its `--test-worker`s, anything they spawned) with state, CPU, RSS and kernel
-// wait channel, plus the sockets those processes hold (via `ss`, or the raw
-// `/proc/<pid>/fd` targets when `ss` is absent, as on the CI runner image). A
-// chunk can report every test and still never exit; this is the only evidence
-// of which process refused to and what it was blocked on. Linux-only (ps column
-// names, /proc); "" elsewhere or without `ps`. Never throws: callers kill the
-// chunk right after, and a snapshot failure must not stop that.
-async function describeStuckProcessTree(rootPid: number): Promise<string> {
-	if (process.platform !== "linux" || !Bun.which("ps")) return "";
-	try {
-		return await snapshotProcessTree(rootPid);
-	} catch (err) {
-		return `[watchdog] process tree snapshot failed: ${err instanceof Error ? err.message : String(err)}\n`;
-	}
-}
-
-async function snapshotProcessTree(rootPid: number): Promise<string> {
-	const ps = Bun.spawnSync(["ps", "-eo", "pid=,ppid=,stat=,etimes=,pcpu=,rss=,wchan:24=,args="]);
-	if (!ps.success) return "";
-	const rows = ps.stdout
-		.toString()
-		.split("\n")
-		.map(line => line.trim().split(/\s+/))
-		.filter(cols => cols.length >= 8);
-	const tree = new Set([String(rootPid)]);
-	for (let grew = true; grew;) {
-		grew = false;
-		for (const cols of rows) {
-			if (tree.has(cols[1]) && !tree.has(cols[0])) {
-				tree.add(cols[0]);
-				grew = true;
-			}
-		}
-	}
-	const lines = ["[watchdog] live process tree (pid ppid stat elapsed_s cpu% rss_kb wchan args):"];
-	for (const cols of rows) {
-		if (tree.has(cols[0])) lines.push(`  ${cols.slice(0, 7).join(" ")} ${cols.slice(7).join(" ").slice(0, 200)}`);
-	}
-	const ss = Bun.which("ss") ? Bun.spawnSync(["ss", "-tuanpH"]) : null;
-	if (ss?.success) {
-		const owned = ss.stdout
-			.toString()
-			.split("\n")
-			.filter(line => [...tree].some(pid => line.includes(`pid=${pid},`)));
-		lines.push(`[watchdog] sockets held by that tree (${owned.length}):`, ...owned.map(line => `  ${line.trim()}`));
-		return `${lines.join("\n")}\n`;
-	}
-	// No `ss`: list each process's non-tty fds (sockets, pipes, files). A
-	// process gone between `ps` and here just yields nothing.
-	lines.push("[watchdog] open fds per process (no ss on PATH):");
-	for (const pid of tree) {
-		const fdDir = `/proc/${pid}/fd`;
-		const targets = await fs.readdir(fdDir).then(
-			fds => Promise.all(fds.map(fd => fs.readlink(`${fdDir}/${fd}`).catch(() => ""))),
-			() => [],
-		);
-		const kept = targets.filter(target => target && !target.startsWith("/dev/"));
-		if (kept.length > 0) lines.push(`  ${pid}: ${kept.join(" ").slice(0, 400)}`);
-	}
-	return `${lines.join("\n")}\n`;
-}
-
 // Exit codes that mean the bun process itself died to a runtime fault
 // (128 + fatal signal) rather than reporting failing tests (which exit 1).
 // Bun's panic handler exits via SIGTRAP (133) on macOS; raw SIGILL/SIGBUS/
@@ -620,7 +565,7 @@ const MAX_CHUNK_ATTEMPTS = 3;
 // killer reaping a chunk that outgrew the runner -- and the bare exit code
 // cannot tell them apart. Which one it was is the difference between "raise
 // OMP_TEST_CHUNK_TIMEOUT" and "lower this bucket's chunkSize", so say it.
-function describeChunkFailure(exitCode: number, timedOut: boolean): string {
+export function describeChunkFailure(exitCode: number, timedOut: boolean): string {
 	if (timedOut) {
 		return `exceeded the ${Math.round(chunkTimeoutMs() / 1000)}s chunk watchdog and was killed (exit ${exitCode}; OMP_TEST_CHUNK_TIMEOUT to change)`;
 	}
@@ -641,19 +586,19 @@ function isCI(): boolean {
 	return normalized !== "" && normalized !== "0" && normalized !== "false";
 }
 
-// Fan-out width for the local parallel path, clamped to the command count and
-// to `cores`. Defaults to `cores`; `OMP_TEST_CONCURRENCY` (`spec`) dials it down
-// on a memory-constrained machine, and `all`/`max` name the cap explicitly.
-// Never wider than `cores`: every chunk is a full `bun test` process (~1 GB
-// resident on coding-agent), so launching all ~190 at once only trades a
-// CPU-bound run for an OOM kill.
-function testConcurrency(total: number, spec: string | undefined, cores: number): number {
-	const cap = Math.min(Math.max(1, cores), total);
-	const raw = spec?.trim().toLowerCase();
-	if (!raw || raw === "all" || raw === "max") return cap;
+// Fan-out width for the local parallel path, clamped to the command count.
+// Defaults to the machine's available parallelism; `OMP_TEST_CONCURRENCY`
+// overrides it — a positive integer to pick an exact width (dial down on a
+// memory-constrained laptop), or `all`/`max` to launch every chunk at once.
+function testConcurrency(total: number): number {
+	const raw = Bun.env.OMP_TEST_CONCURRENCY?.trim().toLowerCase();
+	if (!raw) return Math.min(Math.max(1, os.availableParallelism()), total);
+	if (raw === "all" || raw === "max") {
+		return total;
+	}
 	const override = Number(raw);
 	if (Number.isFinite(override) && override >= 1) {
-		return Math.min(Math.floor(override), cap);
+		return Math.min(Math.floor(override), total);
 	}
 	throw new Error(`Invalid OMP_TEST_CONCURRENCY=${JSON.stringify(raw)}; expected a positive integer, all, or max`);
 }
@@ -745,7 +690,7 @@ function formatDuration(seconds: number): string {
 // captured output — `— file > test (+N more)` — so the exact break is visible
 // in the stream without waiting for the end-of-run report. Emitted in completion
 // order as each chunk finishes.
-function formatProgressLine(outcome: ChunkOutcome): string {
+export function formatProgressLine(outcome: ChunkOutcome): string {
 	const time = style.dim(`[${formatDuration(outcome.seconds)}]`);
 	const retryNote = outcome.retries > 0 ? ` ${style.dim(`(retried ×${outcome.retries} after bun crash)`)}` : "";
 	if (outcome.exitCode === 0) {
@@ -763,7 +708,7 @@ function formatProgressLine(outcome: ChunkOutcome): string {
 // `N chunks passed` line, a `N failed` line (red when non-zero, dim when clean),
 // then the total wall time. Printed after the failure report so a run always
 // ends on an at-a-glance verdict.
-function formatSummaryFooter(passed: number, failed: number, totalSeconds: number): string {
+export function formatSummaryFooter(passed: number, failed: number, totalSeconds: number): string {
 	const failLine = failed > 0 ? style.red(`${failed} failed`) : style.dim("0 failed");
 	return [
 		"",
@@ -777,7 +722,7 @@ function formatSummaryFooter(passed: number, failed: number, totalSeconds: numbe
 // `file > test` identifier and the verbatim failure block bun printed for it
 // (source frame, `error:` line, received/expected) — the detail a developer
 // needs to act without re-running.
-interface FailingTest {
+export interface FailingTest {
 	name: string;
 	detail: string;
 }
@@ -794,7 +739,7 @@ interface FailingTest {
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const FILE_HEADER_RE = /^(\S.*\.test\.[cm]?[jt]sx?):$/;
 const FAIL_MARKER_RE = /^\(fail\)\s+(.*?)(?:\s+\[[\d.]+\s*m?s\])?$/;
-function extractFailingTests(output: string): FailingTest[] {
+export function extractFailingTests(output: string): FailingTest[] {
 	const failing: FailingTest[] = [];
 	let currentFile = "";
 	let buffer: string[] = [];
@@ -827,8 +772,9 @@ function extractFailingTests(output: string): FailingTest[] {
 // the blocks are shown because the run withheld them; in verbose mode they
 // already streamed inline, so only the names are listed. When a chunk crashed
 // without per-test markers (no parseable failures) the raw log is replayed as a
-// fallback in quiet mode.
-function formatChunkFailure(failure: ChunkOutcome, replayOutput: boolean): string {
+// fallback in quiet mode. The banner repeats below so it stays visible whether
+// you scroll to the top or the bottom of the failures.
+export function formatChunkFailure(failure: ChunkOutcome, replayOutput: boolean): string {
 	const lines: string[] = [];
 	lines.push(
 		"",
@@ -853,6 +799,16 @@ function formatChunkFailure(failure: ChunkOutcome, replayOutput: boolean): strin
 	return lines.join("\n");
 }
 
+export function formatFailureReport(failures: ChunkOutcome[], total: number, replayOutput: boolean): string {
+	const header = `${failures.length} of ${total} test chunk(s) FAILED`;
+	const lines: string[] = ["", style.bold(style.red(`━━━ ${header} ━━━`))];
+	for (const failure of failures) {
+		lines.push(formatChunkFailure(failure, replayOutput));
+	}
+	lines.push("", style.red(header));
+	return lines.join("\n");
+}
+
 // Run every command through a fixed-width worker pool. Each child's stdout and
 // stderr are drained concurrently (so a chatty test never deadlocks on a full
 // pipe) and buffered. Quiet mode (the default) prints one progress line per
@@ -860,7 +816,7 @@ function formatChunkFailure(failure: ChunkOutcome, replayOutput: boolean): strin
 // at the end; `--full` streams every chunk's output inline as it completes. All
 // failures are collected and reported together instead of failing fast, so one
 // run surfaces every broken chunk and exits non-zero without a runner stack trace.
-async function runTestCommandsInParallel(commands: TestCommand[], concurrency: number): Promise<void> {
+export async function runTestCommandsInParallel(commands: TestCommand[], concurrency: number): Promise<void> {
 	const env = buildChildEnv();
 	const queue = [...commands];
 	const failures: ChunkOutcome[] = [];
@@ -868,7 +824,7 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 	const fileWidths = [...new Set(commands.map(c => c.parallel).filter(p => p !== undefined))].sort((a, b) => a - b);
 	console.log(
 		`Running ${commands.length} test command(s), up to ${concurrency} in parallel ` +
-			`(OMP_TEST_CONCURRENCY=<n> to lower); ${os.availableParallelism()} cores, ` +
+			`(OMP_TEST_CONCURRENCY=<n>|all to change); ${os.availableParallelism()} cores, ` +
 			`--parallel=${fileWidths.join("/") || "n/a"} per chunk.`,
 	);
 
@@ -931,14 +887,9 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 		// Watchdog: a wedged child (e.g. bun's panic handler deadlocking
 		// after a GC crash) would otherwise hang this worker forever.
 		let timedOut = false;
-		let stuckTree = "";
-		const killTimer = setTimeout(async () => {
+		const killTimer = setTimeout(() => {
 			timedOut = true;
-			try {
-				stuckTree = await describeStuckProcessTree(proc.pid);
-			} finally {
-				proc.kill("SIGKILL");
-			}
+			proc.kill("SIGKILL");
 		}, chunkTimeoutMs());
 		const exitCode = await proc.exited;
 		clearTimeout(killTimer);
@@ -950,7 +901,7 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 		return {
 			exitCode,
 			timedOut,
-			output: `${stdout.text}${stderr.text}${timedOut ? `\n${stuckTree}[watchdog] chunk exceeded ${Math.round(chunkTimeoutMs() / 1000)}s; killed with SIGKILL (OMP_TEST_CHUNK_TIMEOUT to change)\n` : ""}`,
+			output: `${stdout.text}${stderr.text}${timedOut ? `\n[watchdog] chunk exceeded ${Math.round(chunkTimeoutMs() / 1000)}s; killed with SIGKILL (OMP_TEST_CHUNK_TIMEOUT to change)\n` : ""}`,
 		};
 	}
 
@@ -1021,7 +972,7 @@ async function runTestCommandsInParallel(commands: TestCommand[], concurrency: n
 // contiguous ranges because the chunk list follows sorted file order, so slow
 // neighbouring suites spread evenly instead of piling into one shard. Every
 // chunk lands in exactly one shard; unset/empty runs everything.
-function selectShard<T>(commands: T[], spec: string | undefined): T[] {
+export function selectShard<T>(commands: T[], spec: string | undefined): T[] {
 	const trimmed = spec?.trim();
 	if (!trimmed) return commands;
 	const match = /^(\d+)\/(\d+)$/.exec(trimmed);
@@ -1037,26 +988,30 @@ function selectShard<T>(commands: T[], spec: string | undefined): T[] {
 	return selected;
 }
 
-if (!(requestedMode in validModes)) {
-	throw new Error(`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${Object.keys(validModes).join(", ")}`);
-}
+// Skipped when imported (e.g. by the runner's own unit tests), where
+// `process.argv` carries test-file paths rather than a mode/flags.
+if (import.meta.main) {
+	if (!(requestedMode in validModes)) {
+		throw new Error(
+			`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${Object.keys(validModes).join(", ")}`,
+		);
+	}
 
-const requestedCommands = selectShard(await commandsForMode(requestedMode as Mode), Bun.env.OMP_TEST_SHARD);
-const explicitConcurrency = Boolean(Bun.env.OMP_TEST_CONCURRENCY?.trim());
-// CI defaults to one process at a time, but memory-sized workflow buckets
-// explicitly opt into bounded process concurrency. Local runs fan out by
-// default and may use the same override. Resolved before the dry-run check so
-// `--dry-run` prints the argv the real run would use, budget included.
-const pooled = requestedCommands.length > 1 && (!isCI() || explicitConcurrency);
-// The sequential path is a pool of one, so a lone chunk keeps the whole budget.
-const poolWidth = pooled
-	? testConcurrency(requestedCommands.length, Bun.env.OMP_TEST_CONCURRENCY, os.availableParallelism())
-	: 1;
-const testCommands = applyChunkBudget(requestedCommands, poolWidth);
-if (pooled && !isDryRun) {
-	await runTestCommandsInParallel(testCommands, poolWidth);
-} else {
-	for (const testCommand of testCommands) {
-		await runTestCommand(testCommand);
+	const requestedCommands = selectShard(await commandsForMode(requestedMode as Mode), Bun.env.OMP_TEST_SHARD);
+	const explicitConcurrency = Boolean(Bun.env.OMP_TEST_CONCURRENCY?.trim());
+	// CI defaults to one process at a time, but memory-sized workflow buckets
+	// explicitly opt into bounded process concurrency. Local runs fan out by
+	// default and may use the same override. Resolved before the dry-run check so
+	// `--dry-run` prints the argv the real run would use, budget included.
+	const pooled = requestedCommands.length > 1 && (!isCI() || explicitConcurrency);
+	// The sequential path is a pool of one, so a lone chunk keeps the whole budget.
+	const poolWidth = pooled ? testConcurrency(requestedCommands.length) : 1;
+	const testCommands = applyChunkBudget(requestedCommands, poolWidth);
+	if (pooled && !isDryRun) {
+		await runTestCommandsInParallel(testCommands, poolWidth);
+	} else {
+		for (const testCommand of testCommands) {
+			await runTestCommand(testCommand);
+		}
 	}
 }

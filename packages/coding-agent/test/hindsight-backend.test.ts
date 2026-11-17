@@ -68,10 +68,6 @@ function makeFakeSession(deps: FakeSessionDeps) {
 									timestamp: 0,
 								},
 				})),
-			getBranch() {
-				return this.getEntries();
-			},
-			appendCustomEntry: () => "",
 			getCwd: () => deps.cwd ?? "/tmp",
 			getSessionFile: () => null,
 			getSessionId: () => deps.sessionId ?? "",

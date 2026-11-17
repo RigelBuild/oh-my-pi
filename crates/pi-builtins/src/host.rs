@@ -145,9 +145,6 @@ pub(crate) struct Host {
 	/// Requests to the adapter's [`CommandRunner`]; `None` unless the utility
 	/// set [`Utility::RUNS_COMMANDS`].
 	commands:              Option<flume::Sender<CommandRequest>>,
-	/// Raised when the utility reports an error yet goes on; `None` when the
-	/// shell asked for no such report.
-	reported_error:        Option<Arc<AtomicBool>>,
 }
 
 fn output_handle(file: &OpenFile) -> Option<OpenFile> {
@@ -583,13 +580,6 @@ impl Host {
 	/// callbacks.
 	pub fn cancel_flag(&self) -> Arc<AtomicBool> {
 		Arc::clone(&self.cancel)
-	}
-
-	/// The flag to raise when the utility reports an error yet goes on, so
-	/// its exit status does not show the failure; `None` when the shell asked
-	/// for no such report.
-	pub fn reported_error_flag(&self) -> Option<Arc<AtomicBool>> {
-		self.reported_error.clone()
 	}
 
 	/// A `pi_walker` heartbeat that fails with `Interrupted` once the host
@@ -1784,7 +1774,6 @@ fn build_host<SE: ShellExtensions>(
 		merged_out,
 		sigpipe,
 		commands: None,
-		reported_error: context.params.reported_error().cloned(),
 	})
 }
 
@@ -1938,7 +1927,6 @@ mod testing {
 				merged_out:            None,
 				sigpipe,
 				commands:              None,
-				reported_error:        None,
 			};
 			(host, capture)
 		}

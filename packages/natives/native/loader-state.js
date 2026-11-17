@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as zlib from "node:zlib";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
 import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionStamp } from "./version-sentinel.js";
@@ -56,14 +57,6 @@ function startupMarker(text) {
 }
 
 function getNativesDir() {
-	// Match pi-utils directory overrides without depending on pi-utils.
-	const override = process.env.PI_NATIVES_DIR?.trim();
-	if (override) {
-		let dir = override;
-		if (dir === "~") dir = os.homedir();
-		else if (dir.startsWith("~/") || dir.startsWith("~\\")) dir = os.homedir() + dir.slice(1);
-		if (path.isAbsolute(dir)) return path.normalize(dir);
-	}
 	const xdgDataHome = process.env.XDG_DATA_HOME;
 	if (xdgDataHome && fs.existsSync(path.join(xdgDataHome, "omp"))) {
 		return path.join(xdgDataHome, "omp", "natives");
@@ -74,7 +67,7 @@ function getNativesDir() {
 function resolveLeafPackageDir(platformTag) {
 	try {
 		const require_ = createRequire(import.meta.url);
-		return path.dirname(require_.resolve(`${packageJson.name}-${platformTag}/package.json`));
+		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
 	} catch {
 		return null;
 	}
@@ -194,55 +187,18 @@ export function resolveLoaderCandidates({
 // =========================================================================
 
 function parseReleaseVersion(version) {
-	const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$/.exec(version);
-	return match
-		? {
-				parts: [Number(match[1]), Number(match[2]), Number(match[3])],
-				prerelease: match[4]?.split(".") ?? null,
-			}
-		: null;
+	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+	return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
 }
 
-function comparePrereleaseIdentifier(a, b) {
-	const aNumeric = /^\d+$/.test(a);
-	const bNumeric = /^\d+$/.test(b);
-	if (aNumeric && bNumeric) {
-		if (a.length !== b.length) return a.length < b.length ? -1 : 1;
-		return a === b ? 0 : a < b ? -1 : 1;
-	}
-	if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
-	return a === b ? 0 : a < b ? -1 : 1;
-}
-
-// Core versions sort first; Rigel tags follow stable, unlike upstream prereleases.
 function isOlderReleaseVersion(candidate, current) {
-	const candidateVersion = parseReleaseVersion(candidate);
-	const currentVersion = parseReleaseVersion(current);
-	if (!candidateVersion || !currentVersion) return false;
-	for (let index = 0; index < candidateVersion.parts.length; index++) {
-		if (candidateVersion.parts[index] !== currentVersion.parts[index]) {
-			return candidateVersion.parts[index] < currentVersion.parts[index];
+	const candidateParts = parseReleaseVersion(candidate);
+	const currentParts = parseReleaseVersion(current);
+	if (!candidateParts || !currentParts) return false;
+	for (let index = 0; index < candidateParts.length; index++) {
+		if (candidateParts[index] !== currentParts[index]) {
+			return candidateParts[index] < currentParts[index];
 		}
-	}
-
-	const isRigelRelease = version => version?.length === 2 && version[0] === "rigel" && /^(0|[1-9]\d*)$/.test(version[1]);
-	const candidateIsRigel = isRigelRelease(candidateVersion.prerelease);
-	const currentIsRigel = isRigelRelease(currentVersion.prerelease);
-	if (candidateIsRigel || currentIsRigel) {
-		if (!candidateIsRigel) return true;
-		if (!currentIsRigel) return false;
-		return comparePrereleaseIdentifier(candidateVersion.prerelease[1], currentVersion.prerelease[1]) < 0;
-	}
-	if (candidateVersion.prerelease === null || currentVersion.prerelease === null) {
-		return candidateVersion.prerelease !== null && currentVersion.prerelease === null;
-	}
-	for (let index = 0; index < Math.max(candidateVersion.prerelease.length, currentVersion.prerelease.length); index++) {
-		const candidatePart = candidateVersion.prerelease[index];
-		const currentPart = currentVersion.prerelease[index];
-		if (candidatePart === undefined) return true;
-		if (currentPart === undefined) return false;
-		const comparison = comparePrereleaseIdentifier(candidatePart, currentPart);
-		if (comparison !== 0) return comparison < 0;
 	}
 	return false;
 }
@@ -486,6 +442,36 @@ function selectEmbeddedAddonFile(selectedVariant) {
 	return embeddedAddon.files.find(file => file.variant === "baseline") || null;
 }
 
+function readTarString(buffer, offset, length) {
+	const end = Math.min(offset + length, buffer.length);
+	let stringEnd = offset;
+	while (stringEnd < end && buffer[stringEnd] !== 0) stringEnd++;
+	return buffer.toString("utf8", offset, stringEnd);
+}
+
+function readTarOctal(buffer, offset, length) {
+	const value = readTarString(buffer, offset, length).trim();
+	if (!value) return 0;
+	const parsed = Number.parseInt(value, 8);
+	if (!Number.isFinite(parsed)) {
+		throw new Error(`Invalid tar octal value: ${value}`);
+	}
+	return parsed;
+}
+
+function isZeroTarBlock(buffer, offset) {
+	for (let index = 0; index < 512; index++) {
+		if (buffer[offset + index] !== 0) return false;
+	}
+	return true;
+}
+
+function getTarEntryName(header) {
+	const name = readTarString(header, 0, 100);
+	const prefix = readTarString(header, 345, 155);
+	return prefix ? `${prefix}/${name}` : name;
+}
+
 function isSafeEmbeddedAddonFilename(filename) {
 	return filename.length > 0 && path.basename(filename) === filename && !filename.includes("/") && !filename.includes("\\");
 }
@@ -494,7 +480,7 @@ function isEmbeddedAddonFileCurrent(targetPath, file) {
 	try {
 		const stat = fs.statSync(targetPath);
 		if (!stat.isFile()) return false;
-		return stat.size === file.size;
+		return typeof file.size !== "number" || stat.size === file.size;
 	} catch (err) {
 		if (err && err.code === "ENOENT") return false;
 		throw err;
@@ -516,23 +502,60 @@ function writeEmbeddedAddonFile(targetPath, content) {
 	}
 }
 
-export function extractEmbeddedAddons({ files, targetDir }) {
+export function extractEmbeddedAddonArchive({ archivePath, files, targetDir }) {
+	const pending = new Map();
 	for (const file of files) {
 		if (!isSafeEmbeddedAddonFilename(file.filename)) {
 			throw new Error(`Unsafe embedded addon filename: ${file.filename}`);
 		}
-	}
-	const writtenPaths = [];
-	for (const file of files) {
 		const targetPath = path.join(targetDir, file.filename);
-		if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
-		const content = Bun.zstdDecompressSync(fs.readFileSync(file.zstdPath));
-		if (content.length !== file.size) {
-			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
+		if (!isEmbeddedAddonFileCurrent(targetPath, file)) {
+			pending.set(file.filename, file);
 		}
-		writeEmbeddedAddonFile(targetPath, content);
-		writtenPaths.push(targetPath);
 	}
+	if (pending.size === 0) return [];
+
+	const archive = zlib.gunzipSync(fs.readFileSync(archivePath));
+	const writtenPaths = [];
+	let offset = 0;
+
+	while (offset + 512 <= archive.length) {
+		if (isZeroTarBlock(archive, offset)) break;
+		const header = archive.subarray(offset, offset + 512);
+		const filename = getTarEntryName(header);
+		const size = readTarOctal(header, 124, 12);
+		const typeflag = header[156] === 0 ? "0" : String.fromCharCode(header[156]);
+		offset += 512;
+
+		if (offset + size > archive.length) {
+			throw new Error(`Truncated embedded addon archive entry: ${filename}`);
+		}
+
+		if (!isSafeEmbeddedAddonFilename(filename)) {
+			throw new Error(`Unsafe embedded addon archive entry: ${filename}`);
+		}
+		if (typeflag !== "0") {
+			throw new Error(`Unsupported embedded addon archive entry type ${typeflag}: ${filename}`);
+		}
+
+		const file = pending.get(filename);
+		if (file) {
+			if (typeof file.size === "number" && file.size !== size) {
+				throw new Error(`Embedded addon size mismatch for ${filename}: expected ${file.size}, got ${size}`);
+			}
+			const targetPath = path.join(targetDir, filename);
+			writeEmbeddedAddonFile(targetPath, archive.subarray(offset, offset + size));
+			pending.delete(filename);
+			writtenPaths.push(targetPath);
+		}
+
+		offset += Math.ceil(size / 512) * 512;
+	}
+
+	if (pending.size > 0) {
+		throw new Error(`Embedded addon archive missing: ${[...pending.keys()].join(", ")}`);
+	}
+
 	return writtenPaths;
 }
 
@@ -553,12 +576,40 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 		return null;
 	}
 
+	if (embeddedAddon.archive) {
+		try {
+			extractEmbeddedAddonArchive({
+				archivePath: embeddedAddon.archive.filePath,
+				files: embeddedAddon.files,
+				targetDir: ctx.versionedDir,
+			});
+			if (isEmbeddedAddonFileCurrent(targetPath, selectedEmbeddedFile)) {
+				return targetPath;
+			}
+			errors.push(`embedded addon archive (${embeddedAddon.archive.filename}): missing ${selectedEmbeddedFile.filename}`);
+			return null;
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			errors.push(`embedded addon archive (${embeddedAddon.archive.filename}): ${message}`);
+			return null;
+		}
+	}
+
+	if (isEmbeddedAddonFileCurrent(targetPath, selectedEmbeddedFile)) {
+		return targetPath;
+	}
+	if (!selectedEmbeddedFile.filePath) {
+		errors.push(`embedded addon metadata missing file path for ${selectedEmbeddedFile.filename}`);
+		return null;
+	}
+
 	try {
-		extractEmbeddedAddons({ files: embeddedAddon.files, targetDir: ctx.versionedDir });
+		const buffer = fs.readFileSync(selectedEmbeddedFile.filePath);
+		fs.writeFileSync(targetPath, buffer);
 		return targetPath;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		errors.push(`embedded addon extraction (${selectedEmbeddedFile.filename}): ${message}`);
+		errors.push(`embedded addon write (${selectedEmbeddedFile.filename}): ${message}`);
 		return null;
 	}
 }
@@ -773,18 +824,6 @@ function installNativeTokioRuntime(bindings) {
 	}
 }
 
-/**
- * Point the addon at `<nativesDir>/grammars`, where the agent downloads the
- * tree-sitter grammars that load as WebAssembly on demand (pi-utils
- * `getNativeGrammarsDir()` resolves the same path). Version cleanup never
- * touches it: only release-version directories are removed. Older addons
- * predating the export link every grammar and need no directory.
- */
-function configureGrammarDir(bindings, nativesDir) {
-	const setGrammarDir = bindings.__ompSetGrammarDir;
-	if (typeof setGrammarDir === "function") setGrammarDir(path.join(nativesDir, "grammars"));
-}
-
 
 function buildHelpMessage(ctx) {
 	if (ctx.isCompiledBinary) {
@@ -910,7 +949,6 @@ export function loadNative() {
 			const bindings = require_(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
-			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");

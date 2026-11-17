@@ -16,32 +16,13 @@ import { getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { expandTilde } from "../tools/path-utils";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
 
-/** Options shared by the declarative subcommand completers. */
-interface SubcommandCompletionOptions {
-	/** Mirrors `BuiltinSlashCommand.subcommandOptional`. */
-	optional?: boolean;
-}
-
-/** Ghost text completing `prefix` to `sub`: its remaining name characters, then its usage. */
-function subcommandRemainderHint(sub: SubcommandDef, prefix: string): string | undefined {
-	const hint = sub.name.slice(prefix.length) + (sub.usage ? ` ${sub.usage}` : "");
-	return hint || undefined;
-}
-
 /**
  * Build getArgumentCompletions from declarative subcommand definitions.
- * Returns subcommand names filtered by prefix in the dropdown; each item's
- * hint is the ghost text the editor shows while that item is selected.
- * An optional subcommand offers nothing until a prefix is typed, so Enter on
- * the bare `/name ` submits it instead of accepting the first subcommand.
+ * Returns subcommand names filtered by prefix in the dropdown.
  */
-export function buildArgumentCompletions(
-	subcommands: SubcommandDef[],
-	options: SubcommandCompletionOptions = {},
-): (prefix: string) => AutocompleteItem[] | null {
+export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix: string) => AutocompleteItem[] | null {
 	return (argumentPrefix: string) => {
 		if (argumentPrefix.includes(" ")) return null; // past the subcommand
-		if (options.optional && argumentPrefix.length === 0) return null;
 		const lower = argumentPrefix.toLowerCase();
 		const matches = subcommands
 			.filter(s => s.name.startsWith(lower))
@@ -49,7 +30,7 @@ export function buildArgumentCompletions(
 				value: `${s.name} `,
 				label: s.name,
 				description: s.description,
-				hint: subcommandRemainderHint(s, lower),
+				hint: s.usage,
 			}));
 		return matches.length > 0 ? matches : null;
 	};
@@ -218,14 +199,9 @@ async function buildMcpRemoveCompletions(
 
 /**
  * Build getInlineHint from declarative subcommand definitions.
- * Shows remaining completion + usage as dim ghost text after cursor; an
- * optional subcommand advertises its choices before anything is typed, since
- * {@link buildArgumentCompletions} opens no dropdown there.
+ * Shows remaining completion + usage as dim ghost text after cursor.
  */
-export function buildSubcommandInlineHint(
-	subcommands: SubcommandDef[],
-	options: SubcommandCompletionOptions = {},
-): (argumentText: string) => string | null {
+export function buildSubcommandInlineHint(subcommands: SubcommandDef[]): (argumentText: string) => string | null {
 	return (argumentText: string) => {
 		const trimmed = argumentText.trimStart();
 		const spaceIndex = trimmed.indexOf(" ");
@@ -233,11 +209,11 @@ export function buildSubcommandInlineHint(
 		if (spaceIndex === -1) {
 			// Still typing subcommand name — show remaining chars + usage
 			const prefix = trimmed.toLowerCase();
-			if (prefix.length === 0) {
-				return options.optional ? `[${subcommands.map(s => s.name).join("|")}]` : null;
-			}
+			if (prefix.length === 0) return null;
 			const match = subcommands.find(s => s.name.startsWith(prefix));
-			return match ? (subcommandRemainderHint(match, prefix) ?? null) : null;
+			if (!match) return null;
+			const remaining = match.name.slice(prefix.length);
+			return remaining + (match.usage ? ` ${match.usage}` : "");
 		}
 
 		// Subcommand typed — show remaining usage params
@@ -297,9 +273,7 @@ export function buildModelSelectorCompletions(
 			}
 		} else {
 			rankModels ??= createModelMentionSource({
-				source: createModelBrowserSource(runtime.ctx.settings, model =>
-					runtime.ctx.session.effectiveServiceTier(model),
-				),
+				source: createModelBrowserSource(runtime.ctx.settings),
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
 			});

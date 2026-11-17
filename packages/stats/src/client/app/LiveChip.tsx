@@ -1,12 +1,12 @@
 import { RefreshCw } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { formatInteger } from "../data/formatters";
-import { useLiveStatus } from "../data/live";
+import { useLive } from "../data/live";
 import { Dot } from "../ui";
 
 /** Topbar ingest status; click to sync now. */
 export function LiveChip() {
-	const { sync, indexingHours, connected, requestSync } = useLiveStatus();
+	const { sync, indexingHours, connected, requestSync } = useLive();
 	const now = useNow(sync.phase === "idle" ? 15_000 : null);
 
 	let body: ReactNode;

@@ -1,14 +1,5 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	getLogsDir,
-	getPuppeteerDir,
-	isCompiledBinary,
-	logger,
-	untilAborted,
-	withTimeout,
-	workerHostEntry,
-} from "@oh-my-pi/pi-utils";
+import { isCompiledBinary, logger, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
@@ -18,7 +9,6 @@ import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
-	connectPuppeteer,
 	DEFAULT_VIEWPORT,
 	launchHeadlessBrowser,
 	loadPuppeteer,
@@ -26,15 +16,10 @@ import {
 	type UserAgentOverride,
 } from "./launch";
 import { reapOrphanSharedTargets } from "./orphan-registry";
-import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
+import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
-import {
-	browserInstanceId,
-	DOWNLOAD_STAGING_DIRNAME,
-	ensureSharedBrowser,
-	sharedBrowserProfileDir,
-} from "./shared-daemon";
+import { ensureSharedBrowser } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
 
@@ -104,11 +89,8 @@ export interface ReleaseBrowserOptions {
 }
 
 const browsers = new Map<string, BrowserHandle>();
-/**
- * In-flight opens by browser key, so concurrent acquisitions share one launch instead of storming Chromium.
- * `settled` resolves once the open settles or its caller aborts, whichever comes first.
- */
-const pendingOpens = new Map<string, { settled: Promise<void> }>();
+/** In-flight opens by browser key, so concurrent acquisitions share one launch instead of storming Chromium. */
+const pendingOpens = new Map<string, Promise<BrowserHandle>>();
 
 export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
@@ -131,7 +113,6 @@ export interface AcquireBrowserOptions {
 	cwd: string;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	signal?: AbortSignal;
-	timeoutMs?: number;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
@@ -157,36 +138,15 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 		// leaking the rest as unreferenced process trees.
 		const pending = pendingOpens.get(key);
 		if (pending) {
-			await untilAborted(opts.signal, () => pending.settled);
+			await pending.catch(() => undefined);
 			continue;
 		}
-		const open = openBrowserHandle(kind, opts);
-		const settled = Promise.withResolvers<void>();
-		const entry = { settled: settled.promise };
-		// An open whose caller aborted is disposed below, never published, so it
-		// stops being this key's single flight the moment its caller gives up:
-		// waiters start a fresh attempt instead of waiting out a launch or connect
-		// that may never return. Only the registered entry is removed, so a late
-		// settlement cannot drop a replacement already in flight. A spawned app
-		// keeps its key until its abandoned open has been disposed: that kills
-		// the app, which a fresh attempt could otherwise adopt as a reusable endpoint.
-		const clearEntry = () => {
-			opts.signal?.removeEventListener("abort", clearEntry);
-			if (pendingOpens.get(key) === entry) pendingOpens.delete(key);
-			settled.resolve();
-		};
-		if (kind.kind !== "spawned") opts.signal?.addEventListener("abort", clearEntry, { once: true });
-		pendingOpens.set(key, entry);
-		let handle: BrowserHandle;
-		try {
-			handle = await open;
-		} catch (error) {
-			clearEntry();
-			throw error;
-		}
-		// The launch may resolve AFTER the caller has already aborted: the outer
+		const open = openBrowserHandle(kind, opts).finally(() => pendingOpens.delete(key));
+		pendingOpens.set(key, open);
+		const handle = await open;
+		// The launch may resolve AFTER the caller has already aborted (the outer
 		// `untilAborted` rejects immediately on abort but does not cancel the
-		// inner promise, which can settle in the same tick the signal fires.
+		// inner promise, and `launchHeadlessBrowser` does not accept a signal).
 		// Without this branch the completed handle sits in `browsers` at
 		// refCount:0 forever — no tab ever takes a hold, `releaseBrowser` never
 		// fires, and `releaseAllTabs` walks `tabs`, not `browsers`, so the
@@ -198,11 +158,9 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 					error: err instanceof Error ? err.message : String(err),
 				});
 			});
-			clearEntry();
 			throw new ToolAbortError("Browser open aborted");
 		}
 		browsers.set(key, handle);
-		clearEntry();
 		return handle;
 	}
 }
@@ -248,10 +206,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			viewport: opts.viewport,
 			ignoreHttpsErrors: kind.ignoreHttpsErrors,
 			allowFileAccess: kind.allowFileAccess,
-			signal: opts.signal,
-			timeoutMs: opts.timeoutMs,
 		});
-
 		return {
 			key: browserKey(kind),
 			kind,
@@ -265,7 +220,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 		await waitForCdp(cdpUrl, 5_000, opts.signal);
 		const puppeteer = await loadPuppeteer();
-		const browser = await connectPuppeteer(puppeteer, {
+		const browser = await puppeteer.connect({
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -285,24 +240,13 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		// on demand (the extension dials in on its own). Hosts without a CLI
 		// worker entry (bun test, SDK embedding) never spawn brokers. Remote
 		// relay URLs must already be serving.
-		const autoStart = isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null);
-		if (autoStart) {
+		if (isLoopbackRelayUrl(cdpUrl) && (isCompiledBinary() || workerHostEntry() !== null)) {
 			await ensureRelayDaemon({ cdpUrl, signal: opts.signal });
 		}
 		// The relay answers /json/version with 503 until its extension dials in;
 		// the wait fails fast when nothing serves the port or the server has
 		// already outlived the window an installed extension needs to connect.
-		let outcome = await waitForRelayExtension(cdpUrl, opts.signal);
-		// A broker-owned relay outlives omp upgrades; replace an incompatible one
-		// with this version's once, and a compatible older one only while no CDP
-		// client uses it. A manually started relay is left to its owner.
-		if (outcome === "outdated-relay" && autoStart && (await restartRelayDaemon({ cdpUrl, signal: opts.signal }))) {
-			outcome = await waitForRelayExtension(cdpUrl, opts.signal);
-		} else if (outcome === "idle-older-relay" && autoStart) {
-			// Probe again even when it was kept: another omp may have replaced it since.
-			await restartRelayDaemon({ cdpUrl, signal: opts.signal, idleOnly: true });
-			outcome = await waitForRelayExtension(cdpUrl, opts.signal);
-		}
+		const outcome = await waitForRelayExtension(cdpUrl, opts.signal);
 		if (outcome === "unreachable") {
 			throw new ToolError(
 				`omp browser relay is not reachable at ${cdpUrl}. Start it with \`omp browser-relay\` (or check the endpoint), and make sure the OMP Browser Relay extension is loaded in Chrome.`,
@@ -329,7 +273,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			);
 		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await connectPuppeteer(puppeteer, {
+		const browser = await puppeteer.connect({
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -385,7 +329,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 	const puppeteer = await loadPuppeteer();
 	let browser: Browser;
 	try {
-		browser = await connectPuppeteer(puppeteer, {
+		browser = await puppeteer.connect({
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -448,9 +392,6 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			}
 			return;
 		}
-		// Read before close: a launch with the caller's own --user-data-dir stages under the browser's id. A disconnected
-		// browser still names its endpoint, so its staging goes too.
-		const staging = handle.userDataDir ? undefined : stagingDirectoryToRemove(handle);
 		if (handle.browser.connected) {
 			// Puppeteer's `browser.close()` resolves only once the Chromium
 			// process fully exits. A wedged Chromium (a known Windows failure
@@ -465,7 +406,6 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 				if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
 			}
 		}
-		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
 		// exited. Tolerant of the Windows lock-held window (issue #7058).
@@ -483,8 +423,6 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		}
 		return;
 	}
-	// Read before disconnecting; only a browser OMP launched and now kills loses its staging folder.
-	const staging = opts.kill && handle.subprocess ? stagingDirectoryToRemove(handle) : undefined;
 	if (handle.browser.connected) {
 		try {
 			handle.browser.disconnect();
@@ -493,38 +431,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		}
 	}
 	// A discovered CDP PID is borrowed, not ours to kill on close or abort.
-	if (opts.kill && handle.subprocess) {
-		if (handle.subprocess.exitCode === null) await gracefulKillTreeOnce(handle.subprocess.pid);
-		// The owned process is gone either way, so nothing still writes to its staging folder.
-		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+	if (opts.kill && handle.subprocess && handle.subprocess.exitCode === null) {
+		await gracefulKillTreeOnce(handle.subprocess.pid);
 	}
-}
-
-/** A staging lookup failure must not abort the rest of a dispose. */
-function stagingDirectoryToRemove(handle: PuppeteerBrowserHandle): string | undefined {
-	try {
-		return downloadStagingDirectory(handle);
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * The one download folder every tab of `handle`'s browser points Chromium at, or undefined for a browser the user
- * drives. An OMP-owned profile (temp launch, shared daemon) holds it and it goes with that profile; any other browser
- * stages under the puppeteer dir, keyed by the running browser, and that folder is removed only when OMP kills it.
- */
-export function downloadStagingDirectory(handle: PuppeteerBrowserHandle): string | undefined {
-	if (handle.kind.kind === "connected" || handle.kind.kind === "relay") return undefined;
-	if (handle.userDataDir) return path.join(handle.userDataDir, DOWNLOAD_STAGING_DIRNAME);
-	if (handle.sharedDaemon) {
-		// The daemon's profile outlives each Chrome, so key by the Chrome; the profile lock makes every sibling dead.
-		const profile = sharedBrowserProfileDir(handle.sharedDaemon.projectDir, handle.sharedDaemon.name);
-		return path.join(profile, DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle.browser.wsEndpoint()));
-	}
-	// Spawned apps and launches with the caller's own profile: that profile may be the user's, so stage outside it.
-	// Still leaked: a reused or kill:false spawned app's folder, and any folder whose browser outlived an OMP crash.
-	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle.browser.wsEndpoint()));
 }
 
 /**
@@ -552,11 +461,11 @@ async function openSharedHeadlessHandle(
 		});
 		if (!shared) {
 			throw new ToolError(
-				`Shared browser daemon unavailable (broker start or Chromium launch failed); check \`omp ps\` for omp.browser.* daemons and ${getLogsDir()} for details`,
+				"Shared browser daemon unavailable (broker start or Chromium launch failed); check `omp ps` for omp.browser.* daemons and ~/.omp/logs for details",
 			);
 		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await connectPuppeteer(puppeteer, {
+		const browser = await puppeteer.connect({
 			browserWSEndpoint: shared.wsEndpoint,
 			defaultViewport: kind.headless
 				? {

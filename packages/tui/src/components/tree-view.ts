@@ -43,32 +43,8 @@ export interface FlattenTreeOptions<T, K extends TreeKey> {
 	rootDepth?: number;
 	/** Override the display depth inherited by direct children. */
 	getChildDepth?: (item: T, row: TreeRow<T, K>, children: readonly T[]) => number;
-	/**
-	 * Reuse the parent ancestor list when a child keeps the same display depth
-	 * and the current item has no siblings (`siblingCount === 1`). Otherwise
-	 * retain the current item as an ancestor so connector gutters remain
-	 * accurate, including when the item has multiple children.
-	 */
-	compactSameDepthAncestors?: boolean;
 	/** Stop projection after this many structural items. Omit for no traversal cap. */
 	maxItems?: number;
-}
-
-/**
- * Ancestors live in a shared parent chain instead of a per-row array: a linear
- * conversation is an n-deep path, and copying the array at every level costs
- * O(n²) memory — 80k-entry sessions exhausted RAM opening `/tree`. Rows build
- * the array lazily, so only rendered rows pay O(depth).
- */
-interface AncestorChain<K extends TreeKey> {
-	value: TreeAncestor<K>;
-	parent: AncestorChain<K> | undefined;
-}
-
-function ancestorArray<K extends TreeKey>(chain: AncestorChain<K> | undefined): readonly TreeAncestor<K>[] {
-	const out: TreeAncestor<K>[] = [];
-	for (let node = chain; node !== undefined; node = node.parent) out.push(node.value);
-	return out.reverse();
 }
 
 interface PendingTreeRow<T, K extends TreeKey> {
@@ -77,7 +53,7 @@ interface PendingTreeRow<T, K extends TreeKey> {
 	depth: number;
 	siblingIndex: number;
 	siblingCount: number;
-	chain: AncestorChain<K> | undefined;
+	ancestors: readonly TreeAncestor<K>[];
 }
 
 interface FlattenTreeResult<T, K extends TreeKey> {
@@ -101,14 +77,13 @@ function projectTree<T, K extends TreeKey>(options: FlattenTreeOptions<T, K>): F
 			depth: rootDepth,
 			siblingIndex: index,
 			siblingCount: roots.length,
-			chain: undefined,
+			ancestors: [],
 		});
 	}
 
 	while (stack.length > 0 && rows.length < maxItems) {
 		const pending = stack.pop()!;
 		const key = options.getKey(pending.item);
-		const chain = pending.chain;
 		const row: TreeRow<T, K> = {
 			item: pending.item,
 			key,
@@ -118,9 +93,7 @@ function projectTree<T, K extends TreeKey>(options: FlattenTreeOptions<T, K>): F
 			siblingIndex: pending.siblingIndex,
 			siblingCount: pending.siblingCount,
 			isLast: pending.siblingIndex === pending.siblingCount - 1,
-			get ancestors() {
-				return ancestorArray(chain);
-			},
+			ancestors: pending.ancestors,
 		};
 		rows.push(row);
 
@@ -131,13 +104,10 @@ function projectTree<T, K extends TreeKey>(options: FlattenTreeOptions<T, K>): F
 			0,
 			Math.trunc(options.getChildDepth?.(pending.item, row, children) ?? pending.depth + 1),
 		);
-		const childChain: AncestorChain<K> | undefined =
-			options.compactSameDepthAncestors && childDepth === pending.depth && pending.siblingCount === 1
-				? chain
-				: {
-						value: { key, depth: pending.depth, isLast: row.isLast, siblingCount: pending.siblingCount },
-						parent: chain,
-					};
+		const ancestors: readonly TreeAncestor<K>[] = [
+			...pending.ancestors,
+			{ key, depth: pending.depth, isLast: row.isLast, siblingCount: pending.siblingCount },
+		];
 		for (let index = children.length - 1; index >= 0; index--) {
 			stack.push({
 				item: children[index],
@@ -145,7 +115,7 @@ function projectTree<T, K extends TreeKey>(options: FlattenTreeOptions<T, K>): F
 				depth: childDepth,
 				siblingIndex: index,
 				siblingCount: children.length,
-				chain: childChain,
+				ancestors,
 			});
 		}
 	}

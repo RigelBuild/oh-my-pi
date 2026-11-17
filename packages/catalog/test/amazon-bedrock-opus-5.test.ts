@@ -147,7 +147,6 @@ describe("Amazon Bedrock Claude Opus 5", () => {
 				streamIdleTimeoutMs: 900_000,
 				streamRevision: "possible",
 				supportsSamplingParams: false,
-				supportsThinkingBindingControls: true,
 			});
 		}
 	});

@@ -97,10 +97,6 @@ export function startCompletionProbe(options: CompletionProbeOptions): void {
 		const session = options.session();
 		if (!session?.isStreaming || signal.aborted) return;
 		try {
-			const usageOwner = {
-				sessionId: session.sessionManager.getSessionId(),
-				parentId: session.sessionManager.getLeafId(),
-			};
 			const { replyText, assistantMessage } = await session.runEphemeralTurn({
 				promptText: prompt.render(completionProbePrompt, {
 					inflight: inflightToolCalls(session),
@@ -108,19 +104,6 @@ export function startCompletionProbe(options: CompletionProbeOptions): void {
 				}),
 				signal,
 			});
-			if (assistantMessage.usage) {
-				session.sessionManager.appendModelUsage(
-					{
-						purpose: "task-completion-probe",
-						api: assistantMessage.api,
-						provider: assistantMessage.provider,
-						model: assistantMessage.model,
-						usage: assistantMessage.usage,
-						stopReason: assistantMessage.stopReason,
-					},
-					usageOwner,
-				);
-			}
 			const percent = parseCompletionPercent(replyText);
 			if (signal.aborted) return;
 			if (percent === undefined) {

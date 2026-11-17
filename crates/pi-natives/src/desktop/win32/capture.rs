@@ -17,7 +17,6 @@ const MAX_LISTED_WINDOWS: usize = 48;
 const MIN_WINDOW_EDGE: u32 = 16;
 
 struct MonitorSnapshot {
-	id:      u32,
 	monitor: Monitor,
 	display: DesktopDisplay,
 }
@@ -33,14 +32,17 @@ fn monitor_name(monitor: &Monitor) -> String {
 		.unwrap_or_else(|_| "Unknown display".to_string())
 }
 
-fn monitor_snapshots() -> CoreResult<Vec<MonitorSnapshot>> {
+fn monitor_snapshots(selector: &DisplaySelector) -> CoreResult<Vec<MonitorSnapshot>> {
 	let monitors = Monitor::all().map_err(|error| metadata_error("display enumeration", error))?;
 	let mut snapshots = Vec::with_capacity(monitors.len());
 	for monitor in monitors {
-		let native_id = monitor
+		let id = monitor
 			.id()
-			.map_err(|error| metadata_error("display id", error))?;
-		let id = native_id.to_string();
+			.map_err(|error| metadata_error("display id", error))?
+			.to_string();
+		if matches!(selector, DisplaySelector::Id(selected) if selected != &id) {
+			continue;
+		}
 		let physical_x = monitor
 			.x()
 			.map_err(|error| metadata_error("display x", error))?;
@@ -67,7 +69,6 @@ fn monitor_snapshots() -> CoreResult<Vec<MonitorSnapshot>> {
 			.is_primary()
 			.map_err(|error| metadata_error("primary display", error))?;
 		snapshots.push(MonitorSnapshot {
-			id: native_id,
 			display: DesktopDisplay {
 				id,
 				name: monitor_name(&monitor),
@@ -86,7 +87,12 @@ fn monitor_snapshots() -> CoreResult<Vec<MonitorSnapshot>> {
 		});
 	}
 	if snapshots.is_empty() {
-		return Err(DesktopError::capture_failed("Win32 reported no active displays"));
+		return Err(match selector {
+			DisplaySelector::All => DesktopError::capture_failed("Win32 reported no active displays"),
+			DisplaySelector::Id(id) => {
+				DesktopError::invalid_target(format!("selected display '{id}' is not active"))
+			},
+		});
 	}
 	snapshots.sort_by(|a, b| {
 		(a.display.y, a.display.x, &a.display.id).cmp(&(b.display.y, b.display.x, &b.display.id))
@@ -94,21 +100,18 @@ fn monitor_snapshots() -> CoreResult<Vec<MonitorSnapshot>> {
 	Ok(snapshots)
 }
 
-fn lay_out(displays: &mut [DesktopDisplay]) -> CoreResult<(u32, u32)> {
-	let layout = PhysicalLayout::new(displays.iter())?;
-	for display in displays {
-		layout.place(display);
+fn lay_out(snapshots: &mut [MonitorSnapshot]) -> CoreResult<(u32, u32)> {
+	let layout = PhysicalLayout::new(snapshots.iter().map(|snapshot| &snapshot.display))?;
+	for snapshot in snapshots {
+		layout.place(&mut snapshot.display);
 	}
 	Ok((layout.width, layout.height))
 }
 
-pub(super) fn displays() -> CoreResult<Vec<DesktopDisplay>> {
-	let mut displays = monitor_snapshots()?
-		.into_iter()
-		.map(|item| item.display)
-		.collect::<Vec<_>>();
-	let _ = lay_out(&mut displays)?;
-	Ok(displays)
+pub(super) fn displays(selector: &DisplaySelector) -> CoreResult<Vec<DesktopDisplay>> {
+	let mut snapshots = monitor_snapshots(selector)?;
+	let _ = lay_out(&mut snapshots)?;
+	Ok(snapshots.into_iter().map(|item| item.display).collect())
 }
 
 const fn hwnd_from_id(id: u32) -> *mut c_void {
@@ -124,19 +127,12 @@ fn process_id(id: u32) -> Option<u32> {
 }
 
 pub(super) fn windows() -> CoreResult<Vec<DesktopWindow>> {
-	window_snapshots(false)
-}
-
-fn window_snapshots(focused_only: bool) -> CoreResult<Vec<DesktopWindow>> {
 	let native = Window::all().map_err(|error| metadata_error("window enumeration", error))?;
 	let mut result = Vec::new();
 	let mut seen = HashSet::new();
 	for window in native {
 		if result.len() == MAX_LISTED_WINDOWS {
 			break;
-		}
-		if focused_only && !window.is_focused().unwrap_or(false) {
-			continue;
 		}
 		let Ok(id) = window.id() else { continue };
 		if !seen.insert(id) || window.is_minimized().unwrap_or(true) {
@@ -164,65 +160,49 @@ fn window_snapshots(focused_only: bool) -> CoreResult<Vec<DesktopWindow>> {
 			y: physical_y,
 			width: physical_width,
 			height: physical_height,
-			focused: focused_only || window.is_focused().unwrap_or(false),
+			focused: window.is_focused().unwrap_or(false),
 		});
-		if focused_only {
-			break;
-		}
 	}
 	Ok(result)
 }
 
 fn capture_desktop(selector: &DisplaySelector) -> CoreResult<(RgbaImage, FrameGeometry)> {
-	let (monitors, displays): (Vec<_>, Vec<_>) = monitor_snapshots()?
-		.into_iter()
-		.map(|snapshot| ((snapshot.id, snapshot.monitor), snapshot.display))
-		.unzip();
-	let focused = if matches!(selector, DisplaySelector::Active) {
-		window_snapshots(true)?.into_iter().next()
-	} else {
-		None
-	};
-	let mut displays = selector.select(displays, focused.as_ref())?;
-	let (width, height) = lay_out(&mut displays)?;
+	let mut snapshots = monitor_snapshots(selector)?;
+	let (width, height) = lay_out(&mut snapshots)?;
 	let composite = compose(
 		width,
 		height,
 		Rgba([0; 4]),
-		displays.iter().map(|display| {
-			let id = display.id.parse::<u32>().map_err(|_| {
-				DesktopError::capture_failed("selected display has an invalid Win32 monitor id")
-			})?;
-			let monitor = monitors
-				.iter()
-				.find(|(native_id, _)| *native_id == id)
-				.map(|(_, monitor)| monitor)
-				.ok_or_else(|| {
-					DesktopError::capture_failed("selected display is no longer available")
-				})?;
-			let image = monitor.capture_image().map_err(|error| {
+		snapshots.iter().map(|snapshot| {
+			let image = snapshot.monitor.capture_image().map_err(|error| {
 				DesktopError::capture_failed(format!(
 					"capture of display '{}' failed: {error}",
-					display.id
+					snapshot.display.id
 				))
 			})?;
 			if image.width() == 0 || image.height() == 0 {
 				return Err(DesktopError::capture_failed(format!(
 					"capture of display '{}' returned an empty image",
-					display.id
+					snapshot.display.id
 				)));
 			}
-			if image.width() != display.pixel_width || image.height() != display.pixel_height {
+			if image.width() != snapshot.display.pixel_width
+				|| image.height() != snapshot.display.pixel_height
+			{
 				return Err(DesktopError::capture_failed(format!(
 					"display '{}' geometry changed during capture; capture again before coordinate \
 					 input",
-					display.id,
+					snapshot.display.id,
 				)));
 			}
-			Ok((image, display.pixel_x, display.pixel_y))
+			Ok((image, snapshot.display.pixel_x, snapshot.display.pixel_y))
 		}),
 	)?;
-	let geometry = FrameGeometry::for_displays(&displays);
+	let display_data = snapshots
+		.into_iter()
+		.map(|item| item.display)
+		.collect::<Vec<_>>();
+	let geometry = FrameGeometry::for_displays(&display_data);
 	Ok((composite, geometry))
 }
 
@@ -264,7 +244,7 @@ pub(super) fn capture(
 	target: &Target,
 ) -> CoreResult<(RgbaImage, FrameGeometry)> {
 	match target {
-		Target::Desktop | Target::Display(_) => capture_desktop(selector),
+		Target::Desktop => capture_desktop(selector),
 		Target::Window(id) => capture_window(id),
 	}
 }

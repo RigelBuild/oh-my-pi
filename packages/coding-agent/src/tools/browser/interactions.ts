@@ -13,6 +13,12 @@ export interface ClickAtOptions {
 	clickCount?: number;
 }
 
+/** Options accepted by element clicks. */
+export interface ElementClickOptions extends ClickAtOptions {
+	/** Accept an `opacity:0` element, such as a custom checkbox's real input under its drawn box. */
+	transparent?: boolean;
+}
+
 /** Options accepted by pointer movement. */
 export interface MouseMoveOptions {
 	/** Number of intermediate movement events. */
@@ -153,12 +159,13 @@ export function composedContains(ancestor: unknown, descendant: unknown): boolea
 
 interface ClickFlags {
 	viaLabel: boolean;
+	transparent: boolean;
 }
 
 /** Page half of {@link isClickActionable}; `contains` is {@link composedContains}, bound in by `clickActionableInPage`. */
 function checkClickActionable(
 	el: unknown,
-	{ viaLabel }: ClickFlags,
+	{ viaLabel, transparent }: ClickFlags,
 	contains: typeof composedContains,
 ): ActionabilityResult {
 	const element = el as unknown as PageElement;
@@ -173,15 +180,7 @@ function checkClickActionable(
 		return { ok: false as const, reason: `visibility:${style.visibility}` };
 	}
 	if (style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
-	// A custom checkbox or radio keeps its real control at opacity:0 under the box it draws; the hit test below decides.
-	if (
-		Number(style.opacity) === 0 &&
-		!element.matches(
-			'input[type="checkbox"], input[type="radio"], [role="checkbox" i], [role="radio" i], [role="switch" i]',
-		)
-	) {
-		return { ok: false as const, reason: "opacity:0" };
-	}
+	if (!transparent && Number(style.opacity) === 0) return { ok: false as const, reason: "opacity:0" };
 	const rect = element.getBoundingClientRect();
 	if (rect.width < 1 || rect.height < 1) return { ok: false as const, reason: "zero-size" };
 	// A wrapped link's box centre can fall between its lines, on the parent; aim at its first visible line.
@@ -251,9 +250,12 @@ const clickActionableInPage = new Function(
 export async function isClickActionable(
 	handle: ElementHandle,
 	signal?: AbortSignal,
-	options: Pick<ClickAtOptions, "button"> = {},
+	options: Pick<ElementClickOptions, "button" | "transparent"> = {},
 ): Promise<ActionabilityResult> {
-	const flags: ClickFlags = { viaLabel: (options.button ?? "left") === "left" };
+	const flags: ClickFlags = {
+		viaLabel: (options.button ?? "left") === "left",
+		transparent: options.transparent === true,
+	};
 	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
 }
 
@@ -261,7 +263,7 @@ async function actionableClickPoint(
 	handle: ElementHandle,
 	label: string,
 	signal: AbortSignal | undefined,
-	options: ClickAtOptions,
+	options: ElementClickOptions,
 ): Promise<ClickPoint> {
 	await untilAborted(signal, () =>
 		handle.evaluate(el => {
@@ -304,7 +306,7 @@ export async function clickElement(
 	handle: ElementHandle,
 	label: string,
 	signal?: AbortSignal,
-	options: ClickAtOptions = {},
+	options: ElementClickOptions = {},
 ): Promise<void> {
 	const point = await actionableClickPoint(handle, label, signal, options);
 	await untilAborted(signal, () =>
@@ -492,7 +494,7 @@ export async function setElementChecked(
 		);
 		return;
 	}
-	await clickElement(handle, label, signal);
+	await clickElement(handle, label, signal, { transparent: true });
 	await untilAborted(signal, () =>
 		handle.evaluate((el, desired) => {
 			const element = el as unknown as PageElement;

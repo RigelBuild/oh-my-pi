@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import { getBrowserProfilesDir, isRecord, untilAborted } from "@oh-my-pi/pi-utils";
+import { getBrowserProfilesDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Socket } from "bun";
 import type { Browser, Page, Target } from "puppeteer-core";
 import { throwIfAborted } from "../tool-errors";
@@ -292,66 +292,32 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 	return status !== null && status >= 200 && status < 300;
 }
 
-/** Follow at most four unambiguous literal execs; never treat a generic dispatcher as Chromium. */
+/**
+ * Resolve a distro wrapper script to its exec target (e.g.
+ * /opt/google/chrome/google-chrome is bash ending in
+ * `exec -a "$0" "$HERE/chrome" "$@"` with $HERE = dirname of the wrapper).
+ * Scans line-by-line for the final `exec ... $HERE/...` command so helper
+ * invocations are never mistaken for the application. Returns null for
+ * binaries and wrappers without an exec command. Size-guarded so real
+ * binaries are never read into memory.
+ */
 async function resolveWrapperTarget(wrapperPath: string): Promise<string | null> {
 	if (process.platform !== "linux") return null;
-	const prefix = String.raw`^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?`;
-	const relativeExec = new RegExp(
-		`${prefix}(?:"\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+)"|\\$(?:HERE|\\{HERE\\})/([^\\s"'\x60;}]+))(?=\\s|$)`,
-	);
-	const absoluteExec = new RegExp(`${prefix}(?:(["'])(/[^"'\x60\\r\\n]+)\\1|(/[^\\s"'\x60;$}>&|<]+))(?=\\s|$)`);
-	// One leading redirection: optional fd/{var}/&, operator, then a word or process substitution.
-	const leadingRedirect = /^(?:\d+|\{\w+\}|&)?(?:<>|>>|>\||[<>]&?)\s*(?:[<>]\([^)]*\)|"[^"]*"|'[^']*'|[^\s"'<>]+)\s*/;
-	let current = wrapperPath;
-	const seen = new Set<string>();
-	for (let depth = 0; depth <= 4; depth++) {
-		const resolved = await fs.realpath(current).catch(() => null);
-		if (!resolved || seen.has(resolved)) return null;
-		seen.add(resolved);
-		const stat = await fs.stat(resolved).catch(() => null);
-		if (!stat?.isFile()) return null;
-		if (stat.size > 65_536) {
-			return depth > 0 &&
-				(CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) || path.basename(resolved) === "vivaldi-bin")
-				? resolved
-				: null;
-		}
-		const content = await Bun.file(resolved)
-			.text()
-			.catch(() => null);
-		if (!content) return null;
-		if (content.charCodeAt(0) === 0x7f) {
-			return depth > 0 &&
-				(CHROMIUM_BROWSER_BASENAME.test(path.basename(resolved)) || path.basename(resolved) === "vivaldi-bin")
-				? resolved
-				: null;
-		}
-		if (content.includes("<<")) return null;
-		if (/\b(?:then|else|do)\s+exec\s/.test(content)) return null;
-		if (depth === 4) return null;
-		let target: string | null = null;
-		for (const rawLine of content.split("\n")) {
-			if (!/^\s*exec\s/.test(rawLine)) continue;
-			// `exec < /dev/null` only rewires fds (google-chrome does this); drop leading redirections
-			// so `exec 2>/dev/null "$HERE/chrome"` still parses and fd-only execs are skipped.
-			let rest = rawLine.replace(/^\s*exec\s+/, "");
-			for (let m = leadingRedirect.exec(rest); m?.[0]; m = leadingRedirect.exec(rest))
-				rest = rest.slice(m[0].length);
-			if (!rest.trim()) continue;
-			const line = `exec ${rest}`;
-			const relative = relativeExec.exec(line);
-			const absolute = absoluteExec.exec(line);
-			const next =
-				relative?.[1] || relative?.[2]
-					? path.join(path.dirname(resolved), relative[1] ?? relative[2]!)
-					: (absolute?.[2] ?? absolute?.[3]);
-			if (!next || target) return null;
-			target = next;
-		}
-		if (!target || target.includes("$") || target.includes("\\")) return null;
-		current = target;
+	const stat = await fs.stat(wrapperPath).catch(() => null);
+	if (!stat || !stat.isFile() || stat.size > 65_536) return null;
+	const content = await Bun.file(wrapperPath)
+		.text()
+		.catch(() => null);
+	if (!content || content.charCodeAt(0) === 0x7f) return null;
+	let target: string | null = null;
+	const execRegex = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
+	for (const line of content.split("\n")) {
+		const match = execRegex.exec(line);
+		if (match?.[1]) target = match[1];
 	}
-	return null;
+	if (!target) return null;
+	const joined = path.join(path.dirname(wrapperPath), target);
+	return fs.realpath(joined).catch(() => joined);
 }
 
 /**
@@ -483,9 +449,6 @@ const FRAME_READY_TIMEOUT_MS = 8_000;
 const FRAME_READY_POLL_MS = 120;
 const RELAY_JSON_TIMEOUT_MS = 3_000;
 const RELAY_VISIBILITY_TIMEOUT_MS = 1_000;
-// A tab opened outside omp reaches the relay's /json, and gets its URL, a few ms after Chrome reports it created.
-const RELAY_MATCH_SETTLE_MS = 2_000;
-const RELAY_MATCH_POLL_MS = 100;
 
 async function abortable<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
 	try {
@@ -559,14 +522,10 @@ export async function waitForMainFrame(
 		}
 	}
 }
-async function fetchRelayEntries(
-	relayJson: string,
-	signal?: AbortSignal,
-	timeoutMs = RELAY_JSON_TIMEOUT_MS,
-): Promise<RelayJsonEntry[] | null> {
+async function fetchRelayEntries(relayJson: string, signal?: AbortSignal): Promise<RelayJsonEntry[] | null> {
 	try {
 		const res = await probeCdpResponse(`${relayJson.replace(/\/$/, "")}/json`, {
-			timeoutMs,
+			timeoutMs: RELAY_JSON_TIMEOUT_MS,
 			signal,
 		});
 		if (!res || res.status < 200 || res.status >= 300) return null;
@@ -578,68 +537,10 @@ async function fetchRelayEntries(
 	}
 }
 
-/** A relay page `app.target` may pick: not discarded by Chrome, and not internal (devtools, service workers…). */
-function isAdoptableRelayEntry(entry: RelayJsonEntry): boolean {
-	return (
-		entry.discarded !== "true" &&
-		!ATTACH_TARGET_SKIP_PATTERN.test(entry.url) &&
-		!ATTACH_TARGET_SKIP_PATTERN.test(entry.title)
-	);
-}
-
-/** One of the user's Chrome tabs as `browser.targets()` lists it: `app.target` adopts it by `target` (its URL). */
-export interface RelayTarget {
-	/** The page URL, as `app.target` takes it (a URL/title substring). */
-	target: string;
-	title: string;
-	url: string;
-	/** Whether it is the active tab of its Chrome window. */
-	shown: boolean;
-}
-
-/** The adoptable pages among relay `/json` entries; malformed, discarded, and internal entries are skipped. */
-export function relayTargets(entries: readonly unknown[]): RelayTarget[] {
-	const targets: RelayTarget[] = [];
-	for (const raw of entries) {
-		if (!isRecord(raw) || raw.type !== "page" || typeof raw.url !== "string") continue;
-		const entry: RelayJsonEntry = {
-			id: typeof raw.id === "string" ? raw.id : "",
-			type: raw.type,
-			url: raw.url,
-			title: typeof raw.title === "string" ? raw.title : "",
-			active: typeof raw.active === "string" ? raw.active : undefined,
-			discarded: typeof raw.discarded === "string" ? raw.discarded : undefined,
-		};
-		if (!isAdoptableRelayEntry(entry)) continue;
-		targets.push({ target: entry.url, title: entry.title, url: entry.url, shown: entry.active === "true" });
-	}
-	return targets;
-}
-
-/** The `browser.targets()` listing of relay pages: `- "Title" https://… (active)`. */
-export function describeRelayTargets(targets: readonly RelayTarget[]): string {
-	if (targets.length === 0) return "The relay lists no Chrome pages to adopt.";
-	const list = targets
-		.map(entry => `- ${JSON.stringify(entry.title)} ${entry.url}${entry.shown ? " (active)" : ""}`)
-		.join("\n");
-	return `Chrome pages via the relay (adopt one with app.target set to its URL or a title substring):\n${list}`;
-}
-
-/** The pages of the user's Chrome the relay at `relayJson` can adopt. */
-export async function listRelayTargets(relayJson: string, signal?: AbortSignal): Promise<RelayTarget[]> {
-	const entries = await fetchRelayEntries(relayJson, signal);
-	if (!entries) throw new ToolError(`omp browser relay at ${relayJson} did not list its pages (GET /json failed).`);
-	return relayTargets(entries);
-}
-
-function relayEntryMatches(entry: RelayJsonEntry, needle: string): boolean {
-	return entry.url.toLowerCase().includes(needle) || entry.title.toLowerCase().includes(needle);
-}
-
 function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions): RelayJsonEntry | null {
 	const needle = options.matcher?.toLowerCase();
 	if (needle) {
-		const hits = entries.filter(e => relayEntryMatches(e, needle));
+		const hits = entries.filter(e => e.url.toLowerCase().includes(needle) || e.title.toLowerCase().includes(needle));
 		const live = hits.filter(e => e.discarded !== "true");
 		if (live.length > 0) return live[0]!;
 		if (hits.length > 0) {
@@ -648,11 +549,12 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 			);
 		}
 		const summary = entries.map(e => `- ${e.title || "(untitled)"}  ${e.url}`).join("\n");
-		throw new ToolError(
-			`No page target matched ${JSON.stringify(options.matcher)} after waiting ${RELAY_MATCH_SETTLE_MS / 1000}s for a newly opened tab. Pass a target from these URLs or titles (browser.targets() lists them before adopting), or omit it to use the active tab. Available pages:\n${summary}`,
-		);
+		throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
 	}
-	const usable = entries.filter(isAdoptableRelayEntry);
+	const usable = entries.filter(
+		e =>
+			e.discarded !== "true" && !ATTACH_TARGET_SKIP_PATTERN.test(e.url) && !ATTACH_TARGET_SKIP_PATTERN.test(e.title),
+	);
 	return usable.find(e => e.active === "true") ?? usable[0] ?? null;
 }
 
@@ -660,31 +562,19 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
 	if (options.relayJson) {
-		let entries = await fetchRelayEntries(options.relayJson, options.signal);
-		const needle = options.matcher?.toLowerCase();
-		const settleDeadline = Date.now() + RELAY_MATCH_SETTLE_MS;
-		// Without page metadata, target enumeration below decides at once, as before.
-		while (
-			needle &&
-			entries?.some(e => e.type === "page") &&
-			!entries.some(e => e.type === "page" && relayEntryMatches(e, needle)) &&
-			Date.now() < settleDeadline
-		) {
-			await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));
-			const polled = await fetchRelayEntries(
-				options.relayJson,
-				options.signal,
-				Math.max(1, settleDeadline - Date.now()),
-			);
-			throwIfAborted(options.signal);
-			entries = polled ?? entries;
-		}
+		const entries = await fetchRelayEntries(options.relayJson, options.signal);
 		if (entries) {
 			const pageEntries = entries.filter(e => e.type === "page");
 			const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
 			const targets = browser.targets();
 			if (options.preferVisible && !options.matcher) {
-				const active = pageEntries.filter(e => e.active === "true" && isAdoptableRelayEntry(e));
+				const active = pageEntries.filter(
+					e =>
+						e.active === "true" &&
+						e.discarded !== "true" &&
+						!ATTACH_TARGET_SKIP_PATTERN.test(e.url) &&
+						!ATTACH_TARGET_SKIP_PATTERN.test(e.title),
+				);
 				if (active.length > 1) {
 					let firstPage: Page | null = null;
 					let unreadableActive = false;
@@ -713,26 +603,9 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 				}
 			}
 			if (selected) {
-				const isSelected = (t: Target) => (t as Target & { _targetId?: string })._targetId === selected.id;
-				const attachDeadline = Date.now() + PAGE_ATTACH_TIMEOUT_MS;
-				let target = targets.find(isSelected);
-				if (!target) {
-					// Puppeteer learns of a tab from the relay's targetCreated event, which can trail /json.
-					try {
-						target = await abortable(options.signal, () =>
-							browser.waitForTarget(isSelected, { timeout: PAGE_ATTACH_TIMEOUT_MS, signal: options.signal }),
-						);
-					} catch (error) {
-						throwIfAborted(options.signal);
-						if (error instanceof Error && error.name === "TimeoutError") {
-							throw new ToolError(
-								"Selected tab did not become available before omp could attach; retry, or reopen it if it closed",
-							);
-						}
-						throw error;
-					}
-				}
-				const page = await attachPageWithTimeout(target, attachDeadline - Date.now(), options.signal);
+				const target = targets.find(t => (t as Target & { _targetId?: string })._targetId === selected.id);
+				if (!target) throw new ToolError("Selected tab is no longer available");
+				const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
 				if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal)))
 					throw new ToolError("Selected tab is not ready; retry after it loads");
 				return page;
@@ -740,32 +613,9 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 	}
 
-	let targets = browser.targets();
-	if (!targets.some(target => String(target.type()) === "page")) {
-		const pages = await abortable(options.signal, () => browser.pages());
-		if (pages.length > 0) return pickPageFromList(pages, options);
-		// CDP discovery can start answering before Chromium or Electron has
-		// created its first window. Wait for the page, never create a tab in a
-		// borrowed browser or mistake endpoint readiness for page readiness.
-		try {
-			await abortable(options.signal, () =>
-				browser.waitForTarget(target => String(target.type()) === "page", {
-					timeout: PAGE_ATTACH_TIMEOUT_MS,
-					signal: options.signal,
-				}),
-			);
-		} catch (error) {
-			throwIfAborted(options.signal);
-			if (error instanceof Error && error.name === "TimeoutError") {
-				throw new ToolError("No page targets available on the attached browser");
-			}
-			throw error;
-		}
-		targets = browser.targets();
-	}
 	let hasUnreadablePage = false;
 	const discoveredPages = await Promise.all(
-		targets.map(async target => {
+		browser.targets().map(async target => {
 			if (String(target.type()) !== "page") return null;
 			const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
 			if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal))) {

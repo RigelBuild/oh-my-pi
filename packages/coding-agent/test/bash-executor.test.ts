@@ -484,9 +484,6 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
-				// zsh reads `.zshrc` from `$ZDOTDIR` when set; terminal integrations
-				// export their own, which would bypass the fixture rc.
-				ZDOTDIR: shellDir,
 				// The command runs through an interactive login zsh, which loads the
 				// system `/etc/zshrc`. On macOS that pulls in
 				// `/etc/zshrc_Apple_Terminal`, and under Apple Terminal it appends
@@ -587,7 +584,6 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
-				ZDOTDIR: shellDir,
 				SHELL_SESSIONS_DISABLE: "1",
 			},
 			prefix: undefined,

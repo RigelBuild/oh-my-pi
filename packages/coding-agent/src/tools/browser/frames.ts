@@ -9,7 +9,6 @@ import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-snapshot";
 import { clickElement, fillViaHandle, focusTextEntryTarget, pressKey } from "./interactions";
-import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
@@ -103,23 +102,18 @@ export interface FrameApiHooks {
 	captureScreenshot(frame: Frame, selector: string, signal: AbortSignal): Promise<string>;
 }
 
-/** A frame's DevTools identifier, the id CDP events name it by. */
-export function devtoolsFrameId(frame: Frame): string {
-	// Puppeteer keeps the DevTools id on an internal field its public types omit.
-	const internal = frame as unknown as { _id: string };
-	return internal._id;
-}
-
 /** List the page's current main and child frames with stable DevTools identifiers. */
 export async function listFrames(page: Page, signal?: AbortSignal): Promise<BrowserFrameInfo[]> {
 	const result: BrowserFrameInfo[] = [];
 	for (const frame of page.frames()) {
 		const parent = frame.parentFrame();
+		const internalFrame = frame as unknown as { _id: string };
+		const internalParent = parent as unknown as { _id: string } | null;
 		const info: BrowserFrameInfo = {
-			id: devtoolsFrameId(frame),
+			id: internalFrame._id,
 			name: frame.name(),
 			url: frame.url(),
-			parentId: parent ? devtoolsFrameId(parent) : null,
+			parentId: internalParent?._id ?? null,
 		};
 		if (parent) {
 			let element: ElementHandle | null = null;
@@ -373,7 +367,6 @@ export async function captureFrameScreenshot(
 	const handle = await untilAborted(signal, () => frame.$(normalizeSelector(selector)));
 	if (!handle) throw new ToolError(`frame.screenshot(${JSON.stringify(selector)}) matched no element`);
 	let buffer: Buffer;
-	let captureScale: number;
 	try {
 		await untilAborted(signal, () =>
 			handle.evaluate(element => {
@@ -383,7 +376,6 @@ export async function captureFrameScreenshot(
 				target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
 			}),
 		).catch(() => undefined);
-		captureScale = (await readPageViewport(frame.page(), signal)).deviceScaleFactor ?? 1;
 		const screenshotOptions: ElementScreenshotOptions = { type: "png", scrollIntoView: false };
 		buffer = (await untilAborted(signal, () => handle.screenshot(screenshotOptions))) as Buffer;
 	} finally {
@@ -420,7 +412,6 @@ export async function captureFrameScreenshot(
 			savedByteLength: savedBuffer.length,
 			dest,
 			resized,
-			capture: { area: "element", scale: captureScale },
 		}).join("\n"),
 	});
 	output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });

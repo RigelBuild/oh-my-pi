@@ -13,7 +13,6 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	TailBuffer,
-	type TruncationResult,
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
@@ -21,17 +20,17 @@ import { parseWorkDirDirtyPaths } from "../git";
 import {
 	EXPERIMENT_MAX_BYTES,
 	EXPERIMENT_MAX_LINES,
-	ExperimentOutputScanner,
+	parseAsiLines,
+	parseMetricLines,
 	tryGitPrefix,
 	tryGitStatus,
 } from "../helpers";
 import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import { formatElapsed } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
 import { buildExperimentState } from "../state";
-import { quotePosixArgument } from "../../utils/shell-quote";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
-import type { ASIData, RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import type { RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 const runExperimentSchema = type({
@@ -42,12 +41,7 @@ interface ProcessExecutionResult {
 	exitCode: number | null;
 	killed: boolean;
 	logPath: string;
-	/** Tail truncation for the LLM preview ({@link EXPERIMENT_MAX_BYTES}/{@link EXPERIMENT_MAX_LINES}). */
-	llmTruncation: TruncationResult;
-	/** Tail truncation for the rendered output (default budgets). */
-	displayTruncation: TruncationResult;
-	metrics: Map<string, number>;
-	asi: ASIData | null;
+	output: string;
 }
 
 interface ProgressSnapshot {
@@ -160,11 +154,19 @@ export function createRunExperimentTool(
 			const durationSeconds = durationMs / 1000;
 			runtime.lastRunDuration = durationSeconds;
 
-			const { llmTruncation, displayTruncation } = execution;
-			const parsedMetricsMap = execution.metrics;
+			const llmTruncation = truncateTail(execution.output, {
+				maxBytes: EXPERIMENT_MAX_BYTES,
+				maxLines: EXPERIMENT_MAX_LINES,
+			});
+			const displayTruncation = truncateTail(execution.output, {
+				maxBytes: DEFAULT_MAX_BYTES,
+				maxLines: DEFAULT_MAX_LINES,
+			});
+
+			const parsedMetricsMap = parseMetricLines(execution.output);
 			const parsedMetrics = parsedMetricsMap.size > 0 ? Object.fromEntries(parsedMetricsMap.entries()) : null;
 			const parsedPrimary = parsedMetricsMap.get(session.primaryMetric) ?? null;
-			const parsedAsi = execution.asi;
+			const parsedAsi = parseAsiLines(execution.output);
 			runtime.lastRunAsi = parsedAsi;
 
 			storage.markRunCompleted({
@@ -256,7 +258,7 @@ async function resolveHarnessExecLine(): Promise<string> {
 	if (process.platform !== "win32") return DEFAULT_HARNESS_COMMAND;
 	const { shell } = (await Settings.init()).getShellConfig();
 	if (!procmgr.isPosixShell(shell)) return DEFAULT_HARNESS_COMMAND;
-	return `${quotePosixArgument(shell)} ${HARNESS_FILENAME}`;
+	return `'${shell.replaceAll("'", "'\\''")}' ${HARNESS_FILENAME}`;
 }
 
 async function executeProcess(opts: {
@@ -267,11 +269,7 @@ async function executeProcess(opts: {
 	signal?: AbortSignal;
 	onProgress?(details: ProgressSnapshot): void;
 }): Promise<ProcessExecutionResult> {
-	// Holds 2× the largest truncation budget, so tail truncations of it equal those of the full log.
 	const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
-	const scanner = new ExperimentOutputScanner();
-	let totalBytes = 0;
-	let newlineCount = 0;
 
 	const startedAt = Date.now();
 	const snapshot = (): ProgressSnapshot => {
@@ -311,11 +309,6 @@ async function executeProcess(opts: {
 			onChunk: chunk => {
 				tailBuffer.append(chunk);
 				logSink.write(chunk);
-				scanner.append(chunk);
-				totalBytes += Buffer.byteLength(chunk, "utf-8");
-				for (let index = chunk.indexOf("\n"); index !== -1; index = chunk.indexOf("\n", index + 1)) {
-					newlineCount += 1;
-				}
 			},
 		});
 		await closeLogSink();
@@ -323,23 +316,13 @@ async function executeProcess(opts: {
 			throw new Error("aborted");
 		}
 
-		const tail = tailBuffer.text();
-		const totals = { totalLines: newlineCount + 1, totalBytes };
-		const { metrics, asi } = scanner.finish();
+		const output = await fs.promises.readFile(opts.logPath, "utf8");
+
 		return {
 			exitCode: result.exitCode ?? null,
 			killed: result.cancelled,
 			logPath: opts.logPath,
-			llmTruncation: {
-				...truncateTail(tail, { maxBytes: EXPERIMENT_MAX_BYTES, maxLines: EXPERIMENT_MAX_LINES }),
-				...totals,
-			},
-			displayTruncation: {
-				...truncateTail(tail, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES }),
-				...totals,
-			},
-			metrics,
-			asi,
+			output,
 		};
 	} finally {
 		if (progressTimer) clearInterval(progressTimer);

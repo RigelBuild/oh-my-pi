@@ -52,10 +52,6 @@ class AdvisorHeader implements Component {
 		this.#uiTheme = uiTheme;
 	}
 
-	releaseRenderCaches(): void {
-		this.#cache = undefined;
-	}
-
 	invalidate(): void {
 		this.#cache = undefined;
 	}
@@ -84,10 +80,6 @@ class AdvisorNotes implements Component {
 		this.#entries = entries;
 		this.#hidden = hidden;
 		this.#uiTheme = uiTheme;
-	}
-
-	releaseRenderCaches(): void {
-		this.#cache = undefined;
 	}
 
 	invalidate(): void {
@@ -243,9 +235,6 @@ export function createAdvisorMessageCard(
 		},
 		invalidate(): void {
 			disclosure.invalidate();
-		},
-		releaseRenderCaches(): void {
-			disclosure.releaseRenderCaches();
 		},
 		dispose(): void {
 			disclosure.dispose();

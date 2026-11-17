@@ -15,7 +15,7 @@ import {
 	type TUIOptions,
 	type ViewportSize,
 } from "../tui";
-import { wrapLiteralLine } from "../utils";
+import { sliceWithWidth, visibleWidth } from "../utils";
 import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
@@ -803,8 +803,20 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (!lines) return [];
 		if (isInsideTerminalMultiplexer()) return lines.slice(start);
 		const reflowed: string[] = [];
+		const columns = Math.max(1, width);
 		for (let index = start; index < lines.length; index++) {
-			reflowed.push(...wrapLiteralLine(lines[index]!, width));
+			const line = lines[index]!;
+			const lineWidth = visibleWidth(line);
+			if (lineWidth === 0) {
+				reflowed.push("");
+				continue;
+			}
+			for (let column = 0; column < lineWidth;) {
+				let slice = sliceWithWidth(line, column, columns, true);
+				if (slice.width === 0) slice = sliceWithWidth(line, column, columns);
+				reflowed.push(slice.text);
+				column += Math.max(1, slice.width);
+			}
 		}
 		return reflowed;
 	}
@@ -899,7 +911,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 
 	/** Update the canonical editor reference after InteractiveMode remounts a custom editor. */
 	setEditor(editor: CustomEditor): void {
-		this.ui.replaceHeldFocus(this.#editor, editor);
 		this.#editor = editor;
 	}
 

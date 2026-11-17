@@ -1,21 +1,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	$which,
-	getPuppeteerDir,
-	isEnoent,
-	isRecord,
-	logger,
-	removeWithRetries,
-	toError,
-	untilAborted,
-} from "@oh-my-pi/pi-utils";
+import { $which, getPuppeteerDir, logger, removeWithRetries, untilAborted } from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
 import type {
 	Browser,
 	CDPSession,
-	ConnectOptions,
 	Device,
 	JSHandle,
 	NetworkConditions,
@@ -191,20 +181,6 @@ export async function loadPuppeteerInWorker(safeDir: string): Promise<typeof Pup
 	const loaded = await loadPuppeteerImport(safeDir, false);
 	puppeteerModuleWorker = loaded;
 	return loaded;
-}
-
-/** Normalize transport event rejections before they cross browser or worker boundaries. */
-export async function connectPuppeteer(puppeteer: typeof Puppeteer, options: ConnectOptions): Promise<Browser> {
-	try {
-		return await puppeteer.connect(options);
-	} catch (error) {
-		// The WebSocket transports can reject with ErrorEvent rather than Error.
-		// Its message includes the actual debugger endpoint and handshake failure.
-		if (!(error instanceof Error) && isRecord(error) && typeof error.message === "string") {
-			throw new Error(error.message, { cause: error });
-		}
-		throw toError(error);
-	}
 }
 
 /** Return device descriptors from the already-loaded Puppeteer module. */
@@ -481,12 +457,6 @@ export interface LaunchHeadlessOptions extends HeadlessLaunchFeatures {
 	args?: readonly string[];
 	/** Additional exact Puppeteer default arguments to suppress. */
 	ignoreDefaultArgs?: readonly string[];
-	/** Aborts the launch and kills the spawned browser. */
-	signal?: AbortSignal;
-	/** Remaining caller budget; bounds puppeteer's wait for the DevTools endpoint. */
-	timeoutMs?: number;
-	/** Per-CDP-command timeout; defaults to {@link BROWSER_PROTOCOL_TIMEOUT_MS}. */
-	protocolTimeoutMs?: number;
 }
 
 /** Result of a headless Chromium launch. */
@@ -540,13 +510,13 @@ export function buildHeadlessLaunchArgs(
 }
 
 export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promise<LaunchHeadlessResult> {
-	const startedAt = performance.now();
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	const initialViewport = {
 		width: vp.width,
 		height: vp.height,
 		deviceScaleFactor: vp.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	};
+	const puppeteer = await loadPuppeteer();
 	const launchArgs = buildHeadlessLaunchArgs(initialViewport, {
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		allowFileAccess: opts.allowFileAccess,
@@ -555,120 +525,31 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);
 	}
 	// Own the Chromium profile directory instead of letting puppeteer-core create
-	// (and delete) a temporary one: its eager exit-hook cleanup rejects with an
-	// unhandled EBUSY on Windows while Chromium holds the lock (issue #7058).
+	// (and delete) a temporary one. Passing `--user-data-dir` makes puppeteer
+	// treat the profile as non-temporary, so `ChromeLauncher.cleanUserDataDir`
+	// becomes a no-op and can no longer reject its eager process-exit hook with an
+	// unhandled EBUSY when Chromium still holds the profile lock on Windows
+	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
 	let userDataDir: string | undefined;
-	let phase: "executable resolve" | "ws endpoint" | "cdp handshake" | "page target" = "executable resolve";
+	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
+		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
+		launchArgs.push(`--user-data-dir=${userDataDir}`);
+	}
 	try {
-		opts.signal?.throwIfAborted();
-		const puppeteer = await loadPuppeteer();
 		const executablePath = await ensureChromiumExecutable();
-		if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
-			userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
-			launchArgs.push(`--user-data-dir=${userDataDir}`);
-			await seedOwnedProfilePreferences(userDataDir);
-		}
-		const remaining = () => Math.max(1, (opts.timeoutMs ?? 30_000) - (performance.now() - startedAt));
-		phase = "cdp handshake";
-		// Puppeteer's timeout stops at the DevTools URL; the WebSocket upgrade after it
-		// has only a fixed bound. Puppeteer kills Chromium whenever its signal aborts,
-		// even after launch, so it gets one that stops following ours once launch settles.
-		const deadline = new AbortController();
-		const launchAbort = new AbortController();
-		const deadlineTimer = setTimeout(
-			() => deadline.abort(new Error(`timed out after ${opts.timeoutMs ?? 30_000} ms`)),
-			remaining(),
-		);
-		const upstream = opts.signal ? AbortSignal.any([opts.signal, deadline.signal]) : deadline.signal;
-		const forwardAbort = () => launchAbort.abort(upstream.reason);
-		if (upstream.aborted) forwardAbort();
-		else upstream.addEventListener("abort", forwardAbort, { once: true });
-		const launchSignal = launchAbort.signal;
-		let browser: Browser;
-		try {
-			browser = await untilAborted(launchSignal, () =>
-				puppeteer.launch({
-					headless: opts.headless,
-					defaultViewport: opts.headless ? initialViewport : null,
-					executablePath,
-					args: launchArgs,
-					ignoreDefaultArgs: [
-						...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
-					],
-					protocolTimeout: opts.protocolTimeoutMs ?? BROWSER_PROTOCOL_TIMEOUT_MS,
-					signal: launchSignal,
-					timeout: remaining(),
-					// Waited below so a timeout there is reported as the page-target phase.
-					waitForInitialPage: false,
-				}),
-			);
-		} catch (error) {
-			if (deadline.signal.aborted && !opts.signal?.aborted) throw deadline.signal.reason;
-			throw error;
-		} finally {
-			clearTimeout(deadlineTimer);
-			upstream.removeEventListener("abort", forwardAbort);
-		}
-		phase = "page target";
-		try {
-			await browser.waitForTarget(target => target.type() === "page", {
-				timeout: remaining(),
-				signal: opts.signal,
-			});
-		} catch (error) {
-			await browser.close().catch(() => undefined);
-			throw error;
-		}
+		const browser = await puppeteer.launch({
+			headless: opts.headless,
+			defaultViewport: opts.headless ? initialViewport : null,
+			executablePath,
+			args: launchArgs,
+			ignoreDefaultArgs: [
+				...new Set([...stealthIgnoreDefaultArgs(executablePath), ...(opts.ignoreDefaultArgs ?? [])]),
+			],
+			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+		});
 		return { browser, userDataDir };
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
-		// Caller cancellation keeps its AbortError identity; only timeouts get a phase label.
-		if (opts.signal?.aborted) throw error;
-		const message = error instanceof Error ? error.message : String(error);
-		if (phase === "cdp handshake" && /WS endpoint URL/i.test(message)) phase = "ws endpoint";
-		throw new Error(`Headless browser ${phase} failed: ${message}`, { cause: error });
-	}
-}
-
-/**
- * Pin automation-safe preferences in a Chromium profile OMP owns. Password leak
- * detection answers a password form submit with a tab-modal "Change your
- * password" dialog; while it is open Chromium drops `Input.dispatchMouseEvent`
- * input for the tab, and a hidden browser offers no way to close it. Chromium
- * reads `Preferences` only at startup and rewrites it from memory, so call this
- * before a Chromium process starts on the profile. Best-effort: the preference
- * only suppresses a dialog, so a failure is logged and never blocks the launch.
- */
-export async function seedOwnedProfilePreferences(userDataDir: string): Promise<void> {
-	try {
-		await writeOwnedProfilePreferences(path.join(userDataDir, "Default", "Preferences"));
-	} catch (error) {
-		logger.warn("Could not seed browser profile preferences", {
-			userDataDir,
-			error: error instanceof Error ? error.message : String(error),
-		});
-	}
-}
-
-async function writeOwnedProfilePreferences(file: string): Promise<void> {
-	let prefs: Record<string, unknown> = {};
-	try {
-		const parsed: unknown = JSON.parse(await fs.promises.readFile(file, "utf8"));
-		if (isRecord(parsed)) prefs = parsed;
-	} catch (error) {
-		// Fresh profiles have no file yet; Chromium discards an unparseable one on startup anyway.
-		if (!isEnoent(error) && !(error instanceof SyntaxError)) throw error;
-	}
-	const profile = isRecord(prefs.profile) ? prefs.profile : {};
-	if (profile.password_manager_leak_detection === false) return;
-	profile.password_manager_leak_detection = false;
-	prefs.profile = profile;
-	const staged = `${file}.omp-${process.pid}`;
-	try {
-		await Bun.write(staged, JSON.stringify(prefs));
-		await fs.promises.rename(staged, file);
-	} catch (error) {
-		await fs.promises.rm(staged, { force: true });
 		throw error;
 	}
 }
@@ -742,16 +623,13 @@ export async function applyViewport(
 	});
 }
 
-/**
- * The emulated viewport, else the window's own: connected and visible browsers emulate none, and an
- * emulated scale of 0 keeps the window's own device scale.
- */
+/** The emulated viewport, else the window's own: connected and visible browsers emulate none. */
 export async function readPageViewport(
 	page: Page,
 	signal?: AbortSignal,
 ): Promise<{ width: number; height: number; deviceScaleFactor?: number }> {
 	const emulated = page.viewport();
-	if (emulated && emulated.deviceScaleFactor !== 0) return emulated;
+	if (emulated) return emulated;
 	return await untilAborted(signal, () =>
 		page.evaluate(() => {
 			const win = globalThis as unknown as { innerWidth: number; innerHeight: number; devicePixelRatio: number };

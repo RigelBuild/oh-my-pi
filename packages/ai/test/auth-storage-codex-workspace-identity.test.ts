@@ -55,10 +55,8 @@ function codexCredential(args: {
 function readIdentityRows(dbPath: string): Array<{ identity_key: string | null; disabled_cause: string | null }> {
 	const db = new Database(dbPath, { readonly: true });
 	try {
-		// `query()` statements are finalized by `close()`; a leaked `prepare()`
-		// statement keeps the file open on Windows and breaks temp-dir cleanup.
 		return db
-			.query(
+			.prepare(
 				"SELECT identity_key, disabled_cause FROM auth_credentials WHERE provider = 'openai-codex' ORDER BY id ASC",
 			)
 			.all() as Array<{ identity_key: string | null; disabled_cause: string | null }>;

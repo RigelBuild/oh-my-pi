@@ -9,12 +9,9 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
-	resolveGatewayAccount,
 	resolveGatewayApiKey,
-	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
-import type { CallerIdentity } from "../types";
 
 function isGatewayImageApi(api: string): boolean {
 	return (
@@ -30,7 +27,6 @@ async function handleImages(
 	req: Request,
 	peer: string,
 	kind: imagesServer.ImageRequestKind,
-	caller: CallerIdentity,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -58,8 +54,7 @@ async function handleImages(
 		return imagesServer.formatError(400, "invalid_request_error", message);
 	}
 
-	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
-	if (controller.signal.aborted) return aborted();
+	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
 		return imagesServer.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
@@ -83,7 +78,6 @@ async function handleImages(
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -105,15 +99,12 @@ async function handleImages(
 				controller.signal,
 				"images",
 				peer,
-				resolvedKey => {
-					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
-				},
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
 		return json(
 			200,
 			imagesServer.encodeResponse(result, parsed.modelId),
@@ -131,16 +122,10 @@ export function handleImageGenerations(
 	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
-	caller: CallerIdentity,
 ): Promise<Response> {
-	return handleImages(bootOpts, req, peer, "generations", caller);
+	return handleImages(bootOpts, req, peer, "generations");
 }
 
-export function handleImageEdits(
-	bootOpts: AuthGatewayRouteOptions,
-	req: Request,
-	peer: string,
-	caller: CallerIdentity,
-): Promise<Response> {
-	return handleImages(bootOpts, req, peer, "edits", caller);
+export function handleImageEdits(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
+	return handleImages(bootOpts, req, peer, "edits");
 }

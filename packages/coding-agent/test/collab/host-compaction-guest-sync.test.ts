@@ -107,11 +107,7 @@ function makeGuestHarness(model: Model, modelRegistry: ModelRegistry): GuestHarn
 		reloadTodos: () => Promise.resolve(),
 		showStatus: () => {},
 		showError: () => {},
-		eventController: {
-			dispatchSessionEvent: () => Promise.resolve(),
-			takeDisplaceableComponents: () => [],
-			resetTranscriptAnchors: () => {},
-		},
+		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
 		eventBus: undefined,
 		collabGuest: undefined,
 		handleResumeSession: () => Promise.resolve(),

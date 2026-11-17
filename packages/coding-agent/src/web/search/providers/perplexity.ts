@@ -577,15 +577,9 @@ function buildOAuthSources(event: PerplexityOAuthStreamEvent): SearchSource[] {
 	return sourcesFromTextPayload(event.text);
 }
 
-/** Where a snapshot's answer comes from, resolved without materializing the text. */
-type OAuthAnswerSource =
-	| { kind: "chunks"; chunks: unknown[] }
-	| { kind: "answer"; answer: string }
-	| { kind: "text"; text: string };
-
-function resolveOAuthAnswerSource(event: PerplexityOAuthStreamEvent): OAuthAnswerSource | null {
+function buildOAuthAnswer(event: PerplexityOAuthStreamEvent): string {
 	if (!event.blocks?.length) {
-		return typeof event.text === "string" ? { kind: "text", text: event.text } : null;
+		return typeof event.text === "string" ? parseOAuthTextAnswer(event.text) : "";
 	}
 
 	const markdownBlock = event.blocks.find(
@@ -593,10 +587,10 @@ function resolveOAuthAnswerSource(event: PerplexityOAuthStreamEvent): OAuthAnswe
 	)?.markdown_block;
 	if (markdownBlock) {
 		if (Array.isArray(markdownBlock.chunks) && markdownBlock.chunks.length > 0) {
-			return { kind: "chunks", chunks: markdownBlock.chunks };
+			return markdownBlock.chunks.join("");
 		}
 		if (typeof markdownBlock.answer === "string" && markdownBlock.answer.length > 0) {
-			return { kind: "answer", answer: markdownBlock.answer };
+			return markdownBlock.answer;
 		}
 	}
 
@@ -605,41 +599,16 @@ function resolveOAuthAnswerSource(event: PerplexityOAuthStreamEvent): OAuthAnswe
 	)?.markdown_block;
 	if (textBlock) {
 		if (Array.isArray(textBlock.chunks) && textBlock.chunks.length > 0) {
-			return { kind: "chunks", chunks: textBlock.chunks };
+			return textBlock.chunks.join("");
 		}
 		if (typeof textBlock.answer === "string" && textBlock.answer.length > 0) {
-			return { kind: "answer", answer: textBlock.answer };
+			return textBlock.answer;
 		}
 	}
 	if (typeof event.text === "string" && event.text.length > 0) {
-		return { kind: "text", text: event.text };
+		return parseOAuthTextAnswer(event.text);
 	}
-	return null;
-}
-
-/** Whether {@link materializeOAuthAnswer} would produce a non-empty answer, without building it. */
-function oauthAnswerIsNonEmpty(source: OAuthAnswerSource): boolean {
-	switch (source.kind) {
-		case "chunks":
-			// `join("")` renders null/undefined as "" and everything else via String().
-			return source.chunks.some(chunk => chunk != null && String(chunk) !== "");
-		case "answer":
-			return true;
-		case "text":
-			// parseOAuthTextAnswer falls back to the raw text, so only "" yields "".
-			return source.text.length > 0;
-	}
-}
-
-function materializeOAuthAnswer(source: OAuthAnswerSource): string {
-	switch (source.kind) {
-		case "chunks":
-			return source.chunks.join("");
-		case "answer":
-			return source.answer;
-		case "text":
-			return parseOAuthTextAnswer(source.text);
-	}
+	return "";
 }
 
 async function callPerplexityAsk(
@@ -763,16 +732,11 @@ async function callPerplexityAsk(
 		throw new SearchProviderError("perplexity", "Perplexity ask API returned no response body", 500);
 	}
 
+	let answer = "";
 	let model: string | undefined;
 	let finalRequestId: string | undefined;
 	const sourcesByUrl = new Map<string, SearchSource>();
 	let mergedEvent: PerplexityOAuthStreamEvent = { blocks: [] };
-	// Answer of the latest snapshot that had one; materialized once after the stream.
-	let answerSource: OAuthAnswerSource | null = null;
-	// buildOAuthSources reads only these snapshot fields; re-run it only when one changes.
-	let lastWebResults: unknown;
-	let lastSourcesList: unknown;
-	let lastText: unknown;
 
 	for await (const event of readSseJson<PerplexityOAuthStreamEvent>(response.body, params.signal)) {
 		if (event.error_code) {
@@ -782,23 +746,12 @@ async function callPerplexityAsk(
 
 		mergedEvent = mergeOAuthEventSnapshot(mergedEvent, event);
 
-		const snapshotAnswer = resolveOAuthAnswerSource(mergedEvent);
-		if (snapshotAnswer && oauthAnswerIsNonEmpty(snapshotAnswer)) {
-			answerSource = snapshotAnswer;
+		const eventAnswer = buildOAuthAnswer(mergedEvent);
+		if (eventAnswer.length > 0) {
+			answer = eventAnswer;
 		}
-		const webResults = mergedEvent.blocks?.find(block => block.intended_usage === "web_results")?.web_result_block
-			?.web_results;
-		if (
-			webResults !== lastWebResults ||
-			mergedEvent.sources_list !== lastSourcesList ||
-			mergedEvent.text !== lastText
-		) {
-			lastWebResults = webResults;
-			lastSourcesList = mergedEvent.sources_list;
-			lastText = mergedEvent.text;
-			for (const source of buildOAuthSources(mergedEvent)) {
-				sourcesByUrl.set(oauthSourceKey(source.url), source);
-			}
+		for (const source of buildOAuthSources(mergedEvent)) {
+			sourcesByUrl.set(oauthSourceKey(source.url), source);
 		}
 
 		const reportedModel = [mergedEvent.user_selected_model, mergedEvent.display_model].find(
@@ -810,7 +763,6 @@ async function callPerplexityAsk(
 			break;
 		}
 	}
-	const answer = answerSource ? materializeOAuthAnswer(answerSource) : "";
 
 	// Anonymous quota exhaustion answers HTTP 200 with a short signup-wall
 	// message ("Sign up and repeat your request.", localized by the upstream

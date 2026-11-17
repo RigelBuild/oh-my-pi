@@ -329,7 +329,6 @@ describe("ClinePass OpenAI transport", () => {
 			type: "thinking",
 			thinking: "Inspect the marker.",
 			thinkingSignature: "reasoning",
-			summary: false,
 		});
 		expect(wireAssistant?.tool_calls).toBeArray();
 		expect(wireAssistant?.reasoning).toBeUndefined();

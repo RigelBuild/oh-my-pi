@@ -8,20 +8,12 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
-	resolveGatewayAccount,
 	resolveGatewayApiKey,
-	resolveGatewayModel,
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
-import type { CallerIdentity } from "../types";
 
 /** OpenRouter-compatible `POST /v1/rerank` gateway handler. */
-export async function handleRerank(
-	bootOpts: AuthGatewayRouteOptions,
-	req: Request,
-	peer: string,
-	caller: CallerIdentity,
-): Promise<Response> {
+export async function handleRerank(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
@@ -39,8 +31,7 @@ export async function handleRerank(
 	}
 	if (controller.signal.aborted) return aborted();
 
-	const model = await resolveGatewayModel(bootOpts.resolveModel, parsed.modelId, caller);
-	if (controller.signal.aborted) return aborted();
+	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) return rerankWire.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	if (model.api !== "openrouter-rerank") {
 		return rerankWire.formatError(400, "invalid_request_error", `Model ${parsed.modelId} does not support reranking`);
@@ -52,7 +43,6 @@ export async function handleRerank(
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return rerankWire.formatError(apiKey.status, apiKey.type, apiKey.message);
 
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "rerank",
@@ -73,14 +63,11 @@ export async function handleRerank(
 				controller.signal,
 				"rerank",
 				peer,
-				resolvedKey => {
-					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
-				},
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
 		return json(
 			200,
 			rerankWire.encodeResponse(

@@ -57,8 +57,6 @@ export type WorkerInitPayload =
 			initScripts?: string[];
 			/** Absolute directory enabled for completed downloads. */
 			downloadsPath?: string;
-			/** Download folder shared by every tab of this browser; see the attach payload's field. */
-			downloadStagingDirectory?: string;
 			/** Explicit tab user agent applied during worker initialization. */
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
@@ -93,11 +91,6 @@ export type WorkerInitPayload =
 			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
 			 */
 			activateForScreenshot?: boolean;
-			/**
-			 * Download folder shared by every tab of this browser. Unset for a browser the user drives (connected,
-			 * relay): downloads keep its one browser-wide folder and real file names, since the user's own downloads land there too.
-			 */
-			downloadStagingDirectory?: string;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
@@ -135,8 +128,6 @@ export interface RunErrorPayload {
 	recoverTab?: boolean;
 	/** `tab.goto` outlasted its budget; the page stays on what loaded. */
 	navigationTimeout?: boolean;
-	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */
-	rendererCrashed?: boolean;
 }
 
 export type WorkerOutbound =

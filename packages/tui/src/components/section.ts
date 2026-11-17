@@ -51,11 +51,6 @@ export class Section implements Component {
 		this.#cache = undefined;
 	}
 
-	releaseRenderCaches(): void {
-		this.#cache = undefined;
-		if (isComponent(this.#options.body)) this.#options.body.releaseRenderCaches?.();
-	}
-
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;

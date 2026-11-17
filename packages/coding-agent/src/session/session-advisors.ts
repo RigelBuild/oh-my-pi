@@ -67,7 +67,6 @@ import {
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
-	isClassifierRefusal,
 	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
@@ -109,7 +108,6 @@ import {
 	getRetryFallbackRevertPolicy,
 	parseRetryFallbackSelector,
 	type RetryFallbackSelector,
-	retryFallbackAdmits,
 } from "./retry-fallback-chains";
 import { getOpenAiRemoteCompactionPayload } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -128,7 +126,6 @@ import {
 	cfgAdvisorSyncBacklog,
 } from "../advisor/settings";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
-import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -184,8 +181,9 @@ export function planAdvisorUsageLimitWait(args: {
 	// matching the primary retry path's exhausted-budget semantics.
 	if (attempt >= retry.maxRetries) return undefined;
 	// Retry as soon as either the just-blocked credential frees or a temporarily
-	// blocked sibling does. The sibling's post-deadline buffer makes selection
-	// see an expired block, but does not extend the provider wait budget.
+	// blocked sibling does — the next attempt's getApiKey re-ranks and picks up
+	// whichever is available first.
+	const candidates: number[] = [];
 	let credentialUnblockAtMs: number | undefined;
 	if (retryAfterMs !== undefined) {
 		// Provider-stated retry hint, merged with any longer persisted/shared block.
@@ -216,20 +214,17 @@ export function planAdvisorUsageLimitWait(args: {
 	}
 	// Hintless with no complete report → blockedUntilMs is only the default
 	// heuristic (e.g. a permanent 402 balance/spend cap). Never wait on it: a
-	// sibling unblock (retryAtMs) may still authorize a wait, otherwise decline
-	// instead of retrying the dead credential until the budget drains.
-	const credentialWaitMs =
-		credentialUnblockAtMs === undefined ? undefined : Math.max(0, credentialUnblockAtMs - nowMs);
-	const siblingWaitMs = retryAtMs === undefined ? undefined : Math.max(0, retryAtMs - nowMs);
-	if (credentialWaitMs === undefined && siblingWaitMs === undefined) return undefined;
+	// sibling unblock (retryAtMs) may still authorize a wait, otherwise the
+	// empty-candidate decline below latches immediately instead of retrying the
+	// dead credential every minute until the budget drains.
+	if (credentialUnblockAtMs !== undefined) candidates.push(Math.max(0, credentialUnblockAtMs - nowMs));
+	if (retryAtMs !== undefined) candidates.push(Math.max(0, retryAtMs - nowMs) + ADVISOR_SIBLING_UNBLOCK_BUFFER_MS);
+	if (candidates.length === 0) return undefined;
+	const providerWaitMs = Math.min(...candidates);
 	const retryBackoffMs = calculateRetryBackoffDelayMs(retry.baseDelayMs, attempt + 1);
-	const earliestUnblockMs = Math.min(credentialWaitMs ?? Infinity, siblingWaitMs ?? Infinity);
-	if (retry.maxDelayMs > 0 && Math.max(earliestUnblockMs, retryBackoffMs) > retry.maxDelayMs) return undefined;
-	const providerWaitMs = Math.min(
-		credentialWaitMs ?? Infinity,
-		siblingWaitMs === undefined ? Infinity : siblingWaitMs + ADVISOR_SIBLING_UNBLOCK_BUFFER_MS,
-	);
-	return Math.max(providerWaitMs, retryBackoffMs);
+	const waitMs = Math.max(providerWaitMs, retryBackoffMs);
+	if (retry.maxDelayMs > 0 && waitMs > retry.maxDelayMs) return undefined;
+	return waitMs;
 }
 /**
  * Header prepended to the merged terminal-boundary delivery, sourced from
@@ -308,8 +303,6 @@ interface AdvisorRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ThinkingLevel;
 	lastAppliedThinkingLevel: ThinkingLevel;
-	/** Set by a classifier refusal: no cooldown restore until a compaction or new conversation replaces the context. */
-	pinned: boolean;
 }
 
 interface ActiveAdvisor {
@@ -515,8 +508,6 @@ export interface SessionAdvisorsHost {
 		phase: CodexCompactionContext["phase"];
 	}): CodexCompactionContext;
 	sessionId(): string;
-	/** Put an advisor's provider session under the primary session's account pools. */
-	restrictOAuthAccounts(providerSessionId: string): void;
 }
 
 /**
@@ -905,12 +896,9 @@ export class SessionAdvisors {
 		for (const advisor of this.#advisors) this.#refreshAdvisorProviderIdentity(advisor);
 	}
 
-	/**
-	 * Re-primes advisor transcript views after an in-conversation history rewrite.
-	 * `compacted` marks a rewrite that replaced history with a summary, which releases refusal pins.
-	 */
-	resetAllRuntimes(reason?: string, options?: { compacted?: boolean }): void {
-		this.#resetAllAdvisorRuntimes(reason, options?.compacted === true);
+	/** Re-primes advisor transcript views after an in-conversation history rewrite. */
+	resetAllRuntimes(reason?: string): void {
+		this.#resetAllAdvisorRuntimes(reason);
 	}
 
 	/** Re-aligns advisor delivered prefixes after an in-place rewrite their contexts already cover. */
@@ -990,24 +978,14 @@ export class SessionAdvisors {
 		this.#advisorInterruptImmuneTurnStart = this.#advisorPrimaryTurnsCompleted + 1;
 	}
 
-	/**
-	 * One advisor's provider session id under the active primary conversation.
-	 * The primary's account pools follow it: an advisor is part of that session.
-	 */
-	#advisorProviderSessionId(slug: string): string | undefined {
-		const providerSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			this.#host.sessionId(),
-			slug,
-		);
-		if (providerSessionId) this.#host.restrictOAuthAccounts(providerSessionId);
-		return providerSessionId;
-	}
-
 	/** Rebind one advisor to the active primary conversation's provider identity. */
 	#refreshAdvisorProviderIdentity(advisor: ActiveAdvisor): void {
 		const primaryProviderSessionId = this.#host.sessionId();
-		const providerSessionId = this.#advisorProviderSessionId(advisor.slug);
+		const providerSessionId = getOrCreateAdvisorProviderSessionId(
+			this.#advisorProviderSessionIds,
+			primaryProviderSessionId,
+			advisor.slug,
+		);
 		advisor.providerSessionId = providerSessionId;
 		advisor.agent.sessionId = providerSessionId;
 		advisor.agent.promptCacheKey = this.#host.agent.promptCacheKey ?? providerSessionId;
@@ -1062,7 +1040,6 @@ export class SessionAdvisors {
 			// A reset aborts any pending usage-limit wait; clear its budget so the new
 			// conversation starts with a fresh retry allowance (issue #11947).
 			a.usageLimitRetries = 0;
-			this.#releaseRefusalPin(a);
 			// Resets the emission guard and every tool-side note state together.
 			a.adviseTool.resetDeliveredNotes();
 			a.eligibleUpdates = 0;
@@ -1337,7 +1314,11 @@ export class SessionAdvisors {
 			const advisorSessionLabel = slug
 				? `${primaryProviderSessionId}-advisor-${slug}`
 				: `${primaryProviderSessionId}-advisor`;
-			const advisorProviderSessionId = this.#advisorProviderSessionId(slug);
+			const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
+				this.#advisorProviderSessionIds,
+				primaryProviderSessionId,
+				slug,
+			);
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -1470,7 +1451,6 @@ export class SessionAdvisors {
 				serviceTierResolver: advisorServiceTierResolver,
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
-			advisorAgent.setModelResolver(model => this.#host.modelRegistry.fitContextWindow(model, this.#host.settings));
 			let advisorLoopGuardStopped = false;
 			// The advisor's own loop needs the same repeated-tool-call bound the
 			// primary gets from `LoopGuards`; nothing else stops it reissuing one
@@ -1882,13 +1862,12 @@ export class SessionAdvisors {
 	}
 
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */
-	#resetAllAdvisorRuntimes(reason: string | undefined, compacted: boolean): void {
+	#resetAllAdvisorRuntimes(reason?: string): void {
 		for (const a of this.#advisors) {
 			a.runtime.reset(reason);
 			// Match the conversation-boundary re-prime: a reset must not carry a
 			// pending wait's usage-limit budget into the reset conversation.
 			a.usageLimitRetries = 0;
-			if (compacted) this.#releaseRefusalPin(a);
 		}
 	}
 
@@ -1989,17 +1968,10 @@ export class SessionAdvisors {
 		);
 	}
 
-	/** Release refusal pins so the next review may retry the configured primary. */
-	#releaseRefusalPin(advisor: ActiveAdvisor): void {
-		if (advisor.retryFallback) advisor.retryFallback.pinned = false;
-	}
-
 	/** Restore an advisor's configured primary once its fallback cooldown expires. */
 	async #maybeRestoreAdvisorRetryFallbackPrimary(advisor: ActiveAdvisor, signal: AbortSignal): Promise<void> {
 		const fallback = advisor.retryFallback;
-		if (!fallback || fallback.pinned || getRetryFallbackRevertPolicy(this.#host.settings) !== "cooldown-expiry") {
-			return;
-		}
+		if (!fallback || getRetryFallbackRevertPolicy(this.#host.settings) !== "cooldown-expiry") return;
 
 		const originalSelector = parseRetryFallbackSelector(fallback.originalSelector, this.#host.modelRegistry);
 		if (!originalSelector) {
@@ -2148,7 +2120,6 @@ export class SessionAdvisors {
 					)
 				: Promise.resolve(false);
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return declineUsageLimit();
-		if (!retryFallbackAdmits(retrySettings.fallbackOn, usageLimit)) return declineUsageLimit();
 		// Same two-key walk the main loop uses: the chain that owns this advisor's
 		// active fallback, then the chain the current model owns. Without the
 		// second key an advisor that lands on the last entry of one chain never
@@ -2163,13 +2134,7 @@ export class SessionAdvisors {
 			return declineUsageLimit();
 		}
 
-		// A refusal by the advisor's primary judges this context, not the model's health:
-		// skip its cooldown and pin the switch. A refusing fallback gets the usual cooldown.
-		const primaryRefused =
-			assistantFailure !== undefined &&
-			isClassifierRefusal(assistantFailure) &&
-			(advisor.retryFallback === undefined || advisor.retryFallback.originalSelector === currentSelector);
-		if (!primaryRefused) this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -2186,14 +2151,12 @@ export class SessionAdvisors {
 				const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate, requestedThinkingLevel);
 				if (advisor.retryFallback) {
 					advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
-					advisor.retryFallback.pinned ||= primaryRefused;
 				} else {
 					advisor.retryFallback = {
 						role,
 						originalSelector: currentSelector,
 						originalThinkingLevel,
 						lastAppliedThinkingLevel: nextThinkingLevel,
-						pinned: primaryRefused,
 					};
 				}
 				advisor.retryFallbackPendingSuccess = true;
@@ -2332,12 +2295,12 @@ export class SessionAdvisors {
 		if (!configuredCompaction.enabled || methods.length === 0) {
 			return false;
 		}
-		const compactionMethod = methods.includes("remote") ? "remote" : "soft";
-		let advisorModel = agent.state.model;
-		let compactionSettings = resolveMethodSettings(
-			resolveModelCompactionSettings(this.#host.settings, advisorModel),
-			compactionMethod,
+		const compactionSettings = resolveMethodSettings(
+			configuredCompaction,
+			methods.includes("remote") ? "remote" : "soft",
 		);
+
+		let advisorModel = agent.state.model;
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
@@ -2362,12 +2325,8 @@ export class SessionAdvisors {
 
 		// 1. Try promotion first
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
-			// Promotion succeeded, check if new model has enough space under its own compaction point
+			// Promotion succeeded, check if new model has enough space
 			const newModel = agent.state.model;
-			compactionSettings = resolveMethodSettings(
-				resolveModelCompactionSettings(this.#host.settings, newModel),
-				compactionMethod,
-			);
 			const newWindow = newModel.contextWindow ?? 0;
 			if (newWindow > 0) {
 				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
@@ -2432,7 +2391,11 @@ export class SessionAdvisors {
 			// No compaction candidates, fallback to re-prime
 			return true;
 		}
-		const advisorProviderSessionId = this.#advisorProviderSessionId(advisor.slug);
+		const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
+			this.#advisorProviderSessionIds,
+			this.#host.sessionId(),
+			advisor.slug,
+		);
 		// Advisors no longer retain the pre-compaction originals. Prepare opaque
 		// history only for an eligible native writer, independently of whether the
 		// advisor reader itself can create a new compaction. Without such a writer,
@@ -2595,7 +2558,6 @@ export class SessionAdvisors {
 		} satisfies AdvisorCompactionSummaryMessage;
 
 		agent.replaceMessages([summaryMessage, ...recentMessages]);
-		this.#releaseRefusalPin(advisor);
 		return false;
 	}
 	/**

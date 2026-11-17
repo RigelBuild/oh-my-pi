@@ -611,11 +611,10 @@ async function scanSessionDir(
 	sessionDir: string,
 	storage: SessionStorage,
 	withStatus: boolean,
-	siblingDirs: readonly string[] = [],
 ): Promise<SessionInfo[]> {
 	try {
 		await recoverOrphanedBackups(sessionDir, storage);
-		const files = [sessionDir, ...siblingDirs].flatMap(dir => storage.listFilesSync(dir, "*.jsonl"));
+		const files = storage.listFilesSync(sessionDir, "*.jsonl");
 		return await collectSessionsFromFiles(files, storage, withStatus);
 	} catch {
 		return [];
@@ -637,16 +636,10 @@ async function scanSessionDirReadOnly(
 
 /**
  * List sessions in a resolved session directory (newest first), reading each
- * file's lifecycle {@link SessionStatus}. `siblingDirs` merge into the same
- * list; they belong to other working directories (see `worktreeSessionDirs`),
- * so orphaned-backup recovery runs on `sessionDir` only.
+ * file's lifecycle {@link SessionStatus}.
  */
-export function listSessions(
-	sessionDir: string,
-	storage: SessionStorage,
-	siblingDirs: readonly string[] = [],
-): Promise<SessionInfo[]> {
-	return scanSessionDir(sessionDir, storage, true, siblingDirs);
+export function listSessions(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
+	return scanSessionDir(sessionDir, storage, true);
 }
 
 /**

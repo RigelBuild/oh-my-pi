@@ -1156,7 +1156,7 @@ describe("OpenAI completions MiniMax thinking healing", () => {
 
 		expect(result.content).toEqual([
 			{ type: "text", text: "visible " },
-			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined, summary: false },
+			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined },
 			{ type: "text", text: " answer" },
 		]);
 	});

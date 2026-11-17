@@ -117,10 +117,6 @@ export class Table implements Component {
 		this.#native = undefined;
 	}
 
-	releaseRenderCaches(): void {
-		this.#cache = undefined;
-	}
-
 	/**
 	 * A native `table`. Column priorities carry over unchanged (lower gives
 	 * way first); truncating columns truncate at the end, the rest keep

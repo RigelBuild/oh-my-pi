@@ -15,8 +15,6 @@
  */
 export const UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
 	$schema: true,
-	$id: true,
-	$anchor: true,
 	$ref: true,
 	$defs: true,
 	$dynamicRef: true,
@@ -30,11 +28,6 @@ export const UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
 	propertyNames: true,
 	minItems: true,
 	maxItems: true,
-	uniqueItems: true,
-	contains: true,
-	minContains: true,
-	maxContains: true,
-	additionalItems: true,
 	minLength: true,
 	maxLength: true,
 	minimum: true,
@@ -44,9 +37,6 @@ export const UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
 	multipleOf: true,
 	pattern: true,
 	format: true,
-	contentEncoding: true,
-	contentMediaType: true,
-	contentSchema: true,
 	dependencies: true,
 	dependentSchemas: true,
 	dependentRequired: true,
@@ -222,8 +212,6 @@ export const COMBINATOR_KEYS = ["anyOf", "allOf", "oneOf"] as const;
  */
 export const CCA_UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
 	$schema: true,
-	$id: true,
-	$anchor: true,
 	$ref: true,
 	$defs: true,
 	$dynamicRef: true,
@@ -235,12 +223,4 @@ export const CCA_UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
 	readOnly: true,
 	writeOnly: true,
 	$comment: true,
-	uniqueItems: true,
-	contains: true,
-	minContains: true,
-	maxContains: true,
-	additionalItems: true,
-	contentEncoding: true,
-	contentMediaType: true,
-	contentSchema: true,
 };

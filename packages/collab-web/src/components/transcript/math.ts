@@ -1,10 +1,5 @@
 import type { MarkedExtension, Tokens } from "@oh-my-pi/pi-utils/marked";
-import {
-	type MathSpan,
-	mathBlockInContext,
-	mathSpanInContext,
-	mathStartIndex,
-} from "@oh-my-pi/pi-utils/math-delimiters";
+import { type MathSpan, mathBlockAt, mathSpanInContext, mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { renderToString } from "katex";
 import { escapeHtml } from "../../lib/format";
 
@@ -61,7 +56,7 @@ export const mathExtension: MarkedExtension = {
 			// No `start` hint: this parser probes block extensions only at a block
 			// boundary and never consults their hints.
 			tokenizer(source) {
-				const block = mathBlockInContext(this, source);
+				const block = mathBlockAt(source);
 				if (!block) return undefined;
 				return { type: "math", raw: block.raw, text: block.body, display: true };
 			},

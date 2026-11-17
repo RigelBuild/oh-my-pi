@@ -17,8 +17,19 @@ type MCPToolCachePayload = {
 	tools: MCPToolDefinition[];
 };
 
-function hashConfig(config: MCPServerConfig): string {
-	return Bun.SHA256.hash(stableStringifyJson(config), "hex");
+function toHex(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	let output = "";
+	for (const byte of bytes) {
+		output += byte.toString(16).padStart(2, "0");
+	}
+	return output;
+}
+
+async function hashConfig(config: MCPServerConfig): Promise<string> {
+	const stable = stableStringifyJson(config);
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
+	return toHex(digest);
 }
 
 function cacheKey(serverName: string): string {
@@ -48,7 +59,7 @@ export class MCPToolCache {
 
 		let currentHash: string;
 		try {
-			currentHash = hashConfig(config);
+			currentHash = await hashConfig(config);
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return null;
@@ -62,7 +73,7 @@ export class MCPToolCache {
 	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
 		let configHash: string;
 		try {
-			configHash = hashConfig(config);
+			configHash = await hashConfig(config);
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;

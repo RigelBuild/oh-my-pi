@@ -14,4 +14,3 @@ export * from "./registry";
 export * from "./source";
 export * from "./types";
 export * from "./write";
-export * from "./zip-package";

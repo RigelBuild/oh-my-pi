@@ -5,7 +5,7 @@
  * fallback all take effect without recreating feature consumers, while bulk
  * callers (`judge_batch`) do not re-scan the whole catalog per item.
  *
- * Every provider attempt is attributed exactly once: native judgment
+ * Every provider attempt is attributed exactly once: native System One
  * requests by {@link nativeJudge}, prompted chat attempts by the chat
  * backend's `onAttempt`. Each report reaches both {@link JudgeDeps.onUsage}
  * (the session ledger) and one `judgment` telemetry span, so a judgment backed
@@ -21,20 +21,19 @@ import {
 	type Answer,
 	type AssistantMessage,
 	chatTextBackend,
-	createNativeJudge,
 	isJudgmentApi,
 	type Judge,
 	type JudgeOptions,
 	type JudgmentRequest,
 	type JudgmentResult,
 	type Model,
-	type NativeJudge,
 	type Questions,
 	type TextBackend,
 	type TextCompletion,
 	type TextPrompt,
 	TextJudge,
 	TYPESAFE_PROVIDER,
+	TypeSafeJudge,
 	tokenUsage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
@@ -149,23 +148,16 @@ const kRejections = Symbol("judgment.rejections");
 const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
 	[kRejections]?: Map<string, number>;
-	[kRoleChain]?: { settings: Settings; revision: number; list: RoleChainCandidate[]; expiresAt: number };
+	[kRoleChain]?: { settings: Settings; list: RoleChainCandidate[]; expiresAt: number };
 }
 
-/**
- * {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry.
- * A settings change (e.g. a new judge role) resolves afresh; registry or credential changes still wait out the TTL,
- * so {@link hasNativeJudge} (uncached) can briefly see a different chain after a login or discovery change.
- */
+/** {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry. */
 function cachedJudgeRoleChain(settings: Settings, registry: RegistryWithRejections): RoleChainCandidate[] {
 	const now = Date.now();
-	const revision = settings.revision;
 	const cached = registry[kRoleChain];
-	if (cached && cached.settings === settings && cached.revision === revision && now < cached.expiresAt) {
-		return cached.list;
-	}
+	if (cached && cached.settings === settings && now < cached.expiresAt) return cached.list;
 	const list = judgeRoleChain(settings, registry);
-	registry[kRoleChain] = { settings, revision, list, expiresAt: now + CANDIDATE_TTL_MS };
+	registry[kRoleChain] = { settings, list, expiresAt: now + CANDIDATE_TTL_MS };
 	return list;
 }
 
@@ -206,9 +198,9 @@ function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainC
 }
 
 /**
- * Whether the `judge` role resolves first to a native judgment backend
- * (TypeSafe jev, OpenRouter or OpenAI Decisions, Workers AI Clef) rather than a
- * prompted on-device or chat model. Judge-heavy features gate on it, e.g. the `find`
+ * Whether the `judge` role resolves first to a native System One backend
+ * (TypeSafe jev, directly or through OpenRouter) rather than a prompted
+ * on-device or chat model. Judge-heavy features gate on it, e.g. the `find`
  * tool under `find.enabled: auto`.
  */
 export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boolean {
@@ -339,7 +331,14 @@ export class ChainJudge implements Judge {
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
 			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
-			const judge = createNativeJudge(model, { apiKey, headers });
+			const judge = new TypeSafeJudge({
+				apiKey,
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				baseUrl: model.baseUrl,
+				headers,
+			});
 			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
 		}
 		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
@@ -396,16 +395,15 @@ class LocalTextBackend implements TextBackend {
 }
 
 /**
- * Native judgment backend. Questions already answered about the same state
+ * Native System One judge. Questions already answered about the same state
  * under this model come from `cache`; only the rest reach the provider (none
  * when every answer is cached). Each call reports exactly one attempt — failed
- * requests included so the ledger shows why a judgment errored. Most judgment
- * APIs report tokens only, so a response without a billed amount is priced from
+ * requests included so the ledger shows why a judgment errored. TypeSafe
+ * reports tokens only, so a response without a billed amount is priced from
  * the catalog model; a route that bills (OpenRouter) keeps its reported cost.
- * Attempts and results carry the catalog id, not the wire id the judge sends.
  */
 function nativeJudge(
-	judge: NativeJudge,
+	judge: TypeSafeJudge,
 	model: Model,
 	cache: JudgmentCache | undefined,
 	report: (attempt: JudgmentAttempt) => void,
@@ -433,30 +431,19 @@ function nativeJudge(
 				role: TYPESAFE_PROVIDER,
 				api: judge.api,
 				provider: judge.provider,
-				model: model.id,
+				model: judge.model,
 				startedAt,
 				questions,
 				cachedQuestions: questions - pendingCount,
 			};
 			let fresh: JudgmentResult | undefined;
 			if (pendingCount > 0 || questions === 0) {
-				let partial = tokenUsage(0, 0);
 				try {
-					fresh = await judge.judge(
-						{ state: request.state, questions: pending },
-						{
-							signal: options?.signal,
-							onPartialUsage: usage => {
-								partial = usage;
-							},
-						},
-					);
+					fresh = await judge.judge({ state: request.state, questions: pending }, options);
 				} catch (error) {
-					// A split judgment that fails still billed the chunks that succeeded.
-					if (partial.cost.total === 0) calculateCost(model, partial);
 					report({
 						...attempt,
-						usage: partial,
+						usage: tokenUsage(0, 0),
 						stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
 						errorMessage: error instanceof Error ? error.message : String(error),
 					});
@@ -475,8 +462,8 @@ function nativeJudge(
 			return {
 				api: judge.api,
 				provider: judge.provider,
-				model: fresh?.model ?? model.id,
-				// Every id was answered by the cache or by `fresh`, which NativeJudge validated per question type.
+				model: fresh?.model ?? judge.model,
+				// Every id was answered by the cache or by `fresh`, which TypeSafeJudge validated per question type.
 				answers: answers as JudgmentResult<Q>["answers"],
 				usage,
 			};

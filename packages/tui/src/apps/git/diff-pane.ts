@@ -21,7 +21,7 @@ import { centerLine, sliceWithWidth, truncateToWidth, visibleWidth } from "../..
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { getLanguageFromPath } from "../../lang-from-path";
-import { createHighlightStream, getThemeEpoch, theme } from "../../theme/theme";
+import { createHighlightStream, theme } from "../../theme/theme";
 import { bgAnsiHex, canvasHex, fgAnsiHex, mixHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
 import { DIFF_CONTEXT_LINES, type FileAssetSide, type FileStreamUpdate } from "./state";
 
@@ -502,12 +502,9 @@ interface DiffPalette {
 	gutterDel: string;
 }
 
-let paletteCache: { epoch: number; theme: object; palette: DiffPalette } | undefined;
+let paletteCache: { key: string; palette: DiffPalette } | undefined;
 
-/** Diff colors for the active theme, rebuilt only when the theme instance or epoch changes. */
 function palette(): DiffPalette {
-	const epoch = getThemeEpoch();
-	if (paletteCache?.epoch === epoch && paletteCache.theme === theme) return paletteCache.palette;
 	const added = theme.getColorHex("toolDiffAdded");
 	const removed = theme.getColorHex("toolDiffRemoved");
 	const accent = theme.getColorHex("accent");
@@ -515,6 +512,8 @@ function palette(): DiffPalette {
 	const dark = luminance === undefined || luminance <= 0.5;
 	const canvas = canvasHex();
 	const text = textHex();
+	const key = `${added}\u0000${removed}\u0000${accent}\u0000${dark}\u0000${canvas}\u0000${text}`;
+	if (paletteCache?.key === key) return paletteCache.palette;
 	const built: DiffPalette = {
 		addSoft: bgAnsiHex(mixHex(canvas, added, dark ? 0.18 : 0.24)),
 		addStrong: bgAnsiHex(mixHex(canvas, added, dark ? 0.42 : 0.48)),
@@ -530,7 +529,7 @@ function palette(): DiffPalette {
 		gutterAdd: added,
 		gutterDel: removed,
 	};
-	paletteCache = { epoch, theme, palette: built };
+	paletteCache = { key, palette: built };
 	return built;
 }
 
@@ -600,10 +599,6 @@ export class DiffPane {
 	#lastHeight = 1;
 	#lastWidth = 0;
 	#layoutCache: { key: string; visuals: Visual[] } | undefined;
-	/** Minimap column for (layout, height, scroll offset, palette). */
-	#minimapCache:
-		| { visuals: Visual[]; height: number; scrollTop: number; colors: DiffPalette; lines: string[] }
-		| undefined;
 	/** Per visible row: clickable hunk-button ranges recorded during render. */
 	#hits: ({ hunk: number; primary?: [number, number]; discard?: [number, number] } | undefined)[] = [];
 	/**
@@ -1493,22 +1488,6 @@ export class DiffPane {
 	}
 
 	#renderMinimap(visuals: Visual[], height: number, colors: DiffPalette): string[] {
-		const cached = this.#minimapCache;
-		if (
-			cached &&
-			cached.visuals === visuals &&
-			cached.height === height &&
-			cached.scrollTop === this.scrollTop &&
-			cached.colors === colors
-		) {
-			return cached.lines;
-		}
-		const lines = this.#buildMinimap(visuals, height, colors);
-		this.#minimapCache = { visuals, height, scrollTop: this.scrollTop, colors, lines };
-		return lines;
-	}
-
-	#buildMinimap(visuals: Visual[], height: number, colors: DiffPalette): string[] {
 		const total = visuals.length;
 		const lines: string[] = [];
 		const bandKind = (band: number): RowKind | "hunk" | null => {

@@ -39,7 +39,6 @@ import { getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-util
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders } from "../config/model-settings";
-import { resolveProviderModelReference } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
 	type AuthBrokerClientConfig,
@@ -215,25 +214,6 @@ export function indexModelsByRequestId(
 }
 
 /**
- * Resolve a client-requested model id: the exact `provider/id` or bare `id` first, then an
- * OpenRouter routing-variant selector the catalog does not list (`openrouter/<id>:floor`,
- * `:nitro`, …), cloned from its base model under the requested id so the suffix reaches
- * OpenRouter — the same selectors `--model` accepts.
- */
-export function resolveGatewayModel(
-	id: string,
-	modelById: ReadonlyMap<string, Model<Api>>,
-	routable: readonly Model<Api>[],
-): Model<Api> | undefined {
-	const exact = modelById.get(id);
-	if (exact) return exact;
-	const prefix = "openrouter/";
-	return id.startsWith(prefix)
-		? resolveProviderModelReference("openrouter", id.slice(prefix.length), routable)
-		: undefined;
-}
-
-/**
  * Serialize catalog rebuilds so `registry.refresh()` passes never overlap,
  * while guaranteeing a forced rebuild requested mid-flight runs a forced pass
  * afterward. Without the follow-up pass a credential change arriving during a
@@ -315,9 +295,6 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// discovery skips disabled providers too.
 	const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true, settings });
 	let modelById = new Map<string, Model<Api>>();
-	// Routable models as one stable array per rebuild: `resolveProviderModelReference` caches its
-	// index on the array identity, so variant lookups stay O(1) between rebuilds.
-	let routable: Model<Api>[] = [];
 	// Rebuild the served catalog (a `registry.refresh()` pass, then re-index
 	// against the current credential set). Credential-triggered rebuilds force
 	// `online` discovery: an account added to or removed from an
@@ -327,9 +304,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// for up to a cache TTL. Periodic rebuilds stay cached.
 	const rebuildCatalog = createSerializedRebuilder(async force => {
 		await registry.refresh(force ? "online" : "online-if-uncached");
-		const providers = gatewayRoutableProviders(storage, settings);
-		routable = gatewayRoutableModels(registry).filter(model => providers.has(model.provider));
-		modelById = indexModelsByRequestId(routable, providers);
+		modelById = indexModelsByRequestId(gatewayRoutableModels(registry), gatewayRoutableProviders(storage, settings));
 	});
 	await rebuildCatalog();
 
@@ -339,9 +314,8 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		authorize: bearerTokenAuthorizer(gatewayToken ? [gatewayToken] : []),
 		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
-		resolveModel: (id: string) => resolveGatewayModel(id, modelById, routable),
+		resolveModel: (id: string) => modelById.get(id),
 		listModels: () => modelById.values(),
-		excludeProviders: new Set(cfgDisabledProviders.get(settings)),
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {

@@ -29,47 +29,15 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import {
 	detectCompiledBinary,
 	type EmbeddedAddonFile,
-	extractEmbeddedAddons,
+	extractEmbeddedAddonArchive,
 	getAddonFilenames,
 	resolveLoaderCandidates,
 } from "../native/loader-state.js";
 
 describe("issue 823: standalone-binary native loader path resolution", () => {
-	it("resolves platform leaves using the installed core package name", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-leaf-resolve-"));
-		try {
-			for (const packageName of ["@oh-my-pi/pi-natives", "@rigelbuild/omp-natives"]) {
-				const installRoot = path.join(root, packageName.startsWith("@rigelbuild/") ? "rigel" : "upstream");
-				const coreDir = path.join(installRoot, "node_modules", ...packageName.split("/"));
-				const nativeDir = path.join(coreDir, "native");
-				const loaderPath = path.join(nativeDir, "loader-state.js");
-				const platformTag = `linux-${process.arch}`;
-				const leafName = `${packageName}-${platformTag}`;
-				const leafDir = path.join(installRoot, "node_modules", ...leafName.split("/"));
-				await fs.mkdir(nativeDir, { recursive: true });
-				await fs.mkdir(leafDir, { recursive: true });
-				await Promise.all(
-					["loader-state.js", "embedded-addon.js", "version-sentinel.js"].map(file =>
-						fs.copyFile(new URL(`../native/${file}`, import.meta.url), path.join(nativeDir, file)),
-					),
-				);
-				await Bun.write(
-					path.join(coreDir, "package.json"),
-					JSON.stringify({ name: packageName, version: "1.0.0", type: "module" }),
-				);
-				await Bun.write(path.join(leafDir, "package.json"), JSON.stringify({ name: leafName, version: "1.0.0" }));
-				const loader = await import(pathToFileURL(loaderPath).href);
-				const ctx = loader.initLoaderContext({ platform: "linux", isCompiledBinary: false, nativeDir });
-				expect(ctx.leafPackageDir).toBe(leafDir);
-			}
-		} finally {
-			await fs.rm(root, { recursive: true, force: true });
-		}
-	});
 	it("detects compiled-binary mode from embedded-addon presence when env and url markers are absent", () => {
 		// Mirrors what a Bun standalone binary actually sees on linux-x64 / WSL:
 		// - `process.env.PI_COMPILED` is undefined (the build flag does not substitute property accesses).
@@ -87,8 +55,7 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 						{
 							variant: "modern",
 							filename: "pi_natives.linux-x64-modern.node",
-							size: 1,
-							zstdPath: "/$bunfs/root/pi_natives.linux-x64-modern-a1b2c3d4.node.zst",
+							filePath: "/$bunfs/root/packages/natives/native/pi_natives.linux-x64-modern.node",
 						},
 					],
 				},
@@ -215,9 +182,10 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 		);
 	});
 
-	it("extracts every bundled native variant from its zstd frame and skips current files", async () => {
-		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-zstd-"));
+	it("extracts all bundled native variants from one gzip archive and skips current files", async () => {
+		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-archive-"));
 		try {
+			const archivePath = path.join(testDir, "embedded-addons.linux-x64.tar.gz");
 			const targetDir = path.join(testDir, "cache");
 			await fs.mkdir(targetDir);
 
@@ -225,40 +193,28 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 			const baseline = Buffer.from("baseline native addon");
 			const modernFilename = "pi_natives.linux-x64-modern.node";
 			const baselineFilename = "pi_natives.linux-x64-baseline.node";
-			const modernZstdPath = path.join(testDir, `${modernFilename}.zst`);
-			const baselineZstdPath = path.join(testDir, `${baselineFilename}.zst`);
-			await Bun.write(modernZstdPath, Bun.zstdCompressSync(modern));
-			await Bun.write(baselineZstdPath, Bun.zstdCompressSync(baseline));
+			await Bun.write(
+				archivePath,
+				await new Bun.Archive(
+					{
+						[modernFilename]: modern,
+						[baselineFilename]: baseline,
+					},
+					{ compress: "gzip", level: 9 },
+				).bytes(),
+			);
 
 			const files: EmbeddedAddonFile[] = [
-				{ variant: "modern", filename: modernFilename, size: modern.length, zstdPath: modernZstdPath },
-				{ variant: "baseline", filename: baselineFilename, size: baseline.length, zstdPath: baselineZstdPath },
+				{ variant: "modern", filename: modernFilename, size: modern.length },
+				{ variant: "baseline", filename: baselineFilename, size: baseline.length },
 			];
 
-			const written = extractEmbeddedAddons({ files, targetDir });
+			const written = extractEmbeddedAddonArchive({ archivePath, files, targetDir });
 			expect(written.map(filePath => path.basename(filePath)).sort()).toEqual([baselineFilename, modernFilename]);
 			expect(await fs.readFile(path.join(targetDir, modernFilename), "utf8")).toBe("modern native addon");
 			expect(await fs.readFile(path.join(targetDir, baselineFilename), "utf8")).toBe("baseline native addon");
 
-			expect(extractEmbeddedAddons({ files, targetDir })).toEqual([]);
-		} finally {
-			await fs.rm(testDir, { recursive: true, force: true });
-		}
-	});
-
-	it("rejects a zstd frame whose size disagrees with the manifest", async () => {
-		const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-embedded-zstd-"));
-		try {
-			const zstdPath = path.join(testDir, "pi_natives.linux-arm64.node.zst");
-			await Bun.write(zstdPath, Bun.zstdCompressSync(Buffer.from("addon")));
-			const files: EmbeddedAddonFile[] = [
-				{ variant: "default", filename: "pi_natives.linux-arm64.node", size: 6, zstdPath },
-			];
-
-			expect(() => extractEmbeddedAddons({ files, targetDir: testDir })).toThrow(
-				"Embedded addon size mismatch for pi_natives.linux-arm64.node: expected 6, got 5",
-			);
-			expect(await fs.exists(path.join(testDir, "pi_natives.linux-arm64.node"))).toBe(false);
+			expect(extractEmbeddedAddonArchive({ archivePath, files, targetDir })).toEqual([]);
 		} finally {
 			await fs.rm(testDir, { recursive: true, force: true });
 		}
