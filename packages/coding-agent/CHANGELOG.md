@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.3-rigel.11] - 2026-11-17
+
 ### Fixed
 
 - Streamable HTTP MCP servers no longer lose server-pushed messages when their optional GET listener response arrives after the startup budget. The listener is no longer aborted at the budget; it is attached when its response arrives, and closing the transport still aborts it. After the budget nothing times the GET out: it lives until `close()` or a reconnect. A server that never answers GET still does not delay connection beyond the startup budget.
