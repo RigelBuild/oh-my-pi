@@ -136,6 +136,31 @@ describe("auth-gateway classifyGatewayError", () => {
 			).status,
 		).toBe(429);
 	});
+
+	it("answers 429 for `rate limit exceeded` text with a 400 status, since it is not a billing cap", () => {
+		expect(classifyGatewayError(new Error("rate limit exceeded"), 400).status).toBe(429);
+	});
+
+	it("answers 429 for `usage_limit_reached` text with a 500 status, since it is not a billing cap", () => {
+		expect(classifyGatewayError(new Error("usage_limit_reached"), 500).status).toBe(429);
+	});
+
+	it("answers 429 for Codex usage-limit text with a 503 status, since it is not a billing cap", () => {
+		const codexCap = "You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.";
+		expect(classifyGatewayError(new Error(codexCap), 503).status).toBe(429);
+	});
+
+	it("reads the status from `statusCode`, `response.status` or `cause`, so a thrown billing cap keeps it", () => {
+		const outOfCredit = "out of credit";
+		const cases = [
+			Object.assign(new Error(outOfCredit), { statusCode: 402 }),
+			Object.assign(new Error(outOfCredit), { response: { status: 402 } }),
+			new Error(outOfCredit, { cause: { status: 402 } }),
+		];
+		for (const err of cases) {
+			expect(classifyGatewayError(err).status).toBe(402);
+		}
+	});
 });
 
 const classifierModel = buildModel({

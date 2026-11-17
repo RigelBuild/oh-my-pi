@@ -22,8 +22,7 @@ import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
 import {
 	calculateRateLimitBackoffMs,
-	isAnthropicCreditBalanceTooLow,
-	isBillingCapUsageLimit,
+	isBillingCapAnswer,
 	isUsageLimitOutcome,
 	observedLimitErrorStatus,
 } from "../error/rate-limit";
@@ -251,7 +250,7 @@ export function gatewayUsageLimitAnswer(
 	const httpStatus = status ?? extractHttpStatusFromError(error);
 	if (!(AIError.isUsageLimit(error) || isUsageLimitOutcome(httpStatus, message))) return undefined;
 	// A billing cap keeps its own status: topping up clears it, so a 429 would only invite a retry.
-	if (isBillingCapUsageLimit(httpStatus, message) || isAnthropicCreditBalanceTooLow(message)) return undefined;
+	if (isBillingCapAnswer(httpStatus, message)) return undefined;
 	const retryAfterMs =
 		getRetryAfterMsFromHeaders(getHeadersFromError(error)) ?? extractProviderRetryHint(provider, message);
 	return {

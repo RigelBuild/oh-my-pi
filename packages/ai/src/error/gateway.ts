@@ -1,7 +1,7 @@
+import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import { isUsageLimit, status as getErrorStatus } from "./flags";
 import {
-	isAnthropicCreditBalanceTooLow,
-	isBillingCapUsageLimit,
+	isBillingCapAnswer,
 	isConcurrencyCapExclusion,
 	isUsageLimitOutcome,
 	parseRateLimitReason,
@@ -21,45 +21,41 @@ export interface GatewayErrorClassification {
  * Classify an upstream / gateway-internal error into a status code and a
  * format-neutral type. The order is intentional:
  *
- *  1. Honour an explicit numeric `status` property on the thrown error.
- *  2. Parse a status code embedded in the message string. Provider errors
+ *  1. Honour the HTTP status the error carries: a numeric `status`,
+ *     `statusCode`, `response.status`, or one in its `cause`
+ *     ({@link extractHttpStatusFromError}).
+ *  2. A billing cap keeps its upstream status. An answered upstream message
+ *     passes its `errorStatus` as `upstreamStatus`. A 402, or billing wording
+ *     ({@link isBillingCapAnswer}), keeps that status: topping up clears it,
+ *     so a 429 would only invite a retry.
+ *  3. Parse a status code embedded in the message string. Provider errors
  *     virtually always carry one (`Google API error (400): …`, `HTTP 429`,
  *     `status=503`) and the embedded value is authoritative.
- *  3. Fall through to **word-boundaried** substring heuristics. The old
+ *  4. Fall through to **word-boundaried** substring heuristics. The old
  *     `lower.includes("rate")` test famously matched `GenerateContentRequest`,
  *     surfacing every Google 400 as a 429 `rate_limit_error`. The patterns here
  *     all require boundaries so they don't collide with provider field names.
- *
- * An answered upstream message passes its `errorStatus` as `upstreamStatus`, so a billing cap keeps that status.
  */
 export function classifyGatewayError(err: unknown, upstreamStatus?: number): GatewayErrorClassification {
 	const message = err instanceof Error ? err.message : String(err);
 
-	// 1. Custom pi-ai errors may attach a numeric `status` property.
-	const statusProp =
-		typeof err === "object" && err !== null && typeof (err as { status?: unknown }).status === "number"
-			? (err as { status: number }).status | 0
-			: undefined;
-	if (statusProp !== undefined) return bucketStatus(statusProp, message);
+	// 1. The HTTP status the error carries: `status`, `statusCode`, `response.status`, or one in its `cause`.
+	const httpStatus = extractHttpStatusFromError(err);
+	if (httpStatus !== undefined) return bucketStatus(httpStatus, message);
 
 	if (err instanceof Error && err.name === "AbortError") return { status: 499, type: "request_aborted", message };
-	// A billing cap keeps the status it arrived with: topping up clears it, so a 429 would only invite a retry.
-	if (
-		upstreamStatus !== undefined &&
-		(upstreamStatus === 402 ||
-			isBillingCapUsageLimit(upstreamStatus, message) ||
-			isAnthropicCreditBalanceTooLow(message))
-	) {
+	// 2. A billing cap keeps the status it arrived with: topping up clears it, so a 429 would only invite a retry.
+	if (upstreamStatus !== undefined && (upstreamStatus === 402 || isBillingCapAnswer(upstreamStatus, message))) {
 		return bucketStatus(upstreamStatus, message);
 	}
 
-	// 2. Status code embedded in the message. Requires a contextual keyword
+	// 3. Status code embedded in the message. Requires a contextual keyword
 	// (`HTTP`, `API error`, `status`, …) or a leading `(NNN)` token so we
 	// don't trip on incidental three-digit numbers ("took 200ms").
 	const embedded = extractEmbeddedStatus(message);
 	if (embedded !== undefined) return bucketStatus(embedded, message);
 
-	// 3. Word-boundaried substring heuristics.
+	// 4. Word-boundaried substring heuristics.
 	if (/\baborted\b|\babort signal\b/i.test(message)) {
 		return { status: 499, type: "request_aborted", message };
 	}

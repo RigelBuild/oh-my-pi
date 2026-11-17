@@ -469,6 +469,16 @@ export function isBillingCapUsageLimit(status: number | undefined, message: stri
 }
 
 /**
+ * Whether a failure is a billing cap whose upstream status must survive, not a
+ * 429: {@link isBillingCapUsageLimit}, or Anthropic's prepaid "credit balance is
+ * too low" 400. The chat-route usage-limit gate and {@link classifyGatewayError}
+ * share this one predicate.
+ */
+export function isBillingCapAnswer(status: number | undefined, message: string): boolean {
+	return isBillingCapUsageLimit(status, message) || isAnthropicCreditBalanceTooLow(message);
+}
+
+/**
  * Returns true for failures that should burn one credential and rotate to a
  * sibling account. Decision tree:
  *
