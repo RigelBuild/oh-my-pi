@@ -487,7 +487,8 @@ jobs:
    # release jobs consume them, so they build on release runs only. Each target
    # is its own job, so a cold build (~2 h serial for seven targets) is not bound
    # by one 150-minute step. Hosted runners cannot reach the vmon node cache, so
-   # each job builds cold and uploads its addon as a per-target artifact.
+   # jobs share one restored archive (saved by the darwin-arm64 entry on
+   # rigel-release only) and each uploads its addon as a per-target artifact.
    native_addons_cross:
       name: "Build native addon ${{ matrix.target }}"
       needs: [release_metadata]

@@ -4,7 +4,7 @@ description: >
 
 inputs:
    scope:
-      description: Cache scope, folded into the disk-cache key so each build target gets its own archive.
+      description: Cache scope, folded into the disk-cache key so each job class gets its own archive.
       required: true
 
 outputs:
