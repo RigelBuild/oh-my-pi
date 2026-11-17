@@ -117,6 +117,25 @@ describe("auth-gateway classifyGatewayError", () => {
 		expect(c.status).toBe(502);
 		expect(c.type).toBe("upstream_error");
 	});
+
+	it("keeps a billing cap at its upstream status, thrown or answered", () => {
+		const anthropic = "Your credit balance is too low to access the Anthropic API.";
+		expect(classifyGatewayError(new ProviderHttpError("out of credit", 402)).status).toBe(402);
+		expect(classifyGatewayError(new ProviderHttpError(anthropic, 400)).status).toBe(400);
+		expect(classifyGatewayError(new Error("out of credit"), 402).status).toBe(402);
+		expect(classifyGatewayError(new Error(anthropic), 400).status).toBe(400);
+	});
+
+	it("still answers a real usage or rate limit with 429 when the upstream status is known", () => {
+		expect(classifyGatewayError(new Error("usage_limit_reached"), 429).status).toBe(429);
+		expect(classifyGatewayError(new Error("too many requests, back off"), 429).status).toBe(429);
+		expect(
+			classifyGatewayError(
+				new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min."),
+				429,
+			).status,
+		).toBe(429);
+	});
 });
 
 const classifierModel = buildModel({

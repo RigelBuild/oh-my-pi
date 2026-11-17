@@ -1,5 +1,11 @@
 import { isUsageLimit, status as getErrorStatus } from "./flags";
-import { isConcurrencyCapExclusion, isUsageLimitOutcome, parseRateLimitReason } from "./rate-limit";
+import {
+	isAnthropicCreditBalanceTooLow,
+	isBillingCapUsageLimit,
+	isConcurrencyCapExclusion,
+	isUsageLimitOutcome,
+	parseRateLimitReason,
+} from "./rate-limit";
 import { isProviderRetryableError } from "./retryable";
 import type { Api, Model } from "../types";
 import { extractProviderRetryHint, getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
@@ -23,8 +29,10 @@ export interface GatewayErrorClassification {
  *     `lower.includes("rate")` test famously matched `GenerateContentRequest`,
  *     surfacing every Google 400 as a 429 `rate_limit_error`. The patterns here
  *     all require boundaries so they don't collide with provider field names.
+ *
+ * An answered upstream message passes its `errorStatus` as `upstreamStatus`, so a billing cap keeps that status.
  */
-export function classifyGatewayError(err: unknown): GatewayErrorClassification {
+export function classifyGatewayError(err: unknown, upstreamStatus?: number): GatewayErrorClassification {
 	const message = err instanceof Error ? err.message : String(err);
 
 	// 1. Custom pi-ai errors may attach a numeric `status` property.
@@ -35,6 +43,15 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	if (statusProp !== undefined) return bucketStatus(statusProp, message);
 
 	if (err instanceof Error && err.name === "AbortError") return { status: 499, type: "request_aborted", message };
+	// A billing cap keeps the status it arrived with: topping up clears it, so a 429 would only invite a retry.
+	if (
+		upstreamStatus !== undefined &&
+		(upstreamStatus === 402 ||
+			isBillingCapUsageLimit(upstreamStatus, message) ||
+			isAnthropicCreditBalanceTooLow(message))
+	) {
+		return bucketStatus(upstreamStatus, message);
+	}
 
 	// 2. Status code embedded in the message. Requires a contextual keyword
 	// (`HTTP`, `API error`, `status`, …) or a leading `(NNN)` token so we
