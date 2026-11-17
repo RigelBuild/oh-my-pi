@@ -27,16 +27,9 @@ import {
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
-import {
-	createMCPTimeout,
-	getNeverAbortSignal,
-	isMCPTimeoutEnabled,
-	type MCPTimeoutOperation,
-	resolveMCPTimeoutMs,
-} from "../timeout";
+import { createMCPTimeout, getNeverAbortSignal, type MCPTimeoutOperation, resolveMCPTimeoutMs } from "../timeout";
 import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
 
-const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 const DEFAULT_SSE_RETRY_MS = 3_000;
 
 interface SSEResumeState {
@@ -64,20 +57,6 @@ async function waitForSSERetry(ms: number, signal: AbortSignal): Promise<void> {
 		clearTimeout(timer);
 		signal.removeEventListener("abort", onAbort);
 	}
-}
-/**
- * Best-effort startup deadline for the optional Streamable HTTP GET SSE listener.
- *
- * Returns `0` (disabled) when the operator has explicitly disabled MCP client-side
- * timeouts via `timeout: 0` or `OMP_MCP_TIMEOUT_MS=0`, mirroring the rest of the
- * MCP timeout surface. Otherwise caps the wait at one second and scales below
- * short request timeouts so connect-time never exceeds the request budget.
- */
-export function resolveSSEConnectTimeoutMs(configTimeout?: number): number {
-	const requestTimeout = resolveMCPTimeoutMs(configTimeout);
-	if (!isMCPTimeoutEnabled(requestTimeout)) return 0;
-	const boundedTimeout = Math.min(HTTP_SSE_CONNECT_TIMEOUT_MS, Math.floor(requestTimeout / 4));
-	return Math.max(1, boundedTimeout);
 }
 /**
  * HTTP transport for MCP servers.
@@ -203,7 +182,8 @@ export class HttpTransport implements MCPTransport {
 
 	/**
 	 * Start SSE listener for server-initiated messages.
-	 * Resolves once the SSE connection is established (or fails/unsupported).
+	 * Resolves once the GET is established, refused, or fails. It waits for the real
+	 * response and never gives up on it early, so a slow GET cannot be dropped silently.
 	 * Message reading continues in the background.
 	 */
 	async startSSEListener(): Promise<void> {
@@ -219,38 +199,18 @@ export class HttpTransport implements MCPTransport {
 			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
 
-		let response: Response | null;
-		let timedOut = false;
-		let startupFinished = false;
+		let response: Response;
 		const connection = this.#sseConnection;
-		const startupTimeoutMs = resolveSSEConnectTimeoutMs(this.config.timeout);
-		const fetchPromise = this.#fetch({ method: "GET", signal: connection.signal }, generated);
-		const timeoutPromise =
-			startupTimeoutMs > 0
-				? new Promise<null>(resolve => {
-						setTimeout(() => {
-							if (!startupFinished) {
-								timedOut = true;
-								connection.abort();
-							}
-							resolve(null);
-						}, startupTimeoutMs);
-					})
-				: null;
 		try {
-			response = timeoutPromise === null ? await fetchPromise : await Promise.race([fetchPromise, timeoutPromise]);
+			// Await the GET to its real outcome. A startup timer here used to abort a
+			// GET still in flight and resolve silently, leaving the POST progress frame
+			// with no live listener. The connect and request deadlines bound this wait.
+			response = await this.#fetch({ method: "GET", signal: connection.signal }, generated);
 		} catch (error) {
 			if (this.#sseConnection === connection) this.#sseConnection = null;
-			if (error instanceof Error && error.name !== "AbortError" && !timedOut) {
+			if (error instanceof Error && error.name !== "AbortError") {
 				this.onError?.(error);
 			}
-			return;
-		} finally {
-			startupFinished = true;
-		}
-		if (response === null) {
-			if (this.#sseConnection === connection) this.#sseConnection = null;
-			void fetchPromise.then(lateResponse => lateResponse.body?.cancel()).catch(() => {});
 			return;
 		}
 

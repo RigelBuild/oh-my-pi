@@ -1133,4 +1133,86 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 			await transport.close();
 		}
 	});
+
+	it("keeps the GET listener live when its response headers arrive after the startup budget", async () => {
+		// Regression: the startup budget (min(1s, timeout/4) = 75ms here) used to
+		// abort a GET still in flight and resolve startSSEListener() silently. The
+		// POST progress frame then raced a closed listener. The GET must instead be
+		// awaited to its real outcome, so the frame always arrives.
+		let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+		let token: unknown;
+		let getAborted = false;
+		const headersReleased = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method === "GET") {
+					req.signal.addEventListener("abort", () => {
+						getAborted = true;
+					});
+					// Gate the response headers on the test, so the GET is provably still
+					// in flight when the startup budget would have expired.
+					await headersReleased.promise;
+					return new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								stream = controller;
+								controller.enqueue(encoder.encode(": connected\n\n"));
+							},
+						}),
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
+				}
+				const body = (await req.json()) as JsonRpcRequest;
+				token = (body.params?._meta as Record<string, unknown> | undefined)?.progressToken;
+				// Stream the frame only after the POST has its token, so it routes to this request.
+				stream?.enqueue(
+					encoder.encode(
+						`data: ${JSON.stringify({
+							jsonrpc: "2.0",
+							method: "notifications/progress",
+							params: { progressToken: token, progress: 1 },
+						})}\n\n`,
+					),
+				);
+				await release.promise;
+				return Response.json({ jsonrpc: "2.0", id: body.id, result: {} });
+			},
+		});
+		const transport = await connectedTransport(300);
+		const progressReceived = Promise.withResolvers<void>();
+		const updates: MCPProgress[] = [];
+		transport.onNotification = (_method, params) => {
+			if ((params as Record<string, unknown>).progress === 1) progressReceived.resolve();
+		};
+		try {
+			// Start the listener, then hold its headers past the 75ms budget before
+			// releasing them. startSSEListener() must still resolve only after the
+			// GET actually opens, not give up on it.
+			const listening = transport.startSSEListener();
+			// Real clock on purpose: the bug is a socket-level timer expiring while the
+			// GET is in flight, which fake timers do not drive through Bun's fetch stack.
+			await Bun.sleep(150);
+			headersReleased.resolve();
+			await listening;
+			expect(getAborted).toBe(false);
+			const pending = transport.request(
+				"tools/call",
+				{},
+				{
+					onProgress: progress => updates.push(progress),
+				},
+			);
+			await withPendingGuard(progressReceived.promise, "GET progress after late headers");
+			release.resolve();
+			await pending;
+			expect(updates).toEqual([{ progress: 1 }]);
+			expect(getAborted).toBe(false);
+		} finally {
+			headersReleased.resolve();
+			release.resolve();
+			await transport.close();
+		}
+	});
 });
