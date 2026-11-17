@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Streamable HTTP MCP servers no longer lose server-pushed messages when their optional GET listener response arrives after the startup budget. The listener is no longer aborted at the budget; it is attached when its response arrives, and closing the transport still aborts it. A server that never answers GET still does not delay connection beyond the startup budget.
 - A subagent's background bash and eval notice no longer promises an automatic wake. It says the result arrives only while the subagent is still running, and tells it to call `wait` before it ends its turn. The top-level notice is unchanged.
 
 ## [18.18.3-rigel.7] - 2026-11-16

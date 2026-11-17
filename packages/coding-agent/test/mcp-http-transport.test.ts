@@ -1104,9 +1104,9 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 				return response;
 			},
 		});
-		// This is a resumption test, not a deadline test. The 50ms request
-		// fixture above gives the optional GET only 12ms to connect, so a busy
-		// runner can abort it before any stream exists to resume.
+		// This is a resumption test, not a startup-timing test. Timeout 0 disables the
+		// optional GET startup budget, so the listener is not cut short before a
+		// stream exists to resume.
 		const transport = await connectedTransport(0);
 		const notifications: string[] = [];
 		let closed = false;
@@ -1134,15 +1134,16 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 		}
 	});
 
-	it("keeps the GET listener live when its response headers arrive after the startup budget", async () => {
-		// Regression: the startup budget (min(1s, timeout/4) = 75ms here) used to
-		// abort a GET still in flight and resolve startSSEListener() silently. The
-		// POST progress frame then raced a closed listener. The GET must instead be
-		// awaited to its real outcome, so the frame always arrives.
+	it("does not abort a GET whose headers arrive after the startup budget, and delivers its frames", async () => {
+		// A GET still in flight when the startup budget expires must not be aborted:
+		// the listener is live once its headers arrive, and frames sent on it while a
+		// POST is pending must reach that request.
 		let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
 		let token: unknown;
 		let getAborted = false;
+		const getArrived = Promise.withResolvers<void>();
 		const headersReleased = Promise.withResolvers<void>();
+		const getAnswered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		server = Bun.serve({
 			port: 0,
@@ -1151,9 +1152,11 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 					req.signal.addEventListener("abort", () => {
 						getAborted = true;
 					});
-					// Gate the response headers on the test, so the GET is provably still
-					// in flight when the startup budget would have expired.
+					getArrived.resolve();
+					// Hold the headers until the test releases them, so the GET is still
+					// in flight when the startup budget has already expired.
 					await headersReleased.promise;
+					getAnswered.resolve();
 					return new Response(
 						new ReadableStream<Uint8Array>({
 							start(controller) {
@@ -1187,16 +1190,13 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 			if ((params as Record<string, unknown>).progress === 1) progressReceived.resolve();
 		};
 		try {
-			// Start the listener, then hold its headers past the 75ms budget before
-			// releasing them. startSSEListener() must still resolve only after the
-			// GET actually opens, not give up on it.
+			// startSSEListener() resolves at the budget while the GET is still pending.
 			const listening = transport.startSSEListener();
-			// Real clock on purpose: the bug is a socket-level timer expiring while the
-			// GET is in flight, which fake timers do not drive through Bun's fetch stack.
-			await Bun.sleep(150);
+			await withPendingGuard(listening, "startSSEListener at the startup budget");
+			await withPendingGuard(getArrived.promise, "GET reached the server");
+			// The budget has expired and the GET is still unanswered. Only now release it.
 			headersReleased.resolve();
-			await listening;
-			expect(getAborted).toBe(false);
+			await withPendingGuard(getAnswered.promise, "GET answered after release");
 			const pending = transport.request(
 				"tools/call",
 				{},
@@ -1212,6 +1212,36 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 		} finally {
 			headersReleased.resolve();
 			release.resolve();
+			await transport.close();
+		}
+	});
+
+	it("connects when the server never answers the GET, within the startup budget", async () => {
+		// Upstream #1460: a POST-only server never answers GET. connect() must not wait for it.
+		const getArrived = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method === "GET") {
+					getArrived.resolve();
+					// Never answers the GET.
+					return await new Promise<Response>(() => {});
+				}
+				const body = (await req.json()) as JsonRpcRequest;
+				return Response.json({ jsonrpc: "2.0", id: body.id, result: { ok: true } });
+			},
+		});
+		const transport = await connectedTransport(300);
+		try {
+			const started = performance.now();
+			await withPendingGuard(transport.startSSEListener(), "startSSEListener on a hung GET");
+			const elapsed = performance.now() - started;
+			await withPendingGuard(getArrived.promise, "GET reached the server");
+			// Connect resolves at the budget, not at the request timeout, so a hung GET is bounded.
+			expect(elapsed).toBeLessThan(300);
+			const result = await transport.request("tools/call", {}, {});
+			expect(result).toEqual({ ok: true });
+		} finally {
 			await transport.close();
 		}
 	});

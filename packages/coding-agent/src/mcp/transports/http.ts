@@ -27,7 +27,13 @@ import {
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
-import { createMCPTimeout, getNeverAbortSignal, type MCPTimeoutOperation, resolveMCPTimeoutMs } from "../timeout";
+import {
+	createMCPTimeout,
+	getNeverAbortSignal,
+	isMCPTimeoutEnabled,
+	type MCPTimeoutOperation,
+	resolveMCPTimeoutMs,
+} from "../timeout";
 import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
 
 const DEFAULT_SSE_RETRY_MS = 3_000;
@@ -57,6 +63,23 @@ async function waitForSSERetry(ms: number, signal: AbortSignal): Promise<void> {
 		clearTimeout(timer);
 		signal.removeEventListener("abort", onAbort);
 	}
+}
+
+const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
+
+/**
+ * Best-effort startup deadline for the optional Streamable HTTP GET SSE listener.
+ *
+ * Returns `0` (disabled) when the operator has explicitly disabled MCP client-side
+ * timeouts via `timeout: 0` or `OMP_MCP_TIMEOUT_MS=0`, mirroring the rest of the
+ * MCP timeout surface. Otherwise caps the wait at one second and scales below
+ * short request timeouts so connect-time never exceeds the request budget.
+ */
+export function resolveSSEConnectTimeoutMs(configTimeout?: number): number {
+	const requestTimeout = resolveMCPTimeoutMs(configTimeout);
+	if (!isMCPTimeoutEnabled(requestTimeout)) return 0;
+	const boundedTimeout = Math.min(HTTP_SSE_CONNECT_TIMEOUT_MS, Math.floor(requestTimeout / 4));
+	return Math.max(1, boundedTimeout);
 }
 /**
  * HTTP transport for MCP servers.
@@ -181,10 +204,14 @@ export class HttpTransport implements MCPTransport {
 	}
 
 	/**
-	 * Start SSE listener for server-initiated messages.
-	 * Resolves once the GET is established, refused, or fails. It waits for the real
-	 * response and never gives up on it early, so a slow GET cannot be dropped silently.
-	 * Message reading continues in the background.
+	 * Start the optional GET SSE listener for server-initiated messages.
+	 *
+	 * Waits at most the startup budget so a server that never answers GET cannot hold
+	 * `connect()` (upstream #1460). When the budget expires the GET is NOT aborted: it
+	 * stays tracked on the connection, so `close()` aborts it, and when its headers
+	 * arrive they are attached if the connection is still current. Aborting it instead
+	 * would drop every server push that arrives after the budget. The connect deadline
+	 * in `connectToServer` is the only outer bound on this GET; nothing else times it out.
 	 */
 	async startSSEListener(): Promise<void> {
 		if (!this.#connected) return;
@@ -199,27 +226,38 @@ export class HttpTransport implements MCPTransport {
 			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
 
-		let response: Response;
 		const connection = this.#sseConnection;
-		try {
-			// Await the GET to its real outcome. A startup timer here used to abort a
-			// GET still in flight and resolve silently, leaving the POST progress frame
-			// with no live listener. The connect and request deadlines bound this wait.
-			response = await this.#fetch({ method: "GET", signal: connection.signal }, generated);
-		} catch (error) {
-			if (this.#sseConnection === connection) this.#sseConnection = null;
-			if (error instanceof Error && error.name !== "AbortError") {
-				this.onError?.(error);
-			}
+		const startupTimeoutMs = resolveSSEConnectTimeoutMs(this.config.timeout);
+		const fetchPromise = this.#fetch({ method: "GET", signal: connection.signal }, generated);
+		const attached = Promise.withResolvers<void>();
+		fetchPromise.then(
+			response => {
+				if (this.#sseConnection !== connection || !this.#connected) {
+					void response.body?.cancel().catch(() => {});
+				} else {
+					this.#attachSSEResponse(response, connection);
+				}
+				attached.resolve();
+			},
+			error => {
+				if (this.#sseConnection === connection) this.#sseConnection = null;
+				if (error instanceof Error && error.name !== "AbortError") this.onError?.(error);
+				attached.resolve();
+			},
+		);
+		if (startupTimeoutMs <= 0) {
+			await attached.promise;
 			return;
 		}
+		const budget = Promise.withResolvers<void>();
+		const timer = setTimeout(budget.resolve, startupTimeoutMs);
+		await Promise.race([attached.promise, budget.promise]);
+		clearTimeout(timer);
+	}
 
-		if (this.#sseConnection !== connection) {
-			await response.body?.cancel();
-			return;
-		}
+	#attachSSEResponse(response: Response, connection: AbortController): void {
 		if (response.status === 405 || !response.ok || !response.body) {
-			await response.body?.cancel();
+			void response.body?.cancel().catch(() => {});
 			if (this.#sseConnection === connection) this.#sseConnection = null;
 			return;
 		}
