@@ -171,6 +171,14 @@ describe("auth-gateway classifyGatewayError", () => {
 	it("pins `out of credit, error: 402` with no status field at 502, since step 1 reads no message text and step 3 finds no keyword", () => {
 		expect(classifyGatewayError(new Error("out of credit, error: 402")).status).toBe(502);
 	});
+
+	it("keeps a billing cap at its upstream status when the message embeds a 5xx, since step 2 runs before step 3", () => {
+		expect(classifyGatewayError("HTTP 500: credit balance is too low", 400).status).toBe(400);
+	});
+
+	it("answers 429 for `rate limit exceeded` with `status: 0`, since a status outside 100-599 is not read in step 1", () => {
+		expect(classifyGatewayError(Object.assign(new Error("rate limit exceeded"), { status: 0 })).status).toBe(429);
+	});
 });
 
 const classifierModel = buildModel({
