@@ -106,12 +106,16 @@ def _xwin_sysroot_impl(rctx):
 
     # OMP_XWIN_CACHE_DIR points at a persistent location (CI: the cache baked
     # into the vmon omp-ci template, via --repo_env) so ephemeral runners reuse
-    # the ~1 GiB CDN download the repository cache cannot hold. Unset (dev
-    # machines): a repo-local cache, deleted after the --copy splat.
+    # the ~1 GiB CDN download the repository cache cannot hold. Each arch gets
+    # its own subdirectory: two arch repos fetched in one build (cquery of
+    # //:natives-all) otherwise race on shared unpack dirs in one cache dir.
+    # Unset (dev machines): a repo-local cache, deleted after the --copy splat.
     cache_dir = rctx.os.environ.get("OMP_XWIN_CACHE_DIR", "")
     ephemeral_cache = cache_dir == ""
     if ephemeral_cache:
         cache_dir = ".xwin-cache"
+    else:
+        cache_dir = cache_dir + "/" + rctx.attr.arch
 
     result = rctx.execute(
         [
