@@ -16,7 +16,7 @@
 	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/can1357/oh-my-pi.git",
+		"url": "git+https://github.com/RigelBuild/oh-my-pi.git",
 		"directory": "packages/utils"
 	},
 	"files": [

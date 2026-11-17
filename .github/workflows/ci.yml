@@ -1012,8 +1012,9 @@ jobs:
          !inputs.skip_npm }}
       needs: [release_metadata, release_gate, release_binary, release_smoke]
       runs-on: ubuntu-22.04
-      # id-token lets npm mint the OIDC token for trusted publishing; the
-      # NODE_AUTH_TOKEN below is the fallback for unconfigured packages.
+      # id-token lets npm mint the OIDC token for trusted publishing. Auth is OIDC
+      # only: no npm token is passed to this job, so each leaf must have a trusted
+      # publisher configured for this workflow.
       permissions:
          id-token: write
          contents: read
@@ -1054,11 +1055,6 @@ jobs:
            with:
               targets: linux-x64-baseline linux-x64-modern linux-arm64 darwin-x64-baseline darwin-arm64 win32-x64-baseline win32-arm64
          - name: Publish native leaf packages
-           env:
-              # Fallback auth: setup-node wrote an .npmrc referencing
-              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
-              # publisher for the package (or on a first publish).
-              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
            # The six leaves are independent: each process generates its own
            # packages/natives/npm/<tag> dir and packs into a private temp dir,
            # and the legal payload is tracked in packages/natives, so nothing
@@ -1210,9 +1206,9 @@ jobs:
       needs: [release_metadata, release_gate, release_binary, release_smoke, release_github, release_build, release_native_leaves]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
-      # short-lived publish token (trusted publishing + provenance). When a
-      # package has no matching trusted publisher configured, npm silently falls
-      # back to NODE_AUTH_TOKEN below — which also covers first-ever publishes.
+      # short-lived publish token (trusted publishing, which also turns on
+      # provenance). Auth is OIDC only: no npm token is passed to this job, so each
+      # package must have a trusted publisher configured for this workflow.
       permissions:
          id-token: write
          contents: read
@@ -1253,11 +1249,6 @@ jobs:
            with:
               targets: linux-x64-baseline linux-x64-modern
          - name: Publish to npm
-           env:
-              # Fallback auth: setup-node wrote an .npmrc referencing
-              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
-              # publisher for the package (or on a first publish).
-              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
            run: bun run ci:release:publish
 
    # Regenerate the Homebrew tap formula (can1357/homebrew-tap) from the build

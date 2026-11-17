@@ -367,12 +367,11 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
  *
  * The tarball is handed to `npm publish` — not `bun publish` — because only the
  * npm CLI performs the OIDC trusted-publishing token exchange; `bun publish`
- * has no OIDC support (oven-sh/bun#22423). In CI with `id-token: write` granted
- * and `NODE_AUTH_TOKEN` set, npm tries OIDC per package and silently falls back
- * to the configured token when the package has no matching trusted publisher —
- * which also covers a package's first-ever publish. npm auto-enables provenance
- * only on the OIDC path, so we never pass `--provenance` (it would hard-fail the
- * token fallback).
+ * has no OIDC support (oven-sh/bun#22423). In CI with `id-token: write` granted,
+ * npm exchanges the job's OIDC token for a publish token per package. The job
+ * passes no npm token, so a package without a trusted publisher fails to
+ * publish. npm auto-enables provenance only on the OIDC path, so we never pass
+ * `--provenance`.
  */
 export interface PackedTarball {
 	name: string;

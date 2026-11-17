@@ -25,7 +25,7 @@ describe("generated native npm leaf packages", () => {
 		expect(manifest.license).toBe("MIT");
 		expect(manifest.repository).toEqual({
 			type: "git",
-			url: "git+https://github.com/can1357/oh-my-pi.git",
+			url: "git+https://github.com/RigelBuild/oh-my-pi.git",
 			directory: "packages/natives",
 		});
 		expect("exports" in manifest).toBe(false);
