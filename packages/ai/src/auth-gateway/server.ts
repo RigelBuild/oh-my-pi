@@ -320,14 +320,10 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 
 /** A usage-limit answer: 429, with `Retry-After` in whole seconds (rounded up) when the block end is known. */
 function usageLimitResponse(
-	route: { module: FormatModule },
+	formatError: (status: number, type: string, message: string) => Response,
 	usageLimit: { readonly failure: GatewayErrorClassification; readonly retryAfterMs?: number },
 ): Response {
-	const response = route.module.formatError(
-		usageLimit.failure.status,
-		usageLimit.failure.type,
-		usageLimit.failure.message,
-	);
+	const response = formatError(usageLimit.failure.status, usageLimit.failure.type, usageLimit.failure.message);
 	if (usageLimit.retryAfterMs !== undefined && usageLimit.retryAfterMs >= 0) {
 		response.headers.set("Retry-After", String(Math.ceil(usageLimit.retryAfterMs / 1000)));
 	}
@@ -595,6 +591,8 @@ interface FailedOutcome {
 	readonly failure: GatewayErrorClassification;
 	/** The upstream error message, replayed as-is once headers are sent. */
 	readonly error?: AssistantMessage;
+	/** Retry delay of a usage-limit answer; sets `Retry-After` when no body is open yet. */
+	readonly retryAfterMs?: number;
 }
 
 type FailoverOutcome =
@@ -629,8 +627,9 @@ function judgeAttempt(
 		};
 	}
 	if (message === undefined) {
-		const failure = classifyGatewayError(thrown);
-		const outcome: FailedOutcome = { kind: "failed", model, failure };
+		const usageLimit = gatewayUsageLimitAnswer(model.provider, thrown);
+		const failure = usageLimit?.failure ?? classifyGatewayError(thrown);
+		const outcome: FailedOutcome = { kind: "failed", model, failure, retryAfterMs: usageLimit?.retryAfterMs };
 		if (failure.status === 499) return { outcome };
 		return { outcome, upstream: classifyUpstreamFailure(model, thrown, undefined, undefined) };
 	}
@@ -642,9 +641,16 @@ function judgeAttempt(
 		};
 	}
 	const text = message.errorClassificationMessage ?? message.errorMessage;
-	const classified = classifyGatewayError(text ?? errorMessage);
+	const usageLimit = gatewayUsageLimitAnswer(model.provider, text ?? errorMessage);
+	const classified = usageLimit?.failure ?? classifyGatewayError(text ?? errorMessage);
 	return {
-		outcome: { kind: "failed", model, failure: { ...classified, message: errorMessage }, error: message },
+		outcome: {
+			kind: "failed",
+			model,
+			failure: { ...classified, message: errorMessage },
+			error: message,
+			retryAfterMs: usageLimit?.retryAfterMs,
+		},
 		upstream: classifyUpstreamFailure(model, undefined, message.errorStatus, text),
 	};
 }
@@ -711,9 +717,15 @@ function serveWithFailover(request: FailoverRequest, route: FailoverRoute): Prom
 					return;
 				case "failed": {
 					if (!body) {
-						response.resolve(
-							route.formatError(outcome.failure.status, outcome.failure.type, outcome.failure.message),
+						const failed = route.formatError(
+							outcome.failure.status,
+							outcome.failure.type,
+							outcome.failure.message,
 						);
+						if (outcome.retryAfterMs !== undefined && outcome.retryAfterMs >= 0) {
+							failed.headers.set("Retry-After", String(Math.ceil(outcome.retryAfterMs / 1000)));
+						}
+						response.resolve(failed);
 						return;
 					}
 					const relay = new AssistantMessageEventStream();
@@ -1259,7 +1271,7 @@ async function handleFormatEndpoint(
 					model.provider,
 					message.errorClassificationMessage ?? errorMessage,
 				);
-				if (usageLimit) return usageLimitResponse(route, usageLimit);
+				if (usageLimit) return usageLimitResponse(route.module.formatError, usageLimit);
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1276,7 +1288,7 @@ async function handleFormatEndpoint(
 				gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
 				classified.status,
 			);
-			if (usageLimit) return usageLimitResponse(route, usageLimit);
+			if (usageLimit) return usageLimitResponse(route.module.formatError, usageLimit);
 			return route.module.formatError(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
@@ -1533,6 +1545,11 @@ async function handlePiNative(
 				if (message.stopReason === "aborted") {
 					return noStoreErrorResponse(499, "request_aborted", errorMessage);
 				}
+				const usageLimit = gatewayUsageLimitAnswer(
+					model.provider,
+					message.errorClassificationMessage ?? errorMessage,
+				);
+				if (usageLimit) return usageLimitResponse(noStoreErrorResponse, usageLimit);
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return noStoreErrorResponse(classified.status, classified.type, errorMessage);
 			}
@@ -1543,11 +1560,13 @@ async function handlePiNative(
 			);
 		} catch (error) {
 			if (controller.signal.aborted) return aborted();
-			const classified = classifyGatewayError(error);
+			const usageLimit = gatewayUsageLimitAnswer(model.provider, error);
+			const classified = usageLimit?.failure ?? classifyGatewayError(error);
 			logGatewayRequestFailure(
 				gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
 				classified.status,
 			);
+			if (usageLimit) return usageLimitResponse(noStoreErrorResponse, usageLimit);
 			return noStoreErrorResponse(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
