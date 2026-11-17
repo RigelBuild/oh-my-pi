@@ -8628,6 +8628,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				js: cfgEvalJs.get(this.settings),
 				freshAgents: cfgEvalWorkpoolFreshAgents.get(this.settings),
 				perCallModel: perCallModelEnabled(this.settings, "eval"),
+				subagent: this.#agentKind === "sub",
 			};
 			// A notice whose contract needs an inactive tool would demand an
 			// unavailable capability; skip it rather than mislead the model.

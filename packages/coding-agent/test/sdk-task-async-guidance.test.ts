@@ -171,6 +171,14 @@ describe("SDK async task guidance", () => {
 		expect(description).not.toContain("`solutionSpace`");
 	});
 
+	it("tells a spawned subagent its results arrive only while it runs, and to call wait before it yields", async () => {
+		const { session, requests } = await harness({ taskDepth: 1 }, "off");
+		await session.prompt("Delegate two independent inspections");
+		const description = requests[1].taskDescription;
+		expect(description).toContain("Results arrive only while this run is live");
+		expect(description).not.toContain(deliveryGuidance);
+	});
+
 	it.each(["off", "on"])(
 		"sends guidance once through descriptors without repeating it in results (inline=%s)",
 		async inline => {

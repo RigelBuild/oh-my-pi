@@ -34,6 +34,8 @@ export interface MagicKeywordContext {
 	freshAgents: boolean;
 	/** `task.perCallModel` admits `model` on eval `agent()`/`workpool()` (`eval` or `on`). */
 	perCallModel: boolean;
+	/** Whether this is a subagent session (agent kind `sub`); its results arrive only while its run is live. */
+	subagent: boolean;
 }
 
 /** One magic keyword: trigger word, gradient, settings copy, and the notice it injects. */
@@ -79,12 +81,13 @@ export function renderWorkflowNotice({
 	js,
 	freshAgents,
 	perCallModel,
+	subagent,
 }: Pick<
 	MagicKeywordContext,
-	"taskBatch" | "scoutAvailable" | "evalTools" | "py" | "js" | "freshAgents" | "perCallModel"
+	"taskBatch" | "scoutAvailable" | "evalTools" | "py" | "js" | "freshAgents" | "perCallModel" | "subagent"
 >): string {
 	return prompt
-		.render(workflowNotice, { taskBatch, scoutAvailable, evalTools, py, js, freshAgents, perCallModel })
+		.render(workflowNotice, { taskBatch, scoutAvailable, evalTools, py, js, freshAgents, perCallModel, subagent })
 		.trim();
 }
 
