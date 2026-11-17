@@ -9,8 +9,6 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { CompactionMethod } from "./compaction-methods";
-import type { WorkPoolYieldItem } from "../task/workpool-yield";
-import type { RetryFallbackRole } from "./retry-fallback-chains";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -63,8 +61,6 @@ export interface NewSessionOptions {
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
-	/** Directory for the new session file (and later `/new` sessions); defaults to the current session directory. */
-	sessionDir?: string;
 }
 
 export interface SessionEntryBase {
@@ -235,8 +231,8 @@ export interface CredentialPinEntry extends SessionEntryBase {
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
-	/** System prompt blocks exactly as sent to the model; files written before blocks were kept store one joined string. */
-	systemPrompt: string[] | string;
+	/** Full system prompt sent to the model */
+	systemPrompt: string;
 	/** Initial task/user message */
 	task: string;
 	/** Tools available to the agent */
@@ -247,8 +243,6 @@ export interface SessionInitEntry extends SessionEntryBase {
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
-	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
-	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
 	/** Output schema if structured output was requested. */
@@ -267,8 +261,6 @@ export interface SessionInitEntry extends SessionEntryBase {
 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
 	isolated?: boolean;
-	/** Work-pool yield items of the last model call; revival restores them so the yield tool matches. Absent when none. */
-	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
@@ -346,8 +338,6 @@ export interface UsageStatistics {
 	orchestrationCacheRead: number;
 	premiumRequests: number;
 	cost: number;
-	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
-	subagentCost: number;
 }
 /**
  * True when a raw JSONL line is a complete `message` record carrying an

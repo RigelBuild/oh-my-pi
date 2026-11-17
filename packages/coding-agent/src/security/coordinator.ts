@@ -41,10 +41,6 @@ import {
 import { createSecurityPublicationTool } from "./publication";
 import { SecurityStore, writeSecurityBundleToDirectory } from "./store";
 
-import { cfgRetryFallbackChains, cfgRetryModelFallback, cfgRetryUsageAwareFallback } from "../session/settings";
-import { cfgSecurityEnabled } from "../tools/settings";
-import { cfgTaskAgentModelOverrides, cfgTaskAgentPrewalk } from "../task/settings";
-
 const SECURITY_SESSION_TOOLS = ["read", "grep", "glob", "lsp", "ast_grep", "task", "security_publish"];
 const SECURITY_WORKFLOW_FINGERPRINT = createSecurityWorkflowFingerprint([
 	securityCoordinatorPrompt,
@@ -156,7 +152,7 @@ function toIsoTimestamp(now: () => Date): string {
 }
 
 function securityConfigSnapshot(settings: Settings): Record<string, boolean> {
-	return { securityEnabled: cfgSecurityEnabled.get(settings) };
+	return { securityEnabled: settings.get("security.enabled") };
 }
 
 function createOperationId(): string {
@@ -231,15 +227,15 @@ function initialBundle(
 async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInput): Promise<AgentSession> {
 	const scanSettings = await input.host.settings.cloneForCwd(input.executionRoot);
 	const modelSelector = `${input.model.provider}/${input.model.id}`;
-	cfgRetryModelFallback.override(scanSettings, false);
-	cfgRetryUsageAwareFallback.override(scanSettings, false);
-	cfgRetryFallbackChains.override(scanSettings, {});
-	cfgTaskAgentModelOverrides.override(scanSettings, {
-		...cfgTaskAgentModelOverrides.get(scanSettings),
+	scanSettings.override("retry.modelFallback", false);
+	scanSettings.override("retry.usageAwareFallback", false);
+	scanSettings.override("retry.fallbackChains", {});
+	scanSettings.override("task.agentModelOverrides", {
+		...scanSettings.get("task.agentModelOverrides"),
 		"security-reviewer": modelSelector,
 	});
-	cfgTaskAgentPrewalk.override(scanSettings, {
-		...cfgTaskAgentPrewalk.get(scanSettings),
+	scanSettings.override("task.agentPrewalk", {
+		...scanSettings.get("task.agentPrewalk"),
 		"security-reviewer": "off",
 	});
 	const providerSessionId = `security:${input.scanId}`;
@@ -272,8 +268,6 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		skipPythonPreflight: true,
 		agentId: `Security-${input.scanId.slice(-12)}`,
 		agentDisplayName: "security",
-		// A helper for the host session: the host keeps the process-wide effects and provider toggles.
-		bindProcessState: false,
 	});
 	return session;
 }
@@ -429,7 +423,7 @@ export class SecurityCoordinator {
 	}
 
 	async preflight(input: SecurityPreflightInput = {}): Promise<SecurityScanPlan> {
-		if (!cfgSecurityEnabled.get(this.#host.settings)) {
+		if (!this.#host.settings.get("security.enabled")) {
 			throw new Error("Security is disabled; enable security.enabled before planning a scan");
 		}
 		const model = input.model ?? this.#host.activeModel;
@@ -461,7 +455,7 @@ export class SecurityCoordinator {
 	}
 
 	async start(input: SecurityStartInput): Promise<SecurityOperationSnapshot> {
-		if (!cfgSecurityEnabled.get(this.#host.settings)) {
+		if (!this.#host.settings.get("security.enabled")) {
 			throw new Error("Security is disabled; enable security.enabled before starting a scan");
 		}
 		await this.#ensureRecovered();

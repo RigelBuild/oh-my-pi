@@ -30,7 +30,6 @@ pub mod patterns;
 pub mod processes;
 mod prompt;
 mod regex;
-pub mod rlimits;
 pub mod results;
 mod shell;
 pub mod sourceinfo;

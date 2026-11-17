@@ -2,9 +2,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isRecord, logger, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { getConfigDirPaths } from "../config";
 import { getPreloadedPluginRoots } from "../discovery/helpers";
-import { hasRootMarkers, parseConfigContent, resolveCommand } from "../lsp/config";
+import { hasRootMarkers, resolveCommand } from "../lsp/config";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { DapAdapterConfig, DapResolvedAdapter } from "./types";
 
@@ -18,6 +19,14 @@ interface NormalizedConfig {
 
 interface ConfigSource {
 	read(): NormalizedConfig | null;
+}
+
+function parseConfigContent(content: string, filePath: string): unknown {
+	const extension = path.extname(filePath).toLowerCase();
+	if (extension === ".yaml" || extension === ".yml") {
+		return YAML.parse(content) as unknown;
+	}
+	return JSON.parse(content) as unknown;
 }
 
 function normalizeConfig(value: unknown): NormalizedConfig | null {

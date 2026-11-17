@@ -4,6 +4,7 @@
 
 use std::{
 	ffi::OsString,
+	fs::File,
 	io::{self, Read, Seek, SeekFrom, Write},
 	num::TryFromIntError,
 	path::PathBuf,
@@ -12,7 +13,6 @@ use std::{
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 use memchr::memrchr_iter;
-use pi_vfs::File;
 use thiserror::Error;
 use uucore::{display::Quotable, line_ending::LineEnding};
 
@@ -1307,10 +1307,7 @@ fn is_seekable(input: &mut File) -> bool {
 fn head_backwards_file(input: &mut File, output: &mut impl Write, options: &HeadOptions) -> io::Result<u64> {
 	let st = input.metadata()?;
 	let seekable = is_seekable(input);
-	// Only a buffering threshold: an unknown block size uses uucore's default.
-	let blksize_limit = st
-		.blksize()
-		.map_or(uucore::fs::sane_blksize::DEFAULT, uucore::fs::sane_blksize::sane_blksize);
+	let blksize_limit = uucore::fs::sane_blksize::sane_blksize_from_metadata(&st);
 	if !seekable || st.len() <= blksize_limit || options.presume_input_pipe {
 		head_backwards_without_seek_file(input, output, options)
 	} else {
@@ -1398,9 +1395,6 @@ impl Utility for Head {
 		}
 		let mut out = host.stdout_writer();
 		for file in &options.files {
-			if host.is_cancelled() {
-				break;
-			}
 			let result = if file == "-" {
 				if print_headers {
 					print_header(&mut out, b"standard input", &mut first);
@@ -1423,7 +1417,7 @@ impl Utility for Head {
 				}
 			} else {
 				let resolved = host.resolve(file);
-				if host.fs().is_dir(&resolved) {
+				if resolved.is_dir() {
 					// GNU prints the header before reporting the read error,
 					// and that header counts as produced output.
 					if print_headers {
@@ -1432,7 +1426,7 @@ impl Utility for Head {
 					host.error(format!("error reading {}: Is a directory", file.quote()), 1);
 					continue;
 				}
-				let mut input = match host.fs().open(&resolved) {
+				let mut input = match File::open(&resolved) {
 					Ok(input) => input,
 					Err(err) => {
 						host.error(format!("cannot open {} for reading: {err}", file.quote()), 1);

@@ -19,7 +19,6 @@ const PREFERENCE_LABEL: Record<ThemePreference, string> = {
 	dark: "Dark theme",
 };
 
-/** Cycles system → light → dark. */
 export function ThemeToggle() {
 	const { preference, setPreference } = useThemePreference();
 	const Icon = PREFERENCE_ICON[preference];
@@ -27,14 +26,12 @@ export function ThemeToggle() {
 	return (
 		<button
 			type="button"
-			className="btn"
-			data-variant="ghost"
-			data-icon="true"
+			className="stats-theme-toggle"
 			onClick={() => setPreference(NEXT_PREFERENCE[preference])}
 			aria-label={`${PREFERENCE_LABEL[preference]} (click to switch)`}
 			title={`${PREFERENCE_LABEL[preference]} — click to switch`}
 		>
-			<Icon size={15} />
+			<Icon size={16} />
 		</button>
 	);
 }

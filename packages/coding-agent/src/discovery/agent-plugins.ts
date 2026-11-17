@@ -102,11 +102,7 @@ function pluginDataDir(home: string, manifestName: string, instanceKey: string):
  * deeper descendants are never searched. Invalid skills are skipped with a
  * warning while the rest keep loading.
  */
-async function scanStandardSkills(
-	realRoot: string,
-	level: "user" | "project",
-	pluginName: string,
-): Promise<LoadResult<Skill>> {
+async function scanStandardSkills(realRoot: string, level: "user" | "project"): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
 
@@ -190,10 +186,7 @@ async function scanStandardSkills(
 				content: body,
 				frontmatter,
 				level,
-				// The manifest name, never a path segment: registry installs live
-				// under `<marketplace>/<plugin>/<version>/`, so path-derived
-				// collision namespaces would change on every version bump.
-				_source: createSourceMeta(PROVIDER_ID, skillPath, level, undefined, pluginName),
+				_source: createSourceMeta(PROVIDER_ID, skillPath, level),
 			});
 		}),
 	);
@@ -213,7 +206,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 				// reported once here rather than from every capability loader.
 				return { items: [], warnings: [`[agent-plugins] Rejected plugin at ${candidate.path}: ${status.reason}`] };
 			}
-			const scan = await scanStandardSkills(status.realRoot, candidate.level, status.manifest.name);
+			const scan = await scanStandardSkills(status.realRoot, candidate.level);
 			return {
 				items: scan.items,
 				warnings: [...status.warnings, ...(scan.warnings ?? [])].map(

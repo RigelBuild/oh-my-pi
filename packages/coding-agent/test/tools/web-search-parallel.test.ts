@@ -42,7 +42,7 @@ describe("Parallel web search", () => {
 			resolver: (_provider: string) => async () => process.env.PARALLEL_API_KEY ?? undefined,
 		},
 		limits: {
-			rotate: async () => ({ switched: false }),
+			rotate: async () => false,
 		},
 	} as unknown as AuthStorage;
 
@@ -154,10 +154,12 @@ describe("Parallel web search", () => {
 		]);
 	});
 
-	it("joins the auto chain without a credential so the public MCP runs", () => {
+	it("admits credential-free Parallel only when explicitly selected", () => {
 		delete process.env.PARALLEL_API_KEY;
+		const provider = new ParallelProvider();
 
-		expect(new ParallelProvider().isAvailable(anonymousAuthStorage)).toBe(true);
+		expect(provider.isAvailable(anonymousAuthStorage)).toBe(false);
+		expect(provider.isExplicitlyAvailable(anonymousAuthStorage)).toBe(true);
 	});
 
 	it("uses anonymous MCP and maps structured results when Parallel has no credential", async () => {

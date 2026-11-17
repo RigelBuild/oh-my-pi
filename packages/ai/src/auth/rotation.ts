@@ -1,4 +1,3 @@
-import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import { extractProviderRetryHint } from "../utils/retry-after";
@@ -6,8 +5,6 @@ import type { CredentialRankingContext, CredentialRankingStrategy } from "../usa
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
 import {
-	ACCOUNT_POLICY_BLOCK_SCOPE,
-	AUTH_BLOCK_SCOPE,
 	DEFAULT_BLOCK_MS,
 	credentialBlockScopesForRequest,
 	modelAccountPolicyBlockScope,
@@ -20,7 +17,6 @@ import type { CredentialPool } from "./pool";
 import type { AuthCredentialStore } from "./store";
 import type {
 	AuthCredential,
-	CredentialRotation,
 	InvalidateCredentialMatchingOptions,
 	LimitsApi,
 	MarkUsageLimitOptions,
@@ -35,16 +31,6 @@ import {
 	usageResetAtMs,
 	windowResetAt,
 } from "./usage-report";
-
-/**
- * Longest sibling block {@link RateLimits.rotate} sleeps out instead of giving
- * up. Covers Cloud Code Assist capacity 429s ("Resets in 0s", sub-second
- * `retryDelay`) that briefly block every healthy account; longer blocks stay
- * with the caller's own backoff layer.
- */
-const SIBLING_UNBLOCK_WAIT_MAX_MS = 5_000;
-/** Slack past a sibling's deadline so the post-wait resolve sees the block expired. */
-const SIBLING_UNBLOCK_SLACK_MS = 25;
 
 /** Routing scope and strategy for one failed credential. */
 export type CredentialBlockRouting = {
@@ -349,7 +335,6 @@ export class RateLimits implements LimitsApi {
 			providerTypeKey(provider, matched.type),
 			matched.index,
 			Date.now() + DEFAULT_BLOCK_MS,
-			AUTH_BLOCK_SCOPE,
 		);
 
 		const markSuspect = this.#deps.store.markCredentialSuspect?.bind(this.#deps.store);
@@ -388,16 +373,9 @@ export class RateLimits implements LimitsApi {
 	 *   reload when no broker hook is wired) and block it, then drop matching
 	 *   sticky state.
 	 *
-	 * For usage-limit and account-policy failures with no free sibling, sleeps
-	 * until the earliest sibling unblocks when that is at most
-	 * {@link SIBLING_UNBLOCK_WAIT_MAX_MS} away, then reports `afterSiblingWait`.
-	 * Aborting `options.signal` during that wait rejects.
+	 * Returns whether another usable credential of the same type remains.
 	 */
-	async rotate(
-		provider: string,
-		sessionId: string | undefined,
-		options?: RotateCredentialOptions,
-	): Promise<CredentialRotation> {
+	async rotate(provider: string, sessionId: string | undefined, options?: RotateCredentialOptions): Promise<boolean> {
 		await this.#deps.pool.adoptExternalChanges();
 		const error = options?.error;
 		const status = AIError.status(error);
@@ -409,15 +387,16 @@ export class RateLimits implements LimitsApi {
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
 			const retryAfterMs = extractProviderRetryHint(provider, message);
-			const mark = await this.markReached(provider, sessionId, {
-				retryAfterMs,
-				providerTimed: retryAfterMs !== undefined,
-				modelId: options?.modelId,
-				apiKey: options?.apiKey,
-				credentialId: options?.credentialId,
-				signal: options?.signal,
-			});
-			return awaitSiblingUnblock(mark, options?.signal);
+			return (
+				await this.markReached(provider, sessionId, {
+					retryAfterMs,
+					providerTimed: retryAfterMs !== undefined,
+					modelId: options?.modelId,
+					apiKey: options?.apiKey,
+					credentialId: options?.credentialId,
+					signal: options?.signal,
+				})
+			).switched;
 		}
 
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
@@ -429,16 +408,16 @@ export class RateLimits implements LimitsApi {
 			apiKey: options?.apiKey,
 			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
 		});
-		if (!sessionCredential) return { switched: false };
+		if (!sessionCredential) return false;
 		// The exact sentence is provider-controlled input. A non-Codex provider,
 		// absent request model, or mismatched model must not turn it into either a
 		// global block or a hard-auth invalidation.
-		if (deniedModel !== undefined && !exactCodexModelPolicy) return { switched: false };
+		if (deniedModel !== undefined && !exactCodexModelPolicy) return false;
 		if (exactModelPolicy || accountPolicy) {
 			const modelPolicyScope = exactModelPolicy
 				? modelAccountPolicyBlockScope(provider, options?.modelId)
 				: undefined;
-			if (exactModelPolicy && modelPolicyScope === undefined) return { switched: false };
+			if (exactModelPolicy && modelPolicyScope === undefined) return false;
 			const routing = this.#credentialBlockRouting(
 				provider,
 				sessionCredential.type,
@@ -446,7 +425,7 @@ export class RateLimits implements LimitsApi {
 				modelPolicyScope,
 			);
 			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
-			routing.blockScope = modelPolicyScope ?? ACCOUNT_POLICY_BLOCK_SCOPE;
+			routing.blockScope = modelPolicyScope;
 			const sticky = this.#deps.affinity.get(provider, sessionId);
 			if (
 				!sessionCredential.explicit ||
@@ -454,15 +433,14 @@ export class RateLimits implements LimitsApi {
 			) {
 				this.#deps.affinity.clear(provider, sessionId);
 			}
-			const mark = this.#blockCredentialForRotation(
+			return this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,
 				sessionCredential.index,
 				Date.now() + DEFAULT_BLOCK_MS,
 				routing,
 				false,
-			);
-			return awaitSiblingUnblock(mark, options?.signal);
+			).switched;
 		}
 
 		const providerKey = providerTypeKey(provider, sessionCredential.type);
@@ -484,13 +462,7 @@ export class RateLimits implements LimitsApi {
 		) {
 			this.#deps.affinity.clear(provider, sessionId);
 		}
-		this.#deps.blocks.mark(
-			provider,
-			providerKey,
-			sessionCredential.index,
-			Date.now() + DEFAULT_BLOCK_MS,
-			AUTH_BLOCK_SCOPE,
-		);
+		this.#deps.blocks.mark(provider, providerKey, sessionCredential.index, Date.now() + DEFAULT_BLOCK_MS);
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
 			const disabledCause = message ?? "upstream reported invalidated OAuth token";
@@ -502,7 +474,7 @@ export class RateLimits implements LimitsApi {
 					latestRows.map(row => ({ id: row.id, credential: row.credential })),
 				);
 			}
-			return { switched: deleted && hasSibling };
+			return deleted && hasSibling;
 		}
 
 		if (target) {
@@ -519,19 +491,6 @@ export class RateLimits implements LimitsApi {
 			);
 		}
 
-		return { switched: hasSibling };
+		return hasSibling;
 	}
-}
-
-/**
- * Turn a no-sibling mark into a rotation by sleeping out the soonest sibling
- * block when it expires within {@link SIBLING_UNBLOCK_WAIT_MAX_MS}.
- */
-async function awaitSiblingUnblock(mark: UsageLimitMarkResult, signal?: AbortSignal): Promise<CredentialRotation> {
-	if (mark.switched) return { switched: true };
-	if (mark.retryAtMs === undefined) return { switched: false };
-	const waitMs = mark.retryAtMs - Date.now() + SIBLING_UNBLOCK_SLACK_MS;
-	if (waitMs > SIBLING_UNBLOCK_WAIT_MAX_MS) return { switched: false };
-	if (waitMs > 0) await scheduler.wait(waitMs, { signal });
-	return { switched: true, afterSiblingWait: true };
 }

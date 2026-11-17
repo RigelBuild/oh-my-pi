@@ -53,30 +53,8 @@ const vibeKillSchema = type({
 
 const vibeListSchema = type({});
 
-/** Most recent killed ids named in `vibe_list`'s trailing line; older ones fold into `+N more`. */
-const KILLED_IDS_LISTED = 8;
-
-/**
- * TV-wall snapshot. Named `ids` show exactly those sessions. Otherwise
- * sessions the director killed are left off the wall and reported by id, so a
- * director that kills finished workers doesn't re-render every one on each
- * status check. Workers that died on their own stay visible. `keep` retains
- * ids already on the wall (a wait never drops a card mid-wait).
- */
-function wallOf(
-	session: ToolSession,
-	ids?: string[],
-	keep?: ReadonlySet<string>,
-): Pick<VibeToolDetails, "screens" | "hiddenKilled"> {
-	const all = VibeSessionRegistry.global().screens(session, ids);
-	if (ids?.length) return { screens: all };
-	const screens: VibeScreenSnapshot[] = [];
-	const hiddenKilled: string[] = [];
-	for (const screen of all) {
-		if (screen.killed && !keep?.has(screen.id)) hiddenKilled.push(screen.id);
-		else screens.push(screen);
-	}
-	return hiddenKilled.length > 0 ? { screens, hiddenKilled } : { screens };
+function screensOf(session: ToolSession, ids?: string[]): VibeScreenSnapshot[] {
+	return VibeSessionRegistry.global().screens(session, ids);
 }
 
 function textResult(text: string, details: VibeToolDetails): AgentToolResult<VibeToolDetails> {
@@ -99,7 +77,7 @@ export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeTool
 		const { id, jobId } = await VibeSessionRegistry.global().spawn(this.session, params);
 		return textResult(
 			`Spawned ${params.cli} session \`${id}\` (turn job \`${jobId}\`). The turn result will be delivered when it finishes — keep directing other sessions meanwhile. Continue this one with vibe_send \`${id}\`.`,
-			{ op: "spawn", ...wallOf(this.session), spawned: { id, cli: params.cli, jobId } },
+			{ op: "spawn", screens: screensOf(this.session), spawned: { id, cli: params.cli, jobId } },
 		);
 	}
 }
@@ -124,7 +102,7 @@ export class VibeSendTool implements AgentTool<typeof vibeSendSchema, VibeToolDe
 				: outcome.mode === "steered"
 					? `Steered \`${outcome.id}\` mid-turn — the running turn sees your message at its next step.`
 					: `\`${outcome.id}\` is mid-turn; your message is queued and runs automatically as the next turn.`;
-		return textResult(ack, { op: "send", ...wallOf(this.session), send: outcome });
+		return textResult(ack, { op: "send", screens: screensOf(this.session), send: outcome });
 	}
 }
 
@@ -152,15 +130,12 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 		const registry = VibeSessionRegistry.global();
 		// Live TV-wall frames while the wait blocks: each tick re-snapshots the
 		// watched workers so their tool calls and streamed text play in place.
-		// Cards on the wall when the wait starts stay for its duration, so a
-		// worker killed mid-wait can't vanish from the frame that settles it.
-		const shown = new Set(wallOf(this.session, params.sessions).screens.map(screen => screen.id));
 		const emitProgress = (): void => {
 			onUpdate?.({
 				content: [{ type: "text", text: "" }],
 				details: {
 					op: "wait",
-					...wallOf(this.session, params.sessions, shown),
+					screens: screensOf(this.session, params.sessions),
 					wait: { settled: [], stillRunning: [], timedOut: false, waiting: true },
 				},
 			});
@@ -177,11 +152,9 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 		} finally {
 			clearInterval(progressTimer);
 		}
-		// A worker that died as its turn settled keeps its card for the settled footer.
-		for (const entry of outcome.settled) shown.add(entry.id);
 		const details: VibeToolDetails = {
 			op: "wait",
-			...wallOf(this.session, params.sessions, shown),
+			screens: screensOf(this.session, params.sessions),
 			wait: {
 				settled: outcome.settled.map(({ id, jobId, status }) => ({ id, jobId, status })),
 				stillRunning: outcome.stillRunning,
@@ -226,7 +199,7 @@ export class VibeKillTool implements AgentTool<typeof vibeKillSchema, VibeToolDe
 			`Killed session \`${outcome.id}\`.${cancelNote} Transcript remains at history://${outcome.id}.`,
 			{
 				op: "kill",
-				...wallOf(this.session),
+				screens: screensOf(this.session),
 				killed: outcome,
 			},
 		);
@@ -246,8 +219,11 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 	}
 
 	async execute(): Promise<AgentToolResult<VibeToolDetails>> {
-		const { screens, hiddenKilled } = wallOf(this.session);
-		const details: VibeToolDetails = { op: "list", screens, hiddenKilled };
+		const screens = screensOf(this.session);
+		const details: VibeToolDetails = { op: "list", screens };
+		if (screens.length === 0) {
+			return textResult("No vibe sessions. Spawn one with vibe_spawn.", details);
+		}
 		const lines = screens.map(screen => {
 			const parts = [
 				`- \`${screen.id}\` [${screen.cli}] ${screen.state}`,
@@ -258,15 +234,6 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 			if (screen.lastActivity) parts.push(`last: ${screen.lastActivity}`);
 			return parts.join(" · ");
 		});
-		if (lines.length === 0) {
-			lines.push(hiddenKilled ? "No live vibe sessions." : "No vibe sessions. Spawn one with vibe_spawn.");
-		}
-		if (hiddenKilled) {
-			const recent = hiddenKilled.slice(-KILLED_IDS_LISTED).map(id => `\`${id}\``);
-			const older = hiddenKilled.length - recent.length;
-			if (older > 0) recent.push(`+${older} more`);
-			lines.push(`Killed (${hiddenKilled.length}, transcripts at history://<id>): ${recent.join(", ")}`);
-		}
 		return textResult(lines.join("\n"), details);
 	}
 }

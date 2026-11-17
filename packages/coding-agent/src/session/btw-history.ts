@@ -77,22 +77,6 @@ async function readRecord(filePath: string): Promise<StoredRecord | undefined> {
 	}
 }
 
-function historyDirectory(artifactsDir: string, scope: string | undefined): string {
-	const root = path.join(artifactsDir, "btw-history");
-	if (scope === undefined) return root;
-	// Session ids come from session headers; never let one escape the history root.
-	const segment = /^[\w-]+$/.test(scope) ? scope : new Bun.CryptoHasher("sha256").update(scope).digest("hex");
-	return path.join(root, "sessions", segment);
-}
-
-/** The topic on disk is missing or was rewritten since this store read it; retrying the same write can never succeed. */
-export class BtwHistoryConflictError extends Error {
-	constructor(readonly recordId: string) {
-		super(`BTW history conflict for ${recordId}; reopen history before retrying`);
-		this.name = "BtwHistoryConflictError";
-	}
-}
-
 /** Session-local sidecar storage; never reads or writes the main session journal. */
 export class BtwHistoryStore {
 	readonly #directory: string | undefined;
@@ -107,13 +91,10 @@ export class BtwHistoryStore {
 		this.#directory = directory;
 	}
 
-	/**
-	 * Open the BTW history for an artifacts directory. Subagents share their
-	 * parent's artifacts directory, so a `scope` (the owning session id) keeps
-	 * each focused agent's side conversations apart from main and its siblings.
-	 */
-	static async open(artifactsDir: string | undefined, scope?: string): Promise<BtwHistoryStore> {
-		const store = new BtwHistoryStore(artifactsDir === undefined ? undefined : historyDirectory(artifactsDir, scope));
+	static async open(artifactsDir: string | undefined): Promise<BtwHistoryStore> {
+		const store = new BtwHistoryStore(
+			artifactsDir === undefined ? undefined : path.join(artifactsDir, "btw-history"),
+		);
 		if (store.#directory === undefined) return store;
 		let names: string[];
 		try {
@@ -176,7 +157,7 @@ export class BtwHistoryStore {
 			// Missing records and new-id collisions are conflicts, not blind inserts.
 			const stored = await readRecord(filePath);
 			if (stored?.revision !== this.#revisions.get(snapshot.id)) {
-				throw new BtwHistoryConflictError(snapshot.id);
+				throw new Error(`BTW history conflict for ${snapshot.id}; reopen history before retrying`);
 			}
 			const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 			try {

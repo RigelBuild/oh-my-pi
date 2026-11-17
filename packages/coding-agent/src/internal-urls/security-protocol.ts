@@ -1,37 +1,35 @@
 import * as path from "node:path";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../config/settings";
-
-import securityDoc from "../prompts/internal-urls/security.md" with { type: "text" };
+import { getDefault } from "../config/settings-schema";
 import type { SecurityFinding } from "../security/contracts";
 import { createPublicSecurityScan, redactPrivateSecurityMetadata } from "../security/provenance";
 import { createSecurityResource } from "../security/resource-output";
 import type { SecurityScanSummary } from "../security/store";
 import { SecurityStore } from "../security/store";
-import type {
-	InternalResource,
-	InternalUrl,
-	ProtocolHandler,
-	ResolveContext,
-	SchemeHost,
-	SchemeSpec,
-	UrlCompletion,
-} from "./types";
-import { cfgSecurityEnabled } from "../tools/settings";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 export type SecurityStoreResolver = (cwd: string, signal?: AbortSignal) => Promise<SecurityStore>;
 
 export function isSecurityEnabled(): boolean {
-	if (!isSettingsInitialized()) return cfgSecurityEnabled.default;
+	if (!isSettingsInitialized()) return getDefault("security.enabled");
 	try {
-		return cfgSecurityEnabled.get(settings);
+		return settings.get("security.enabled");
 	} catch {
-		return cfgSecurityEnabled.default;
+		return getDefault("security.enabled");
 	}
 }
 
 function securityEnabledFromContext(context?: ResolveContext): boolean | undefined {
-	return context?.settings ? cfgSecurityEnabled.get(context.settings) : undefined;
+	if (!context?.settings || typeof context.settings !== "object") return undefined;
+	try {
+		const get = Reflect.get(context.settings, "get");
+		if (typeof get !== "function") return undefined;
+		const enabled = Reflect.apply(get, context.settings, ["security.enabled"]);
+		return typeof enabled === "boolean" ? enabled : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 const SECURITY_DISABLED_MESSAGE =
@@ -102,7 +100,7 @@ function formatFinding(finding: SecurityFinding): string {
 
 export class SecurityProtocolHandler implements ProtocolHandler {
 	readonly scheme = "security";
-	readonly spec: SchemeSpec = { backing: "virtual", selectors: "lines", immutable: true };
+	readonly immutable = true;
 	readonly #resolveStore: SecurityStoreResolver;
 	readonly #enabled: () => boolean;
 
@@ -112,11 +110,6 @@ export class SecurityProtocolHandler implements ProtocolHandler {
 	) {
 		this.#resolveStore = resolveStore;
 		this.#enabled = enabled;
-	}
-
-	/** Advertised only when `security.enabled` is on for the session. */
-	promptDoc(host: SchemeHost): string | undefined {
-		return host.securityEnabled ? securityDoc.trim() : undefined;
 	}
 
 	async #store(context?: ResolveContext): Promise<SecurityStore> {

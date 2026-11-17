@@ -7,8 +7,6 @@ import { STTController, type STTControllerDependencies } from "../src/stt/stt-co
 import { evaluateSubmitTrigger, type SttSubmitTrigger } from "../src/stt/submit-trigger";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-import { cfgSttSubmitTrigger } from "@oh-my-pi/pi-coding-agent/stt/settings";
-
 const DICTATION_MODELS = [getBundledModel("local", "whisper-base")];
 const registry: STTControllerDependencies["registry"] = {
 	getError: () => undefined,
@@ -199,7 +197,7 @@ describe("STTController submit trigger integration", () => {
 	}
 
 	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger) {
-		cfgSttSubmitTrigger.set(settings, trigger);
+		settings.set("stt.submitTrigger", trigger);
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
 			stop: vi.fn().mockResolvedValue(transcript),
@@ -221,7 +219,7 @@ describe("STTController submit trigger integration", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.setModelRole("dictation", "local/whisper-base");
-		cfgSttSubmitTrigger.set(settings, "never");
+		settings.set("stt.submitTrigger", "never");
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);
 	});
@@ -252,6 +250,14 @@ describe("STTController submit trigger integration", () => {
 
 		expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
 		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(8);
+		expect(editor.submit).toHaveBeenCalledTimes(1);
+	});
+
+	it("submits the existing draft when streaming dictation only says submit", async () => {
+		const { editor } = await transcribeStream("submit", "say-submit");
+
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("submit");
+		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(6);
 		expect(editor.submit).toHaveBeenCalledTimes(1);
 	});
 });

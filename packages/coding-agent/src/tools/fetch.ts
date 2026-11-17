@@ -35,9 +35,6 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
-import { cfgFetchEnabled, cfgToolsMaxTimeout } from "./settings";
-import { cfgProvidersFetch } from "../session/settings";
-
 // =============================================================================
 // Types and Constants
 // =============================================================================
@@ -665,7 +662,7 @@ export async function renderHtmlToText(
 		},
 	};
 
-	const preference = cfgProvidersFetch.get(settings);
+	const preference = settings.get("providers.fetch");
 	const order: readonly FetchProvider[] =
 		preference === "auto"
 			? FETCH_PROVIDER_ORDER
@@ -1618,7 +1615,7 @@ export async function fetchReadUrl(
 ): Promise<ReadUrlEntry> {
 	const { path: url, raw = false } = params;
 
-	const effectiveTimeout = clampTimeout("fetch", 30, cfgToolsMaxTimeout.get(session.settings));
+	const effectiveTimeout = clampTimeout("fetch", 30, session.settings.get("tools.maxTimeout"));
 
 	if (signal?.aborted) {
 		throw new ToolAbortError();
@@ -1662,7 +1659,7 @@ export async function materializeReadUrlToFile(
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
 ): Promise<{ path: string; details: ReadUrlToolDetails }> {
-	if (!cfgFetchEnabled.get(session.settings)) {
+	if (!session.settings.get("fetch.enabled")) {
 		throw new ToolError("URL reads are disabled by settings.");
 	}
 	const entry = await fetchReadUrl(session, params, signal);

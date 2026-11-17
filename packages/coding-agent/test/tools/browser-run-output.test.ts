@@ -72,7 +72,6 @@ describe("browser handle enrichment — fill()", () => {
 					focus: () => {
 						node.focused = true;
 					},
-					matches: () => false,
 				});
 			},
 			type: async (text: string) => {
@@ -83,7 +82,7 @@ describe("browser handle enrichment — fill()", () => {
 
 		await toActionableHandle(stub).fill("fresh");
 
-		expect(calls).toEqual(["evaluate", "evaluate", "type"]);
+		expect(calls).toEqual(["evaluate", "type"]);
 		expect(node.focused).toBe(true);
 		expect(node.value).toBe("fresh");
 	});
@@ -168,7 +167,7 @@ describe("browser handle enrichment — guarded actions", () => {
 		const stub = {
 			type: async () => {},
 			evaluate: async (fn: (el: unknown) => unknown) => {
-				fn({ focus: () => {}, matches: () => false });
+				fn({ focus: () => {} });
 			},
 			frame: {
 				page: () => ({
@@ -198,20 +197,20 @@ describe("browser handle enrichment — guarded actions", () => {
 	});
 
 	it("passes arguments and return values through the guarded method unchanged", async () => {
-		const received: unknown[][] = [];
+		let calls = 0;
 		const stub = {
-			drag: async (...args: unknown[]) => {
-				received.push(args);
-				return { items: [], dragOperationsMask: 1 };
+			select: async (...values: string[]) => {
+				calls++;
+				return values;
 			},
 			type: async () => {},
 			evaluate: async () => {},
 		} as unknown as ElementHandle;
 		const { guard, labels } = makeGuard(1_000);
 
-		expect(await toActionableHandle(stub, guard).drag({ x: 1, y: 2 })).toEqual({ items: [], dragOperationsMask: 1 });
-		expect(received).toEqual([[{ x: 1, y: 2 }]]);
-		expect(labels).toEqual(["handle.drag()"]);
+		expect(await toActionableHandle(stub, guard).select("a", "b")).toEqual(["a", "b"]);
+		expect(calls).toBe(1);
+		expect(labels).toEqual(["handle.select()"]);
 	});
 
 	it("guards drag and touch input methods, not just click/type", async () => {
@@ -248,7 +247,6 @@ describe("browser handle enrichment — guarded actions", () => {
 					focus: () => {
 						node.focused = true;
 					},
-					matches: () => false,
 				});
 			},
 			type: async () => {},

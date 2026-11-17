@@ -58,8 +58,7 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 // Broker-shared server mode (one language server per project shared by every
 // omp instance through the LSP mux daemon). Off by default so embedders and
 // tests that drive getOrCreateClient directly never touch the daemon broker;
-// the SDK sets it from the `lsp.shared` setting at session creation and on every
-// later change. Only consulted at cold-start, so running clients keep their transport.
+// the SDK turns it on from the `lsp.shared` setting at session creation.
 let sharedLspEnabled = false;
 
 /** Enable or disable attaching to broker-shared language servers. */

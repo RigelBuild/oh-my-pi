@@ -1,9 +1,6 @@
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { type Component, Container } from "../tui";
-import { col, span, text } from "../native/describe";
-import type { NativeChild, NativeNode } from "../native/node";
-import { plainText } from "../native/spans";
 
 /** One refresh of a streaming overlay's presentation. */
 export interface StreamingPanelPresentation {
@@ -21,19 +18,9 @@ class StreamingPanelFooter implements Component {
 	readonly #line: string | (() => string);
 	#renderedLine: string | undefined;
 	#text: Text | undefined;
-	#native: { line: string; node: NativeNode } | undefined;
 
 	constructor(line: string | (() => string)) {
 		this.#line = line;
-	}
-
-	/** The footer line as muted text, re-read each describe because action availability can change. */
-	describe(): NativeNode {
-		const line = plainText(typeof this.#line === "function" ? this.#line() : this.#line);
-		if (this.#native?.line !== line) {
-			this.#native = { line, node: text([span(line, "muted")], { wrap: "word", role: "omp.panel.footer" }) };
-		}
-		return this.#native.node;
 	}
 
 	render(width: number): readonly string[] {
@@ -57,7 +44,6 @@ class StreamingPanelFooter implements Component {
  */
 export class StreamingPanelContent extends Container {
 	readonly #presentation: () => StreamingPanelPresentation;
-	#native: NativeNode = col([]);
 
 	constructor(presentation: () => StreamingPanelPresentation) {
 		super();
@@ -70,24 +56,14 @@ export class StreamingPanelContent extends Container {
 		this.disposeChildren();
 		this.addChild(new Spacer(1));
 		const presentation = this.#presentation();
-		const sections: NativeChild[] = [];
 		for (const section of presentation.sections) {
 			if (!section) continue;
 			const children = isComponentList(section) ? section : [section];
 			if (children.length === 0) continue;
 			for (const child of children) this.addChild(child);
 			this.addChild(new Spacer(1));
-			sections.push(col(children));
 		}
-		const footer = new StreamingPanelFooter(presentation.footer);
-		this.addChild(footer);
-		sections.push(footer);
-		this.#native = col(sections, { gap: "sm" });
-	}
-
-	/** The sections as a spaced stack followed by the footer; spacing is the terminal's. */
-	override describe(): NativeNode {
-		return this.#native;
+		this.addChild(new StreamingPanelFooter(presentation.footer));
 	}
 
 	override invalidate(): void {

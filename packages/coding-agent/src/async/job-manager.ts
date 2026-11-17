@@ -92,8 +92,6 @@ export interface AsyncJob {
 	 * attempt, redelivery, and `proc://` snapshot reads it from here.
 	 */
 	structured?: StructuredSubagentOutput;
-	/** Latest progress text the running job reported (a bash job's output tail). */
-	progressText?: string;
 	/** Latest tool-render details reported by the running job. */
 	latestDetails?: AsyncJobDetails;
 	/**
@@ -109,8 +107,6 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
-	/** The process the job runs, when it spawns one. */
-	process?: AsyncJobProcess;
 	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
@@ -135,19 +131,6 @@ export interface AsyncJob {
 	retainedArtifactsCleanup?: () => Promise<void>;
 }
 
-/**
- * The process a job runs, for job inspectors (the jobs sheet): set by bodies
- * that spawn one (bash), absent for in-process work (eval, task).
- */
-export interface AsyncJobProcess {
-	/** Full command line; the job label is cut to 120 characters. */
-	readonly command: string;
-	/** Directory the command started in. */
-	readonly cwd: string;
-	/** Live pids the command spawned, in spawn order; empty before it starts and after it ends. */
-	pids(): readonly number[];
-}
-
 /** Delivery callback for a settled job's result text. */
 export type AsyncJobDeliverySink = (jobId: string, text: string, job?: AsyncJob) => void | Promise<void>;
 
@@ -161,8 +144,7 @@ export interface AsyncJobManagerOptions {
 	 * would leak one agent's result into another session.
 	 */
 	onJobComplete?: AsyncJobDeliverySink;
-	/** Running-job cap; a function is re-read on every capacity check so a live setting resizes the cap. */
-	maxRunningJobs?: number | (() => number);
+	maxRunningJobs?: number;
 	retentionMs?: number;
 	/**
 	 * Delay after a job's `async-result` delivery settles before its retained
@@ -234,18 +216,15 @@ export interface AsyncJobRegisterOptions {
 	queued?: boolean;
 	/** Register the job as backing a foreground call; see {@link AsyncJob.foreground}. */
 	foreground?: boolean;
-	/** The process the job runs; see {@link AsyncJob.process}. */
-	process?: AsyncJobProcess;
 }
 
 /**
- * Filter applied to job query/cancel/delivery APIs. Matches jobs registered by
- * exactly `ownerId` (registry id from `AgentRegistry`, e.g. "Main",
- * "AuthLoader"); `ownerId: undefined` matches only unowned jobs. Omit the
- * filter entirely for a manager-wide view.
+ * Filter applied to job query/cancel APIs. With `ownerId`, results are
+ * restricted to jobs registered by that agent (registry id from
+ * `AgentRegistry`, e.g. "Main", "AuthLoader").
  */
 export interface AsyncJobFilter {
-	ownerId: string | undefined;
+	ownerId?: string;
 }
 
 export class AsyncJobManager {
@@ -277,7 +256,7 @@ export class AsyncJobManager {
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
-	readonly #maxRunningJobsOption: AsyncJobManagerOptions["maxRunningJobs"];
+	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
 	readonly #retainedArtifactsCleanupGraceMs: number;
 	readonly #retainedArtifactsCleanupMaxWaitMs: number;
@@ -287,10 +266,11 @@ export class AsyncJobManager {
 	#disposed = false;
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
-		if (!filter) return Array.from(jobs);
+		const ownerId = filter?.ownerId;
+		if (!ownerId) return Array.from(jobs);
 		const out: AsyncJob[] = [];
 		for (const job of jobs) {
-			if (job.ownerId === filter.ownerId) out.push(job);
+			if (job.ownerId === ownerId) out.push(job);
 		}
 		return out;
 	}
@@ -301,7 +281,7 @@ export class AsyncJobManager {
 
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
-		this.#maxRunningJobsOption = options.maxRunningJobs;
+		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
 		this.#retainedArtifactsCleanupGraceMs = Math.max(
 			0,
@@ -315,13 +295,6 @@ export class AsyncJobManager {
 			0,
 			Math.floor(options.consumedResultEvictionMs ?? CONSUMED_RESULT_EVICTION_MS),
 		);
-	}
-
-	/** Effective running-job cap (at least 1), resolved at check time. */
-	get #maxRunningJobs(): number {
-		const option = this.#maxRunningJobsOption;
-		const value = typeof option === "function" ? option() : option;
-		return Math.max(1, Math.floor(value ?? DEFAULT_MAX_RUNNING_JOBS));
 	}
 
 	/** True when the running-job count has reached the configured cap. */
@@ -356,10 +329,9 @@ export class AsyncJobManager {
 		for (const existing of this.#jobs.values()) {
 			if (existing.status === "running" && !existing.queued) activeCount++;
 		}
-		const maxRunningJobs = this.#maxRunningJobs;
-		if (activeCount >= maxRunningJobs) {
+		if (activeCount >= this.#maxRunningJobs) {
 			throw new Error(
-				`Background job limit reached (${maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
+				`Background job limit reached (${this.#maxRunningJobs}). Wait for running jobs to finish or cancel one.`,
 			);
 		}
 
@@ -381,13 +353,11 @@ export class AsyncJobManager {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
-			process: options?.process,
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
-			job.progressText = text;
 			if (details) job.latestDetails = details;
 			if (!options?.onProgress) return;
 			try {
@@ -439,14 +409,14 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Cancel a single job by id. When a filter is given and its owner does not
+	 * Cancel a single job by id. When `filter.ownerId` is set and does not
 	 * match the job's owner, the call is treated as not-found (returns false)
 	 * so cross-agent cancellation is rejected at the manager level.
 	 */
 	cancel(id: string, filter?: AsyncJobFilter): boolean {
 		const job = this.#jobs.get(id);
 		if (!job) return false;
-		if (filter && job.ownerId !== filter.ownerId) return false;
+		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
 		job.abortController.abort();
@@ -596,8 +566,8 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Cancel running jobs. With a filter, cancels only jobs the matching owner
-	 * registered; with no filter, cancels every running job
+	 * Cancel running jobs. With `filter.ownerId` set, cancels only jobs the
+	 * matching agent registered; with no filter, cancels every running job
 	 * (used by `dispose()` to nuke the manager's state).
 	 *
 	 * `reason` is forwarded to each job's `AbortController.abort`, so a session
@@ -738,7 +708,7 @@ export class AsyncJobManager {
 		const deadline = hasDeadline ? Date.now() + Math.max(timeoutMs, 0) : Number.POSITIVE_INFINITY;
 
 		while (this.hasPendingDeliveries(filter)) {
-			if (filter) {
+			if (filter?.ownerId) {
 				const delivered = await this.#deliverNextFiltered(filter, deadline);
 				if (delivered) continue;
 				return false;
@@ -995,14 +965,18 @@ export class AsyncJobManager {
 	}
 
 	#filterDeliveries(filter?: AsyncJobFilter): AsyncJobDelivery[] {
+		const ownerId = filter?.ownerId;
+		if (!ownerId) return this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
 		return this.#deliveries.filter(
-			delivery => (!filter || delivery.ownerId === filter.ownerId) && !this.isDeliverySuppressed(delivery.jobId),
+			delivery => delivery.ownerId === ownerId && !this.isDeliverySuppressed(delivery.jobId),
 		);
 	}
 
 	#filterInFlightDeliveries(filter?: AsyncJobFilter): AsyncJobDelivery[] {
+		const ownerId = filter?.ownerId;
+		if (!ownerId) return this.#inFlightDeliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
 		return this.#inFlightDeliveries.filter(
-			delivery => (!filter || delivery.ownerId === filter.ownerId) && !this.isDeliverySuppressed(delivery.jobId),
+			delivery => delivery.ownerId === ownerId && !this.isDeliverySuppressed(delivery.jobId),
 		);
 	}
 

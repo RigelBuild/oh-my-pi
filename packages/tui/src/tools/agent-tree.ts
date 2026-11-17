@@ -60,8 +60,6 @@ export interface AgentTreeRowOptions {
 	description?: string;
 	preview?: string;
 	stats?: AgentStats;
-	/** The agent's own completion estimate (0–100); shown only while live. */
-	completionPercent?: number;
 	durationMs?: number;
 }
 
@@ -122,9 +120,6 @@ export function renderAgentTreeRow(
 	}
 	let line = `${lead}${modelLead}${title}${badges}`;
 	if (options.preview) line += options.preview;
-	if (live && options.completionPercent !== undefined) {
-		line += `${theme.sep.dot}${theme.fg("accent", `${options.completionPercent}%`)}`;
-	}
 	if (options.stats) line += formatAgentStatRun(options.stats, theme);
 	if (options.durationMs !== undefined && options.durationMs > 0) {
 		line += `${theme.sep.dot}${theme.fg("dim", formatDuration(options.durationMs))}`;

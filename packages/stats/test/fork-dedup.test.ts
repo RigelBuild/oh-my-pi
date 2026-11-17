@@ -1,11 +1,9 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { closeDb, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
-import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
-import * as parser from "@oh-my-pi/omp-stats/parser";
+import { closeDb, getOverallStats, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -106,7 +104,7 @@ function makeStat(sessionFile: string, entryId: string, timestamp: number, premi
 }
 
 describe("stats sync deduplicates forked-session entries", () => {
-	it("keeps each request attributed to its original transcript when the fork finishes parsing first", async () => {
+	it("counts each provider request once even when a fork copied the entries", async () => {
 		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
 		const userEntry = buildUserEntry("user01ab", ts, "hello");
 		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
@@ -123,25 +121,13 @@ describe("stats sync deduplicates forked-session entries", () => {
 		// header. Earlier stats sync keyed uniqueness on (session_file,
 		// entry_id), so both files contributed the same provider request to
 		// every aggregate.
-		const forkFile = await writeSessionFile(
+		await writeSessionFile(
 			"--tmp--fork-dedup",
 			"02_fork.jsonl",
 			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile },
 			[userEntry, assistantEntry],
 		);
-		const parse = parser.parseSessionFile;
-		const forkParsed = parse(forkFile);
-		const observer = spyOn(parser, "parseSessionFile").mockImplementation(async (file, offset, state, replay) => {
-			if (file === forkFile) return forkParsed;
-			// Finish the real fork read before allowing its parent's read to start.
-			await forkParsed;
-			return parse(file, offset, state, replay);
-		});
-		try {
-			await syncAllSessions({ workers: 1 });
-		} finally {
-			observer.mockRestore();
-		}
+		await syncAllSessions({ workers: 1 });
 
 		const assistantRequests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
 		expect(assistantRequests).toHaveLength(1);

@@ -16,54 +16,15 @@ import {
 	Tokenizer,
 	tokenizerEncodingForModel,
 } from "@oh-my-pi/pi-agent-core";
-import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Encoding } from "@oh-my-pi/pi-natives";
-import type { Settings } from "../config/settings";
-import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
-
-import {
-	cfgModelLoopGuardCheckAssistantContent,
-	cfgModelLoopGuardEnabled,
-	cfgOmitThinking,
-	cfgProvidersAnthropicServerSideFallback,
-	cfgProvidersAnthropicSlowMode,
-	cfgProvidersAntigravityEndpoint,
-	cfgProvidersCacheRetention,
-	cfgProvidersMaxInFlightRequests,
-	cfgProvidersMuseCodeStoreResponses,
-	cfgProvidersOpenaiLiveSteering,
-	cfgProvidersOpenaiWebsockets,
-	cfgProvidersOpenrouterVariant,
-	cfgProvidersStreamFirstEventTimeoutSeconds,
-	cfgProvidersStreamIdleTimeoutSeconds,
-	cfgRetryMaxDelayMs,
-	cfgTextVerbosity,
-	validateProviderMaxInFlightRequests,
-} from "./settings";
-
-/** Map `providers.openaiWebsockets` to the provider `preferWebsockets` hint (`auto` → model default). */
-export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | undefined {
-	const setting = cfgProvidersOpenaiWebsockets.get(settings);
-	return setting === "on" ? true : setting === "off" ? false : undefined;
-}
+import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
 function timeoutSecondsToMs(value: number): number | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
 	if (value === 0) return 0;
 	return Math.max(1, Math.trunc(value * 1000));
-}
-
-/** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`). */
-export interface SettingsStreamSlowModeContext {
-	/** Defaults to the process-wide lane registry. */
-	lanes?: AnthropicSlowModeLanes;
-	/** Final gate before auto-accepting the lane for `model` (e.g. prefer sibling accounts). */
-	canAutoAccept?: (model: Model) => boolean | Promise<boolean>;
-	/** Route slow-mode notices to the requesting session. */
-	notify?: (level: "info" | "warning" | "error", message: string) => void;
-	/** Record which account lane served the session's latest Anthropic request. */
-	onLane?: (lane: string) => void;
 }
 
 /**
@@ -76,66 +37,42 @@ export interface SettingsStreamSlowModeContext {
  * {@link fitOutputTokensToContextWindow}); every request this session drives,
  * including side turns like `/btw`, goes through here.
  */
-export function createSettingsAwareStreamFn(
-	settings: Settings,
-	base: StreamFn = streamSimple,
-	slowModeContext?: SettingsStreamSlowModeContext,
-): StreamFn {
+export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn = streamSimple): StreamFn {
 	// One tokenizer per encoding, so per-message counts are reused across requests.
 	const tokenizers = new Map<Encoding | null, Tokenizer>();
 	return (model, context, streamOptions) => {
-		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
+		const openrouterRoutingPreset = settings.get("providers.openrouterVariant");
 		const openrouterVariant =
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
-		const antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
+		const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
 		const textVerbosity =
 			model.api === "openai-codex-responses"
-				? cfgTextVerbosity.isConfigured(settings)
-					? cfgTextVerbosity.get(settings)
+				? settings.isConfigured("textVerbosity")
+					? settings.get("textVerbosity")
 					: undefined
 				: model.api === "openai-responses"
-					? cfgTextVerbosity.get(settings)
+					? settings.get("textVerbosity")
 					: undefined;
 		// "auto" leaves the option unset so provider defaults and the
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and
 		// implicitly disables the short-entry keep-alive refresh loop).
-		const cacheRetentionSetting = cfgProvidersCacheRetention.get(settings);
+		const cacheRetentionSetting = settings.get("providers.cacheRetention");
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
-		const streamFirstEventTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamFirstEventTimeoutSeconds.get(settings));
-		const streamIdleTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamIdleTimeoutSeconds.get(settings));
+		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
+		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
 		// Server-side fallback (opt-in): when the user enables it, inject the
 		// catalog-owned `fallbacks` chain (`server-side-fallback-models` axis,
 		// authored for Fable/Mythos on first-party Anthropic). The provider
 		// layer picks it up, sends the beta header, and honors the response
 		// signals. Models without a rule-assigned chain are untouched.
 		const serverSideFallbackChain =
-			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
+			streamOptions?.fallbacks === undefined && settings.get("providers.anthropic.serverSideFallback")
 				? serverSideFallbackModels(model)
 				: [];
 		const fallbacks =
 			streamOptions?.fallbacks ??
 			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);
-		// Anthropic usage-limit stages: the provider consults these hooks only for
-		// first-party OAuth requests, so attaching them per anthropic call is safe.
-		// Wrap-up tracking runs for everyone; the setting (`/slow`) gates only the
-		// low-priority lane, read per call so a mid-request toggle takes effect.
-		const slowModeLanes = slowModeContext?.lanes ?? anthropicSlowModeLanes;
-		const canAutoAccept = slowModeContext?.canAutoAccept;
-		const slowModeHooks =
-			streamOptions?.anthropicSlowMode === undefined && model.provider === "anthropic"
-				? slowModeLanes.hooks({
-						lowPriority: () => cfgProvidersAnthropicSlowMode.get(settings) === "auto",
-						canAutoAccept: canAutoAccept ? () => canAutoAccept(model) : undefined,
-						notify: slowModeContext?.notify,
-						onLane: slowModeContext?.onLane,
-					})
-				: undefined;
-		// Opt-in: storage keeps prompts and outputs on Meta's side. The setting
-		// also reads PI_MUSE_STORE_RESPONSES, which overrides it while set.
-		const storeResponses =
-			streamOptions?.storeResponses ??
-			(model.provider === "muse-code" ? cfgProvidersMuseCodeStoreResponses.get(settings) : undefined);
 		const encoding = tokenizerEncodingForModel(model);
 		let tokenizer = tokenizers.get(encoding);
 		if (!tokenizer) {
@@ -152,21 +89,17 @@ export function createSettingsAwareStreamFn(
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
-			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
+			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
-				streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
+				streamOptions?.maxInFlightRequests ?? settings.get("providers.maxInFlightRequests"),
 			),
 			loopGuard: {
-				enabled: cfgModelLoopGuardEnabled.get(settings),
-				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),
+				enabled: settings.get("model.loopGuard.enabled"),
+				checkAssistantContent: settings.get("model.loopGuard.checkAssistantContent"),
 				...streamOptions?.loopGuard,
 			},
-			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? cfgOmitThinking.get(settings),
-			// An off switch, not a default: the agent loop always offers its queue.
-			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
+			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? settings.get("omitThinking"),
 			...(fallbacks !== undefined ? { fallbacks } : {}),
-			...(storeResponses !== undefined ? { storeResponses } : {}),
-			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
 		return base(model, context, merged);
 	};

@@ -288,14 +288,8 @@ function scopes(node: KdlNodeView): { scopes: string[]; separator: string } {
 function validation(node: KdlNodeView): CompiledAuthValidation {
 	const kind = singleString(node);
 	const optional = propBool(node, "optional");
-	const trustForbidden = propBool(node, "trust-forbidden");
-	if (trustForbidden && !optional) malformed(node);
 	const label = propString(node, "label");
-	const common = {
-		...(label !== undefined ? { label } : {}),
-		...(optional ? { optional } : {}),
-		...(trustForbidden ? { trustForbidden } : {}),
-	};
+	const common = { ...(label !== undefined ? { label } : {}), ...(optional ? { optional } : {}) };
 	switch (kind) {
 		case "chat-completions": {
 			leaf(node, [
@@ -306,7 +300,6 @@ function validation(node: KdlNodeView): CompiledAuthValidation {
 				"max-tokens-field",
 				"max-tokens",
 				"optional",
-				"trust-forbidden",
 			]);
 			const result: CompiledAuthValidation = {
 				kind,
@@ -326,10 +319,10 @@ function validation(node: KdlNodeView): CompiledAuthValidation {
 			return result;
 		}
 		case "anthropic-messages":
-			leaf(node, ["base-url", "model", "label", "optional", "trust-forbidden"]);
+			leaf(node, ["base-url", "model", "label", "optional"]);
 			return { kind, ...common, baseUrl: requiredProp(node, "base-url"), model: requiredProp(node, "model") };
 		case "models-endpoint": {
-			leaf(node, ["url", "base-url-env", "headers-hook", "label", "optional", "trust-forbidden"]);
+			leaf(node, ["url", "base-url-env", "headers-hook", "label", "optional"]);
 			const result: CompiledAuthValidation = { kind, ...common, url: requiredProp(node, "url") };
 			const baseUrlEnv = propString(node, "base-url-env");
 			if (baseUrlEnv !== undefined) result.baseUrlEnv = baseUrlEnv;

@@ -12,9 +12,6 @@ describe("startup watchdog under test runner", () => {
 		const stop = new Error("stop after auth discovery");
 		const parsed = parseArgs([]);
 		parsed.noExtensions = true;
-		// An interactive launch needs a terminal on stdin; without one it exits 2.
-		const originalIsTTY = process.stdin.isTTY;
-		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
 		let thrownError: unknown;
 		try {
@@ -25,8 +22,6 @@ describe("startup watchdog under test runner", () => {
 			});
 		} catch (err) {
 			thrownError = err;
-		} finally {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		}
 		expect(thrownError).toBe(stop);
 

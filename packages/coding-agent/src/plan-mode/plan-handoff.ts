@@ -1,5 +1,5 @@
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 
 /** The session's active plan, resolved for handoff into a subagent's context. */
 export interface OverallPlanReference {
@@ -24,12 +24,7 @@ export async function loadOverallPlanReference(
 	planReferencePath: string,
 	localProtocolOptions: LocalProtocolOptions,
 ): Promise<OverallPlanReference | undefined> {
-	const resolved = await InternalUrlRouter.instance().requireLocal(
-		planReferencePath,
-		"load plan from",
-		{ localProtocolOptions },
-		{ create: true },
-	);
+	const resolved = resolveLocalUrlToPath(planReferencePath, localProtocolOptions);
 	let content: string;
 	try {
 		content = await Bun.file(resolved).text();

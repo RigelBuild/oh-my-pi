@@ -1,7 +1,6 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Page } from "puppeteer-core";
-import type { ReactPageHost } from "./devtools-hook";
 
 /** Options controlling Web Vitals collection. */
 export interface VitalsOptions {
@@ -28,8 +27,7 @@ export interface VitalsResult {
 	longTasks: number;
 }
 
-/** Page expression installing buffered Web Vitals observers (idempotent); run at document start and on the live page. */
-export const VITALS_INIT_SOURCE = `(() => {
+const VITALS_INIT_SOURCE = `(() => {
 	const root = globalThis;
 	if (root.__ompBrowserVitals) return root.__ompBrowserVitals;
 	const round = value => Math.round(value * 100) / 100;
@@ -75,8 +73,7 @@ export const VITALS_INIT_SOURCE = `(() => {
 	return state;
 })()`;
 
-/** Page expression reading the installed observers; evaluates to a `VitalsReadEnvelope`. */
-export const VITALS_READ_SOURCE = `(() => {
+const VITALS_READ_SOURCE = `(() => {
 	const state = globalThis.__ompBrowserVitals;
 	if (!state) return { installed: false, fromDocumentStart: false };
 	const round = value => Math.round((Number(value) || 0) * 100) / 100;
@@ -108,8 +105,7 @@ export const VITALS_READ_SOURCE = `(() => {
 	};
 })()`;
 
-/** Result of evaluating `VITALS_READ_SOURCE`: install state and, when installed, the current vitals. */
-export interface VitalsReadEnvelope {
+interface VitalsReadEnvelope {
 	installed: boolean;
 	fromDocumentStart: boolean;
 	value?: VitalsResult;
@@ -123,19 +119,25 @@ export async function installVitalsObservers(page: Page, signal?: AbortSignal): 
 
 /** Read Web Vitals, reloading once by default when observers missed document start. */
 export async function collectVitals(
-	host: ReactPageHost,
+	page: Page,
 	options: VitalsOptions = {},
 	signal?: AbortSignal,
 ): Promise<VitalsResult> {
-	let envelope = (await host.evaluate(VITALS_READ_SOURCE, signal)) as VitalsReadEnvelope;
+	let envelope = (await untilAborted(signal, () =>
+		page.mainFrame().mainRealm().evaluate(VITALS_READ_SOURCE),
+	)) as VitalsReadEnvelope;
 	if (!envelope.installed) {
-		await host.evaluate(VITALS_INIT_SOURCE, signal);
-		envelope = (await host.evaluate(VITALS_READ_SOURCE, signal)) as VitalsReadEnvelope;
+		await untilAborted(signal, () => page.mainFrame().mainRealm().evaluate(VITALS_INIT_SOURCE));
+		envelope = (await untilAborted(signal, () =>
+			page.mainFrame().mainRealm().evaluate(VITALS_READ_SOURCE),
+		)) as VitalsReadEnvelope;
 	}
 	if (options.reload === true || (options.reload === undefined && !envelope.fromDocumentStart)) {
-		await host.reload(signal);
+		await untilAborted(signal, () => page.reload({ waitUntil: "load" }));
 	}
-	const result = (await host.evaluate(VITALS_READ_SOURCE, signal)) as VitalsReadEnvelope;
+	const result = (await untilAborted(signal, () =>
+		page.mainFrame().mainRealm().evaluate(VITALS_READ_SOURCE),
+	)) as VitalsReadEnvelope;
 	if (!result.value) throw new ToolError("Web Vitals observers are unavailable in this document");
 	return result.value;
 }

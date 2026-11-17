@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 describe("InputController tool output expansion", () => {
 	it("expands children and forces a full repaint so every live block re-renders", () => {
@@ -37,7 +35,7 @@ describe("InputController tool output expansion", () => {
 			hideToolActivity: true,
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable] },
-			keybindings: { getKeys: vi.fn(() => ["alt+h"]) },
+			keybindings: { getDisplayString: vi.fn(() => "Alt+H") },
 			showStatus,
 			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
@@ -47,6 +45,7 @@ describe("InputController tool output expansion", () => {
 		expect(ctx.toolOutputExpanded).toBe(false);
 		expect(expandable.setExpanded).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Alt+H"));
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("/settings"));
 	});
 });
@@ -61,7 +60,7 @@ describe("InputController tool activity visibility", () => {
 		const clear = vi.fn();
 		const addChild = vi.fn();
 		const rebuildChatFromMessages = vi.fn();
-		const settings = Settings.isolated();
+		const set = vi.fn();
 		const clearInlineImages = vi.fn();
 		const resetDisplay = vi.fn();
 		const showStatus = vi.fn();
@@ -69,7 +68,7 @@ describe("InputController tool activity visibility", () => {
 		const ctx = {
 			hideToolActivity: false,
 			toolOutputExpanded: true,
-			settings,
+			settings: { set },
 			chatContainer: { children, clear, addChild, setToolActivityVisible },
 			rebuildChatFromMessages,
 			showStatus,
@@ -82,7 +81,7 @@ describe("InputController tool activity visibility", () => {
 		controller.toggleToolActivityVisibility();
 
 		expect(ctx.hideToolActivity).toBe(true);
-		expect(cfgDisplayHideToolActivity.get(settings)).toBe(true);
+		expect(set).toHaveBeenLastCalledWith("display.hideToolActivity", true);
 		expect(ctx.chatContainer.children).toEqual(children);
 		expect(clear).not.toHaveBeenCalled();
 		expect(addChild).not.toHaveBeenCalled();
@@ -98,7 +97,7 @@ describe("InputController tool activity visibility", () => {
 
 		expect(ctx.hideToolActivity).toBe(false);
 		expect(ctx.toolOutputExpanded).toBe(false);
-		expect(cfgDisplayHideToolActivity.get(settings)).toBe(false);
+		expect(set).toHaveBeenLastCalledWith("display.hideToolActivity", false);
 		expect(ctx.chatContainer.children).toEqual(children);
 		expect(clear).not.toHaveBeenCalled();
 		expect(addChild).not.toHaveBeenCalled();

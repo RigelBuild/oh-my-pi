@@ -1,5 +1,4 @@
 import type { Api, AuthStorage, FetchImpl, Model } from "@oh-my-pi/pi-ai";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../../../config/model-registry";
 import type { StructuredQuery } from "../query";
 import type { SearchProviderId, SearchResponse } from "../types";
@@ -67,8 +66,6 @@ export interface SearchParams {
 	authStorage: AuthStorage;
 	/** Selected catalog model that chose this engine or grounding backend. */
 	model: Model<Api>;
-	/** Thinking selector resolved from the model-role candidate. */
-	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Provider/model transport settings used by native search endpoints. */
 	modelRegistry: ModelRegistry;
 	/** Whether the selected model came from an explicit role-chain entry. */
@@ -101,9 +98,9 @@ export abstract class SearchProvider {
 	/**
 	 * Returns `true` when this provider should run when the user explicitly
 	 * selects it, even if {@link isAvailable} would reject it for the auto
-	 * chain. Providers with an unauthenticated fallback kept out of the auto
-	 * chain (e.g. Perplexity's anonymous ask endpoint) override this so explicit
-	 * selection still routes through it rather than failing.
+	 * chain. Providers that ship an unauthenticated fallback (e.g. Exa's
+	 * public MCP) override this so explicit selection still routes through
+	 * the fallback rather than silently falling back to another provider.
 	 *
 	 * Defaults to mirroring {@link isAvailable}.
 	 */

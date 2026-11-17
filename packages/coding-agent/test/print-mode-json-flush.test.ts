@@ -13,7 +13,6 @@
  * fires (so `process.exit` can't discard it), and the full record is delivered.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
@@ -38,9 +37,8 @@ function createFlushHarness(): FlushHarness {
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
 			onPersistenceError: () => () => {},
-			onPersistenceNotice: () => () => {},
 		},
-		settings: Settings.isolated(),
+		settings: { get: () => false },
 		getLastAssistantMessage: () => undefined,
 		extensionRunner: undefined,
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {

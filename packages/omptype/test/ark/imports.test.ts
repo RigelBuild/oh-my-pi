@@ -203,6 +203,8 @@ it("non-generic", () => {
 	> = true;
 });
 
+it.todo("autocompletes private references");
+
 it("errors on private reference with #", () => {
 	expect(() =>
 		scope({

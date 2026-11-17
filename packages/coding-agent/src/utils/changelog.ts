@@ -3,9 +3,7 @@ import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-util
 import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
-import type { SettingValueOf } from "../config/registry";
-
-import type { cfgStartupChangelogMode } from "../modes/settings";
+import type { SettingValue } from "../config/settings";
 
 export interface ChangelogEntry {
 	major: number;
@@ -315,9 +313,9 @@ async function parseStartupChangelogFile(
 			newlineIndex = pending.indexOf("\n");
 		}
 	}
-	// A seen-version stop already finished the current entry, so this is a no-op then.
-	if (pending) processLine(pending + decoder.decode());
-	finishCurrentEntry();
+	if (pending && !processLine(pending + decoder.decode())) {
+		finishCurrentEntry();
+	}
 	return { entries, totalUnseenEntries };
 }
 
@@ -442,7 +440,7 @@ export function selectStartupChangelog(
  * erase knowledge of a newer version the user has already seen.
  */
 export async function resolveStartupChangelogForDisplay(options: {
-	mode: SettingValueOf<typeof cfgStartupChangelogMode>;
+	mode: SettingValue<"startup.changelogMode">;
 	currentVersion: string;
 	changelogPath?: string;
 	agentDir?: string;

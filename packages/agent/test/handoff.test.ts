@@ -6,6 +6,7 @@ import {
 	defaultConvertToLlm,
 	generateHandoff,
 	generateHandoffFromContext,
+	renderHandoffPrompt,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
@@ -99,6 +100,11 @@ describe("handoff summary injection", () => {
 });
 
 describe("handoff helpers", () => {
+	test("renders custom focus into the handoff prompt", () => {
+		const rendered = renderHandoffPrompt("preserve failing test name");
+		expect(rendered).toContain("preserve failing test name");
+	});
+
 	test("generates handoff with the live cache prefix and tool use disabled", async () => {
 		const strayToolCall: ToolCall = { type: "toolCall", id: "call_1", name: "read", arguments: {} };
 		const completeSimpleSpy = vi

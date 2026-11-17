@@ -33,7 +33,7 @@ function normalizeCapabilities(capabilities) {
 		...capabilities,
 		ax: false,
 		backgroundWindowInput: false,
-		takeover: true,
+		deliveryModes: ["foreground"],
 		axPermission: "unavailable",
 	};
 }
@@ -211,7 +211,7 @@ export function adaptDesktopSession(NativeDesktopSession) {
 		}
 
 		#ensureForeground(target, options) {
-			if (target !== "desktop" && options?.takeover !== true) {
+			if (options?.deliveryMode !== "foreground" && (target !== "desktop" || options?.deliveryMode !== undefined)) {
 				throw desktopError(
 					"BackgroundUnavailable",
 					"the installed native addon supports foreground input only",

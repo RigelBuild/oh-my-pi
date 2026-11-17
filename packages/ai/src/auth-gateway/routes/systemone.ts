@@ -17,7 +17,7 @@ import { isJudgmentApi, TypeSafeJudge } from "../../judgment/typesafe";
 import * as systemOne from "../../providers/systemone-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayRouteOptions,
+	type AuthGatewayBootOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
@@ -25,11 +25,7 @@ import {
 } from "../dispatch";
 import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
 
-export async function handleSystemOne(
-	bootOpts: AuthGatewayRouteOptions,
-	req: Request,
-	peer: string,
-): Promise<Response> {
+export async function handleSystemOne(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
@@ -73,7 +69,7 @@ export async function handleSystemOne(
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if (typeof apiKey !== "string") return systemOne.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	const judge = new TypeSafeJudge({
 		apiKey: buildGatewayApiKeyResolver(

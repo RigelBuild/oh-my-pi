@@ -451,10 +451,10 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 			return processExposure("zrok", baseUrl, proc);
 		}
 		case "bore": {
+			const binary = requireBinary("bore");
 			const server = optionString(config, "server", "bore.pub");
 			if (!server) throw new Error('imageUrls exposure "bore" requires options.server');
 			const secret = credentialString(config, "secret");
-			const binary = requireBinary("bore");
 			const argv = [binary, "local", String(port), "--to", server];
 			if (secret) argv.push("--secret", secret);
 			const { proc, baseUrl } = await spawnUrlTunnel(argv, line => parseBoreUrl(line, server));
@@ -464,10 +464,11 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 			if (!config.publicBaseUrl) {
 				throw new Error('imageUrls exposure "named-cloudflared" requires imageUrls.publicBaseUrl');
 			}
+			const binary = requireBinary("cloudflared");
 			const token = credentialString(config, "tunnelToken");
-			let args: string[];
+			let argv: string[];
 			if (token) {
-				args = ["tunnel", "--no-autoupdate", "run", "--token", token];
+				argv = [binary, "tunnel", "--no-autoupdate", "run", "--token", token];
 			} else {
 				const configFile = optionString(config, "configFile");
 				const tunnelName = optionString(config, "tunnelName");
@@ -476,9 +477,8 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 						'imageUrls exposure "named-cloudflared" requires credentials.tunnelToken or options.configFile and options.tunnelName',
 					);
 				}
-				args = ["tunnel", "--no-autoupdate", "--config", configFile, "run", tunnelName];
+				argv = [binary, "tunnel", "--no-autoupdate", "--config", configFile, "run", tunnelName];
 			}
-			const argv = [requireBinary("cloudflared"), ...args];
 			const baseUrl = normalizeBaseUrl(config.publicBaseUrl);
 			const { proc } = await spawnUrlTunnel(
 				argv,

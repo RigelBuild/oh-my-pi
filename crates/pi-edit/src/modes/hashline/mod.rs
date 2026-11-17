@@ -117,6 +117,14 @@ fn header_parts(input: &str) -> Vec<(String, usize, usize)> {
 		.collect()
 }
 
+fn added_lines(body: &str) -> String {
+	body
+		.lines()
+		.filter_map(|line| line.strip_prefix('+').filter(|_| !line.starts_with("+++ ")))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
 fn inspect_input(input: &str) -> Inspection {
 	let headers = header_parts(input);
 	let paths = headers.iter().map(|(path, ..)| path.clone()).collect();
@@ -125,7 +133,7 @@ fn inspect_input(input: &str) -> Inspection {
 		let body_end = headers
 			.get(index + 1)
 			.map_or(input.len(), |(_, start, _)| *start);
-		let digest = super::added_lines(input[*body_start..body_end].lines()).unwrap_or_default();
+		let digest = added_lines(&input[*body_start..body_end]);
 		if digest.is_empty() {
 			continue;
 		}

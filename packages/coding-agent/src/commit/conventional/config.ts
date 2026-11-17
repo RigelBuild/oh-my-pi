@@ -1,4 +1,4 @@
-import type { CommitSettings } from "../settings";
+import type { CommitSettings } from "../../config/settings-schema";
 
 /** Runtime thresholds copied from llm-git's standard commit workflow. */
 export interface ConventionalGenerationConfig {

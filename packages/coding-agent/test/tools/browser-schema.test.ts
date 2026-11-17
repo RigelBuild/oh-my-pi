@@ -4,8 +4,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 
-import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
-
 function makeSession(settings = Settings.isolated({ "browser.enabled": true })): ToolSession {
 	return {
 		cwd: "/tmp/test",
@@ -19,11 +17,11 @@ function makeSession(settings = Settings.isolated({ "browser.enabled": true })):
 describe("browser prelude", () => {
 	it("tracks the live browser capability setting", () => {
 		const settings = Settings.isolated();
-		cfgBrowserEnabled.set(settings, false);
+		settings.set("browser.enabled", false);
 		const prelude = createBrowserPrelude(makeSession(settings));
 
 		expect(prelude.enabled?.()).toBe(false);
-		cfgBrowserEnabled.set(settings, true);
+		settings.set("browser.enabled", true);
 		expect(prelude.enabled?.()).toBe(true);
 	});
 

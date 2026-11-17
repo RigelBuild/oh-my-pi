@@ -7,8 +7,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-import { cfgComposerRecallClearedDrafts } from "@oh-my-pi/pi-coding-agent/modes/settings";
-
 const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
 
 beforeAll(async () => {
@@ -307,7 +305,7 @@ describe("cleared draft recovery preference", () => {
 		helpers.clearEditor();
 		editor.handleInput("\x1b[A");
 		expect(editor.getText()).toBe("recovered by default");
-		cfgComposerRecallClearedDrafts.set(settings, false);
+		settings.set("composer.recallClearedDrafts", false);
 		editor.setDraft("discard [Image #1]", [image]);
 		helpers.clearEditor();
 		expect(editor.getText()).toBe("");
@@ -315,7 +313,7 @@ describe("cleared draft recovery preference", () => {
 		editor.handleInput("\x1b[A");
 		expect(editor.getText()).toBe("recovered by default");
 		expect(editor.pendingImages).toEqual([]);
-		cfgComposerRecallClearedDrafts.set(settings, true);
+		settings.set("composer.recallClearedDrafts", true);
 		editor.setText("recovered again");
 		helpers.clearEditor();
 		editor.handleInput("\x1b[A");

@@ -1,6 +1,4 @@
 import type { Component } from "../index";
-import type { NativeNode } from "../native/node";
-import { col } from "../native/describe";
 let composerShape = "box";
 
 /** Set the process-wide editor gap layout. */
@@ -10,8 +8,6 @@ export function setEditorGapComposerShape(shape: string): void {
 
 const GAP: readonly string[] = [""];
 const FLUSH: readonly string[] = [];
-/** A TSP terminal spaces the dock itself; the gap describes nothing. */
-const NATIVE_GAP: NativeNode = col([]);
 
 /**
  * One-line top margin between the working/status HUD row and the editor.
@@ -28,9 +24,5 @@ export class EditorTopGap implements Component {
 
 	render(_width: number): readonly string[] {
 		return composerShape === "band" && this.statusRowOccupied() ? FLUSH : GAP;
-	}
-
-	describe(): NativeNode {
-		return NATIVE_GAP;
 	}
 }

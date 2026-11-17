@@ -13,18 +13,19 @@ export interface OrchestratorBeam extends BeamMemoryState {
 }
 
 export interface OrchestrateRecallOptions
-	extends
-		Omit<RecallOptions, "queryEmbedding">,
-		Omit<PolyphonicRecallOptions, "queryEmbedding" | "channelId" | "queryTime"> {
+	extends Omit<RecallOptions, "queryEmbedding">, Omit<PolyphonicRecallOptions, "queryEmbedding"> {
 	readonly queryEmbedding?: readonly number[] | Float32Array | null;
 	readonly enhanced?: boolean;
 	readonly forcePolyphonic?: boolean;
 	readonly forceLinear?: boolean;
 }
 
-/** Linear recall rows, or polyphonic rows that also carry `combined_score`. */
-export interface OrchestratedRecallResult extends RecallResult {
+export interface OrchestratedRecallResult extends Omit<RecallResult, "metadata" | "score" | "tier"> {
+	score?: number;
+	metadata?: RecallResult["metadata"];
+	tier?: RecallResult["tier"] | PolyphonicMemoryResult["tier"];
 	combined_score?: PolyphonicMemoryResult["combined_score"];
+	voice_scores?: PolyphonicMemoryResult["voice_scores"];
 }
 
 function toLinearRecallOptions(options: OrchestrateRecallOptions): RecallOptions {
@@ -34,21 +35,13 @@ function toLinearRecallOptions(options: OrchestrateRecallOptions): RecallOptions
 	return options as RecallOptions;
 }
 
-/**
- * Pick the recall path for one query. Polyphonic recall runs when forced or when
- * the gate is on for this beam (`MNEMOPI_POLYPHONIC_RECALL`, then the beam's
- * `polyphonicRecall` config, then the process-wide default); otherwise the beam's
- * linear `recall` / `recallEnhanced` surface answers.
- */
 export async function orchestrateRecall(
 	beam: OrchestratorBeam,
 	query: string,
 	topK = 20,
 	options: OrchestrateRecallOptions = {},
 ): Promise<OrchestratedRecallResult[]> {
-	const polyphonic =
-		!options.forceLinear &&
-		(options.forcePolyphonic === true || polyphonicRecallIsEnabled(process.env, beam.config.polyphonicRecall));
+	const polyphonic = !options.forceLinear && (options.forcePolyphonic === true || polyphonicRecallIsEnabled());
 	let queryEmbedding: readonly number[] | Float32Array | null | undefined = options.queryEmbedding;
 	if (queryEmbedding === undefined && query.length > 0) {
 		// Auto-derive when the caller did not pass one. `embedQuery()` returns null when

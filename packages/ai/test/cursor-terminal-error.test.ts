@@ -7,9 +7,6 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
 	ExecServerMessageSchema,
-	CustomErrorDetailsSchema,
-	CursorError,
-	ErrorDetailsSchema,
 	InteractionUpdateSchema,
 	ReadArgsSchema,
 	TextDeltaUpdateSchema,
@@ -28,12 +25,9 @@ type Scenario =
 	| { kind: "connect-error-after-turn" }
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
-	| { kind: "connect-cursor-error-details-after-turn"; isRetryable: boolean }
-	| { kind: "connect-structured-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
-	| { kind: "end-frame-awaits-half-close" }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-transport-error"; responseFinished: PromiseWithResolvers<void> }
 	| { kind: "exec-then-hang" }
@@ -266,60 +260,7 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
-		if (scenario.kind === "connect-cursor-error-details-after-turn") {
-			// Shape captured from a live Cursor outage: bare `unavailable: Error`
-			// with the retry verdict only inside the typed detail's debug JSON.
-			stream.write(
-				connectEndErrorFrame("unavailable", "Error", [
-					{
-						type: "aiserver.v1.ErrorDetails",
-						debug: {
-							error: "ERROR_OPENAI",
-							details: {
-								title: "Unable to reach the model provider",
-								detail: "We're having trouble connecting to the model provider.",
-								isRetryable: scenario.isRetryable,
-							},
-							isExpected: false,
-						},
-					},
-				]),
-			);
-			stream.end();
-			return;
-		}
-
-		if (scenario.kind === "connect-structured-error-after-turn") {
-			const details = create(ErrorDetailsSchema, {
-				error: CursorError.ERROR_RATE_LIMITED,
-				details: create(CustomErrorDetailsSchema, {
-					title: "Capacity reached",
-					detail: "Retry this request shortly",
-					isRetryable: true,
-				}),
-			});
-			stream.write(
-				connectEndErrorFrame("invalid_argument", "Error", [
-					{
-						type: "type.googleapis.com/aiserver.v1.ErrorDetails",
-						value: Buffer.from(toBinary(ErrorDetailsSchema, details)).toString("base64"),
-					},
-				]),
-			);
-			stream.end();
-			return;
-		}
-
 		if (scenario.kind === "hang-after-turn") {
-			return;
-		}
-
-		if (scenario.kind === "end-frame-awaits-half-close") {
-			// Through an HTTP CONNECT proxy the server's Connect end frame is the
-			// last byte until the client half-closes; only then does the HTTP/2
-			// stream end. A client that never ends its request side hangs here.
-			stream.write(frameConnectMessage(Buffer.from("{}"), CONNECT_END_STREAM_FLAG));
-			stream.on("end", () => stream.end());
 			return;
 		}
 
@@ -407,14 +348,6 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
-	it("half-closes its request once the Connect end frame arrives", async () => {
-		scenario = { kind: "end-frame-awaits-half-close" };
-		const baseUrl = await startServer();
-		const { eventTypes, result } = await collectStream(makeModel(baseUrl), { signal: AbortSignal.timeout(5000) });
-		expect(eventTypes.at(-1)).toBe("done");
-		expect(result.stopReason).toBe("stop");
-	});
-
 	it("surfaces CONNECT end-stream errors that arrive after turnEnded", async () => {
 		scenario = { kind: "connect-error-after-turn" };
 		const baseUrl = await startServer();
@@ -442,24 +375,6 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		const { result } = await collectStream(makeModel(baseUrl));
 		expect(result.errorMessage).toContain("quota exceeded for this account");
 		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
-	});
-
-	it.each([true, false])("follows Cursor's ErrorDetails.isRetryable=%p verdict for recovery", async isRetryable => {
-		scenario = { kind: "connect-cursor-error-details-after-turn", isRetryable };
-		const baseUrl = await startServer();
-		const { result } = await collectStream(makeModel(baseUrl));
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Unable to reach the model provider");
-		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(isRetryable);
-	});
-
-	it("maps Cursor ErrorDetails into retryable provider status and message", async () => {
-		scenario = { kind: "connect-structured-error-after-turn" };
-		const baseUrl = await startServer();
-		const { result } = await collectStream(makeModel(baseUrl));
-		expect(result.stopReason).toBe("error");
-		expect(result.errorStatus).toBe(429);
-		expect(result.errorMessage).toContain("Cursor RATE_LIMITED: Capacity reached: Retry this request shortly");
 	});
 
 	it("surfaces nonzero gRPC trailers that arrive after turnEnded", async () => {

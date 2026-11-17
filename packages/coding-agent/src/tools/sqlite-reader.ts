@@ -42,10 +42,6 @@ function configureSqliteReadConnection(db: Database): Database {
 
 /**
  * Opens the query-only connection used by read tools, retrying read-write mode solely to initialize missing WAL sidecars.
- *
- * Helpers here run statements through `db.query()`: `close()` finalizes that cache, while an
- * unfinalized `db.prepare()` statement leaves the connection a zombie that keeps the file open
- * (Windows then refuses to delete it).
  */
 export async function openSqliteReadConnection(filePath: string): Promise<Database> {
 	if (await requiresWalSidecarInitialization(filePath)) {
@@ -321,7 +317,7 @@ function parseOffset(value: string | null): number {
 function getTableMasterRow(db: Database, table: string): SqliteMasterRow {
 	const row =
 		db
-			.query<SqliteMasterRow, [string]>(
+			.prepare<SqliteMasterRow, [string]>(
 				"SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name = ?",
 			)
 			.get(table) ?? null;
@@ -333,7 +329,7 @@ function getTableMasterRow(db: Database, table: string): SqliteMasterRow {
 
 function getTableInfoRows(db: Database, table: string): SqliteTableInfoRow[] {
 	getTableMasterRow(db, table);
-	return db.query<SqliteTableInfoRow, []>(`PRAGMA table_info(${quoteSqliteIdentifier(table)})`).all();
+	return db.prepare<SqliteTableInfoRow, []>(`PRAGMA table_info(${quoteSqliteIdentifier(table)})`).all();
 }
 
 function getTableColumns(db: Database, table: string): string[] {
@@ -638,13 +634,13 @@ export function parseSqliteSelector(subPath: string, queryString: string): Sqlit
 function loadRowEstimates(db: Database): Map<string, number> {
 	const estimates = new Map<string, number>();
 	const hasStat1 = db
-		.query<Pick<SqliteMasterRow, "name">, []>(
+		.prepare<Pick<SqliteMasterRow, "name">, []>(
 			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'",
 		)
 		.get();
 	if (!hasStat1) return estimates;
 
-	for (const { tbl, stat } of db.query<SqliteStat1Row, []>("SELECT tbl, stat FROM sqlite_stat1").all()) {
+	for (const { tbl, stat } of db.prepare<SqliteStat1Row, []>("SELECT tbl, stat FROM sqlite_stat1").all()) {
 		if (!stat) continue;
 		const rows = Number.parseInt(stat, 10);
 		if (!Number.isFinite(rows)) continue;
@@ -662,14 +658,14 @@ function loadRowEstimates(db: Database): Map<string, number> {
  */
 function probeRowCount(db: Database, table: string, cap: number): TableRowCount {
 	const sql = `SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${quoteSqliteIdentifier(table)} LIMIT ${cap + 1})`;
-	const counted = db.query<SqliteCountRow, []>(sql).get()?.count ?? 0;
+	const counted = db.prepare<SqliteCountRow, []>(sql).get()?.count ?? 0;
 	return counted > cap ? { kind: "atLeast", rows: cap } : { kind: "exact", rows: counted };
 }
 
 export function listTables(db: Database, options: { probeCap?: number } = {}): SqliteTableSummary[] {
 	const cap = options.probeCap ?? ROW_COUNT_PROBE_CAP;
 	const names = db
-		.query<Pick<SqliteMasterRow, "name">, []>(
+		.prepare<Pick<SqliteMasterRow, "name">, []>(
 			"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name COLLATE NOCASE",
 		)
 		.all();
@@ -733,8 +729,8 @@ export function queryRows(
 	const orderClause = resolveOrderClause(opts.order, columns);
 	const countSql = `SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(table)}${whereClause}`;
 	const selectSql = `SELECT * FROM ${quoteSqliteIdentifier(table)}${whereClause}${orderClause} LIMIT ? OFFSET ?`;
-	const totalCount = db.query<SqliteCountRow, []>(countSql).get()?.count ?? 0;
-	const statement = db.query<SqliteRow, SQLQueryBindings[]>(selectSql);
+	const totalCount = db.prepare<SqliteCountRow, []>(countSql).get()?.count ?? 0;
+	const statement = db.prepare<SqliteRow, SQLQueryBindings[]>(selectSql);
 	if (statement.paramsCount !== 2) {
 		throw new ToolError(
 			"SQLite where clause changed the expected pagination parameters; use q=SELECT ... for raw SQL",
@@ -753,14 +749,14 @@ export function getRowByKey(
 	getTableMasterRow(db, table);
 	const sql = `SELECT * FROM ${quoteSqliteIdentifier(table)} WHERE ${quoteSqliteIdentifier(pk.column)} = ? LIMIT 1`;
 	const binding = coerceLookupValue(key, pk.type ?? "");
-	return db.query<SqliteRow, SQLQueryBindings[]>(sql).get(binding);
+	return db.prepare<SqliteRow, SQLQueryBindings[]>(sql).get(binding);
 }
 
 export function getRowByRowId(db: Database, table: string, key: string): Record<string, unknown> | null {
 	getTableMasterRow(db, table);
 	const binding = coerceIntegerKey(key, "SQLite ROWID");
 	return db
-		.query<SqliteRow, SQLQueryBindings[]>(`SELECT * FROM ${quoteSqliteIdentifier(table)} WHERE rowid = ? LIMIT 1`)
+		.prepare<SqliteRow, SQLQueryBindings[]>(`SELECT * FROM ${quoteSqliteIdentifier(table)} WHERE rowid = ? LIMIT 1`)
 		.get(binding);
 }
 
@@ -768,7 +764,7 @@ export function executeReadQuery(
 	db: Database,
 	sql: string,
 ): { columns: string[]; rows: Record<string, unknown>[]; truncated: boolean } {
-	const statement = db.query<SqliteRow, []>(sql);
+	const statement = db.prepare<SqliteRow, []>(sql);
 	if (statement.paramsCount > 0) {
 		throw new ToolError("SQLite raw queries do not support bound parameters");
 	}
@@ -796,7 +792,7 @@ export function insertRow(db: Database, table: string, data: Record<string, unkn
 	const columns = entries.map(([column]) => quoteSqliteIdentifier(column)).join(", ");
 	const placeholders = entries.map(() => "?").join(", ");
 	const bindings = entries.map(([, value]) => value);
-	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
+	const statement = db.prepare<SqliteRow, SQLQueryBindings[]>(
 		`INSERT INTO ${quoteSqliteIdentifier(table)} (${columns}) VALUES (${placeholders})`,
 	);
 	statement.run(...bindings);
@@ -818,7 +814,7 @@ export function updateRowByKey(
 	const assignments = entries.map(([column]) => `${quoteSqliteIdentifier(column)} = ?`).join(", ");
 	const bindings = entries.map(([, value]) => value);
 	bindings.push(coerceLookupValue(key, pk.type ?? ""));
-	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
+	const statement = db.prepare<SqliteRow, SQLQueryBindings[]>(
 		`UPDATE ${quoteSqliteIdentifier(table)} SET ${assignments} WHERE ${quoteSqliteIdentifier(pk.column)} = ?`,
 	);
 	return statement.run(...bindings).changes;
@@ -834,7 +830,7 @@ export function updateRowByRowId(db: Database, table: string, key: string, data:
 	const assignments = entries.map(([column]) => `${quoteSqliteIdentifier(column)} = ?`).join(", ");
 	const bindings = entries.map(([, value]) => value);
 	bindings.push(coerceIntegerKey(key, "SQLite ROWID"));
-	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
+	const statement = db.prepare<SqliteRow, SQLQueryBindings[]>(
 		`UPDATE ${quoteSqliteIdentifier(table)} SET ${assignments} WHERE rowid = ?`,
 	);
 	return statement.run(...bindings).changes;
@@ -848,7 +844,7 @@ export function deleteRowByKey(
 ): number {
 	getTableMasterRow(db, table);
 	const binding = coerceLookupValue(key, pk.type ?? "");
-	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
+	const statement = db.prepare<SqliteRow, SQLQueryBindings[]>(
 		`DELETE FROM ${quoteSqliteIdentifier(table)} WHERE ${quoteSqliteIdentifier(pk.column)} = ?`,
 	);
 	return statement.run(binding).changes;
@@ -857,7 +853,7 @@ export function deleteRowByKey(
 export function deleteRowByRowId(db: Database, table: string, key: string): number {
 	getTableMasterRow(db, table);
 	const binding = coerceIntegerKey(key, "SQLite ROWID");
-	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
+	const statement = db.prepare<SqliteRow, SQLQueryBindings[]>(
 		`DELETE FROM ${quoteSqliteIdentifier(table)} WHERE rowid = ?`,
 	);
 	return statement.run(binding).changes;

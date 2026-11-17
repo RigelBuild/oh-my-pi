@@ -6,14 +6,16 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getSettingsForTab } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
-import { autosaveApprovedPlan, resolvePlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
+import {
+	autosaveApprovedPlan,
+	defaultPlanAutosaveDir,
+	resolvePlanAutosaveDir,
+} from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { PlanYolo } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { PrewalkCoordinator, type PrewalkCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/prewalk";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-
-import { cfgPlanAutosave, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
 let tempDir: TempDir | undefined;
 
@@ -45,16 +47,23 @@ describe("plan autosave settings UI", () => {
 		expect(autosave.condition()).toBe(true);
 		expect(autosaveDir.condition()).toBe(false);
 
-		cfgPlanAutosave.set(Settings.instance, true);
+		Settings.instance.set("plan.autosave", true);
 		expect(autosaveDir.condition()).toBe(true);
 
-		cfgPlanEnabled.set(Settings.instance, false);
+		Settings.instance.set("plan.enabled", false);
 		expect(autosave.condition()).toBe(false);
 		expect(autosaveDir.condition()).toBe(false);
 	});
 });
 
 describe("resolvePlanAutosaveDir", () => {
+	it("defaults to <project>/.omp/plans when unset", () => {
+		const cwd = makeCwd();
+		const settings = Settings.isolated();
+		expect(resolvePlanAutosaveDir(settings, cwd)).toBe(path.join(cwd, ".omp", "plans"));
+		expect(defaultPlanAutosaveDir(cwd)).toBe(path.join(cwd, ".omp", "plans"));
+	});
+
 	it("resolves absolute, tilde, and cwd-relative custom dirs", () => {
 		const cwd = makeCwd();
 		expect(resolvePlanAutosaveDir(Settings.isolated({ "plan.autosaveDir": path.join(cwd, "custom") }), cwd)).toBe(

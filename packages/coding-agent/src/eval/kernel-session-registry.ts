@@ -7,6 +7,7 @@ import {
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
+	resolveOwnerScopedSessionKey,
 	type SessionOwners,
 	waitForPromiseWithCancellation,
 } from "./executor-base";
@@ -411,19 +412,38 @@ export function createKernelSessionRegistry<
 
 	function peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
-		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
+		const sessionKey = resolveOwnerScopedSessionKey({
+			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
+			ownerId: options.kernelOwnerId,
+			reset: false,
+			hasSession: key => sessions.has(key) || startingSessions.has(key),
+			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
+		});
 		const kernel = sessions.get(sessionKey)?.kernel;
 		return kernel?.isAlive() ? kernel : undefined;
 	}
 
 	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
-		return sessions.get(descriptor.buildSessionKey(sessionId, cwd, options.interpreter));
+		const sessionKey = resolveOwnerScopedSessionKey({
+			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
+			ownerId: options.kernelOwnerId,
+			reset: false,
+			hasSession: key => sessions.has(key),
+			getOwners: key => sessions.get(key),
+		});
+		return sessions.get(sessionKey);
 	}
 
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
-		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
+		const sessionKey = resolveOwnerScopedSessionKey({
+			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
+			ownerId: options.kernelOwnerId,
+			reset: options.reset === true,
+			hasSession: key => sessions.has(key) || startingSessions.has(key),
+			getOwners: key => sessions.get(key) ?? startingSessions.get(key),
+		});
 		if (options.bridge && !options.bridgeSessionId) {
 			options.bridgeSessionId = sessionId;
 		}

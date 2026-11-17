@@ -15,9 +15,6 @@ import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { LoadedImageInput } from "./image-loading";
 
-import { cfgImagesBlockImages } from "../modes/settings";
-import { cfgImagesQuestionTimeoutMs } from "../tools/settings";
-
 /** Vision-capable model selected for an explicit image question. */
 export interface ResolvedImageQuestionModel {
 	model: Model<Api>;
@@ -87,7 +84,7 @@ export async function askImageQuestion(
 	signal: AbortSignal | undefined,
 	completeImpl: typeof completeSimple = completeSimple,
 ): Promise<ImageQuestionResult> {
-	if (cfgImagesBlockImages.get(session.settings)) {
+	if (session.settings.get("images.blockImages")) {
 		throw new ToolError(
 			"Image submission is disabled by settings (images.blockImages=true). Disable it to ask about images.",
 		);
@@ -111,7 +108,7 @@ export async function askImageQuestion(
 	}
 
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
-	const timeoutMs = cfgImagesQuestionTimeoutMs.get(session.settings);
+	const timeoutMs = session.settings.get("images.questionTimeoutMs");
 	const hasTimeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0;
 	const timeoutSignal = hasTimeout ? AbortSignal.timeout(timeoutMs) : undefined;
 	const effectiveSignal = timeoutSignal ? (signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal) : signal;

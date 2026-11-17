@@ -46,10 +46,7 @@ async function loadLockedSkill(
 		});
 		return null;
 	}
-	// Canonical so `skill://` containment (checked against the realpathed root) holds when the store
-	// sits behind a symlink, e.g. a dotfiles-managed ~/.omp.
-	const realStoreDir = await fs.realpath(storeDir);
-	const skillPath = path.join(realStoreDir, "SKILL.md");
+	const skillPath = path.join(storeDir, "SKILL.md");
 	let text: string;
 	try {
 		text = await fs.readFile(skillPath, "utf8");
@@ -67,10 +64,9 @@ async function loadLockedSkill(
 		content: body,
 		frontmatter: frontmatter as SkillFrontmatter,
 		// Registry content is untrusted: keep `skill://` access inside the unpacked package.
-		containRoot: realStoreDir,
+		containRoot: await fs.realpath(storeDir),
 		level,
-		// Namespace by package name, not by the versioned store path.
-		_source: createSourceMeta(SKILLSHARE_PROVIDER_ID, skillPath, level, `skillshare:${id}@${entry.version}`, name),
+		_source: createSourceMeta(SKILLSHARE_PROVIDER_ID, skillPath, level, `skillshare:${id}@${entry.version}`),
 	};
 }
 

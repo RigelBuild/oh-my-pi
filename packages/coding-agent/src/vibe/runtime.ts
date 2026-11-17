@@ -26,8 +26,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
-import { resolveAgentModelSelection } from "../config/model-resolver";
-import { sessionLocalProtocolOptions } from "../internal-urls/context";
+import { modelCatalogForClassification, resolveAgentModelSelection } from "../config/model-resolver";
+import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
@@ -55,8 +55,6 @@ import {
 	type VibeTombstoneReason,
 } from "./lifecycle";
 import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
-
-import { cfgTaskAgentModelOverrides, cfgTaskEnableLsp } from "../task/settings";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -105,6 +103,19 @@ export interface VibeParentSession {
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
+	/**
+	 * Parent catalog, so worker model resolution can tell an inherited literal
+	 * model id from a thinking selector. Optional on the interface because a
+	 * lifecycle-only caller (scope suspension, tombstoning) never resolves a
+	 * worker; a caller that spawns or rehydrates one must supply it.
+	 */
+	modelRegistry?: ToolSession["modelRegistry"];
+	/**
+	 * The parent's ACTIVE model, which the catalog above can omit: a session that
+	 * pinned a model directly and authenticates it itself is absent from the
+	 * registry's available projection. Needed for the same classification.
+	 */
+	getActiveModel?: ToolSession["getActiveModel"];
 }
 
 interface VibeRestoreCandidate {
@@ -120,8 +131,6 @@ interface ResolvedVibeWorker {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
-	/** {@link modelOverride} is the parent's live selector; its `:level` ranks below the agent's own level. */
-	modelInheritsLiveThinkingLevel?: boolean;
 }
 
 interface VibeTurn {
@@ -145,8 +154,6 @@ interface VibeRecord {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
-	/** {@link modelOverride} is the parent's live selector; its `:level` ranks below the agent's own level. */
-	modelInheritsLiveThinkingLevel?: boolean;
 	state: VibeSessionState;
 	createdAt: number;
 	lastActivityAt: number;
@@ -272,29 +279,21 @@ export class VibeSessionRegistry {
 	/**
 	 * Insert a bare worker record without the spawn machinery. Test-only —
 	 * lets focused runtime tests attach an optional synthetic in-flight job.
-	 * Keyed like a real spawn in the `test-parent-session` scope (null file), so
-	 * id lookups (`vibe_wait` with named sessions, `vibe_kill`) resolve.
 	 */
 	registerRecordForTests(record: {
 		id: string;
 		cli?: VibeCli;
 		ownerId: string;
 		state?: VibeSessionState;
-		killed?: boolean;
 		jobId?: string;
 	}): void {
 		const now = Date.now();
-		const scope: VibeOwnerScope = {
-			ownerId: record.ownerId,
-			parentSessionId: "test-parent-session",
-			parentSessionFile: null,
-		};
-		this.#records.set(scopeKey(scope, record.id), {
+		this.#records.set(record.id, {
 			id: record.id,
 			cli: record.cli ?? "fast",
 			ownerId: record.ownerId,
-			parentSessionId: scope.parentSessionId,
-			parentSessionFile: scope.parentSessionFile,
+			parentSessionId: "test-parent-session",
+			parentSessionFile: null,
 			agent: getBundledAgent("sonic")!,
 			state: record.state ?? "running",
 			createdAt: now,
@@ -304,7 +303,7 @@ export class VibeSessionRegistry {
 				: undefined,
 			queue: [],
 			turnCount: 0,
-			killed: record.killed ?? false,
+			killed: false,
 			suspended: false,
 			terminalPersisted: false,
 		});
@@ -359,23 +358,27 @@ export class VibeSessionRegistry {
 		if (!agent) {
 			throw new ToolError(`Bundled agent "${agentName}" for vibe cli "${cli}" is unavailable.`);
 		}
-		const agentModelOverrides = cfgTaskAgentModelOverrides.get(session.settings);
+		const agentModelOverrides = session.settings.get("task.agentModelOverrides");
 		// Same contract as the task spawn path: the expansion discards the role
 		// alias (`@task`, `@smol`), so patterns and role identity come from one
 		// call — the child's inherited retry-fallback chain is keyed off the role.
-		const { patterns, role, inheritsLiveThinkingLevel } = resolveAgentModelSelection({
+		const { patterns, role } = resolveAgentModelSelection({
 			settingsOverride: agentModelOverrides[agentName],
 			agentModel: agent.model,
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
+			// So a suffixed self alias (`*:xhigh`) re-tiers an inherited SELECTOR but
+			// leaves an inherited literal id (`nanogpt/coding-router:low`) alone —
+			// rewriting that suffix names a different model, not a new tier. The
+			// active model joins the projection because a pinned, caller-authenticated
+			// model is absent from it — see `modelCatalogForClassification`.
+			availableModels: modelCatalogForClassification(
+				session.modelRegistry?.getAvailable(),
+				session.getActiveModel?.(),
+			),
 		});
-		return {
-			agent,
-			modelOverride: patterns,
-			modelRole: role,
-			modelInheritsLiveThinkingLevel: inheritsLiveThinkingLevel,
-		};
+		return { agent, modelOverride: patterns, modelRole: role };
 	}
 
 	async #appendLifecycleEvent(
@@ -562,7 +565,6 @@ export class VibeSessionRegistry {
 			id: record.id,
 			cli: record.cli,
 			state: record.state,
-			killed: record.killed,
 			model: record.resolvedModel,
 			turns: record.turnCount,
 			queued: record.queue.length,
@@ -767,10 +769,7 @@ export class VibeSessionRegistry {
 				existing.sessionFile === childSessionFile &&
 				(existing.status === "idle" || existing.status === "parked");
 			const blockedByCollision = Boolean(existing && !existingIsResumable);
-			const { agent, modelOverride, modelRole, modelInheritsLiveThinkingLevel } = this.#resolveWorker(
-				session,
-				spawn.cli,
-			);
+			const { agent, modelOverride, modelRole } = this.#resolveWorker(session, spawn.cli);
 			if (!existing) {
 				AgentRegistry.global().register({
 					id: spawn.id,
@@ -792,7 +791,6 @@ export class VibeSessionRegistry {
 				agent,
 				modelOverride,
 				modelRole,
-				modelInheritsLiveThinkingLevel,
 				state: "idle",
 				createdAt: spawn.createdAt,
 				lastActivityAt: candidate.lastActivityAt,
@@ -827,10 +825,7 @@ export class VibeSessionRegistry {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
 		const manager = this.#manager(session);
-		const { agent, modelOverride, modelRole, modelInheritsLiveThinkingLevel } = this.#resolveWorker(
-			session,
-			args.cli,
-		);
+		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 		}
@@ -855,7 +850,6 @@ export class VibeSessionRegistry {
 			agent,
 			modelOverride,
 			modelRole,
-			modelInheritsLiveThinkingLevel,
 			state: "starting",
 			createdAt,
 			lastActivityAt: createdAt,
@@ -1296,7 +1290,10 @@ export class VibeSessionRegistry {
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
 		await fs.mkdir(artifactsDir, { recursive: true });
 		if (!sessionArtifactsDir) registerArtifactsDir(artifactsDir);
-		const localProtocolOptions = sessionLocalProtocolOptions(session);
+		const localProtocolOptions: LocalProtocolOptions = session.localProtocolOptions ?? {
+			getArtifactsDir: session.getArtifactsDir ?? (() => null),
+			getSessionId: session.getSessionId ?? (() => null),
+		};
 		return {
 			cwd: session.cwd,
 			agent: record.agent,
@@ -1309,13 +1306,12 @@ export class VibeSessionRegistry {
 			detached: true,
 			modelOverride: record.modelOverride,
 			modelRole: record.modelRole,
-			modelInheritsLiveThinkingLevel: record.modelInheritsLiveThinkingLevel,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
 			sessionFile,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
-			enableLsp: (session.enableLsp ?? true) && cfgTaskEnableLsp.get(session.settings),
+			enableLsp: (session.enableLsp ?? true) && session.settings.get("task.enableLsp"),
 			signal,
 			eventBus: session.eventBus,
 			subagentEventBus: session.subagentEventBus,
@@ -1323,7 +1319,6 @@ export class VibeSessionRegistry {
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
 			settings: session.settings,
-			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 			skills: [...(session.skills ?? [])],
@@ -1338,6 +1333,7 @@ export class VibeSessionRegistry {
 			parentHindsightSessionState: session.getHindsightSessionState?.(),
 			parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 			parentTelemetry: session.getTelemetry?.(),
+			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 			keepAlive: true,

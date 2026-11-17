@@ -116,8 +116,7 @@ def download_repo(emit, request_id, model_key, repo, model_dir):
                 "id": request_id,
                 "event": {
                     "modelKey": model_key,
-                    # Running total across the repo, tagged with the current file.
-                    "status": "progress_total",
+                    "status": "progress",
                     "file": name,
                     "progress": (loaded / total * 100.0) if total else 0.0,
                     "loaded": loaded,

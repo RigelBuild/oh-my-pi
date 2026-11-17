@@ -1,22 +1,28 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { BashInterceptorRule } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import {
+	type BashInterceptorRule,
+	DEFAULT_BASH_INTERCEPTOR_RULES,
+} from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
-import { DEFAULT_BASH_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
 	const session = {
-		settings: Settings.isolated({
-			"bashInterceptor.enabled": true,
-			"bashInterceptor.patterns": rules,
-			"async.enabled": false,
-			"bash.autoBackground.enabled": false,
-			"bash.autoBackground.thresholdMs": 60_000,
-		}),
+		settings: {
+			get(key: string) {
+				if (key === "bashInterceptor.enabled") return true;
+				if (key === "async.enabled") return false;
+				if (key === "bash.autoBackground.enabled") return false;
+				if (key === "bash.autoBackground.thresholdMs") return 60_000;
+				return undefined;
+			},
+			getBashInterceptorRules() {
+				return rules;
+			},
+		},
 	} as unknown as ToolSession;
 
 	return new BashTool(session);

@@ -14,9 +14,9 @@ import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRegistry,
+	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
-import { getAgentTombstonePath } from "./agent-tombstone";
 
 /** Maximum prefix entries inspected for task metadata. */
 const MAX_METADATA_LINES = 64;
@@ -341,10 +341,7 @@ async function readPersistedAgentMetadata(
 				hasSessionInit = true;
 				createdAt ??= timestampOf(record.timestamp);
 				if (typeof record.task === "string") activity = summarizePersistedTask(record.task);
-				const systemPrompt = Array.isArray(record.systemPrompt)
-					? record.systemPrompt.join("\n\n")
-					: record.systemPrompt;
-				const inferred = typeof systemPrompt === "string" ? inferBundledAgent(systemPrompt) : {};
+				const inferred = typeof record.systemPrompt === "string" ? inferBundledAgent(record.systemPrompt) : {};
 				history = {
 					...history,
 					...inferred,
@@ -487,8 +484,7 @@ function rosterScanError(error: unknown): string {
 	return text.length <= 200 ? text : `${text.slice(0, 197)}...`;
 }
 
-/** Whether `sessionFile` is the root transcript or lives in its artifacts tree. */
-export function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
+function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
 	const file = path.resolve(sessionFile);
 	const root = path.resolve(rootSessionFile);
 	const artifactRoot = root.slice(0, -".jsonl".length);

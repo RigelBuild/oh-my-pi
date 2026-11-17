@@ -45,12 +45,17 @@ async function createRuntimeHarness(options?: { collabHost?: NonNullable<Interac
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const present = vi.fn();
+	const settingsGet = vi.fn((key: string) => {
+		if (key === "collab.relayUrl") return "wss://relay.example.com";
+		if (key === "collab.webUrl") return "";
+		return "";
+	});
 	const ctx = {
 		editor: { setText },
 		showStatus,
 		showError,
 		present,
-		settings: Settings.isolated({ "collab.relayUrl": "wss://relay.example.com" }),
+		settings: { get: settingsGet },
 		session: { registerSessionChangeCallback: () => () => {} },
 		sessionManager: { getSessionId: () => "sess-qrcode" },
 		statusLine: { setCollabStatus: () => {}, invalidate: () => {} },

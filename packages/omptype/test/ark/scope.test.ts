@@ -164,6 +164,8 @@ it("errors on ridiculous unexpected alias scenario", () => {
 	).toThrow();
 });
 
+it.todo("autocompletion");
+
 it("cross-scope reference", () => {
 	const { Apple } = scope({
 		Apple: {
@@ -224,6 +226,15 @@ describe("cyclic", () => {
 		packageData.dependencies.push(packageData);
 		return packageData;
 	};
+
+	it("cyclic intersection", () => {
+		const types = scope({
+			a: { b: "b&a" },
+			b: { a: "a&b" },
+		}).export();
+		void types.a.t;
+		void types.b.t;
+	});
 
 	it("allows valid", () => {
 		const types = getCyclicScope().export();

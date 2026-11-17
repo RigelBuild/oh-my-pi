@@ -4,10 +4,8 @@ import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "
 import { charmHyperUsageProvider } from "./charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./claude";
 import { clinePassUsageProvider } from "./cline-pass";
-import { commandCodeRankingStrategy, commandCodeUsageProvider } from "./commandcode";
-import { cursorRankingStrategy, cursorUsageProvider } from "./cursor";
+import { cursorUsageProvider } from "./cursor";
 import { devinUsageProvider } from "./devin";
-import { factoryDroidRankingStrategy, factoryDroidUsageProvider } from "./factory-droid";
 import { googleGeminiCliUsageProvider } from "./gemini";
 import { githubCopilotUsageProvider } from "./github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
@@ -35,7 +33,6 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	antigravityUsageProvider,
 	googleGeminiCliUsageProvider,
 	ollamaUsageProvider,
-	factoryDroidUsageProvider,
 	ollamaCloudUsageProvider,
 	claudeUsageProvider,
 	clinePassUsageProvider,
@@ -48,7 +45,6 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	xaiOauthUsageProvider,
 	devinUsageProvider,
 	charmHyperUsageProvider,
-	commandCodeUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
@@ -64,14 +60,11 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["alibaba-token-plan", alibabaTokenPlanRankingStrategy],
 	["openai-codex", codexRankingStrategy],
 	["anthropic", claudeRankingStrategy],
-	["cursor", cursorRankingStrategy],
 	["google-antigravity", antigravityRankingStrategy],
-	["factory-droid", factoryDroidRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],
 	["opencode-go", opencodeGoRankingStrategy],
 	["xai-oauth", xaiOauthRankingStrategy],
-	["commandcode", commandCodeRankingStrategy],
 ]);
 
 /** Built-in ranking strategy for `provider`. */

@@ -27,8 +27,6 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-import { cfgPrewalkEnabled } from "@oh-my-pi/pi-coding-agent/session/settings";
-
 describe("issue #11820 prewalk into a models.yml discovery provider target", () => {
 	let tempDir: string;
 	const authStoragesToClose: AuthStorage[] = [];
@@ -101,7 +99,7 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 	test("arms prewalk for the configured smol role after discovery", async () => {
 		const modelRegistry = registry();
 		const settings = Settings.isolated();
-		cfgPrewalkEnabled.set(settings, true);
+		settings.set("prewalk.enabled", true);
 		settings.setModelRole("smol", "my-provider/some-model");
 
 		const options = await buildSessionOptions(parseArgs([]), [], SessionManager.inMemory(), modelRegistry, settings);

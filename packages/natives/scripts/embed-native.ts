@@ -1,10 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	containsLegacyVersionSentinel,
-	containsVersionStamp,
-	VERSION_STAMP_MAGIC,
-} from "../native/version-sentinel.js";
+import { containsVersionSentinel, versionSentinelFor } from "../native/version-sentinel.js";
 
 const outputPath = path.join(import.meta.dir, "../native/embedded-addon.js");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
@@ -114,15 +110,13 @@ export async function embedNativeAddon({
 	const archiveFilename = `${archivePrefix}${platformTag}${archiveSuffix}`;
 	const archivePath = path.join(nativeDir, archiveFilename);
 	const archiveEntries: Record<string, Uint8Array> = {};
+	const versionSentinel = versionSentinelFor(version);
 	for (const addon of available) {
 		const bytes = await fs.readFile(addon.path);
-		// Pre-stamp addons (npm releases and main builds before the stamp slot)
-		// identify their release by the legacy export, which the loader accepts.
-		if (!containsVersionStamp(bytes, version) && !containsLegacyVersionSentinel(bytes, version)) {
+		if (!containsVersionSentinel(bytes, versionSentinel)) {
 			throw new Error(
-				`Native addon ${addon.path} does not carry the @oh-my-pi/pi-natives@${version} version stamp ` +
-					`\`${VERSION_STAMP_MAGIC}${version}\`. Rebuild it (installs stamp automatically), run ` +
-					`\`bun scripts/stamp-native-version.ts ${addon.path}\`, or fetch @oh-my-pi/pi-natives-${platformTag}@${version} before embedding.`,
+				`Native addon ${addon.path} does not contain the @oh-my-pi/pi-natives@${version} version sentinel ` +
+					`\`${versionSentinel}\`. Rebuild it or fetch @oh-my-pi/pi-natives-${platformTag}@${version} before embedding.`,
 			);
 		}
 		archiveEntries[addon.filename] = bytes;

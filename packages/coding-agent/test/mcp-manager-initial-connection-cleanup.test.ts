@@ -77,6 +77,19 @@ describe("MCPManager initial connection ownership", () => {
 		expect(manager.getConnectedServers()).toEqual([]);
 	});
 
+	it("closes and forgets a connection whose initial tools/list fails", async () => {
+		const manager = new MCPManager(process.cwd());
+		const failed = fakeConnection("server");
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(failed.connection);
+		vi.spyOn(mcpClient, "listTools").mockRejectedValue(new Error("initial tools/list failed"));
+
+		const result = await manager.connectServers({ server: CONFIG }, {});
+
+		expect(result.errors.get("server")).toBe("initial tools/list failed");
+		expect(failed.transport.closeCalls).toBe(1);
+		expect(manager.getConnectedServers()).toEqual([]);
+	});
+
 	it("recovers tools after an initial handshake timeout", async () => {
 		const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-initial-recovery-"));
 		const manager = new MCPManager(workDir);
@@ -88,23 +101,18 @@ describe("MCPManager initial connection ownership", () => {
 			type: "stdio",
 			command: process.execPath,
 			args: [path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts"), marker],
-			timeout: 1_000,
+			timeout: 100,
 		};
 		manager.setOnToolsChanged(tools => {
 			if (tools.some(tool => tool.name === `mcp__server_${DELAYED_TOOL_NAME}`)) rebound.resolve();
 		});
 
 		try {
-			const result = await manager.connectServers(
-				{ server: config },
-				{},
-				event => {
-					statusTypes.push(event.type);
-					if (event.type === "connected") statusSettled.resolve();
-				},
-				0,
-			);
-			expect(result.errors.get("server")).toBe('Connection to MCP server "server" timed out after 1000ms');
+			const result = await manager.connectServers({ server: config }, {}, event => {
+				statusTypes.push(event.type);
+				if (event.type === "connected") statusSettled.resolve();
+			});
+			expect(result.errors.get("server")).toBe('Connection to MCP server "server" timed out after 100ms');
 			await rebound.promise;
 			await statusSettled.promise;
 
@@ -115,7 +123,7 @@ describe("MCPManager initial connection ownership", () => {
 			await manager.disconnectAll();
 			await removeWithRetries(workDir);
 		}
-	}, 10_000);
+	}, 5_000);
 
 	it("stops a startup-timeout retry when that server is disconnected", async () => {
 		vi.useFakeTimers();

@@ -15,7 +15,6 @@ import {
 	unpackEnvelope,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 interface RelayData {
@@ -91,7 +90,7 @@ function makeStreamingHostContext(): StreamingHostHarness {
 	const prompts: CapturedPrompt[] = [];
 	const promptWaiters: ((prompt: CapturedPrompt) => void)[] = [];
 	const ctx = {
-		settings: Settings.isolated(),
+		settings: { get: () => "" },
 		sessionManager: {
 			getSessionId: () => "sess-1",
 			getCwd: () => "/tmp",

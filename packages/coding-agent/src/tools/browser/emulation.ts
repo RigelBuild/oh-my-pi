@@ -1,6 +1,5 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Device, Frame, NetworkConditions, Page, Permission } from "puppeteer-core";
-import { pressKey } from "./interactions";
 import { applyViewport } from "./launch";
 
 /** Viewport dimensions accepted by runtime emulation. */
@@ -242,7 +241,12 @@ export class BrowserEmulationController {
 		this.#clipboardShim = undefined;
 		await this.#grantPermissions(["clipboard-read", "clipboard-write"]);
 		const modifier = process.platform === "darwin" ? "Meta" : "Control";
-		await pressKey(this.#page, `${modifier}+c`);
+		await this.#page.keyboard.down(modifier);
+		try {
+			await this.#page.keyboard.press("c");
+		} finally {
+			await this.#page.keyboard.up(modifier);
+		}
 		return { source: "page" };
 	}
 
@@ -250,7 +254,12 @@ export class BrowserEmulationController {
 	async clipboardPaste(): Promise<ClipboardActionResult> {
 		await this.#grantPermissions(["clipboard-read", "clipboard-write"]);
 		const modifier = process.platform === "darwin" ? "Meta" : "Control";
-		await pressKey(this.#page, `${modifier}+v`);
+		await this.#page.keyboard.down(modifier);
+		try {
+			await this.#page.keyboard.press("v");
+		} finally {
+			await this.#page.keyboard.up(modifier);
+		}
 		return { source: "page" };
 	}
 

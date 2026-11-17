@@ -1,7 +1,4 @@
-use std::{
-	io::Write,
-	path::{Path, PathBuf},
-};
+use std::{fs::File, io::Write, path::PathBuf};
 
 use brush_core::{ExecutionExitCode, ExecutionResult, builtins, history};
 use clap::Parser;
@@ -52,11 +49,8 @@ pub(crate) struct HistoryCommand {
 }
 
 struct HistoryConfig {
-	/// The file named by the `-a`/`-n`/`-r`/`-w` operand (at most one of those
-	/// options is accepted), falling back to the shell's history file.
-	history_file_path: Option<PathBuf>,
-	time_format:       Option<String>,
-	filesystem:        pi_vfs::Fs,
+	default_history_file_path: Option<PathBuf>,
+	time_format:               Option<String>,
 }
 
 impl builtins::Command for HistoryCommand {
@@ -66,30 +60,17 @@ impl builtins::Command for HistoryCommand {
 		&self,
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Self::Error> {
-		// Retrieve the shell's history config while we still can. File operands
-		// resolve against the shell's working directory and filesystem.
-		let operand = [
-			&self.append_session_to_file,
-			&self.append_rest_of_file_to_session,
-			&self.append_file_to_session,
-			&self.write_session_to_file,
-		]
-		.into_iter()
-		.find_map(|option| option.as_ref()?.as_deref());
+		// Retrieve the shell's history config while we still can.
 		let config = HistoryConfig {
-			history_file_path: operand.map_or_else(
-				|| context.shell.history_file_path(),
-				|file| Some(context.shell.absolute_path(Path::new(file))),
-			),
-			time_format:       context.shell.history_time_format(),
-			filesystem:        context.shell.filesystem().clone(),
+			default_history_file_path: context.shell.history_file_path(),
+			time_format:               context.shell.history_time_format(),
 		};
 
 		let stdout = context.stdout();
 		let stderr = context.stderr();
 
 		if let Some(history) = context.shell.history_mut() {
-			self.execute_with_history(history, config, stdout, stderr).await
+			self.execute_with_history(history, config, stdout, stderr)
 		} else {
 			Err(brush_core::ErrorKind::HistoryNotEnabled.into())
 		}
@@ -100,12 +81,12 @@ impl HistoryCommand {
 	#[expect(clippy::cast_possible_wrap)]
 	#[expect(clippy::cast_possible_truncation)]
 	#[expect(clippy::cast_sign_loss)]
-	async fn execute_with_history(
+	fn execute_with_history(
 		&self,
 		history: &mut history::History,
 		config: HistoryConfig,
-		stdout: impl Write + Send,
-		mut stderr: impl Write + Send,
+		stdout: impl Write,
+		mut stderr: impl Write,
 	) -> Result<ExecutionResult, brush_core::Error> {
 		if self.clear_history {
 			history.clear()?;
@@ -138,61 +119,52 @@ impl HistoryCommand {
 			return Ok(ExecutionResult::success());
 		}
 
-		if self.append_session_to_file.is_some() {
-			if let Some(file_path) = config.history_file_path {
-				history
-					.flush(
-						&config.filesystem,
-						file_path,
-						true,                         /* append? */
-						true,                         /* unsaved items only */
-						config.time_format.is_some(), /* write timestamps? */
-					)
-					.await?;
-			}
-
-			return Ok(ExecutionResult::success());
-		}
-
-		if self.append_rest_of_file_to_session.is_some() {
-			if let Some(file_path) = config.history_file_path {
-				append_history_file_to_session(
-					history,
-					&config.filesystem,
+		if let Some(append_option) = &self.append_session_to_file {
+			if let Some(file_path) = get_effective_history_file_path(
+				config.default_history_file_path,
+				append_option.as_ref(),
+			) {
+				history.flush(
 					file_path,
-					HistoryReadMode::Unread,
-				)
-				.await?;
+					true,                         /* append? */
+					true,                         /* unsaved items only */
+					config.time_format.is_some(), /* write timestamps? */
+				)?;
 			}
 
 			return Ok(ExecutionResult::success());
 		}
 
-		if self.append_file_to_session.is_some() {
-			if let Some(file_path) = config.history_file_path {
-				append_history_file_to_session(
-					history,
-					&config.filesystem,
+		if let Some(read_option) = &self.append_rest_of_file_to_session {
+			if let Some(file_path) =
+				get_effective_history_file_path(config.default_history_file_path, read_option.as_ref())
+			{
+				append_history_file_to_session(history, file_path, HistoryReadMode::Unread)?;
+			}
+
+			return Ok(ExecutionResult::success());
+		}
+
+		if let Some(read_option) = &self.append_file_to_session {
+			if let Some(file_path) =
+				get_effective_history_file_path(config.default_history_file_path, read_option.as_ref())
+			{
+				append_history_file_to_session(history, file_path, HistoryReadMode::All)?;
+			}
+
+			return Ok(ExecutionResult::success());
+		}
+
+		if let Some(write_option) = &self.write_session_to_file {
+			if let Some(file_path) =
+				get_effective_history_file_path(config.default_history_file_path, write_option.as_ref())
+			{
+				history.flush(
 					file_path,
-					HistoryReadMode::All,
-				)
-				.await?;
-			}
-
-			return Ok(ExecutionResult::success());
-		}
-
-		if self.write_session_to_file.is_some() {
-			if let Some(file_path) = config.history_file_path {
-				history
-					.flush(
-						&config.filesystem,
-						file_path,
-						false,                        /* append? */
-						false,                        /* unsaved items only? */
-						config.time_format.is_some(), /* write timestamps? */
-					)
-					.await?;
+					false,                        /* append? */
+					false,                        /* unsaved items only? */
+					config.time_format.is_some(), /* write timestamps? */
+				)?;
 			}
 
 			return Ok(ExecutionResult::success());
@@ -468,14 +440,13 @@ enum HistoryReadMode {
 	Unread,
 }
 
-async fn append_history_file_to_session(
+fn append_history_file_to_session(
 	history: &mut history::History,
-	filesystem: &pi_vfs::Fs,
 	file_path: PathBuf,
 	mode: HistoryReadMode,
 ) -> Result<(), brush_core::Error> {
-	let contents = filesystem.read(file_path).await?;
-	let imported_history = history::History::import(contents.as_slice())?;
+	let file = File::open(file_path)?;
+	let imported_history = history::History::import(file)?;
 	let already_read_count = match mode {
 		HistoryReadMode::All => 0,
 		HistoryReadMode::Unread => history.iter().filter(|item| !item.dirty).count(),
@@ -486,6 +457,13 @@ async fn append_history_file_to_session(
 	}
 
 	Ok(())
+}
+
+fn get_effective_history_file_path(
+	default_history_file_path: Option<PathBuf>,
+	option: Option<&String>,
+) -> Option<PathBuf> {
+	option.map_or_else(|| default_history_file_path, |file_path| Some(PathBuf::from(file_path)))
 }
 
 #[cfg(test)]
@@ -515,19 +493,13 @@ mod tests {
 		Ok(())
 	}
 
-	#[tokio::test]
-	async fn test_append_history_file_to_session_reads_all_entries() -> Result<()> {
+	#[test]
+	fn test_append_history_file_to_session_reads_all_entries() -> Result<()> {
 		let file_path = write_temp_history("history-r", "one\ntwo\n")?;
 		let mut history = history::History::default();
 		history.add(history::Item::new("local"))?;
 
-		append_history_file_to_session(
-			&mut history,
-			&pi_vfs::Fs::native(),
-			file_path.clone(),
-			HistoryReadMode::All,
-		)
-		.await?;
+		append_history_file_to_session(&mut history, file_path.clone(), HistoryReadMode::All)?;
 
 		assert_eq!(history.count(), 3);
 		assert_eq!(history.get(0).map(|item| item.command_line.as_str()), Some("local"));
@@ -539,21 +511,14 @@ mod tests {
 		Ok(())
 	}
 
-	#[tokio::test]
-	async fn test_append_history_file_to_session_reads_unread_entries_after_clean_history()
-	-> Result<()> {
+	#[test]
+	fn test_append_history_file_to_session_reads_unread_entries_after_clean_history() -> Result<()> {
 		let initial_file_path = write_temp_history("history-n-initial", "one\ntwo\n")?;
 		let mut history = history::History::import(fs::File::open(&initial_file_path)?)?;
 		history.add(history::Item::new("local"))?;
 
 		let updated_file_path = write_temp_history("history-n-updated", "one\ntwo\nthree\n")?;
-		append_history_file_to_session(
-			&mut history,
-			&pi_vfs::Fs::native(),
-			updated_file_path.clone(),
-			HistoryReadMode::Unread,
-		)
-		.await?;
+		append_history_file_to_session(&mut history, updated_file_path.clone(), HistoryReadMode::Unread)?;
 
 		assert_eq!(history.count(), 4);
 		assert_eq!(history.get(2).map(|item| item.command_line.as_str()), Some("local"));

@@ -63,7 +63,6 @@ describe("AgentSession todo reminder async-job deferral", () => {
 	let gates: Array<PromiseWithResolvers<string>>;
 	let reminderAttempts: number[];
 	let agentEndTerminalStates: Array<boolean | undefined>;
-	let agentEndAwaitingAsyncWork: Array<boolean | undefined>;
 
 	function textOnlyAssistantMessage(): AssistantMessage {
 		return {
@@ -156,12 +155,12 @@ describe("AgentSession todo reminder async-job deferral", () => {
 
 		reminderAttempts = [];
 		agentEndTerminalStates = [];
-		agentEndAwaitingAsyncWork = [];
 		session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "todo_reminder") reminderAttempts.push(event.attempt);
 			if (event.type === "agent_end") {
-				agentEndTerminalStates.push(event.isTerminal);
-				agentEndAwaitingAsyncWork.push(event.awaitingAsyncWork);
+				agentEndTerminalStates.push(
+					(event as Extract<AgentSessionEvent, { type: "agent_end" }> & { isTerminal?: boolean }).isTerminal,
+				);
 			}
 		});
 	});
@@ -189,8 +188,6 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		expect(reminderAttempts).toEqual([]);
 		expect(continueSpy).not.toHaveBeenCalled();
 		expect(agentEndTerminalStates).toEqual([false]);
-		// Only a background result can resume this pause, so the event says so.
-		expect(agentEndAwaitingAsyncWork).toEqual([true]);
 	});
 
 	it("does not defer for a running job owned by a different agent", async () => {
@@ -202,8 +199,6 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		await session.waitForIdle();
 
 		expect(reminderAttempts).toEqual([1]);
-		// The reminder is the agent's own continuation, not an async wait.
-		expect(agentEndAwaitingAsyncWork).toEqual([undefined]);
 	});
 
 	it("fires the reminder on the next stop once the owned job completes and its delivery drains", async () => {

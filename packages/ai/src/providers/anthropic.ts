@@ -3,7 +3,6 @@ import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
 import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/hosts";
-import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
@@ -16,15 +15,11 @@ import {
 	parseStreamingJsonThrottled,
 	readSseEvents,
 } from "@oh-my-pi/pi-utils";
-import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
-import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
-	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,
-	AnthropicCompactionRequest,
 	AnthropicFallbackContent,
 	AnthropicMessagePayload,
 	AnthropicOutputEffort,
@@ -82,11 +77,6 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
-import {
-	ANTHROPIC_SLOW_USAGE_LIMIT,
-	ANTHROPIC_USAGE_LIMIT_HEADER,
-	parseAnthropicSlowModeHeaders,
-} from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
@@ -121,6 +111,7 @@ import {
 	type TextBlockParam,
 } from "./anthropic-wire";
 import {
+	CLAUDE_CODE_MAX_OUTPUT_TOKENS,
 	claudeCodeSdkVersion,
 	claudeCodeSystemInstruction,
 	adoptRequiredClaudeCodeVersion,
@@ -159,7 +150,6 @@ import {
 	resolveAnthropicMetadataUserId,
 	stripClaudeToolPrefix,
 } from "./anthropic-identity";
-import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import {
 	anthropicProviderSessionStateKey,
 	clearAnthropicFastModeFallback,
@@ -353,7 +343,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		for (const key in headerSource) {
 			const value = headerSource[key];
 			const lowerKey = key.toLowerCase();
-			if (enforcedHeaderKeys.has(lowerKey) && (oauthToken || !coworkHeaderKeys.has(lowerKey))) {
+			if (enforcedHeaderKeys.has(lowerKey)) {
 				if (allowAnthropicHeaderOverrides && overridableAnthropicHeaderKeys.has(lowerKey)) {
 					anthropicHeaderOverrides[key] = value;
 					continue;
@@ -410,17 +400,10 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		};
 		return allowAnthropicHeaderOverrides ? mergeHeaders(headers, anthropicHeaderOverrides) : headers;
 	} else if (!isOfficialAnthropicApiUrl(options.baseUrl)) {
-		// A keyless provider (`auth: none`) resolves to the `N/A` sentinel
-		// rather than a real key; custom endpoints that authenticate via their
-		// own headers may reject a bogus bearer, so send no Authorization —
-		// same sentinel guard as the openai transports. A caller-supplied
-		// Authorization in `model.headers` still wins.
-		const bearer =
-			incomingAuthorization ?? (options.apiKey !== NO_AUTH_SENTINEL ? `Bearer ${options.apiKey}` : undefined);
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
-			...(bearer ? { Authorization: bearer } : {}),
+			Authorization: incomingAuthorization ?? `Bearer ${options.apiKey}`,
 			...sharedHeaders,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
@@ -610,15 +593,6 @@ export const claudeCodeHeaders = {
 	"X-Stainless-Runtime-Version": "v26.3.0",
 	"X-Stainless-Timeout": "600",
 };
-
-/**
- * Cowork's fingerprint keys. Only the OAuth branch re-emits them, so only that
- * branch may enforce them: everywhere else nothing would fill the gap and
- * filtering would silently delete a client identity the caller built on
- * purpose (Factory Droid mirrors droid's Anthropic SDK fingerprint on this
- * wire, right down to the 600s client timeout).
- */
-const coworkHeaderKeys = new Set(Object.keys(claudeCodeHeaders).map(key => key.toLowerCase()));
 
 const enforcedHeaderKeys = new Set(
 	[
@@ -1612,6 +1586,31 @@ export function applyAnthropicUsageExtras(usage: Usage, source: AnthropicUsageLi
 	}
 }
 
+function parseAnthropicWireUsage(value: unknown): AnthropicWireUsage | undefined {
+	if (!isRecord(value)) return undefined;
+	const cacheCreation = isRecord(value.cache_creation)
+		? {
+				...(typeof value.cache_creation.ephemeral_5m_input_tokens === "number"
+					? { ephemeral_5m_input_tokens: value.cache_creation.ephemeral_5m_input_tokens }
+					: {}),
+				...(typeof value.cache_creation.ephemeral_1h_input_tokens === "number"
+					? { ephemeral_1h_input_tokens: value.cache_creation.ephemeral_1h_input_tokens }
+					: {}),
+			}
+		: undefined;
+	return {
+		...(typeof value.input_tokens === "number" ? { input_tokens: value.input_tokens } : {}),
+		...(typeof value.output_tokens === "number" ? { output_tokens: value.output_tokens } : {}),
+		...(typeof value.cache_read_input_tokens === "number"
+			? { cache_read_input_tokens: value.cache_read_input_tokens }
+			: {}),
+		...(typeof value.cache_creation_input_tokens === "number"
+			? { cache_creation_input_tokens: value.cache_creation_input_tokens }
+			: {}),
+		...(cacheCreation === undefined ? {} : { cache_creation: cacheCreation }),
+	};
+}
+
 function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackContent | undefined {
 	if (!isRecord(value) || value.type !== "fallback") return undefined;
 	const from = isRecord(value.from) && typeof value.from.model === "string" ? value.from.model : undefined;
@@ -1631,28 +1630,6 @@ function isReplayableAnthropicCompaction(
 	model: Model<"anthropic-messages">,
 ): payload is AnthropicCompactionPayload {
 	return payload?.type === "anthropicCompaction" && payload.provider === model.provider && payload.content.length > 0;
-}
-
-/** Which persisted compaction summaries a request replays as native blocks. */
-interface AnthropicCompactionReplay {
-	model: Model<"anthropic-messages">;
-	/** Replay persisted legacy threshold blocks (encrypted content) too. */
-	legacy: boolean;
-}
-
-/**
- * Whether `payload` goes on the wire as a `compaction` block under `replay`:
- * replayable for the model, and carrying a signature or (when legacy replay is
- * on) the legacy ciphertext. Anything else is sent as the summary's text.
- */
-function replaysAnthropicCompactionBlock(
-	payload: ProviderPayload | undefined,
-	replay: AnthropicCompactionReplay,
-): payload is AnthropicCompactionPayload {
-	return (
-		isReplayableAnthropicCompaction(payload, replay.model) &&
-		(payload.signature !== undefined || (replay.legacy && payload.encryptedContent !== undefined))
-	);
 }
 
 /** The wire block for a replayed compaction payload, opaque state included. */
@@ -2090,6 +2067,7 @@ const streamAnthropicOnce = (
 				});
 			}
 
+			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
 			// Retained so a Claude Code version bump can rebuild the client's fingerprint headers.
@@ -2102,10 +2080,11 @@ const streamAnthropicOnce = (
 				isOAuthToken = false;
 			} else {
 				const extraBetas = normalizeExtraBetas(options?.betas);
+				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
 				// endpoint+model rejects fast mode; `speed` is dropped from the params
 				// too (dropFastMode), so the request stays a faithful non-fast request.
-				if (wantsAnthropicFastMode(model, options) && !dropFastMode && !extraBetas.includes(fastModeBeta)) {
+				if (wantsAnthropicPriority && !dropFastMode && !extraBetas.includes(fastModeBeta)) {
 					extraBetas.push(fastModeBeta);
 				}
 				if (options?.taskBudget && !extraBetas.includes(taskBudgetBeta)) {
@@ -2124,16 +2103,12 @@ const streamAnthropicOnce = (
 					isAdaptiveOnlyThinking(model) &&
 					(options?.thinkingEnabled === false ||
 						(model.compat.supportsForcedToolChoice && isForcedToolChoice(options?.toolChoice)));
-				// A resolved `effortBeta` (Factory Droid routes, whose Bedrock/Vertex
-				// upstreams gate the beta themselves) replaces the heuristic: the beta
-				// rides exactly when an output effort does.
-				const emitsEffortBeta =
-					model.compat.effortBeta !== undefined
-						? model.compat.effortBeta && options?.effort !== undefined
-						: model.reasoning &&
-							model.compat.supportsOutputEffort &&
-							((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin);
-				if (emitsEffortBeta && !extraBetas.includes(effortBeta)) {
+				if (
+					model.reasoning &&
+					model.compat.supportsOutputEffort &&
+					((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin) &&
+					!extraBetas.includes(effortBeta)
+				) {
 					extraBetas.push(effortBeta);
 				}
 				if (!isVertexRawPredictUrl(baseUrl)) {
@@ -2228,7 +2203,7 @@ const streamAnthropicOnce = (
 					model,
 					apiKey,
 					extraBetas,
-					stream: true,
+					stream: !zeroOutputCacheRefresh,
 					interleavedThinking: options?.interleavedThinking ?? true,
 					headers: options?.headers,
 					dynamicHeaders: copilotDynamicHeaders?.headers,
@@ -2281,8 +2256,6 @@ const streamAnthropicOnce = (
 					nextParams = replacementPayload as typeof nextParams;
 				}
 				if (nextParams.compaction) stripCompactionIncompatibleParams(nextParams);
-				// After `onPayload`, so a hook cannot restore a field Bedrock rejects.
-				if (model.compat.bedrockMessagesApi) fitBedrockAnthropicPayload(nextParams);
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
@@ -2344,6 +2317,89 @@ const streamAnthropicOnce = (
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 
+			if (zeroOutputCacheRefresh) {
+				const refreshParams: MessageCreateParams = { ...params, max_tokens: 0, stream: false };
+				// Anthropic rejects `tool_choice: {type:"tool"|"any"}` with `max_tokens: 0`
+				// ("tool_choice ... cannot be used when max_tokens is 0", #12597). A refresh
+				// replays the captured turn's payload, which can carry a forced selector
+				// (e.g. a forced yield). A zero-output keep-alive produces no tokens, so the
+				// forced choice is meaningless here — drop it so the request is accepted.
+				const refreshChoiceType = refreshParams.tool_choice?.type;
+				if (refreshChoiceType === "tool" || refreshChoiceType === "any") {
+					delete refreshParams.tool_choice;
+				}
+				rawRequestDump = {
+					provider: model.provider,
+					api: output.api,
+					model: model.id,
+					method: "POST",
+					url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
+					body: refreshParams,
+				};
+				const { requestSignal } = activeAbortTracker;
+				// A replayed compaction block needs the beta on injected clients too.
+				// Route by the client's own endpoint when it exposes one.
+				const refreshBetaRouteUrl =
+					options?.client !== undefined ? (injectedClientBaseUrl(options.client) ?? baseUrl) : baseUrl;
+				let refreshHeaders: Record<string, string> | undefined;
+				if (options?.client !== undefined && !isVertexRawPredictUrl(refreshBetaRouteUrl)) {
+					if (carriesSignedCompaction(refreshParams)) {
+						refreshHeaders = mergeAnthropicBetaHeader(refreshHeaders ?? mergedCallerHeaders, COMPACTION_BETA);
+					}
+					if (carriesLegacyCompactionEdit(refreshParams)) {
+						refreshHeaders = mergeAnthropicBetaHeader(
+							refreshHeaders ?? mergedCallerHeaders,
+							LEGACY_COMPACTION_BETA,
+						);
+					}
+				}
+				const requestOptions = {
+					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
+					maxRetries: 0,
+					...(refreshHeaders ? { headers: refreshHeaders } : {}),
+				};
+				const request: unknown =
+					isOAuthToken && client.beta
+						? client.beta.messages.create(refreshParams, requestOptions)
+						: client.messages.create(refreshParams, requestOptions);
+				if (!hasAnthropicRawResponseRequest(request)) {
+					throw new AIError.AnthropicStreamEnvelopeError(
+						"Anthropic cache refresh request did not expose a raw response",
+					);
+				}
+				const response = await request.asResponse();
+				await notifyProviderResponse(options, response, model, response.headers.get("request-id"));
+				const body: unknown = await response.json();
+				if (!isRecord(body)) {
+					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh returned a malformed response");
+				}
+				const wireUsage = parseAnthropicWireUsage(body.usage);
+				if (!wireUsage) {
+					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh response omitted usage");
+				}
+				if (typeof body.id === "string") output.responseId = body.id;
+				applyReportedInputTransformations(
+					output,
+					params,
+					providerSessionState,
+					body.input_transformations,
+					seenInputTransformations,
+				);
+				output.usage.input = wireUsage.input_tokens ?? 0;
+				output.usage.output = wireUsage.output_tokens ?? 0;
+				output.usage.cacheRead = wireUsage.cache_read_input_tokens ?? 0;
+				output.usage.cacheWrite = wireUsage.cache_creation_input_tokens ?? 0;
+				applyAnthropicUsageExtras(output.usage, wireUsage);
+				output.usage.totalTokens =
+					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+				calculateCost(model, output.usage, output.timestamp);
+				output.duration = performance.now() - startTime;
+				stream.push({ type: "start", partial: output });
+				stream.push({ type: "done", reason: "stop", message: output });
+				stream.end();
+				return;
+			}
+
 			// Opt-in flag: the response parser only honors `fallback` content
 			// blocks and `usage.iterations` when the current request opted into
 			// server-side-fallback beta chain. Leaving `fallbacks` unset preserves
@@ -2395,12 +2451,26 @@ const streamAnthropicOnce = (
 						block[kStreamingPartialJson].length > 0
 							? block[kStreamingPartialJson]
 							: JSON.stringify(block.arguments ?? {});
-					// Keep malformed calls non-fatal, but never execute their auto-closed previews.
-					block.arguments = parseToolCallArguments(finalJson);
-					if (isRecord(block.arguments) && "__parseError" in block.arguments) {
+					try {
+						block.arguments = parseJsonWithRepair(finalJson) as ToolCall["arguments"];
+					} catch (parseError) {
+						// Non-fatal: keep the best-effort arguments recovered by the throttled streaming
+						// parser instead of failing the turn on malformed/truncated tool-argument JSON.
 						reportAnthropicEnvelopeAnomaly(
-							`tool_use ${block.id} arguments are not valid JSON: ${block.arguments.__parseError}`,
+							`tool_use ${block.id} arguments are not valid JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
 						);
+						const recoveredKeys = Object.keys(block.arguments ?? {});
+						if (recoveredKeys.length === 0) {
+							const maxLen = 512;
+							const truncatedJson =
+								finalJson.length <= maxLen
+									? finalJson
+									: `${finalJson.slice(0, maxLen)}… [truncated ${finalJson.length - maxLen} chars]`;
+							block.arguments = {
+								__parseError: parseError instanceof Error ? parseError.message : String(parseError),
+								__rawJson: truncatedJson,
+							};
+						}
 					}
 					clearStreamingPartialJson(block);
 					stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
@@ -2450,26 +2520,6 @@ const streamAnthropicOnce = (
 				if (usingFallbackCredit) forfeitFallbackCredit(streamFailure);
 				return prepareParams();
 			};
-			// Subscription slow mode (Claude Code `/low-priority`): first-party OAuth
-			// requests only. Capacity waits are tracked per request so the caller's
-			// max-wait budget covers the whole wait, not one attempt.
-			const slowMode =
-				options?.anthropicSlowMode !== undefined &&
-				model.provider === "anthropic" &&
-				isOAuthToken &&
-				!options.client &&
-				isOfficialAnthropicApiUrl(baseUrl)
-					? options.anthropicSlowMode
-					: undefined;
-			// Slow-lane state is per Claude account: key it by the stored credential
-			// that served this request, else by a digest of the bearer.
-			const slowLane =
-				options?.credentialId !== undefined
-					? `cred:${options.credentialId}`
-					: `key:${Bun.hash(apiKey).toString(36)}`;
-			let slowWaitSinceMs: number | undefined;
-			let slowWaitAttempts = 0;
-			let sentSlow = false;
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const { requestSignal } = activeAbortTracker;
@@ -2511,14 +2561,12 @@ const streamAnthropicOnce = (
 						);
 					}
 				}
-				sentSlow = slowMode?.isActive(slowLane) === true;
 				let perRequestHeaders: Record<string, string> | undefined =
-					umansGatewayWebSearchHeader || injectedClientBetaHeaders || options?.userProfileId || sentSlow
+					umansGatewayWebSearchHeader || injectedClientBetaHeaders || options?.userProfileId
 						? {
 								...umansGatewayWebSearchHeader,
 								...injectedClientBetaHeaders,
 								...(options?.userProfileId ? { "anthropic-user-profile-id": options.userProfileId } : {}),
-								...(sentSlow ? { [ANTHROPIC_USAGE_LIMIT_HEADER]: ANTHROPIC_SLOW_USAGE_LIMIT } : {}),
 							}
 						: undefined;
 				if (usingFallbackCredit && options?.fallbackCreditRedemption?.betaHeader) {
@@ -2573,10 +2621,6 @@ const streamAnthropicOnce = (
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
 					await notifyProviderResponse(options, response, model, requestId);
-					if (slowMode) {
-						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
-						if (slowSignal) slowMode.observe(slowSignal, slowLane);
-					}
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
@@ -3325,7 +3369,8 @@ const streamAnthropicOnce = (
 					}
 					if (
 						!dropFastMode &&
-						wantsAnthropicFastMode(model, options) &&
+						model.provider === "anthropic" &&
+						options?.serviceTier === "priority" &&
 						firstTokenTime === undefined &&
 						AIError.isFastModeUnsupported(streamFailure)
 					) {
@@ -3349,46 +3394,6 @@ const streamAnthropicOnce = (
 						output.stopReason = "stop";
 						firstTokenTime = undefined;
 						continue;
-					}
-					if (
-						slowMode &&
-						firstTokenTime === undefined &&
-						!streamedReplayUnsafeContent &&
-						!activeAbortTracker.wasCallerAbort()
-					) {
-						const failureStatus = (streamFailure as { status?: unknown } | null)?.status;
-						const httpStatus = typeof failureStatus === "number" ? failureStatus : undefined;
-						const failureText = streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
-						const slowRetry = await slowMode.onFailure({
-							lane: slowLane,
-							httpStatus,
-							overloaded: httpStatus === 529 || failureText.includes("overloaded_error"),
-							signal: parseAnthropicSlowModeHeaders(getHeadersFromError(streamFailure)),
-							sentSlow,
-							waitedMs: slowWaitSinceMs === undefined ? 0 : Date.now() - slowWaitSinceMs,
-							attempts: slowWaitAttempts,
-						});
-						if (slowRetry) {
-							if (slowRetry.capacityWait) {
-								slowWaitSinceMs ??= Date.now();
-								slowWaitAttempts++;
-							}
-							logger.debug("anthropic: slow mode retry", {
-								model: model.id,
-								status: httpStatus,
-								delayMs: slowRetry.delayMs,
-								attempt: slowWaitAttempts,
-							});
-							if (slowRetry.delayMs > 0) {
-								if (options?.providerRetryWait) {
-									await options.providerRetryWait(slowRetry.delayMs, options.signal);
-								} else {
-									await scheduler.wait(slowRetry.delayMs, { signal: options?.signal });
-								}
-							}
-							resetStreamOutputState();
-							continue;
-						}
 					}
 					const isTransientEnvelopeFailure =
 						AIError.isTransientStreamParseError(streamFailure) || AIError.isStreamEnvelopeError(streamFailure);
@@ -3735,13 +3740,8 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// the proxy to deal with two competing credentials when the user explicitly
 	// asked for one.
 	const authorizationHeader = getHeaderCaseInsensitive(defaultHeaders, "Authorization");
-	// A keyless provider resolves to the `N/A` sentinel, for which no
-	// Authorization was built above; the client would otherwise inject a
-	// bogus `X-Api-Key: N/A` of its own.
 	const shouldSuppressClientApiKey =
-		!oauthToken &&
-		!model.compat.officialEndpoint &&
-		(typeof authorizationHeader === "string" || apiKey === NO_AUTH_SENTINEL);
+		!oauthToken && !model.compat.officialEndpoint && typeof authorizationHeader === "string";
 
 	return {
 		isOAuthToken: oauthToken,
@@ -3831,17 +3831,22 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 	const budgetTokens = thinking.budget_tokens ?? 0;
 	if (budgetTokens <= 0) return;
 
-	const output = budgetThinkingOutput(params.max_tokens, budgetTokens, maxAllowedTokens);
-	params.max_tokens = output.maxTokens;
+	const currentMaxTokens = Math.min(params.max_tokens ?? maxAllowedTokens, maxAllowedTokens);
+	const raisedMaxTokens = Math.min(
+		Math.max(currentMaxTokens, budgetTokens + OUTPUT_FALLBACK_BUFFER),
+		maxAllowedTokens,
+	);
+	params.max_tokens = raisedMaxTokens;
 
-	if (output.budgetTokens === budgetTokens) return;
+	if (budgetTokens + OUTPUT_FALLBACK_BUFFER <= raisedMaxTokens) return;
 
-	if (output.budgetTokens <= 0) {
+	const clampedBudget = raisedMaxTokens - OUTPUT_FALLBACK_BUFFER;
+	if (clampedBudget <= 0) {
 		throw new AIError.ConfigurationError(
-			`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${output.maxTokens}`,
+			`Anthropic thinking budget requires max_tokens greater than ${OUTPUT_FALLBACK_BUFFER}; got ${raisedMaxTokens}`,
 		);
 	}
-	thinking.budget_tokens = output.budgetTokens;
+	thinking.budget_tokens = clampedBudget;
 }
 
 function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl: AnthropicCacheControl): boolean {
@@ -4016,33 +4021,34 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 }
 
 /**
- * System-prompt segments whose bytes differ between sessions or turns of the
- * same agent: per-turn memory recall (`<memories>`) and the coding agent's
- * working-directory context (`<project-context>`: context files with their
- * paths, workspace tree, workspace roots, session append text; advisors use
- * the same tag for their context-file block). The coding agent renders them
- * as their own `systemPrompt` array elements after the large static prompt.
- * The system cache breakpoint anchors on the block right before the first
- * such segment, so the static head is shared byte-for-byte across sessions in
- * different directories (e.g. one git worktree per task) and a recall refresh
- * re-bills only the suffix and the message tail.
+ * Trailing system-prompt segments carrying per-turn volatile content (memory
+ * recall blocks). They are rendered by the coding agent as their own
+ * `systemPrompt` array elements and appended last, so on the wire they
+ * normally form a volatile suffix after the stable prefix. The system cache
+ * breakpoint anchors on the last stable segment instead of the array tail, so
+ * a recall refresh re-bills only the suffix and the message tail for one turn
+ * while the tools+stable-system prefix stays a cache hit.
  *
- * Everything from the first volatile segment on sits after the head
- * breakpoint, including stable blocks appended behind it (per-spawn subagent
- * role text, `before_agent_start` extension policy): prefix caching is
- * positional, so bytes after a changing segment can never extend the cached
- * head anyway; the rolling message breakpoints still cover them.
+ * Only a genuinely trailing volatile run counts: a `before_agent_start`
+ * extension override may append a stable policy block after the staged recall
+ * block, and that block stays in the cached head. A volatile block stranded
+ * mid-array still poisons the prefix at its position — prefix caching is
+ * positional, so no classification can save the bytes after it.
  *
- * Detection is by our own markup, not model identity: only a leading tag
- * counts, so stable segments quoting these tags elsewhere are unaffected.
+ * Detection is by our own markup, not model identity: recall blocks always
+ * open with `<memories>`. Stable segments containing recalled text elsewhere
+ * (e.g. quoted in conversation) are unaffected — only a leading tag counts.
  */
-const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>", "<project-context>"];
+const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>"];
 
-function volatileSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
-	const start = systemBlocks.findIndex(block =>
-		VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => block.text.startsWith(marker)),
-	);
-	return start === -1 ? systemBlocks.length : start;
+function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
+	let start = systemBlocks.length;
+	while (start > 0) {
+		const text = systemBlocks[start - 1]?.text ?? "";
+		if (!VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => text.startsWith(marker))) break;
+		start--;
+	}
+	return start;
 }
 
 /**
@@ -4056,10 +4062,10 @@ function volatileSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]
  * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
  * moving message tail, so tail churn re-writes the whole head uncached.
  *
- * Volatile segments (memory recall, working-directory context) sit after the
- * breakpoint, so a recall refresh or a different cwd re-bills only the suffix
- * and the tail instead of the whole head. When every system block is volatile
- * there is no stable boundary and the breakpoint stays on the array tail.
+ * Volatile trailing segments (memory recall) sit after the breakpoint, so a
+ * recall refresh re-bills only the suffix and the tail for one turn instead of
+ * the whole head. When every system block is volatile there is no stable
+ * boundary and the breakpoint stays on the array tail (previous behavior).
  *
  * Anthropic allows at most 4 cache breakpoints per request. At most one is
  * spent on tools and one on system here, leaving the remaining budget for
@@ -4069,12 +4075,9 @@ function volatileSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]
  * sit first in wire order and survive message rewrites, and sibling subagents of
  * the same definition share this prefix byte for byte.
  *
- * The OAuth Claude Code path pre-decorates its identity system block in
- * buildAnthropicSystemBlocks. That breakpoint moves to the anchor block instead
- * of a second one being added: the identity block is a prefix of the anchored
- * head, so the move keeps the budget at last tool + last stable system block +
- * 2 message breakpoints while the agent's static system prompt, not just the
- * identity line, becomes a cached prefix of its own.
+ * When the OAuth Claude Code path already anchors its identity system block at
+ * buildAnthropicSystemBlocks, the system check skips adding a second system
+ * breakpoint, while the tool check still anchors the last tool definition.
  *
  * Runs on the fresh system blocks and wire tools built for this request, after
  * the declared tool list was derived from the transcript's request controls.
@@ -4098,20 +4101,26 @@ function applyHeadCaching(
 	}
 
 	if (systemBlocks && systemBlocks.length > 0) {
-		// Anchor on the last block before the volatile suffix so a recall
-		// refresh or a different working directory re-bills only the suffix,
-		// not the whole head. An earlier system breakpoint (the OAuth identity
-		// block) moves to the anchor rather than staying as a second one: a
-		// breakpoint left on the identity block caches only tools + identity,
-		// and keeping both would take a rolling message breakpoint from
-		// `applyPromptCaching` (4 minus head breakpoints). All-volatile falls
-		// back to tail anchoring.
-		const suffixStart = volatileSystemSuffixStart(systemBlocks);
-		const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
-		const anchor = systemBlocks[anchorIndex];
-		if (anchor && anchor.cache_control == null) {
-			for (const block of systemBlocks) delete block.cache_control;
-			anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
+		// Anchor on the last stable block so a volatile recall suffix refresh
+		// re-bills only the suffix, not the whole head. The skip-if-decorated
+		// check applies only when there is no volatile suffix (previous
+		// behavior): with a suffix present the boundary anchor is added
+		// whenever the anchor block itself lacks a breakpoint, even if the
+		// OAuth path pre-decorated its identity block — otherwise the only
+		// system breakpoint sits before the stable prompt and a recall
+		// refresh re-bills it. The message budget in `applyPromptCaching`
+		// shrinks accordingly (4 minus head breakpoints). All-volatile falls
+		// back to tail anchoring (previous behavior).
+		const suffixStart = stableSystemSuffixStart(systemBlocks);
+		if (suffixStart === systemBlocks.length) {
+			if (!systemBlocks.some(block => block.cache_control != null)) {
+				const lastBlock = systemBlocks[systemBlocks.length - 1];
+				if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+			}
+		} else {
+			const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
+			const anchor = systemBlocks[anchorIndex];
+			if (anchor && anchor.cache_control == null) anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
 		}
 	}
 }
@@ -4125,41 +4134,6 @@ function usesAdaptiveThinkingTagOnly(model: Model<"anthropic-messages">): boolea
 		if (effortMap[effort] !== "adaptive") return false;
 	}
 	return thinking.efforts.length > 0;
-}
-
-/**
- * True when enabled thinking on `model` is budget thinking
- * (`thinking.type: "enabled"` with `budget_tokens`) rather than adaptive.
- */
-export function usesBudgetThinking(model: Model<"anthropic-messages">): boolean {
-	return model.thinking?.mode !== "anthropic-adaptive" || model.compat.disableAdaptiveThinking === true;
-}
-
-/** The most output tokens a request to `model` may ask for (`max_tokens` ceiling). */
-export function anthropicOutputLimit(model: Model<"anthropic-messages">): number {
-	return model.maxTokens ?? UNKNOWN_MODEL_MAX_OUTPUT_TOKENS;
-}
-
-/**
- * The `max_tokens` and thinking budget of budget thinking: `max_tokens`
- * rises to leave {@link OUTPUT_FALLBACK_BUFFER} visible output tokens after
- * the budget, within `maxAllowedTokens`, and the budget shrinks when that
- * ceiling leaves less (a non-positive budget means the ceiling is too low).
- */
-export function budgetThinkingOutput(
-	maxTokens: number | undefined,
-	budgetTokens: number,
-	maxAllowedTokens: number,
-): { maxTokens: number; budgetTokens: number } {
-	const currentMaxTokens = Math.min(maxTokens ?? maxAllowedTokens, maxAllowedTokens);
-	const raisedMaxTokens = Math.min(
-		Math.max(currentMaxTokens, budgetTokens + OUTPUT_FALLBACK_BUFFER),
-		maxAllowedTokens,
-	);
-	return {
-		maxTokens: raisedMaxTokens,
-		budgetTokens: Math.min(budgetTokens, raisedMaxTokens - OUTPUT_FALLBACK_BUFFER),
-	};
 }
 
 /**
@@ -4210,9 +4184,6 @@ function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): st
  */
 const ANTHROPIC_CONTROL = Symbol("anthropicControl");
 
-/** `max_tokens` requested when the catalog has no output ceiling for the model. */
-const UNKNOWN_MODEL_MAX_OUTPUT_TOKENS = 64_000;
-
 /** One control message: tool changes (removals first) and an optional per-message effort. */
 type AnthropicControlSpec = { toolChanges: AnthropicToolChange[]; effort?: AnthropicOutputEffort };
 
@@ -4258,26 +4229,12 @@ function collectAnthropicControlRecords(messages: readonly Message[]): Anthropic
  * lands between a `tool_use` and its `tool_result`, where `transformMessages`
  * would flush synthetic aborted results; a mid-turn change therefore takes
  * effect from the next step.
- *
- * A summary replayed as a `compaction` block is never a slot: the block must
- * open the request, so nothing may precede it. A response opened by the block
- * (no real user turn between them) takes the change from its next step. A
- * summary sent as text is an ordinary user turn.
  */
-function anthropicEffortInsertIndex(
-	messages: readonly Message[],
-	end: number,
-	compactionReplay: AnthropicCompactionReplay | undefined,
-): number {
+function anthropicEffortInsertIndex(messages: readonly Message[], end: number): number {
 	for (let i = end - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message?.role === "assistant") return end;
-		if (message?.role !== "user") continue;
-		if (!compactionReplay || !replaysAnthropicCompactionBlock(message.providerPayload, compactionReplay)) return i;
-		let next = end;
-		if (messages[next]?.role === "assistant") next++;
-		while (messages[next]?.role === "toolResult") next++;
-		return next;
+		const role = messages[i]?.role;
+		if (role === "user") return i;
+		if (role === "assistant") return end;
 	}
 	return end;
 }
@@ -4309,16 +4266,11 @@ function diffAnthropicActiveTools(
  * at the tail. Records at a different index than they were written at are
  * rewritten history: they keep the declaration but emit no controls, so the
  * net change from the declared baseline lands at the first live position.
- * Without `ownChange` (an on-demand compaction request, which ends inside the
- * conversation) the tail control is left out: there it would sit between the
- * summarized prefix and the retained turns, where live requests never sent
- * it, and invalidate their signed thinking. The next live turn sends it.
  */
 function planAnthropicToolControls(
 	context: Context,
 	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
-	ownChange: boolean,
 ): { tools: Tool[] | undefined; inserts: AnthropicControlInsert[]; record: AnthropicToolControls | undefined } {
 	if (!enabled || !context.tools) return { tools: context.tools, inserts: [], record: undefined };
 	const definitions = new Map<string, Tool>();
@@ -4361,7 +4313,7 @@ function planAnthropicToolControls(
 			if (toolChanges.length > 0) inserts.push({ index: record.index, spec: { toolChanges } });
 			previous = record.tools.active;
 		}
-		const toolChanges = ownChange ? diffAnthropicActiveTools(previous, activeNames, declaredSet) : [];
+		const toolChanges = diffAnthropicActiveTools(previous, activeNames, declaredSet);
 		if (toolChanges.length > 0) inserts.push({ index: context.messages.length, spec: { toolChanges } });
 	}
 
@@ -4388,16 +4340,13 @@ function planAnthropicToolControls(
  * restore, so a request without an explicit effort keeps the level in force.
  * Records at a different index than they were written at are rewritten history:
  * they keep the top-level effort but emit no controls, so the net change lands
- * at the first live position. Without `ownChange` (an on-demand compaction
- * request) `current` is not applied: the request runs at the effort in force.
+ * at the first live position.
  */
 function planAnthropicEffortControls(
 	current: AnthropicOutputEffort | undefined,
 	messages: readonly Message[],
 	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
-	compactionReplay: AnthropicCompactionReplay | undefined,
-	ownChange: boolean,
 ): {
 	topLevel: AnthropicOutputEffort | undefined;
 	inserts: AnthropicControlInsert[];
@@ -4422,46 +4371,20 @@ function planAnthropicEffortControls(
 		const recorded = record.effort.tail;
 		if (recorded !== null && recorded !== tail) {
 			inserts.push({
-				index: anthropicEffortInsertIndex(messages, record.index, compactionReplay),
+				index: anthropicEffortInsertIndex(messages, record.index),
 				spec: { toolChanges: [], effort: recorded },
 			});
 		}
 		tail = recorded ?? tail;
 	}
-	if (ownChange && current !== undefined && current !== tail) {
+	if (current !== undefined && current !== tail) {
 		inserts.push({
-			index: anthropicEffortInsertIndex(messages, messages.length, compactionReplay),
+			index: anthropicEffortInsertIndex(messages, messages.length),
 			spec: { toolChanges: [], effort: current },
 		});
 		tail = current;
 	}
 	return { topLevel, inserts, record: { topLevel: topLevel ?? null, tail: tail ?? null } };
-}
-
-/**
- * The effort whose thinking allowance an on-demand compaction request over
- * `messages` gets. It sends no effort change of its own, so once an earlier
- * request recorded an effort, the one it left in force applies, even when
- * `requested` differs or is off. When that request named none, the API's
- * per-model default applies, which is not known here: the request gets the
- * largest effort's allowance (`max_tokens` is a cap, not spend). Without a
- * recorded effort the request sets its own.
- */
-export function resolveAnthropicCompactionEffort(
-	model: Model<"anthropic-messages">,
-	messages: readonly Message[],
-	requested: Effort | undefined,
-): Effort | undefined {
-	if (model.compat.supportsPerMessageEffort !== true) return requested;
-	const records = collectAnthropicControlRecords(messages);
-	if (!records.some(record => record.controls.effort)) return requested;
-	const inForce = planAnthropicEffortControls(undefined, messages, records, true, undefined, false).record?.tail;
-	if (!inForce) return requested && (model.thinking?.efforts.at(-1) ?? requested);
-	if (requested && mapEffortToAnthropicAdaptiveEffort(model, requested) === inForce) return requested;
-	return (
-		model.thinking?.efforts?.findLast(effort => mapEffortToAnthropicAdaptiveEffort(model, effort) === inForce) ??
-		requested
-	);
 }
 
 /**
@@ -4533,70 +4456,6 @@ type AnthropicParamBuildOptions = {
 	effectiveBaseUrl?: string;
 };
 
-/**
- * Fast mode (`speed: "fast"` plus its beta): a KDL fast-mode SKU, or a
- * priority-tier request to first-party Anthropic.
- */
-function wantsAnthropicFastMode(model: Model<"anthropic-messages">, options: AnthropicOptions | undefined): boolean {
-	return model.compat.fastMode === true || (model.provider === "anthropic" && options?.serviceTier === "priority");
-}
-
-/**
- * Native Factory Droid history predicate (ported from the CLI's request
- * builder): true when the conversation contains assistant turns but none of
- * them leads with a `thinking`/`redactedThinking` block.
- */
-function hasThinkinglessAssistantHistory(messages: readonly Message[]): boolean {
-	let hasAssistant = false;
-	for (const message of messages) {
-		if (message.role !== "assistant") continue;
-		if (!Array.isArray(message.content) || message.content.length === 0) continue;
-		hasAssistant = true;
-		const first = message.content[0];
-		if (
-			first != null &&
-			typeof first === "object" &&
-			(first.type === "thinking" || first.type === "redactedThinking")
-		) {
-			return false;
-		}
-	}
-	return hasAssistant;
-}
-
-/**
- * Native Factory Droid history predicate: true when the message after the last
- * user turn is an assistant turn whose first block is not
- * `thinking`/`redactedThinking` (the conversation is not resuming a
- * thinking-led chain).
- */
-function hasNonThinkingTurnAfterLastUser(messages: readonly Message[]): boolean {
-	let lastUser = -1;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		if (messages[i].role === "user") {
-			lastUser = i;
-			break;
-		}
-	}
-	if (lastUser === -1 || lastUser === messages.length - 1) return false;
-	const next = messages[lastUser + 1];
-	if (next.role !== "assistant") return false;
-	if (!Array.isArray(next.content) || next.content.length === 0) return false;
-	const first = next.content[0];
-	if (first == null || typeof first !== "object") return false;
-	return first.type !== "thinking" && first.type !== "redactedThinking";
-}
-
-/**
- * Whether the conversation has stopped being thinking-led, so routes with
- * `compat.stripThinkingHistory` drop the budget `thinking` config and replay
- * history without thinking blocks. Exported so the factory-droid provider can
- * gate its header-level interleaved beta on the same decision.
- */
-export function shouldStripThinkingHistory(messages: readonly Message[]): boolean {
-	return hasThinkinglessAssistantHistory(messages) || hasNonThinkingTurnAfterLastUser(messages);
-}
-
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
@@ -4637,9 +4496,6 @@ function buildParams(
 		cacheControl,
 	});
 
-	// An on-demand compaction request ends inside the conversation: it gets
-	// nothing live requests lack there, so it makes no tool or effort change.
-	const compactionRequest = compactionSupported ? options?.anthropicCompaction : undefined;
 	// Controls earlier requests recorded on their responses fix the declared
 	// tools, the top-level effort and every control message in between.
 	const records = collectAnthropicControlRecords(context.messages);
@@ -4647,7 +4503,6 @@ function buildParams(
 		context,
 		records,
 		model.compat.supportsMidConversationToolChanges === true,
-		!compactionRequest,
 	);
 
 	// Pre-compute tools.
@@ -4681,24 +4536,12 @@ function buildParams(
 	let thinking: MessageCreateParamsStreaming["thinking"] | undefined;
 	let outputConfigEffort: AnthropicOutputEffort | undefined;
 	if (model.reasoning) {
-		const disabledThinking = model.compat.disabledThinking;
-		if (options?.thinkingEnabled === false && disabledThinking !== undefined) {
-			if (disabledThinking !== "omit") {
-				thinking =
-					disabledThinking === "adaptive"
-						? {
-								type: "adaptive",
-								...(model.thinking?.supportsDisplay
-									? { display: options.thinkingDisplay ?? "summarized" }
-									: {}),
-							}
-						: { type: "disabled" };
-			}
-		} else if (options?.thinkingEnabled || model.compat.requiresThinkingEnabled) {
+		if (options?.thinkingEnabled || model.compat.requiresThinkingEnabled) {
 			const thinkingOptions = options ?? {};
 			const mode = model.thinking?.mode;
 			const effort = resolveAnthropicAdaptiveEffort(model, thinkingOptions);
-			if (!usesBudgetThinking(model)) {
+			const compat = model.compat;
+			if (mode === "anthropic-adaptive" && !compat.disableAdaptiveThinking) {
 				const adaptive: { type: "adaptive"; display?: AnthropicThinkingDisplay } = { type: "adaptive" };
 				// Starting with Claude Opus 4.7 and Claude Fable/Mythos 5, adaptive thinking
 				// content is omitted from the response by default. Opt into summarized
@@ -4715,21 +4558,12 @@ function buildParams(
 				thinking = {
 					type: "enabled",
 					budget_tokens: thinkingOptions.thinkingBudgetTokens || 1024,
-					// Budget thinking accepts `display` unless a host explicitly declares
-					// it unsupported (proxies whose native clients never send it).
-					...(model.thinking?.supportsDisplay === false
-						? {}
-						: { display: thinkingOptions.thinkingDisplay ?? "summarized" }),
+					display: thinkingOptions.thinkingDisplay ?? "summarized",
 				};
 				if (mode === "anthropic-budget-effort" && effort && effort !== "adaptive") outputConfigEffort = effort;
 			}
 		} else if (options?.thinkingEnabled === false) {
-			if (model.compat.supportsBetweenToolsThinking) {
-				// Sonnet 5.5 rejects `disabled` with a 400; `between_tools` is its lowest
-				// thinking setting. It takes no other field and leaves effort untouched:
-				// pinning `low` here would cap the whole turn's quality, not only thinking.
-				thinking = { type: "between_tools" };
-			} else if (isAdaptiveOnlyThinking(model)) {
+			if (isAdaptiveOnlyThinking(model)) {
 				// Adaptive-only Claude models (Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) reject
 				// `thinking.type: "disabled"` — adaptive thinking cannot be switched off.
 				// Omit the thinking field (the API defaults to adaptive) and pin the
@@ -4745,31 +4579,13 @@ function buildParams(
 	}
 
 	if (prefixMismatchBehavior) {
-		if (
-			!thinking &&
-			model.thinking?.mode === "anthropic-adaptive" &&
-			!(options?.thinkingEnabled === false && model.compat.disabledThinking === "omit")
-		) {
+		if (!thinking && model.thinking?.mode === "anthropic-adaptive") {
 			thinking = { type: "adaptive" };
 		}
 		if (thinking?.type === "adaptive" || thinking?.type === "enabled") {
 			thinking.block_binding = { prefix_mismatch_behavior: prefixMismatchBehavior };
 		}
 	}
-
-	// Factory Droid's native thinking-history rule for non-adaptive budget
-	// models: when the conversation is not thinking-led (an assistant turn
-	// exists but none opens with a thinking block, or the turn after the last
-	// user does not), the CLI drops the `thinking` field and replays the
-	// history without thinking blocks — budget-effort models keep
-	// `output_config.effort`, interleaved budget models carry none. Off turns
-	// never strip (native only applies this to an active non-adaptive
-	// `thinking` config).
-	const stripThinkingHistory =
-		model.compat.stripThinkingHistory === true &&
-		thinking?.type === "enabled" &&
-		shouldStripThinkingHistory(context.messages);
-	if (stripThinkingHistory) thinking = undefined;
 
 	// Pre-compute context_management. Send keep: "all" for every enabled or
 	// adaptive thinking request (OAuth + API-key) — not just OAuth. Without
@@ -4790,6 +4606,7 @@ function buildParams(
 	// A new on-demand compaction request cannot carry context_management.
 	// Later turns carrying its signed block may keep clear_thinking as usual.
 	// Persisted encrypted threshold blocks alone need a legacy replay edit.
+	const compactionRequest = compactionSupported ? options?.anthropicCompaction : undefined;
 	const signedReplay = compactionSupported && contextReplaysAnthropicCompaction(context.messages, model, "signed");
 	const legacyReplay =
 		compactionSupported && !signedReplay && contextReplaysAnthropicCompaction(context.messages, model, "legacy");
@@ -4806,23 +4623,12 @@ function buildParams(
 	// the `effort-2025-11-24` beta, which that adapter can only accept in the body
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
-	const compactionReplay: AnthropicCompactionReplay | undefined = compactionSupported
-		? { model: effectiveModel, legacy: !compactionRequest && !signedReplay }
-		: undefined;
 	const effortPlan = planAnthropicEffortControls(
 		outputConfigEffort,
 		context.messages,
 		records,
 		model.compat.supportsPerMessageEffort === true,
-		compactionReplay,
-		!compactionRequest,
 	);
-	// `between_tools` returns a 400 at `xhigh`/`max` effort, and the effort in
-	// force from earlier turns outlives a thinking toggle. Fall back to the
-	// default adaptive request, which accepts every effort level.
-	if (thinking?.type === "between_tools" && (effortPlan.topLevel === "xhigh" || effortPlan.topLevel === "max")) {
-		thinking = undefined;
-	}
 	const wireMessages = convertAnthropicMessages(
 		insertAnthropicControlMarkers(context.messages, [...toolPlan.inserts, ...effortPlan.inserts]),
 		effectiveModel,
@@ -4830,11 +4636,10 @@ function buildParams(
 		{
 			serverSideFallbackEnabled: !!fallbacks?.length,
 			replayCompaction: compactionSupported,
-			replayLegacyCompaction: compactionReplay?.legacy,
-			dropAllThinking: dropAllThinking || stripThinkingHistory,
+			replayLegacyCompaction: !compactionRequest && !signedReplay,
+			dropAllThinking,
 			droppedThinkingBlocks,
 			credentialId: options?.credentialId,
-			compactionRequest,
 		},
 	);
 	// Anchor the stable tools+system head so it stays cached across turns; the
@@ -4862,9 +4667,11 @@ function buildParams(
 	}
 	const outputConfig = Object.keys(outputConfigEntries).length ? outputConfigEntries : undefined;
 
-	// OAuth and API-key requests alike get the full model ceiling; Claude Code
-	// itself requests 128k on Opus 5.5.
-	const maxOutputTokens = anthropicOutputLimit(model);
+	// Claude Code requests at most 64k output tokens; clamp only OAuth requests,
+	// where the wire fingerprint must match. API-key callers keep the full model
+	// ceiling (e.g. 128k on Opus 4.8).
+	const modelMaxTokens = model.maxTokens ?? CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, modelMaxTokens) : modelMaxTokens;
 
 	// A caller-owned client targets its own endpoint: route body betas by the
 	// client's URL when it exposes one, not the model's routing. Otherwise the
@@ -4895,7 +4702,7 @@ function buildParams(
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
 		...(metadata && { metadata }),
-		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? maxOutputTokens),
+		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? modelMaxTokens),
 		...(thinking && { thinking }),
 		...(contextManagement && { context_management: contextManagement }),
 		...(compactionRequest && {
@@ -4936,7 +4743,7 @@ function buildParams(
 			seqs.length > ANTHROPIC_STOP_SEQUENCES_MAX ? seqs.slice(0, ANTHROPIC_STOP_SEQUENCES_MAX) : seqs;
 	}
 
-	if (wantsAnthropicFastMode(model, options)) {
+	if (model.provider === "anthropic" && options?.serviceTier === "priority") {
 		params.speed = "fast";
 	}
 
@@ -5094,8 +4901,6 @@ export function convertAnthropicMessages(
 		dropAllThinking?: boolean;
 		droppedThinkingBlocks?: ReadonlySet<string>;
 		credentialId?: number;
-		/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
-		compactionRequest?: AnthropicCompactionRequest;
 	},
 ): AnthropicMessageParam[] {
 	// Indices of params emitted from `developer` messages. After the main pass,
@@ -5107,33 +4912,21 @@ export function convertAnthropicMessages(
 	// and the developer upgrade below look through them: they were inserted
 	// by this provider, not authored in the conversation.
 	const controlParams = new Set<AnthropicMessageParam>();
-	// Harness file metadata queued behind a replayed compaction block, oldest
-	// replay point first. Messages kept after a summary must reach the API
-	// exactly as they were sent before, or their signed thinking no longer
-	// matches its prefix; each entry therefore waits for the first message
-	// created after its replay point (past any tool results that close an open
-	// tool_use turn), or the end of the list.
-	let pendingCompactionFiles: AnthropicCompactionFiles[] = [];
-	const pushCompactionFiles = (filesText: string): void => {
-		if (filesText.trim().length === 0) return;
-		// The payload bypassed the `transformMessages` redaction pass, so
-		// the metadata takes the same credential redaction here that the
-		// dropped message text received there.
-		params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
-	};
-	const flushCompactionFiles = (before: number): void => {
-		const due = pendingCompactionFiles.filter(files => files.after < before);
-		pendingCompactionFiles = pendingCompactionFiles.filter(files => files.after >= before);
-		for (const files of due) pushCompactionFiles(files.text);
-	};
-	// Summaries without `exactTail` replay their metadata after the first param
-	// boundary past the block (clear of the fold and of an open tool_use turn):
-	// thinking created after them was signed against that layout.
-	let legacyCompactionFiles: string | undefined;
-	const flushLegacyCompactionFiles = (): void => {
-		if (legacyCompactionFiles === undefined) return;
-		pushCompactionFiles(legacyCompactionFiles);
-		legacyCompactionFiles = undefined;
+	// Harness file metadata queued behind a replayed compaction block. Flushed
+	// after the next param boundary that keeps it clear of both the block (the
+	// fold below must still join the block with a following assistant turn, or
+	// that turn's thinking prefix changes) and any open tool_use turn (its
+	// results must follow it contiguously).
+	const pendingCompactionFiles: string[] = [];
+	const flushCompactionFiles = (): void => {
+		while (pendingCompactionFiles.length > 0) {
+			const filesText = pendingCompactionFiles.shift();
+			if (filesText === undefined || filesText.trim().length === 0) continue;
+			// The payload bypassed the `transformMessages` redaction pass, so
+			// the metadata takes the same credential redaction here that the
+			// dropped message text received there.
+			params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
+		}
 	};
 
 	const transformedMessages = transformMessages(
@@ -5163,7 +4956,9 @@ export function convertAnthropicMessages(
 		if (
 			opts?.replayCompaction &&
 			(msg.role === "user" || msg.role === "developer") &&
-			replaysAnthropicCompactionBlock(msg.providerPayload, { model, legacy: opts.replayLegacyCompaction !== false })
+			isReplayableAnthropicCompaction(msg.providerPayload, model) &&
+			(msg.providerPayload.signature !== undefined ||
+				(opts.replayLegacyCompaction !== false && msg.providerPayload.encryptedContent !== undefined))
 		) {
 			const compactionParam: AnthropicMessageParam = {
 				role: "assistant",
@@ -5173,23 +4968,17 @@ export function convertAnthropicMessages(
 			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
 			// (which holds the harness file lists) would be dropped with it.
-			// Queue the file metadata past the retained tail (see above); the
-			// summary message carries the compaction's commit time.
-			const { filesText, retainedFiles, exactTail } = msg.providerPayload;
-			if (exactTail) {
-				pendingCompactionFiles = [
-					...(retainedFiles ?? []),
-					...(filesText !== undefined ? [{ text: filesText, after: msg.timestamp }] : []),
-				].sort((a, b) => a.after - b.after);
-			} else {
-				pendingCompactionFiles = [];
-				legacyCompactionFiles = filesText;
+			// Queue the file metadata for after the block: it sits past the
+			// compaction boundary the API enforces, unlike anything before it.
+			// The flush waits past a following assistant turn (see above).
+			if (msg.providerPayload.filesText !== undefined) {
+				pendingCompactionFiles.push(msg.providerPayload.filesText);
 			}
 			continue;
 		}
-		if (msg.role !== "toolResult") flushCompactionFiles(msg.timestamp);
 		if (msg.role === "user" || msg.role === "developer") {
-			flushLegacyCompactionFiles();
+			// Queued file metadata predates this message, so it emits first.
+			flushCompactionFiles();
 			const payload =
 				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
 					? msg.providerPayload
@@ -5253,10 +5042,9 @@ export function convertAnthropicMessages(
 			// replayed turn.
 			if (
 				opts?.replayCompaction &&
-				replaysAnthropicCompactionBlock(msg.providerPayload, {
-					model,
-					legacy: opts.replayLegacyCompaction !== false,
-				})
+				isReplayableAnthropicCompaction(msg.providerPayload, model) &&
+				(msg.providerPayload.signature !== undefined ||
+					(opts.replayLegacyCompaction !== false && msg.providerPayload.encryptedContent !== undefined))
 			) {
 				blocks.push(compactionBlockParam(msg.providerPayload));
 			}
@@ -5389,7 +5177,12 @@ export function convertAnthropicMessages(
 			};
 			copyPerCallContextMessage(assistantParam, msg);
 			params.push(assistantParam);
-			if (!blocks.some(block => block.type === "tool_use")) flushLegacyCompactionFiles();
+			// Flush queued file metadata unless this turn left tool calls open:
+			// their results must follow the turn contiguously, so the metadata
+			// waits for the merged result message (or the end of the list).
+			if (!blocks.some(block => block.type === "tool_use")) {
+				flushCompactionFiles();
+			}
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
@@ -5425,7 +5218,9 @@ export function convertAnthropicMessages(
 
 			// Add a single user message with all tool results
 			params.push(toolResultParam);
-			flushLegacyCompactionFiles();
+			// An open tool_use turn's results are whole again; queued file
+			// metadata can follow without splitting the pairing.
+			flushCompactionFiles();
 		}
 	}
 
@@ -5522,18 +5317,9 @@ export function convertAnthropicMessages(
 		params.splice(previous + 1, 0, { role: "user", content: "Continue." });
 		i = previous + 1;
 	}
-	if (opts?.compactionRequest) {
-		// Metadata due before `filesDueBefore` ends the summarized range; the
-		// rest replays with the retained tail and is carried by the new summary
-		// instead. Legacy metadata still pending here belongs after the first
-		// retained turn, outside this request.
-		flushCompactionFiles(opts.compactionRequest.filesDueBefore ?? Number.POSITIVE_INFINITY);
-		return params;
-	}
 	// A trailing compaction summary leaves its file metadata queued; emit it
 	// before the prefill check so the list ends the request as a user turn.
-	flushCompactionFiles(Number.POSITIVE_INFINITY);
-	flushLegacyCompactionFiles();
+	flushCompactionFiles();
 	const last = skipControls(params.length, -1);
 	if (params[last]?.role === "assistant") {
 		params.splice(last + 1, 0, { role: "user", content: "Continue." });
@@ -5593,10 +5379,7 @@ const ANTHROPIC_TOOL_SCHEMA_STRING_FORMATS = new Set([
 	"ipv6",
 	"uuid",
 ]);
-// Not `bash`: strict decoding fixes property order, so an optional key declared
-// before one the model has already written can no longer be emitted, and bash's
-// `timeout` vanished from every `async`-first call.
-const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["python", "edit", "find"]);
+const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["bash", "python", "edit", "find"]);
 const MAX_ANTHROPIC_STRICT_TOOLS = 20;
 const MAX_ANTHROPIC_STRICT_OPTIONAL_PARAMETERS = 24;
 const MAX_ANTHROPIC_STRICT_UNION_PARAMETERS = 16;

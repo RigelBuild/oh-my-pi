@@ -20,7 +20,7 @@
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
  *   `gh`.
  */
-import issueDoc from "../prompts/internal-urls/issue.md" with { type: "text" };
+import type { Settings } from "../config/settings";
 import { AgentRegistry } from "../registry/agent-registry";
 import {
 	formatRepoRef,
@@ -34,7 +34,7 @@ import {
 } from "../tools/gh";
 import { type CacheStatus, formatFreshnessNote } from "../tools/github-cache";
 import { github } from "../utils/github";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext } from "./types";
 
 type Scheme = "issue" | "pr";
 
@@ -254,6 +254,13 @@ function resolveCwd(context: ResolveContext | undefined): string {
 	return process.cwd();
 }
 
+function settingsFromContext(context: ResolveContext | undefined): Settings | undefined {
+	const raw = context?.settings;
+	if (!raw || typeof raw !== "object") return undefined;
+	if (typeof (raw as { get?: unknown }).get !== "function") return undefined;
+	return raw as Settings;
+}
+
 async function resolveListRepo(
 	scheme: Scheme,
 	parsedRepo: string | undefined,
@@ -438,7 +445,7 @@ async function fetchAndRenderPrDiff(
 		repo,
 		number: parsed.number,
 		signal: context?.signal,
-		settings: context?.settings,
+		settings: settingsFromContext(context),
 	});
 	const files = lookup.payload.files;
 	const freshness = formatFreshnessNote(lookup.status, lookup.fetchedAt);
@@ -504,12 +511,7 @@ async function fetchAndRenderPrDiff(
  */
 export class IssueProtocolHandler implements ProtocolHandler {
 	readonly scheme = "issue";
-	readonly spec: SchemeSpec = { backing: "remote", selectors: "lines", immutable: true };
-
-	/** Advertised when `gh` is on PATH; the entry documents `pr://` too. */
-	promptDoc(): string | undefined {
-		return github.available() ? issueDoc.trim() : undefined;
-	}
+	readonly immutable = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		if (context?.signal?.aborted) {
@@ -536,7 +538,7 @@ export class IssueProtocolHandler implements ProtocolHandler {
 				issue: String(parsed.number),
 				includeComments: parsed.comments,
 				signal: context?.signal,
-				settings: context?.settings,
+				settings: settingsFromContext(context),
 			});
 			return buildSingleResource({
 				url,
@@ -558,7 +560,7 @@ export class IssueProtocolHandler implements ProtocolHandler {
  */
 export class PrProtocolHandler implements ProtocolHandler {
 	readonly scheme = "pr";
-	readonly spec: SchemeSpec = { backing: "remote", selectors: "lines", immutable: true };
+	readonly immutable = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		if (context?.signal?.aborted) {
@@ -600,7 +602,7 @@ export class PrProtocolHandler implements ProtocolHandler {
 				number: parsed.number,
 				includeComments: parsed.comments,
 				signal: context?.signal,
-				settings: context?.settings,
+				settings: settingsFromContext(context),
 			});
 			return buildSingleResource({
 				url,

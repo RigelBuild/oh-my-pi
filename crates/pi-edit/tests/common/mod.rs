@@ -110,9 +110,8 @@ impl Workspace {
 			policy: PathPolicy {
 				cwd:                  cwd.clone(),
 				home_dir:             cwd,
-				url_schemes:          Vec::new(),
-				url_alias_schemes:    Vec::new(),
-				plan_writable_roots:  Vec::new(),
+				local_sandbox_root:   None,
+				vault_roots:          None,
 				plan_active:          false,
 				block_auto_generated: true,
 			},

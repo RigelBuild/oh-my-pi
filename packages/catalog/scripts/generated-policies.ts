@@ -31,27 +31,27 @@ export function hasBillableCost(cost: ModelSpec["cost"]): boolean {
 }
 
 /**
- * Price zero-cost rows at their `pricing-peer` equivalents: the rule's alias
- * `peer-id` first, then the row's own id, across the peer providers in their
- * declared order (e.g. Antigravity Claude ids at Vertex before Anthropic).
- * Rows that are already billable, and ids without a billable peer, keep
- * their cost.
+ * Price `google-antigravity` models at their first-party equivalents via the
+ * `pricing-peer` behavior rule: Gemini ids at Google API list prices, Claude
+ * ids at Google Vertex list prices (falling back to Anthropic). Models
+ * without a priced peer (gpt-oss, internal tab models) keep zero cost.
  */
-export function applyPricingPeerFallback(models: readonly ModelSpec[]): ModelSpec[] {
-	const billable = new Map<string, ModelSpec["cost"]>();
-	for (const model of models) {
-		if (!hasBillableCost(model.cost)) continue;
-		const key = `${model.provider}\0${model.id}`;
-		if (!billable.has(key)) billable.set(key, model.cost);
-	}
+export function applyAntigravityPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
-		if (hasBillableCost(model.cost)) return model;
-		const peer = pricingPeerFor(model.provider, model.id);
-		if (!peer) return model;
+		if (model.provider !== "google-antigravity" || hasBillableCost(model.cost)) {
+			return model;
+		}
+		const peer = pricingPeerFor("google-antigravity", model.id);
+		if (!peer) {
+			return model;
+		}
 		for (const candidateId of peer.peerId !== model.id ? [peer.peerId, model.id] : [model.id]) {
 			for (const provider of peer.peers) {
-				const cost = billable.get(`${provider}\0${candidateId}`);
-				if (cost) return { ...model, cost: { ...cost } };
+				const match = models.find(
+					candidate =>
+						candidate.provider === provider && candidate.id === candidateId && hasBillableCost(candidate.cost),
+				);
+				if (match) return { ...model, cost: { ...match.cost } };
 			}
 		}
 		return model;

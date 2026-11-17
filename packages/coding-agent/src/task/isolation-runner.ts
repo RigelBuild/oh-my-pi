@@ -8,15 +8,15 @@
  * does not need to round-trip through `TaskTool.#runSpawn`.
  *
  * Shape:
- *   1. {@link prepareIsolationContext} — resolve the git root.
- *   2. {@link runIsolatedSubprocess}    — start worktree, capture its
- *                                        baseline, run, capture changes, and
- *                                        transfer cleanup ownership.
+ *   1. {@link prepareIsolationContext} — resolve git root + capture baseline.
+ *   2. {@link runIsolatedSubprocess}    — start worktree, run, capture
+ *                                        changes, and transfer cleanup ownership.
  *   3. {@link mergeIsolatedChanges}     — apply captured changes back to the
  *                                        parent repo (skip when the caller
  *                                        opted out).
  *
- * Step 1 happens once per top-level call; steps 2 and 3 are per-spawn.
+ * Step 1 happens once per top-level call (the baseline is cloned per spawn
+ * before mutation); steps 2 and 3 are per-spawn.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -36,8 +36,8 @@ import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership
 import type { NestedRepoPatch, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	applyNestedPatches,
+	captureBaseline,
 	captureDeltaPatch,
-	captureIsolationBaseline,
 	cleanupIsolation,
 	cleanupTaskBranches,
 	type CommitToBranchResult,
@@ -48,8 +48,6 @@ import {
 	mergeTaskBranches,
 	type WorktreeBaseline,
 } from "./worktree";
-
-import { cfgTaskIsolationCommits } from "./settings";
 
 type IsoBackendKind = natives.IsoBackendKind;
 
@@ -131,26 +129,21 @@ async function rescueTaskBranch(repoRoot: string, branchName: string, baseSha: s
 	return undefined;
 }
 
-/** Resolved repo shared by every isolated spawn in a single call. */
+/** Resolved repo + baseline used by every isolated spawn in a single call. */
 export interface IsolationContext {
 	repoRoot: string;
+	baseline: WorktreeBaseline;
 }
 
 /**
- * Resolve the git repo root isolated spawns are copied from and merged back
- * into. Throws when the cwd is not inside a git repository; callers surface
- * the error as a task-tool failure. Each spawn captures its own baseline from
- * its isolation copy (see {@link captureIsolationBaseline}).
+ * Resolve the git repo root and capture the worktree baseline used to diff
+ * each isolated spawn against. Throws when the cwd is not inside a git
+ * repository; callers surface the error as a task-tool failure.
  */
 export async function prepareIsolationContext(cwd: string): Promise<IsolationContext> {
-	return { repoRoot: await getRepoRoot(cwd) };
-}
-
-/** Fingerprint of a captured delta, used to skip re-committing an unchanged workspace on release. */
-function deltaFingerprint(rootPatch: string, nestedPatches: readonly NestedRepoPatch[]): bigint | number {
-	let key = rootPatch;
-	for (const { relativePath, patch } of nestedPatches) key += `\0${relativePath}\0${patch}`;
-	return Bun.hash(key);
+	const repoRoot = await getRepoRoot(cwd);
+	const baseline = await captureBaseline(repoRoot);
+	return { repoRoot, baseline };
 }
 
 /** Build a commit-message callback for branch/nested commits; `undefined` ⇒ fall back to generic message. */
@@ -169,7 +162,7 @@ export type BuildCommitMessage = () => undefined | ((diff: string) => Promise<st
  */
 export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMessage {
 	return () => {
-		const style = cfgTaskIsolationCommits.get(session.settings);
+		const style = session.settings.get("task.isolation.commits");
 		if (style !== "ai" || !session.modelRegistry) return undefined;
 		const registry = session.modelRegistry;
 		const settings = session.settings;
@@ -186,7 +179,7 @@ export interface IsolatedRunOptions {
 	 * else unchanged.
 	 */
 	baseOptions: ExecutorOptions;
-	/** Context returned by {@link prepareIsolationContext}. */
+	/** Context returned by {@link prepareIsolationContext}. Baseline is cloned per spawn. */
 	context: IsolationContext;
 	/** PAL backend hint from `parseIsolationBackend(...)` (undefined ⇒ resolver picks). */
 	preferredBackend: IsoBackendKind | undefined;
@@ -251,12 +244,6 @@ interface IsolationPatchArtifacts {
 	nestedPatchPaths: string[];
 }
 
-interface IsolationPatchCapture {
-	artifacts: IsolationPatchArtifacts;
-	/** {@link deltaFingerprint} of the written delta. */
-	fingerprint: bigint | number;
-}
-
 /**
  * Capture the isolation delta and write every part of it to disk — the root
  * patch and one file per nested repo — before the caller tears the workspace
@@ -267,19 +254,16 @@ async function writeIsolationPatch(
 	baseline: WorktreeBaseline,
 	artifactsDir: string,
 	agentId: string,
-): Promise<IsolationPatchCapture> {
+): Promise<IsolationPatchArtifacts> {
 	const delta = await captureDeltaPatch(isolationDir, baseline);
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
 	await Bun.write(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
 	return {
-		artifacts: {
-			patchPath,
-			hasRootChanges: delta.rootPatch.trim().length > 0,
-			nestedPatches: delta.nestedPatches,
-			nestedPatchPaths,
-		},
-		fingerprint: deltaFingerprint(delta.rootPatch, delta.nestedPatches),
+		patchPath,
+		hasRootChanges: delta.rootPatch.trim().length > 0,
+		nestedPatches: delta.nestedPatches,
+		nestedPatchPaths,
 	};
 }
 
@@ -381,9 +365,7 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * sibling and its path is named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
-	let taskBaseline: WorktreeBaseline | undefined;
-	/** Fingerprint of the delta already handed to the caller at run end; release only re-captures on change. */
-	let handedOff: bigint | number | undefined;
+	const taskBaseline = structuredClone(opts.context.baseline);
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
 	let retainWorkspace = false;
@@ -403,14 +385,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	};
 	const releaseIsolation = (): Promise<void> => {
 		releasePromise ??= (async () => {
-			if (!handle || !taskBaseline || retainWorkspace) {
-				await cleanupHandle();
+			if (!handle || retainWorkspace) {
+				await releaseBase();
 				return;
 			}
 			try {
-				let capture: IsolationPatchCapture;
+				let patchResult: IsolationPatchArtifacts;
 				try {
-					capture = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
+					patchResult = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
 				} catch (captureErr) {
 					retainWorkspace = true;
 					const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
@@ -423,14 +405,10 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 						}),
 					);
 				}
-				const patchResult = capture.artifacts;
 				AgentRegistry.global().setHistory(opts.agentId, {
 					patchPath: patchResult.patchPath,
 					nestedPatchPaths: patchResult.nestedPatchPaths,
 				});
-				// Nothing changed since the run-end capture the caller already
-				// merged or applied: a branch now would only duplicate that work.
-				if (capture.fingerprint === handedOff) return;
 				const commitResult = await commitToBranch(
 					handle.mergedDir,
 					taskBaseline,
@@ -453,8 +431,6 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
-		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
-		taskBaseline = baseline;
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
@@ -484,7 +460,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			try {
 				commitResult = await commitToBranch(
 					isolationDir,
-					baseline,
+					taskBaseline,
 					opts.agentId,
 					opts.description,
 					opts.buildCommitMessage?.(),
@@ -500,15 +476,20 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				// below, so deleting the branch unconditionally turned a
 				// recoverable merge conflict into permanent loss of committed
 				// work (#8868). Delete only when nothing is at stake.
-				const baseSha = baseline.root.headCommit;
+				const baseSha = taskBaseline.root.headCommit;
 				const branchName = `omp/task/${opts.agentId}`;
 				const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
-					const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+					const patchResult = await writeIsolationPatch(
+						isolationDir,
+						taskBaseline,
+						opts.artifactsDir,
+						opts.agentId,
+					);
 					return rememberAgentArtifacts({
 						...result,
-						...capture.artifacts,
+						...patchResult,
 						error: renderIsolationError({ kind: "merge-failed", message: msg, rescueBranch }),
 					});
 				} catch (patchErr) {
@@ -527,7 +508,6 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					});
 				}
 			}
-			handedOff = deltaFingerprint(commitResult?.rootPatch ?? "", commitResult?.nestedPatches ?? []);
 			// The branch holds the root-repo work, but nested-repo patches exist
 			// only in memory until written; the workspace goes away in `finally`.
 			try {
@@ -562,9 +542,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		if (result.exitCode === 0) {
 			try {
-				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
-				handedOff = capture.fingerprint;
-				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
+				const patchResult = await writeIsolationPatch(isolationDir, taskBaseline, opts.artifactsDir, opts.agentId);
+				return rememberAgentArtifacts({ ...result, ...patchResult });
 			} catch (patchErr) {
 				retainWorkspace = true;
 				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
@@ -684,6 +663,9 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 					conflict: mergeResult.conflict,
 					nestedPatchPaths: result.nestedPatchPaths,
 				});
+			}
+			if (mergeResult.stashConflict) {
+				summary += `\n\n<system-notification>${mergeResult.stashConflict}</system-notification>`;
 			}
 
 			// Clean up the merged branch (keep failed ones for manual resolution)

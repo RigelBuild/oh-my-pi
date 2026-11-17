@@ -17,10 +17,8 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
-import { type ComposerShape, getComposerShapeOptions } from "./composer-shape-registry";
+import type { ComposerShape } from "./composer-shape-registry";
 import { theme } from "../theme/theme";
-import type { NativeNode } from "../native/node";
-import { col, node, span, text } from "../native/describe";
 
 /**
  * Real status renderer the preview borrows rows from — structurally satisfied
@@ -122,7 +120,6 @@ export function renderComposerShapePreview(
 export class ComposerShapePreview implements Component {
 	#shape: ComposerShape;
 	#options: ComposerShapePreviewOptions;
-	#native: { shape: ComposerShape; node: NativeNode } | undefined;
 
 	constructor(initialValue: ComposerShape = "band", options: ComposerShapePreviewOptions = {}) {
 		this.#shape = initialValue;
@@ -133,28 +130,6 @@ export class ComposerShapePreview implements Component {
 		if (this.#shape === shape) return;
 		this.#shape = shape;
 		this.#options.requestRender?.();
-	}
-
-	/**
-	 * A TSP terminal draws the composer itself, so the shape's glyph chrome has
-	 * no native twin: the preview names the shape over a read-only prompt.
-	 */
-	describe(): NativeNode {
-		const memo = this.#native;
-		if (memo?.shape === this.#shape) return memo.node;
-		const option = getComposerShapeOptions().find(candidate => candidate.value === this.#shape);
-		const caption = [span(option?.label ?? this.#shape, "strong")];
-		if (option?.description) caption.push(span(` · ${option.description}`, "muted"));
-		const described = col(
-			[
-				text([span("Preview:", "muted")]),
-				node("editor", { placeholder: "Ask anything, edit files, run tools", readonly: true, maxLines: 1 }),
-				text(caption, { wrap: "word" }),
-			],
-			{ role: "omp.preview.composer-shape", gap: "xs" },
-		);
-		this.#native = { shape: this.#shape, node: described };
-		return described;
 	}
 
 	render(width: number): readonly string[] {

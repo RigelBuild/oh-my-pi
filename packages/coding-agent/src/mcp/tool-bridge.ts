@@ -16,14 +16,15 @@ import type {
 	CustomToolResult,
 	RenderResultOptions,
 } from "../extensibility/custom-tools/types";
-import { extractUriScheme } from "../internal-urls/parse";
-import { InternalUrlRouter } from "../internal-urls/router";
+import { resolveLocalUrlToFile } from "../internal-urls/local-protocol";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+
+import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
-import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import { renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import type {
 	MCPAuthChallenge,
 	MCPServerConnection,
@@ -108,9 +109,8 @@ function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinitio
 /**
  * Drop the harness-internal intent field (`INTENT_FIELD`) before forwarding
  * args to an MCP server. The harness injects `i` into every tool's wire
- * schema; the direct model tool-call path strips it via `extractIntent` and
- * the `eval` `tool.*` bridge drops it in `callSessionTool`, but other
- * in-process callers (Task proxies, `ctx.invokeTool`) may still forward args
+ * schema; the direct model tool-call path strips it via `extractIntent`, but
+ * the `eval` `tool.*` bridge and any other in-process caller forwards args
  * verbatim. Strict-schema servers (Linear, anything with
  * `additionalProperties:false` / Zod `.strict()`) reject every call that
  * carries `i`. The MCP boundary is the authoritative guard so callers don't
@@ -126,28 +126,20 @@ function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["i
 	return rest;
 }
 
-/** Replace string args that are file-backed internal URLs with the local path backing them. */
-async function resolveOutboundUrlArgs(
+async function resolveOutboundLocalUrlArgs(
 	value: unknown,
 	context: CustomToolContext,
 	seen: WeakSet<object> = new WeakSet(),
 ): Promise<unknown> {
 	if (typeof value === "string") {
-		// Only arguments that are themselves URLs: the router's repair of a
-		// cwd-prefixed `…/local://x` path must not rewrite free text that merely
-		// mentions one.
-		if (!extractUriScheme(value)) return value;
-		const router = InternalUrlRouter.instance();
-		const url = router.normalize(value);
-		if (!router.canHandle(url)) return value;
-		const scheme = extractUriScheme(url);
-		if (!scheme || router.spec(scheme)?.backing !== "file") return value;
-		const located = await router.locate(url, {
+		const normalized = normalizeLocalScheme(value);
+		if (!normalized.startsWith("local://")) return value;
+		const localFile = await resolveLocalUrlToFile(normalized, {
 			cwd: context.sessionManager?.getCwd?.(),
 			settings: context.settings,
 			localProtocolOptions: context.localProtocolOptions,
 		});
-		return located ?? value;
+		return localFile?.path ?? value;
 	}
 	if (typeof value !== "object" || value === null) return value;
 	if (seen.has(value)) return value;
@@ -157,7 +149,7 @@ async function resolveOutboundUrlArgs(
 		let resolved: unknown[] | undefined;
 		for (let index = 0; index < value.length; index++) {
 			const item = value[index];
-			const next = await resolveOutboundUrlArgs(item, context, seen);
+			const next = await resolveOutboundLocalUrlArgs(item, context, seen);
 			if (next === item && !resolved) continue;
 			resolved ??= value.slice();
 			resolved[index] = next;
@@ -169,7 +161,7 @@ async function resolveOutboundUrlArgs(
 	let resolved: Record<string, unknown> | undefined;
 	for (const key in input) {
 		const item = input[key];
-		const next = await resolveOutboundUrlArgs(item, context, seen);
+		const next = await resolveOutboundLocalUrlArgs(item, context, seen);
 		if (next === item && !resolved) continue;
 		resolved ??= { ...input };
 		resolved[key] = next;
@@ -180,7 +172,7 @@ async function resolveOutboundUrlArgs(
 /**
  * Normalize raw tool params into the outbound `tools/call` arguments: strip
  * the harness intent field, drop optional empty placeholders the server
- * declares but doesn't require, then translate file-backed internal URLs to paths
+ * declares but doesn't require, then translate session-local files to paths
  * external MCP servers can read.
  */
 async function prepareOutboundArgs(
@@ -189,7 +181,7 @@ async function prepareOutboundArgs(
 	context: CustomToolContext,
 ): Promise<MCPToolArgs> {
 	const args = omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
-	return (await resolveOutboundUrlArgs(args, context)) as MCPToolArgs;
+	return (await resolveOutboundLocalUrlArgs(args, context)) as MCPToolArgs;
 }
 
 /**
@@ -234,7 +226,6 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
  * reaches the model through the standard content channel — and the eval
  * `tool.*` and subagent proxy bridges that read the same result. Subject to the
  * usual spill/byte-cap machinery like any other text block.
- * Programmatic consumers use details.structuredContent instead of parsing this rendering.
  */
 function formatStructuredContent(structured: Record<string, unknown>): string {
 	let json: string;
@@ -293,7 +284,6 @@ function buildResult(
 		}
 	}
 	const structured = result.structuredContent;
-	if (structured !== undefined) details.structuredContent = structured;
 	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
 		const rendered = formatStructuredContent(structured);
 		if (rendered.length > 0) {
@@ -696,14 +686,6 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
 	}
 
-	describeCall(args: unknown, _options: RenderResultOptions) {
-		return describeMCPCall(normalizeToolArgs(args), this.label);
-	}
-
-	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
-		return describeMCPResult(result, options, normalizeToolArgs(args));
-	}
-
 	async execute(
 		_toolCallId: string,
 		params: unknown,
@@ -825,14 +807,6 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 
 	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
 		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
-	}
-
-	describeCall(args: unknown, _options: RenderResultOptions) {
-		return describeMCPCall(normalizeToolArgs(args), this.label);
-	}
-
-	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
-		return describeMCPResult(result, options, normalizeToolArgs(args));
 	}
 
 	async execute(

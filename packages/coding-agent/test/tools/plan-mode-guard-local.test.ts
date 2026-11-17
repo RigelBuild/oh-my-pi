@@ -1,18 +1,15 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { enforcePlanModeWrite, resolvePlanPath } from "@oh-my-pi/pi-coding-agent/tools/plan-mode-guard";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const ARTIFACTS_DIR = path.join(os.tmpdir(), "agent-artifacts");
 const REPO_ROOT = path.join(os.tmpdir(), "repo");
+const PLANS_DIR = path.join(os.tmpdir(), "plans");
 
 interface SessionOverrides {
 	artifactsDir?: string | null;
@@ -27,7 +24,9 @@ function makeSession(overrides: SessionOverrides): ToolSession {
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated(),
+		settings: {
+			getPlansDirectory: () => PLANS_DIR,
+		},
 		getArtifactsDir: () => overrides.artifactsDir ?? null,
 		getSessionId: () => overrides.sessionId ?? null,
 		getPlanModeState: () => overrides.planMode,
@@ -35,16 +34,16 @@ function makeSession(overrides: SessionOverrides): ToolSession {
 }
 
 describe("resolvePlanPath local:// support", () => {
-	it("resolves local:// paths under session artifacts local root", async () => {
+	it("resolves local:// paths under session artifacts local root", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, sessionId: "abc" });
-		expect(await resolvePlanPath(session, "local://handoffs/result.json")).toBe(
+		expect(resolvePlanPath(session, "local://handoffs/result.json")).toBe(
 			path.join(ARTIFACTS_DIR, "local", "handoffs", "result.json"),
 		);
 	});
 
-	it("falls back to os tmp root when artifacts dir is unavailable", async () => {
+	it("falls back to os tmp root when artifacts dir is unavailable", () => {
 		const session = makeSession({ artifactsDir: null, sessionId: "session-42" });
-		expect(await resolvePlanPath(session, "local://memo.txt")).toBe(
+		expect(resolvePlanPath(session, "local://memo.txt")).toBe(
 			path.join(os.tmpdir(), "omp-local", "session-42", "memo.txt"),
 		);
 	});
@@ -53,21 +52,26 @@ describe("resolvePlanPath local:// support", () => {
 describe("resolvePlanPath resolves literally (no plan-mode redirect)", () => {
 	const planMode: PlanModeState = { enabled: true, planFilePath: "local://some-plan.md" };
 
-	it("resolves a bare path against cwd regardless of plan mode", async () => {
+	it("resolves a bare path against cwd regardless of plan mode", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode });
-		expect(await resolvePlanPath(session, "PLAN.md")).toBe(path.join(REPO_ROOT, "PLAN.md"));
-		expect(await resolvePlanPath(session, "src/foo.ts")).toBe(path.join(REPO_ROOT, "src", "foo.ts"));
+		expect(resolvePlanPath(session, "PLAN.md")).toBe(path.join(REPO_ROOT, "PLAN.md"));
+		expect(resolvePlanPath(session, "src/foo.ts")).toBe(path.join(REPO_ROOT, "src", "foo.ts"));
 	});
 
-	it("unwraps a `[PATH#TAG]` hashline header to the inner filesystem path", async () => {
+	it("resolves a local:// plan file to the session local root", () => {
+		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, planMode });
+		expect(resolvePlanPath(session, "local://some-plan.md")).toBe(path.join(ARTIFACTS_DIR, "local", "some-plan.md"));
+	});
+
+	it("unwraps a `[PATH#TAG]` hashline header to the inner filesystem path", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, planMode });
 		const planPath = path.join(ARTIFACTS_DIR, "local", "some-plan.md");
-		expect(await resolvePlanPath(session, "[local://some-plan.md#ABCD]")).toBe(planPath);
-		expect(await resolvePlanPath(session, `[${planPath}#ABCD]`)).toBe(planPath);
-		expect(await resolvePlanPath(session, "[local://some-plan.md]")).toBe(planPath);
+		expect(resolvePlanPath(session, "[local://some-plan.md#ABCD]")).toBe(planPath);
+		expect(resolvePlanPath(session, `[${planPath}#ABCD]`)).toBe(planPath);
+		expect(resolvePlanPath(session, "[local://some-plan.md]")).toBe(planPath);
 	});
 
-	it("leaves malformed bracketed paths untouched so downstream errors surface", async () => {
+	it("leaves malformed bracketed paths untouched so downstream errors surface", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode });
 		// Inner path with a non-tag `#`, selector tail, or empty body falls outside
 		// the strict header shape and is resolved literally against the session cwd
@@ -75,47 +79,39 @@ describe("resolvePlanPath resolves literally (no plan-mode redirect)", () => {
 		// silently rewriting the target.
 		const nonHexHeader = `[${path.join(ARTIFACTS_DIR, "x")}#nothex]`;
 		const selectorHeader = `[${path.join(ARTIFACTS_DIR, "x")}#ABCD:1-2]`;
-		expect(await resolvePlanPath(session, nonHexHeader)).toBe(path.join(REPO_ROOT, nonHexHeader));
-		expect(await resolvePlanPath(session, selectorHeader)).toBe(path.join(REPO_ROOT, selectorHeader));
+		expect(resolvePlanPath(session, nonHexHeader)).toBe(path.join(REPO_ROOT, nonHexHeader));
+		expect(resolvePlanPath(session, selectorHeader)).toBe(path.join(REPO_ROOT, selectorHeader));
 	});
 });
 
 describe("enforcePlanModeWrite (working tree read-only, local:// sandbox writable)", () => {
 	const planMode: PlanModeState = { enabled: true, planFilePath: "local://some-plan.md" };
 
-	it("accepts writes to any local:// file", async () => {
+	it("accepts writes to any local:// file", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, planMode });
-		await expect(
-			enforcePlanModeWrite(session, "local://auth-refactor-plan.md", { op: "create" }),
-		).resolves.toBeUndefined();
-		await expect(
-			enforcePlanModeWrite(session, "local://scratch/notes.md", { op: "update" }),
-		).resolves.toBeUndefined();
+		expect(() => enforcePlanModeWrite(session, "local://auth-refactor-plan.md", { op: "create" })).not.toThrow();
+		expect(() => enforcePlanModeWrite(session, "local://scratch/notes.md", { op: "update" })).not.toThrow();
 	});
 
-	it("rejects writes to the working tree", async () => {
+	it("rejects writes to the working tree", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode });
-		await expect(enforcePlanModeWrite(session, "src/foo.ts", { op: "update" })).rejects.toThrow(
-			/working tree is read-only/,
-		);
-		await expect(enforcePlanModeWrite(session, "PLAN.md", { op: "create" })).rejects.toThrow(
-			/working tree is read-only/,
-		);
+		expect(() => enforcePlanModeWrite(session, "src/foo.ts", { op: "update" })).toThrow(/working tree is read-only/);
+		expect(() => enforcePlanModeWrite(session, "PLAN.md", { op: "create" })).toThrow(/working tree is read-only/);
 	});
 
-	it("rejects deletes and renames outright", async () => {
+	it("rejects deletes and renames outright", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, planMode });
-		await expect(enforcePlanModeWrite(session, "local://some-plan.md", { op: "delete" })).rejects.toThrow(
+		expect(() => enforcePlanModeWrite(session, "local://some-plan.md", { op: "delete" })).toThrow(
 			/deleting files is not allowed/,
 		);
-		await expect(
-			enforcePlanModeWrite(session, "local://some-plan.md", { move: "local://renamed.md" }),
-		).rejects.toThrow(/renaming files is not allowed/);
+		expect(() => enforcePlanModeWrite(session, "local://some-plan.md", { move: "local://renamed.md" })).toThrow(
+			/renaming files is not allowed/,
+		);
 	});
 
-	it("is a no-op when plan mode is disabled", async () => {
+	it("is a no-op when plan mode is disabled", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT });
-		await expect(enforcePlanModeWrite(session, "src/foo.ts", { op: "update" })).resolves.toBeUndefined();
+		expect(() => enforcePlanModeWrite(session, "src/foo.ts", { op: "update" })).not.toThrow();
 	});
 });
 
@@ -128,8 +124,8 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-test-"));
 		try {
 			const session = makeSession({ artifactsDir, planMode });
-			const absolute = await resolvePlanPath(session, "local://my-plan.md");
-			await expect(enforcePlanModeWrite(session, absolute, { op: "update" })).resolves.toBeUndefined();
+			const absolute = resolvePlanPath(session, "local://my-plan.md");
+			expect(() => enforcePlanModeWrite(session, absolute, { op: "update" })).not.toThrow();
 		} finally {
 			await removeWithRetries(artifactsDir);
 		}
@@ -139,105 +135,42 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-test-"));
 		try {
 			const session = makeSession({ artifactsDir, planMode });
-			const absolute = await resolvePlanPath(session, "local://my-plan.md");
+			const absolute = resolvePlanPath(session, "local://my-plan.md");
 
 			// Strict hashline shape `[PATH]` or `[PATH#XXXX]` is unwrapped to the
 			// inner path for both the sandbox check and the eventual resolution.
-			await expect(enforcePlanModeWrite(session, `[${absolute}#ABCD]`, { op: "update" })).resolves.toBeUndefined();
-			await expect(enforcePlanModeWrite(session, `[${absolute}]`, { op: "update" })).resolves.toBeUndefined();
-			await expect(
-				enforcePlanModeWrite(session, `[local://my-plan.md#ABCD]`, { op: "update" }),
-			).resolves.toBeUndefined();
+			expect(() => enforcePlanModeWrite(session, `[${absolute}#ABCD]`, { op: "update" })).not.toThrow();
+			expect(() => enforcePlanModeWrite(session, `[${absolute}]`, { op: "update" })).not.toThrow();
+			expect(() => enforcePlanModeWrite(session, `[local://my-plan.md#ABCD]`, { op: "update" })).not.toThrow();
 		} finally {
 			await removeWithRetries(artifactsDir);
 		}
 	});
 
-	it("rejects malformed bracketed headers instead of silently unwrapping them", async () => {
+	it("rejects malformed bracketed headers instead of silently unwrapping them", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode });
 		const sandboxPlanPath = path.join(ARTIFACTS_DIR, "local", "plan.md");
 
 		// Selector tails (`#TAG:lines`), non-hex tags, and short tags fall outside
 		// the strict header shape; we leave them alone so the downstream resolver
 		// surfaces the real error rather than treating the bracketed blob as a path.
-		await expect(enforcePlanModeWrite(session, `[${sandboxPlanPath}#ABCD:1-2]`, { op: "update" })).rejects.toThrow(
+		expect(() => enforcePlanModeWrite(session, `[${sandboxPlanPath}#ABCD:1-2]`, { op: "update" })).toThrow(
 			/working tree is read-only/,
 		);
-		await expect(enforcePlanModeWrite(session, `[${sandboxPlanPath}#nothex]`, { op: "update" })).rejects.toThrow(
+		expect(() => enforcePlanModeWrite(session, `[${sandboxPlanPath}#nothex]`, { op: "update" })).toThrow(
 			/working tree is read-only/,
 		);
 	});
 
-	it("rejects sandbox paths that a symlinked ancestor routes into the working tree", async () => {
-		if (process.platform === "win32") return;
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-link-"));
-		try {
-			const artifactsDir = path.join(tempDir, "artifacts");
-			const repo = path.join(tempDir, "repo");
-			await fs.mkdir(path.join(artifactsDir, "local"), { recursive: true });
-			await fs.mkdir(repo, { recursive: true });
-			await fs.symlink(repo, path.join(artifactsDir, "local", "link"));
-			const session = makeSession({ artifactsDir, cwd: repo, planMode });
-
-			for (const target of [
-				"local://link/newdir/f.md",
-				path.join(artifactsDir, "local", "link", "newdir", "f.md"),
-			]) {
-				await expect(enforcePlanModeWrite(session, target, { op: "create" })).rejects.toThrow(
-					/working tree is read-only/,
-				);
-			}
-		} finally {
-			await removeWithRetries(tempDir);
-		}
-	});
-
-	it("still rejects absolute paths outside the local sandbox", async () => {
+	it("still rejects absolute paths outside the local sandbox", () => {
 		const session = makeSession({ artifactsDir: ARTIFACTS_DIR, cwd: REPO_ROOT, planMode });
 		const workingTreePath = path.join(REPO_ROOT, "src", "foo.ts");
 
-		await expect(enforcePlanModeWrite(session, workingTreePath, { op: "update" })).rejects.toThrow(
+		expect(() => enforcePlanModeWrite(session, workingTreePath, { op: "update" })).toThrow(
 			/working tree is read-only/,
 		);
-		await expect(enforcePlanModeWrite(session, `[${workingTreePath}#ABCD]`, { op: "update" })).rejects.toThrow(
+		expect(() => enforcePlanModeWrite(session, `[${workingTreePath}#ABCD]`, { op: "update" })).toThrow(
 			/working tree is read-only/,
 		);
-	});
-});
-
-describe("local:// write and read agree for sessions without artifact wiring", () => {
-	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
-	});
-
-	afterEach(() => {
-		LocalProtocolHandler.resetOverrideForTests();
-		InternalUrlRouter.resetForTests();
-	});
-
-	it("reads back a local:// file written through the same legacy-shaped session", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-legacy-"));
-		try {
-			const hostArtifacts = path.join(tempDir, "host-artifacts");
-			LocalProtocolHandler.setOverride({ getArtifactsDir: () => hostArtifacts, getSessionId: () => "host" });
-			// Shape of the legacy pi-coding-agent shim session: no local:// pinning, no artifacts dir.
-			const session: ToolSession = {
-				cwd: tempDir,
-				hasUI: false,
-				getSessionFile: () => null,
-				getSessionSpawns: () => null,
-				settings: Settings.isolated(),
-				enableLsp: false,
-			};
-
-			await new WriteTool(session).execute("write-notes", { path: "local://notes.md", content: "shared notes\n" });
-			const read = await new ReadTool(session).execute("read-notes", { path: "local://notes.md" });
-			const text = read.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
-
-			expect(await Bun.file(path.join(hostArtifacts, "local", "notes.md")).text()).toBe("shared notes\n");
-			expect(text).toContain("shared notes");
-		} finally {
-			await removeWithRetries(tempDir);
-		}
 	});
 });

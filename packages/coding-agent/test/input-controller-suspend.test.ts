@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 
 interface SuspendCtx {
 	ctx: InteractiveModeContext;
@@ -26,7 +25,6 @@ function createCtx(): SuspendCtx {
 		ui: ui as unknown as InteractiveModeContext["ui"],
 		showStatus,
 		showError,
-		keybindings: KeybindingsManager.inMemory(),
 	} as unknown as InteractiveModeContext;
 	return { ctx, ui, showStatus, showError };
 }

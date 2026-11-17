@@ -27,7 +27,6 @@ import type {
 	ClientUsageReportRequest,
 	ClientUsageReportResponse,
 	ClientUsageSummaryResponse,
-	CredentialBlockDeleteRequest,
 	CredentialBlockRequest,
 	CredentialBlockResponse,
 	CredentialBlockSnapshot,
@@ -393,12 +392,6 @@ export const disabledCredentialsResponseSchema: FluentType<DisabledCredentialsRe
 // ─── Credential blocks ───────────────────────────────────────────────────────
 
 export const credentialBlockRequestSchema: FluentType<CredentialBlockRequest> = credentialBlockSnapshotSchema;
-
-export const credentialBlockDeleteRequestSchema: FluentType<CredentialBlockDeleteRequest> = type({
-	"+": "reject",
-	providerKey: type("string").atLeastLength(1),
-	blockScope: "string",
-});
 
 export const credentialBlockResponseSchema: FluentType<CredentialBlockResponse> = type({
 	"+": "reject",

@@ -20,7 +20,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { encodeSixelAsync, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
+import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -37,22 +37,13 @@ const files = await find({
 	fileType: "file",
 });
 
-// SIXEL encode for a terminal cell box (px), off the JS thread
-// (`encodeSixel` is the synchronous form)
-const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx);
+// SIXEL encode for a terminal cell box (px)
+const sequence = encodeSixel(pngBytes, widthPx, heightPx);
 
 // Extract PDF text and identify pages that still need OCR
 const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
-
-### Lazy Windows path helpers
-
-Import `expandWindowsLongPath` and `getWindowsShortPath` from
-`@oh-my-pi/pi-natives/path` when importing a module must not load the native addon.
-The addon loads only when a helper is called on Windows; other platforms preserve
-the input path without loading it. These helpers change long/8.3 spellings without
-resolving symlinks or junctions.
 
 ## Building
 

@@ -1046,7 +1046,7 @@ fn encode_literal_markers(text: &str) -> String {
 		.replace(SELECT_DIVIDER, LITERAL_DIVIDER)
 }
 
-pub(super) fn decode_literal_markers(text: &str) -> String {
+fn decode_literal_markers(text: &str) -> String {
 	text
 		.replace(LITERAL_OPEN, SELECT_OPEN)
 		.replace(LITERAL_CLOSE, SELECT_CLOSE)
@@ -1543,7 +1543,6 @@ fn finish_pattern(
 	path: &str,
 	pattern_lines: &[String],
 	all: bool,
-	streaming: bool,
 	operations: &mut Vec<Operation>,
 	pending: &mut Vec<(usize, String)>,
 ) -> Result<(), EditError> {
@@ -1551,11 +1550,6 @@ fn finish_pattern(
 	let number = operations.len() + 1;
 	if has_inline_selection(&source) || has_marker_lines(&source) || has_bare_desired(&source) {
 		operations.push(create_operation_text(&source, "", all, number, false)?);
-		return Ok(());
-	}
-	// A Find whose Replace has not streamed in yet: the recovery ladder below
-	// scans the whole file, and its answer would be discarded anyway.
-	if streaming {
 		return Ok(());
 	}
 	if let Some((pattern, rewrite)) = recover_missing_separator(pattern_lines, content) {
@@ -1704,54 +1698,12 @@ fn finish_pattern(
 	Ok(())
 }
 
-/// Rows collected for one side of an operation, with running `⟪`/`⟫` counts
-/// and a non-blank flag so each new row costs O(row) instead of re-scanning
-/// the block.
-#[derive(Default)]
-struct Rows {
-	lines:       Vec<String>,
-	opens:       usize,
-	closes:      usize,
-	has_content: bool,
-}
-
-impl Rows {
-	fn push(&mut self, line: &str) {
-		self.opens += line.matches(SELECT_OPEN).count();
-		self.closes += line.matches(SELECT_CLOSE).count();
-		self.has_content |= !line.trim().is_empty();
-		self.lines.push(line.to_owned());
-	}
-
-	fn clear(&mut self) {
-		self.lines.clear();
-		self.opens = 0;
-		self.closes = 0;
-		self.has_content = false;
-	}
-
-	const fn balanced(&self) -> bool {
-		self.opens == self.closes
-	}
-}
-
 /// Parse a canonical or taught sloppy payload into operations. `path` is the
 /// authored target, echoed in copy-ready payloads inside parse errors.
 pub fn parse_operations(
 	input: &str,
 	content: &str,
 	path: &str,
-) -> Result<Vec<Operation>, EditError> {
-	parse_section(input, content, path, false)
-}
-
-/// [`parse_operations`] for one section; while `streaming`, a trailing
-/// `*** Find` without its `*** Replace` is dropped instead of recovered.
-pub(super) fn parse_section(
-	input: &str,
-	content: &str,
-	path: &str,
-	streaming: bool,
 ) -> Result<Vec<Operation>, EditError> {
 	let payload = normalize_input(input);
 	let mut lines: Vec<String> = payload.split('\n').map(str::to_owned).collect();
@@ -1776,8 +1728,8 @@ pub(super) fn parse_section(
 	let mut operations = Vec::new();
 	let mut state = State::Outside;
 	let mut all = false;
-	let mut pattern = Rows::default();
-	let mut rewrite = Rows::default();
+	let mut pattern_lines: Vec<String> = Vec::new();
+	let mut rewrite_lines = Vec::new();
 	let mut reference_separator: Option<String> = None;
 	let mut pending = Vec::new();
 
@@ -1789,7 +1741,7 @@ pub(super) fn parse_section(
 		if let Some((at, encoded)) = strip_insert_header(line) {
 			let number = operations.len() + 1;
 			let header = at.header();
-			if state != State::Pattern || !pattern.has_content {
+			if state != State::Pattern || pattern_lines.iter().all(|line| line.trim().is_empty()) {
 				return Err(parse_error(format!(
 					"Operation {number} needs a non-empty *** Find before {header}."
 				)));
@@ -1797,7 +1749,7 @@ pub(super) fn parse_section(
 			let text = serde_json::from_str(encoded)
 				.map_err(|error| parse_error(format!("Invalid {header} body: {error}")))?;
 			operations.push(create_operation(
-				&normalize_block(&pattern.lines, false),
+				&normalize_block(&pattern_lines, false),
 				OperationRewrite::Insert { text, at },
 				all,
 				content,
@@ -1813,7 +1765,11 @@ pub(super) fn parse_section(
 			)));
 		}
 		if trimmed == format!("{OPENER}{REWRITE_HEADER}") {
-			if state == State::Pattern && pattern.has_content {
+			if state == State::Pattern
+				&& pattern_lines
+					.iter()
+					.any(|line: &String| !line.trim().is_empty())
+			{
 				state = State::Rewrite;
 			}
 			continue;
@@ -1833,8 +1789,8 @@ pub(super) fn parse_section(
 		if state == State::Outside {
 			if let Some(opener) = parsed_opener {
 				all = opener == OpenerKind::All;
-				pattern.clear();
-				rewrite.clear();
+				pattern_lines.clear();
+				rewrite_lines.clear();
 				reference_separator = None;
 				state = State::Pattern;
 			} else if !trimmed.is_empty() {
@@ -1846,14 +1802,20 @@ pub(super) fn parse_section(
 			continue;
 		}
 		if state == State::Pattern {
-			let balanced = pattern.balanced();
+			let accumulated = pattern_lines.join("\n");
+			let balanced =
+				accumulated.matches(SELECT_OPEN).count() == accumulated.matches(SELECT_CLOSE).count();
 			if trimmed == REWRITE_HEADER
-				|| (trimmed == "***" && balanced && pattern.has_content)
-				|| (trimmed == SELECT_CLOSE && balanced && pattern.has_content)
+				|| (trimmed == "***"
+					&& balanced
+					&& pattern_lines.iter().any(|line| !line.trim().is_empty()))
+				|| (trimmed == SELECT_CLOSE
+					&& balanced
+					&& pattern_lines.iter().any(|line| !line.trim().is_empty()))
 			{
 				state = State::Rewrite;
 			} else if register_reference.is_some() && balanced {
-				if !pattern.has_content {
+				if !pattern_lines.iter().any(|line| !line.trim().is_empty()) {
 					return Err(parse_error(format!(
 						"{trimmed} is valid only in REWRITE, never MATCH."
 					)));
@@ -1861,25 +1823,24 @@ pub(super) fn parse_section(
 				state = State::Rewrite;
 				reference_separator = Some(trimmed.to_owned());
 			} else if let Some(opener) = parsed_opener {
-				if pattern.has_content {
+				if pattern_lines.iter().any(|line| !line.trim().is_empty()) {
 					finish_pattern(
 						&lines,
 						index,
 						content,
 						path,
-						&pattern.lines,
+						&pattern_lines,
 						all,
-						false,
 						&mut operations,
 						&mut pending,
 					)?;
 				}
 				all = opener == OpenerKind::All;
-				pattern.clear();
-				rewrite.clear();
+				pattern_lines.clear();
+				rewrite_lines.clear();
 				reference_separator = None;
 			} else {
-				pattern.push(line);
+				pattern_lines.push(line.clone());
 			}
 			continue;
 		}
@@ -1888,15 +1849,15 @@ pub(super) fn parse_section(
 				&lines,
 				index,
 				path,
-				&pattern.lines,
-				&rewrite.lines,
+				&pattern_lines,
+				&rewrite_lines,
 				reference_separator.as_deref(),
 				all,
 				&mut operations,
 			)?;
 			all = opener == OpenerKind::All;
-			pattern.clear();
-			rewrite.clear();
+			pattern_lines.clear();
+			rewrite_lines.clear();
 			reference_separator = None;
 			state = State::Pattern;
 		} else if trimmed == "***" {
@@ -1910,9 +1871,12 @@ pub(super) fn parse_section(
 					operations.len() + 1
 				)));
 			}
-		} else if trimmed == SELECT_CLOSE && rewrite.balanced() {
+		} else if trimmed == SELECT_CLOSE
+			&& rewrite_lines.join("\n").matches(SELECT_OPEN).count()
+				== rewrite_lines.join("\n").matches(SELECT_CLOSE).count()
+		{
 		} else {
-			rewrite.push(line);
+			rewrite_lines.push(line.clone());
 		}
 	}
 	match state {
@@ -1920,8 +1884,8 @@ pub(super) fn parse_section(
 			&lines,
 			lines.len(),
 			path,
-			&pattern.lines,
-			&rewrite.lines,
+			&pattern_lines,
+			&rewrite_lines,
 			reference_separator.as_deref(),
 			all,
 			&mut operations,
@@ -1931,9 +1895,8 @@ pub(super) fn parse_section(
 			lines.len(),
 			content,
 			path,
-			&pattern.lines,
+			&pattern_lines,
 			all,
-			streaming,
 			&mut operations,
 			&mut pending,
 		)?,

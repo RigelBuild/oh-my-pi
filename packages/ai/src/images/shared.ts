@@ -69,12 +69,9 @@ async function parseImageApiResponse(model: Model, response: Response): Promise<
 	}
 }
 
-/** Request URL, or a builder for routes that depend on the bearer (xAI's `XAI_BASE_URL` rule). */
-type ImageRequestUrl = string | ((bearer: string) => string);
-
 export async function postJson(options: {
 	model: Model;
-	url: ImageRequestUrl;
+	url: string;
 	body: unknown;
 	apiKey: ApiKey;
 	fetch: FetchImpl;
@@ -83,8 +80,7 @@ export async function postJson(options: {
 	return withAuth(
 		options.apiKey,
 		async key => {
-			const url = typeof options.url === "string" ? options.url : options.url(key);
-			const response = await options.fetch(url, {
+			const response = await options.fetch(options.url, {
 				method: "POST",
 				headers: {
 					...(await modelHeaders(options.model, options.signal)),
@@ -103,7 +99,7 @@ export async function postJson(options: {
 
 export async function postMultipart(options: {
 	model: Model;
-	url: ImageRequestUrl;
+	url: string;
 	body: FormData;
 	apiKey: ApiKey;
 	fetch: FetchImpl;
@@ -112,8 +108,7 @@ export async function postMultipart(options: {
 	return withAuth(
 		options.apiKey,
 		async key => {
-			const url = typeof options.url === "string" ? options.url : options.url(key);
-			const response = await options.fetch(url, {
+			const response = await options.fetch(options.url, {
 				method: "POST",
 				headers: {
 					...(await modelHeaders(options.model, options.signal)),

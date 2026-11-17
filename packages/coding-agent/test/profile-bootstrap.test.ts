@@ -26,6 +26,15 @@ describe("extractProfileFlags", () => {
 		expect(result.profile).toBeUndefined();
 		expect(result.argv).toEqual(["--system-prompt", "--profile", "foo", "bar"]);
 	});
+	it("does not eat the value of --approval-mode", () => {
+		// `--approval-mode` is a string-valued flag in args.ts (`args[++i]` with
+		// no `-` check). The pre-parser must mirror that contract or
+		// `omp --approval-mode --profile foo` silently activates profile `foo`
+		// instead of letting the launch parser surface the invalid mode value.
+		const result = extractProfileFlags(["--approval-mode", "--profile", "foo", "bar"]);
+		expect(result.profile).toBeUndefined();
+		expect(result.argv).toEqual(["--approval-mode", "--profile", "foo", "bar"]);
+	});
 
 	it("honors extension-shadowed --plan before a global profile", () => {
 		const extracted = extractProfileFlags(["--plan", "--profile", "work", "follow up"]);
@@ -211,6 +220,11 @@ describe("extractProfileFlags", () => {
 		});
 		expect(extractProfileFlags(["--no-tools", "--profile", "work"])).toEqual({
 			argv: ["--no-tools"],
+			profile: "work",
+			aliasName: undefined,
+		});
+		expect(extractProfileFlags(["--reapply-config", "--profile", "work"])).toEqual({
+			argv: ["--reapply-config"],
 			profile: "work",
 			aliasName: undefined,
 		});

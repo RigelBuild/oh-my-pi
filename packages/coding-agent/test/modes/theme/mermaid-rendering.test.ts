@@ -1,7 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { Markdown } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../../src/config/settings";
-import { fgAnsi } from "@oh-my-pi/pi-tui/theme/color";
 import { createTheme, getBuiltinThemes } from "@oh-my-pi/pi-tui/theme/loader";
 import {
 	getMarkdownTheme,
@@ -58,32 +57,27 @@ describe("Mermaid rendering setting", () => {
 		expect(lines).toContain("-->");
 	});
 
-	it("draws Mermaid structure with the muted token and labels with the text token", async () => {
+	it("uses content-visible Titanium colors for Mermaid structure", async () => {
 		const dark = await getThemeByName("dark");
 		if (!dark) throw new Error("fallback theme unavailable");
 		const titaniumJson = getBuiltinThemes().titanium;
 		if (!titaniumJson) throw new Error("Titanium theme unavailable");
 
 		try {
-			// Titanium's border tokens are near-background, so it exposes a regression to UI-chrome strokes.
-			const titanium = createTheme(titaniumJson, { mode: "truecolor" });
-			setThemeInstance(titanium);
-			const sgr = (token: "muted" | "text" | "border" | "borderMuted") =>
-				fgAnsi(titanium.getColorHex(token), "truecolor");
+			setThemeInstance(createTheme(titaniumJson, { mode: "truecolor" }));
 			const renderer = getMarkdownTheme().resolveMermaidAscii;
 			if (!renderer) throw new Error("Mermaid renderer unavailable");
 			const rendered = renderer("stateDiagram-v2\n  [*] --> Capture\n  Capture --> [*]", 80);
-			const muted = sgr("muted");
-			const text = sgr("text");
-			expect(new Set([muted, text, sgr("border"), sgr("borderMuted")]).size).toBe(4);
+			const muted = "\x1b[38;2;156;163;176m";
 
 			expect(rendered).toContain(`${muted}╔`);
 			expect(rendered).toContain(`${muted}║`);
 			expect(rendered).toContain(`${muted}╚`);
-			for (const glyph of "╔═╗║╚╝") expect(rendered).not.toContain(`${text}${glyph}`);
-			expect(rendered).not.toContain(sgr("border"));
-			expect(rendered).not.toContain(sgr("borderMuted"));
+			expect(rendered).not.toMatch(/\x1b\[38;2;229;229;231m[╔═╗║╚╝]/);
+			expect(rendered).not.toContain("\x1b[38;2;42;48;56m");
+			expect(rendered).not.toContain("\x1b[38;2;31;37;45m");
 			const labels = renderer("flowchart TD\n  A[x=y]\n  B[status=#1]", 80);
+			const text = "\x1b[38;2;229;229;231m";
 			expect(labels).toContain(`${text}x=y`);
 			expect(labels).toContain(`${text}status=#1`);
 		} finally {

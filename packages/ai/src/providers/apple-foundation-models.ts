@@ -13,7 +13,6 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { appleFmAvailability, appleFmCancel, appleFmGenerate } from "@oh-my-pi/pi-natives";
 import { parseStreamingJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	AssistantMessage,
 	Context,
@@ -368,7 +367,7 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 			for (const index of toolIndices.values()) {
 				const block = output.content[index] as ToolCallBlock;
 				block.arguments = decodeFoundationModelsArguments(
-					parseToolCallArguments(block[kStreamingPartialJson]),
+					parseStreamingJson<Record<string, unknown>>(block[kStreamingPartialJson] ?? ""),
 					encodedPaths.get(block.name) ?? [],
 				);
 				clearStreamingPartialJson(block);

@@ -28,7 +28,7 @@ import {
 } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
 import { Settings } from "../config/settings";
-import { cfgTtsr, type TtsrSettings } from "../export/ttsr-settings";
+import type { TtsrSettings } from "../config/settings-schema";
 import { initializeWithSettings, loadCapability } from "../discovery";
 import { buildRuleFromMarkdown, createSourceMeta } from "../discovery/helpers";
 import type { TtsrManager } from "../export/ttsr";
@@ -265,7 +265,7 @@ async function evaluate(
 	return { triggered, notTriggered };
 }
 
-async function createTtsrManager(settings?: Partial<TtsrSettings>): Promise<TtsrManager> {
+async function createTtsrManager(settings?: TtsrSettings): Promise<TtsrManager> {
 	const { TtsrManager } = await import("../export/ttsr");
 	return new TtsrManager(settings);
 }
@@ -292,7 +292,7 @@ function filterTtsrRulesForScan(
 async function loadProjectTtsrRules(cwd: string, agentName?: string): Promise<{ rules: Rule[]; manager: TtsrManager }> {
 	const settingsInstance = await Settings.init({ cwd });
 	initializeWithSettings(settingsInstance);
-	const ttsrSettings = cfgTtsr.get(settingsInstance);
+	const ttsrSettings = settingsInstance.getGroup("ttsr");
 	const manager = await createTtsrManager(ttsrSettings);
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	bucketRules(result.items, manager, {
@@ -306,7 +306,7 @@ async function loadProjectTtsrRules(cwd: string, agentName?: string): Promise<{ 
 async function loadProjectScanRules(cwd: string): Promise<Rule[]> {
 	const settingsInstance = await Settings.init({ cwd });
 	initializeWithSettings(settingsInstance);
-	const ttsrSettings = cfgTtsr.get(settingsInstance);
+	const ttsrSettings = settingsInstance.getGroup("ttsr");
 	if (!ttsrSettings.enabled) {
 		return [];
 	}

@@ -37,7 +37,7 @@ process.env.OTEL_TRACES_EXPORTER = "console";
 process.env.OTEL_LOGS_EXPORTER = "console";
 process.env.OTEL_METRICS_EXPORTER = "console";
 
-await initTelemetryExport(true);
+await initTelemetryExport();
 const enabled = isTelemetryExportEnabled();
 
 const span = trace.getTracer("@oh-my-pi/pi-agent-core").startSpan("non-otlp-probe");

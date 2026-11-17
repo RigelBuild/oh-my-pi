@@ -21,7 +21,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { $env, asRecord, readSseJson } from "@oh-my-pi/pi-utils";
+import { $env, readSseJson } from "@oh-my-pi/pi-utils";
 import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -29,12 +29,7 @@ import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery }
 import { dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import {
-	type ApiConfig,
-	getAvailableAuthMethods,
-	PERPLEXITY_CHAT_BASE_URL,
-	PERPLEXITY_RESPONSES_BASE_URL,
-} from "./perplexity-auth";
+import { type ApiConfig, getAvailableAuthMethods } from "./perplexity-auth";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const PERPLEXITY_OAUTH_ASK_URL = "https://www.perplexity.ai/rest/sse/perplexity_ask";
@@ -216,6 +211,11 @@ function mergeOAuthEventSnapshot(
 	return merged;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	return value as Record<string, unknown>;
+}
+
 function parseJson(text: string): unknown | null {
 	try {
 		return JSON.parse(text);
@@ -350,13 +350,14 @@ interface PerplexityApiStreamMetadata {
 	related_questions?: unknown;
 }
 
-function buildPerplexityCompletionsModel(request: PerplexityRequest): Model<"openai-completions"> {
+function buildPerplexityCompletionsModel(config: ApiConfig, request: PerplexityRequest): Model<"openai-completions"> {
+	const model = config.modelPrefix ? `${config.modelPrefix}${request.model}` : request.model;
 	const spec: ModelSpec<"openai-completions"> = {
-		id: request.model,
-		name: request.model,
+		id: model,
+		name: model,
 		api: "openai-completions",
-		provider: "perplexity",
-		baseUrl: PERPLEXITY_CHAT_BASE_URL,
+		provider: config.provider,
+		baseUrl: config.chatBaseUrl,
 		reasoning: false,
 		input: ["text"],
 		supportsTools: false,
@@ -374,13 +375,14 @@ function buildPerplexityCompletionsModel(request: PerplexityRequest): Model<"ope
 	return buildModel(spec);
 }
 
-function buildPerplexityResponsesModel(request: PerplexityRequest): Model<"openai-responses"> {
+function buildPerplexityResponsesModel(config: ApiConfig, request: PerplexityRequest): Model<"openai-responses"> {
+	const model = config.modelPrefix ? `${config.modelPrefix}${request.model}` : request.model;
 	const spec: ModelSpec<"openai-responses"> = {
-		id: request.model,
-		name: request.model,
+		id: model,
+		name: model,
 		api: "openai-responses",
-		provider: "perplexity",
-		baseUrl: PERPLEXITY_RESPONSES_BASE_URL,
+		provider: config.provider,
+		baseUrl: config.responsesBaseUrl,
 		reasoning: false,
 		input: ["text"],
 		supportsTools: false,
@@ -493,7 +495,7 @@ function throwPerplexityStreamError(message: AssistantMessage): never {
 	throw new SearchProviderError("perplexity", `Perplexity API error (${status}): ${details}`, status);
 }
 
-/** Call the Perplexity API-key endpoint through the shared OpenAI streaming providers. */
+/** Call Perplexity API-key endpoint (or OpenRouter) through the shared OpenAI streaming providers. */
 async function callPerplexityApi(
 	config: ApiConfig,
 	request: PerplexityRequest,
@@ -510,7 +512,7 @@ async function callPerplexityApi(
 
 	const message = config.useResponses
 		? await drainAssistantStream(
-				streamOpenAIResponses(buildPerplexityResponsesModel(request), context, {
+				streamOpenAIResponses(buildPerplexityResponsesModel(config, request), context, {
 					apiKey: config.apiKey,
 					maxTokens: request.max_tokens ?? undefined,
 					temperature: request.temperature ?? undefined,
@@ -521,7 +523,7 @@ async function callPerplexityApi(
 				}),
 			)
 		: await drainAssistantStream(
-				streamOpenAICompletions(buildPerplexityCompletionsModel(request), context, {
+				streamOpenAICompletions(buildPerplexityCompletionsModel(config, request), context, {
 					apiKey: config.apiKey,
 					maxTokens: request.max_tokens ?? undefined,
 					temperature: request.temperature ?? undefined,
@@ -764,22 +766,6 @@ async function callPerplexityAsk(
 		}
 	}
 
-	// Anonymous quota exhaustion answers HTTP 200 with a short signup-wall
-	// message ("Sign up and repeat your request.", localized by the upstream
-	// service) and zero sources. A grounded anonymous ask (skip_search_enabled
-	// false + always_search_override) always returns web_results, so a
-	// source-less anonymous response is almost always the wall. Either way an
-	// unsourced answer is useless, so classify it as a provider failure and let
-	// the fallback chain advance, matching the DuckDuckGo/Startpage/Google/SearXNG
-	// wall paths. The check is locale-independent (no text match).
-	if (auth.type === "anonymous" && sourcesByUrl.size === 0) {
-		throw new SearchProviderError(
-			"perplexity",
-			"Perplexity anonymous ask returned no sources (likely signup wall or exhausted anonymous quota); sign in with `/login perplexity` or configure another provider.",
-			429,
-		);
-	}
-
 	return {
 		answer,
 		sources: [...sourcesByUrl.values()],
@@ -984,18 +970,24 @@ export class PerplexityProvider extends SearchProvider {
 	 * Auto-chain admission. Requires a direct Perplexity credential
 	 * (`PERPLEXITY_COOKIES`, OAuth session, or `PERPLEXITY_API_KEY`).
 	 *
-	 * OpenRouter keys are never borrowed: silently billing OpenRouter's
-	 * `perplexity/sonar-pro` surprises users. That path runs only through an
-	 * explicit `openrouter/perplexity/…` selector, via OpenRouter grounding.
+	 * OpenRouter auth is intentionally NOT accepted here: silently using
+	 * OpenRouter's `perplexity/sonar-pro` whenever any OpenRouter key is
+	 * configured surprises users (and bills them) for a path they never
+	 * asked for. The default role chain skips Perplexity in that case and falls
+	 * through to the next candidate. Users who DO want the OpenRouter-backed
+	 * Perplexity path can still opt in with the `web/perplexity` model selector —
+	 * see {@link isExplicitlyAvailable}.
 	 */
 	isAvailable(authStorage: AuthStorage): boolean {
 		return !!$env.PERPLEXITY_COOKIES?.trim() || authStorage.keys.source("perplexity") !== undefined;
 	}
 
 	/**
-	 * Perplexity accepts anonymous browser-style ask requests, so explicit
-	 * selection always runs. Auto-chain admission stays credential-gated so a
-	 * configured provider keeps priority over the anonymous fallback.
+	 * Perplexity accepts anonymous browser-style ask requests, and the
+	 * OpenRouter-backed `perplexity/sonar-pro` path is opt-in through
+	 * explicit selection. Keep auto-chain admission credential-gated so a
+	 * configured provider keeps priority over the anonymous/OpenRouter
+	 * fallbacks.
 	 */
 	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;

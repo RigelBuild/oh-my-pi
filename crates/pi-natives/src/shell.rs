@@ -1,15 +1,6 @@
 //! Brush-based shell execution exported via N-API.
 
-pub mod vfs;
-
-use std::{
-	collections::HashMap,
-	sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-	},
-	time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use napi::{
 	Env, Result,
@@ -24,42 +15,7 @@ use pi_shell::{
 	execute_shell as core_execute_shell, minimizer,
 };
 
-use self::vfs::ShellFilesystem;
 use crate::task;
-
-/// Expand Windows 8.3 components without resolving symlinks or junctions.
-#[napi]
-#[allow(clippy::missing_const_for_fn, reason = "windows branch calls non-const path helpers")]
-pub fn expand_windows_long_path(path: String) -> String {
-	#[cfg(windows)]
-	{
-		pi_shell::expand_to_long_path(std::path::Path::new(&path))
-			.into_os_string()
-			.into_string()
-			.unwrap_or(path)
-	}
-	#[cfg(not(windows))]
-	{
-		path
-	}
-}
-
-/// Get the existing Windows 8.3 spelling; preserve the input when unavailable.
-#[napi]
-#[allow(clippy::missing_const_for_fn, reason = "windows branch calls non-const path helpers")]
-pub fn get_windows_short_path(path: String) -> String {
-	#[cfg(windows)]
-	{
-		pi_shell::get_short_path(std::path::Path::new(&path))
-			.into_os_string()
-			.into_string()
-			.unwrap_or(path)
-	}
-	#[cfg(not(windows))]
-	{
-		path
-	}
-}
 
 /// N-API opt-in handle for the minimizer.
 #[napi(object)]
@@ -108,7 +64,7 @@ impl From<MinimizerOptions> for minimizer::MinimizerOptions {
 }
 
 /// Options for configuring a persistent shell session.
-#[napi(object, object_to_js = false)]
+#[napi(object)]
 pub struct ShellOptions {
 	/// Environment variables to apply once per session.
 	pub session_env:   Option<HashMap<String, String>>,
@@ -116,8 +72,6 @@ pub struct ShellOptions {
 	pub snapshot_path: Option<String>,
 	/// Optional per-command output minimizer configuration.
 	pub minimizer:     Option<MinimizerOptions>,
-	/// Filesystem backing every run of this session (native when absent).
-	pub filesystem:    Option<ShellFilesystem>,
 }
 
 impl From<ShellOptions> for CoreShellOptions {
@@ -126,16 +80,12 @@ impl From<ShellOptions> for CoreShellOptions {
 			session_env:   value.session_env,
 			snapshot_path: value.snapshot_path,
 			minimizer:     value.minimizer.map(Into::into),
-			filesystem:    value
-				.filesystem
-				.map(ShellFilesystem::into_fs)
-				.unwrap_or_default(),
 		}
 	}
 }
 
 /// Options for running a shell command.
-#[napi(object, object_to_js = false)]
+#[napi(object)]
 pub struct ShellRunOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:    String,
@@ -147,13 +97,10 @@ pub struct ShellRunOptions<'env> {
 	pub timeout_ms: Option<u32>,
 	/// Abort signal for cancelling the operation.
 	pub signal:     Option<Unknown<'env>>,
-	/// Filesystem for this run only, replacing the session's; the session's
-	/// filesystem applies again to later runs.
-	pub filesystem: Option<ShellFilesystem>,
 }
 
 /// Options for executing a shell command via brush-core.
-#[napi(object, object_to_js = false)]
+#[napi(object)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
 	pub command:       String,
@@ -171,8 +118,6 @@ pub struct ShellExecuteOptions<'env> {
 	pub minimizer:     Option<MinimizerOptions>,
 	/// Abort signal for cancelling the operation.
 	pub signal:        Option<Unknown<'env>>,
-	/// Filesystem backing the command (native when absent).
-	pub filesystem:    Option<ShellFilesystem>,
 }
 
 /// Telemetry for a single minimization.
@@ -278,7 +223,6 @@ impl Shell {
 			cwd:        options.cwd,
 			env:        options.env,
 			timeout_ms: options.timeout_ms,
-			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -309,17 +253,6 @@ impl Shell {
 	pub async fn live_background_job_count(&self) -> u32 {
 		self.inner.live_background_job_count().await
 	}
-
-	/// Pids of the still-alive processes spawned by this session's in-flight
-	/// `run`, in spawn order: foreground commands, pipeline stages, and `&`
-	/// jobs started by that run. Builtins run in-process and never appear.
-	/// Empty when no run is executing; children that outlive their run are no
-	/// longer reported once it returns. Synchronous and never waits on the
-	/// running command.
-	#[napi]
-	pub fn pids(&self) -> Vec<i32> {
-		self.inner.pids()
-	}
 }
 
 /// Execute a brush shell command.
@@ -343,10 +276,6 @@ pub fn execute_shell<'env>(
 		timeout_ms:    options.timeout_ms,
 		snapshot_path: options.snapshot_path,
 		minimizer:     options.minimizer.map(Into::into),
-		filesystem:    options
-			.filesystem
-			.map(ShellFilesystem::into_fs)
-			.unwrap_or_default(),
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -359,13 +288,13 @@ pub fn execute_shell<'env>(
 	})
 }
 
-/// Capacity (in chunks) of the queue between the output readers (pipe or PTY)
-/// and the JS forwarding pump. One queued chunk is at most one read (≤64 KiB),
-/// so the Rust side of the bridge holds ~4 MiB worst case before the readers'
-/// sends park — which in turn parks the child on its stdout/stderr pipe or PTY
-/// (ordinary backpressure) instead of buffering the surplus in process memory
-/// (#4078).
-pub(crate) const BRIDGE_QUEUE_CHUNKS: usize = 64;
+/// Capacity (in chunks) of the queue between the pipe readers and the JS
+/// forwarding pump. One queued chunk is at most one pipe read (≤64 KiB), so
+/// the Rust side of the bridge holds ~4 MiB worst case before the readers'
+/// `send_async` parks — which in turn parks the child on its stdout/stderr
+/// pipe (ordinary pipe backpressure) instead of buffering the surplus in
+/// process memory (#4078).
+const BRIDGE_QUEUE_CHUNKS: usize = 64;
 
 /// Maximum time a single chunk-forwarding `call_async` may take before the
 /// pump treats the JS consumer as wedged and disconnects the bridge.
@@ -378,7 +307,7 @@ pub(crate) const BRIDGE_QUEUE_CHUNKS: usize = 64;
 /// `write(2)` so it never exits and the run never settles (#12657). 30s is far
 /// beyond any legitimate per-callback latency while still recovering a stranded
 /// background job in bounded time.
-pub(crate) const FORWARD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+const FORWARD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn bridge_chunks(
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
@@ -387,50 +316,27 @@ fn bridge_chunks(
 		return (None, None);
 	};
 	let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
-	let handle = napi::tokio::spawn(pump_chunks(
-		rx,
-		FORWARD_STALL_TIMEOUT,
-		None,
-		async move |payload: String| {
+	let handle =
+		napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async move |payload: String| {
 			// `call_async` resolves only after the JS callback ran, so at most
 			// one batch sits in the napi queue at a time and the JS event loop's
 			// actual consumption rate backpressures the whole pipeline. An error
 			// means the JS side is gone (env teardown) — stop forwarding.
 			on_chunk.call_async(Ok(payload)).await.is_ok()
-		},
-	));
+		}));
 	(Some(tx), Some(handle))
-}
-
-/// One item on a reader→JS bridge queue.
-pub(crate) trait BridgeItem {
-	/// The output text, or `None` for an explicit end-of-output marker. The
-	/// marker ends the pump even while a sender clone is still alive (the PTY
-	/// keeps one to inspect queue depth).
-	fn into_text(self) -> Option<String>;
-}
-
-impl BridgeItem for String {
-	fn into_text(self) -> Option<String> {
-		Some(self)
-	}
 }
 
 /// Drain `rx`, greedily coalescing queued chunks into ≤64 KiB batches, and
 /// feed each batch to `forward`, awaiting its completion before pulling more.
-/// Returns when `rx` disconnects (all senders dropped), on an end-of-output
-/// item, when `forward` reports the consumer is gone, or when a single
-/// `forward` stalls past `stall_timeout` (a wedged JS consumer). In every case
-/// dropping `rx` disconnects the channel so parked/future senders fail fast and
-/// the readers keep draining the child instead of wedging it (#12657).
-///
-/// `busy` is held from the moment a chunk is taken until its batch has been
-/// forwarded, so an empty queue with `busy` clear really means no output is
-/// in transit (the PTY's stuck-open-slave check).
-pub(crate) async fn pump_chunks<T: BridgeItem>(
-	rx: flume::Receiver<T>,
+/// Returns when `rx` disconnects (all senders dropped), when `forward` reports
+/// the consumer is gone, or when a single `forward` stalls past `stall_timeout`
+/// (a wedged JS consumer). In every case dropping `rx` disconnects the channel
+/// so parked/future senders fail fast and the pipe readers keep draining the
+/// child instead of wedging it (#12657).
+async fn pump_chunks(
+	rx: flume::Receiver<String>,
 	stall_timeout: Duration,
-	busy: Option<&AtomicBool>,
 	mut forward: impl AsyncFnMut(String) -> bool,
 ) {
 	// Hard cap on one coalesced batch so the JS main thread never sees a
@@ -440,18 +346,8 @@ pub(crate) async fn pump_chunks<T: BridgeItem>(
 	// Initial capacity sized for typical bursty pipe output. Re-allocated
 	// each batch because `String` ownership is moved into the napi call.
 	const INITIAL_BATCH_CAP: usize = 8 * 1024;
-	let set_busy = |value: bool| {
-		if let Some(busy) = busy {
-			busy.store(value, Ordering::Release);
-		}
-	};
 	let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
-	let mut ended = false;
-	while !ended
-		&& let Ok(first) = rx.recv_async().await
-		&& let Some(first) = first.into_text()
-	{
-		set_busy(true);
+	while let Ok(first) = rx.recv_async().await {
 		batch.push_str(&first);
 		// Greedily drain everything already queued. Child processes that
 		// write byte-at-a-time (printf-style progress, llama-cli token
@@ -459,27 +355,22 @@ pub(crate) async fn pump_chunks<T: BridgeItem>(
 		// saturating the JS main thread (~200% CPU observed) and leaving
 		// the queue draining long after the child exits.
 		while batch.len() < MAX_BATCH_BYTES {
-			match rx.try_recv().map(BridgeItem::into_text) {
-				Ok(Some(more)) => batch.push_str(&more),
-				Ok(None) => {
-					ended = true;
-					break;
-				},
+			match rx.try_recv() {
+				Ok(more) => batch.push_str(&more),
 				Err(_) => break,
 			}
 		}
 		let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
 		// A single napi `call_async` that never returns (a wedged JS consumer)
 		// must not park the pump forever: that keeps the bridge queue full, the
-		// reader parked on its send, and the child blocked in `write(2)` so it
-		// never exits and the run never settles (#12657). Bound each forward;
-		// on a stall, return so `rx` drops and the bridge disconnects,
+		// pipe reader parked on `send_async`, and the child blocked in `write(2)`
+		// so it never exits and the run never settles (#12657). Bound each
+		// forward; on a stall, return so `rx` drops and the bridge disconnects,
 		// unblocking the reader and child. The deadline resets per forward, so a
 		// slow-but-progressing consumer still drains losslessly.
-		let forwarded = napi::tokio::time::timeout(stall_timeout, forward(payload)).await;
-		set_busy(false);
-		if !matches!(forwarded, Ok(true)) {
-			return;
+		match napi::tokio::time::timeout(stall_timeout, forward(payload)).await {
+			Ok(true) => {},
+			Ok(false) | Err(_) => return,
 		}
 	}
 }
@@ -569,7 +460,7 @@ mod tests {
 		let mut received = String::with_capacity(CHUNKS * CHUNK_BYTES);
 		time::timeout(
 			Duration::from_secs(30),
-			pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async |payload: String| {
+			pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |payload: String| {
 				received.push_str(&payload);
 				// Emulate a busy JS event loop: each napi callback takes a while.
 				time::sleep(Duration::from_micros(500)).await;
@@ -596,7 +487,7 @@ mod tests {
 	async fn bridge_pump_death_disconnects_channel_without_blocking_senders() {
 		let (tx, rx) = flume::bounded::<String>(4);
 		let pump =
-			tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async |_payload: String| false));
+			tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| false));
 		let producer = tokio::spawn(async move {
 			let mut disconnected = 0usize;
 			for _ in 0..64 {
@@ -628,7 +519,6 @@ mod tests {
 		let handle = napi::tokio::spawn(pump_chunks(
 			rx,
 			FORWARD_STALL_TIMEOUT,
-			None,
 			async move |_payload: String| {
 				time::sleep(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_millis(100)).await;
 				observed.store(true, Ordering::Release);
@@ -667,12 +557,8 @@ mod tests {
 	async fn await_drain_returns_when_a_reader_orphans_a_sender_after_timeout() {
 		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
 		let orphan = tx.clone();
-		let handle = napi::tokio::spawn(pump_chunks(
-			rx,
-			FORWARD_STALL_TIMEOUT,
-			None,
-			async |_payload: String| true,
-		));
+		let handle =
+			napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| true));
 		drop(tx);
 		let result = Ok(ShellRunResult {
 			exit_code:   None,
@@ -713,7 +599,7 @@ mod tests {
 		// Prime one chunk so the pump enters `forward`, which then wedges.
 		tx.send("first".to_string()).expect("send primes the pump");
 		let started = time::Instant::now();
-		let pump = napi::tokio::spawn(pump_chunks(rx, STALL, None, async |_payload: String| {
+		let pump = napi::tokio::spawn(pump_chunks(rx, STALL, async |_payload: String| {
 			std::future::pending::<bool>().await
 		}));
 		time::timeout(STALL + Duration::from_secs(5), pump)
@@ -787,7 +673,6 @@ mod tests {
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
-						filesystem: None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -835,7 +720,6 @@ mod tests {
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
-						filesystem: None,
 					},
 					None,
 					cancel,
@@ -857,48 +741,28 @@ mod tests {
 	async fn timeout_drains_pipeline_output_before_stopping_reader() {
 		let shell = CoreShell::new(None);
 		let (tx, rx) = flume::unbounded::<String>();
-		// The downstream stage reads and writes exactly five complete lines
-		// before it emits READY, then blocks in a sixth read. READY therefore
-		// proves the reader, rather than merely the producer or pipe, consumed
-		// the asserted output. Cancellation makes the sixth read return EOF.
-		let mut cancel = CancelToken::default();
-		let abort = cancel.emplace_abort_token();
-		let handle = tokio::spawn(async move {
-			shell
-				.run(
-					CoreShellRunOptions {
-						command:    "{ printf 'x\\nx\\nx\\nx\\nx\\n'; sleep 30; } | { for _ in 1 2 3 4 \
-						             5; do IFS= read -r line; printf '%s\\n' \"$line\"; done; printf \
-						             'READY\\n' >&2; read -r; }"
-							.to_string(),
-						cwd:        None,
-						env:        None,
-						timeout_ms: None,
-						filesystem: None,
-					},
-					Some(tx),
-					cancel,
-				)
-				.await
-		});
-		let mut output = String::new();
-		time::timeout(Duration::from_secs(30), async {
-			while !output.contains("READY") {
-				output.push_str(
-					&rx.recv_async()
-						.await
-						.expect("shell output closed before readiness"),
-				);
-			}
-		})
-		.await
-		.expect("producer did not become ready");
-		abort.abort(AbortReason::Timeout);
-		let result = time::timeout(Duration::from_secs(10), handle)
+		// `tail` runs as an in-process builtin, so cancellation kills only the
+		// external `yes`; tail then sees EOF and flushes its final 5 lines into
+		// the post-cancel reader grace window. The deadline must be generous
+		// enough that `yes` has demonstrably spawned and produced before the
+		// timeout fires — a 50ms budget lost that race on cold CI runners and
+		// tail flushed an empty ring buffer.
+		const TIMEOUT_MS: u32 = 750;
+		let result = shell
+			.run(
+				CoreShellRunOptions {
+					command:    "yes x | tail -5".to_string(),
+					cwd:        None,
+					env:        None,
+					timeout_ms: Some(TIMEOUT_MS),
+				},
+				Some(tx),
+				CancelToken::new(Some(TIMEOUT_MS)),
+			)
 			.await
-			.expect("shell run did not stop after timeout")
-			.expect("shell task panicked")
 			.expect("shell run");
+
+		let mut output = String::new();
 		while let Ok(chunk) = rx.recv_async().await {
 			output.push_str(&chunk);
 		}

@@ -92,7 +92,7 @@ fn filter_rspec(input: &str, exit_code: i32) -> String {
 		if trimmed == "Failures:" {
 			in_failure = true;
 			in_failed_examples = false;
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 			continue;
 		}
 		if trimmed == "Failed examples:" {
@@ -100,7 +100,7 @@ fn filter_rspec(input: &str, exit_code: i32) -> String {
 			render_rspec_blocks(&mut out, &mut blocks, &mut rendered_blocks);
 			in_failure = false;
 			in_failed_examples = true;
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 			continue;
 		}
 		if is_rspec_summary_line(trimmed) {
@@ -108,11 +108,11 @@ fn filter_rspec(input: &str, exit_code: i32) -> String {
 			render_rspec_blocks(&mut out, &mut blocks, &mut rendered_blocks);
 			in_failure = false;
 			in_failed_examples = false;
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 			continue;
 		}
 		if in_failure {
-			if is_gem_backtrace(trimmed) {
+			if is_gem_backtrace(trimmed) || is_rspec_noise(trimmed) {
 				continue;
 			}
 			if is_numbered_failure(trimmed) {
@@ -123,7 +123,7 @@ fn filter_rspec(input: &str, exit_code: i32) -> String {
 			continue;
 		}
 		if in_failed_examples && !trimmed.is_empty() {
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 		}
 	}
 	// Any failure blocks not yet rendered (no summary / `Failed examples:`
@@ -131,7 +131,7 @@ fn filter_rspec(input: &str, exit_code: i32) -> String {
 	flush_rspec_block(&mut blocks, &mut current);
 	render_rspec_blocks(&mut out, &mut blocks, &mut rendered_blocks);
 
-	if primitives::has_content(&out) {
+	if has_content(&out) {
 		out
 	} else {
 		primitives::head_tail_lines(input, 80, 80)
@@ -157,7 +157,7 @@ fn render_rspec_blocks(out: &mut String, blocks: &mut Vec<String>, rendered: &mu
 		out.push_str(block);
 	}
 	if total > MAX_RENDERED_FAILURES {
-		primitives::push_line(out, &format!("[…{} failures elided…]", total - MAX_RENDERED_FAILURES));
+		push_line(out, &format!("[…{} failures elided…]", total - MAX_RENDERED_FAILURES));
 	}
 	blocks.clear();
 }
@@ -168,7 +168,7 @@ fn render_rspec_blocks(out: &mut String, blocks: &mut Vec<String>, rendered: &mu
 const MAX_RENDERED_FAILURES: usize = 5;
 
 fn flush_rspec_block(blocks: &mut Vec<String>, current: &mut String) {
-	if primitives::has_content(current) {
+	if has_content(current) {
 		blocks.push(std::mem::take(current));
 	} else {
 		current.clear();
@@ -250,11 +250,11 @@ fn strip_rspec_noise(input: &str) -> String {
 			continue;
 		}
 		if let Some(rest) = trimmed.strip_prefix("saved screenshot to ") {
-			primitives::push_line(&mut out, &format!("[screenshot: {}]", rest.trim()));
+			push_line(&mut out, &format!("[screenshot: {}]", rest.trim()));
 			continue;
 		}
 
-		primitives::push_line(&mut out, line);
+		push_line(&mut out, line);
 	}
 
 	out
@@ -275,10 +275,10 @@ fn rspec_success_summary(input: &str) -> String {
 	for line in input.lines() {
 		let trimmed = line.trim();
 		if is_rspec_summary_line(trimmed) || trimmed.starts_with("Pending") {
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 		}
 	}
-	if primitives::has_content(&out) {
+	if has_content(&out) {
 		out
 	} else {
 		ruby_test_success(input)
@@ -291,9 +291,9 @@ fn compact_rspec_json(input: &str) -> Option<String> {
 	let mut out = String::new();
 
 	if let Some(summary_line) = first_json_string(map, &["summary_line"]) {
-		primitives::push_line(&mut out, summary_line);
+		push_line(&mut out, summary_line);
 	} else if let Some(summary) = map.get("summary").and_then(|value| value.as_object()) {
-		primitives::push_line(&mut out, &rspec_summary_from_json(summary));
+		push_line(&mut out, &rspec_summary_from_json(summary));
 	}
 
 	if let Some(examples) = map.get("examples").and_then(|value| value.as_array()) {
@@ -321,11 +321,7 @@ fn compact_rspec_json(input: &str) -> Option<String> {
 		}
 	}
 
-	if primitives::has_content(&out) {
-		Some(out)
-	} else {
-		None
-	}
+	if has_content(&out) { Some(out) } else { None }
 }
 
 fn rspec_summary_from_json(map: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -362,19 +358,19 @@ fn push_rspec_json_example(
 ) {
 	let description = first_json_string(map, &["full_description", "description", "id"])
 		.unwrap_or("<unknown example>");
-	primitives::push_line(out, &format!("{label}: {description}"));
+	push_line(out, &format!("{label}: {description}"));
 	push_json_location(out, map);
 
 	if let Some(exception) = map.get("exception").and_then(|value| value.as_object()) {
 		push_json_exception(out, exception);
 	}
 	if let Some(message) = first_json_string(map, &["pending_message", "message"]) {
-		primitives::push_line(out, message);
+		push_line(out, message);
 	}
 }
 
 fn push_rspec_json_error(out: &mut String, map: &serde_json::Map<String, serde_json::Value>) {
-	primitives::push_line(out, "ERROR outside examples");
+	push_line(out, "ERROR outside examples");
 	push_json_exception(out, map);
 }
 
@@ -385,23 +381,23 @@ fn push_json_location(out: &mut String, map: &serde_json::Map<String, serde_json
 			location.push(':');
 			location.push_str(&line.to_string());
 		}
-		primitives::push_line(out, &location);
+		push_line(out, &location);
 	}
 }
 
 fn push_json_exception(out: &mut String, map: &serde_json::Map<String, serde_json::Value>) {
 	if let Some(class_name) = first_json_string(map, &["class", "class_name", "type"]) {
-		primitives::push_line(out, class_name);
+		push_line(out, class_name);
 	}
 	if let Some(message) = first_json_string(map, &["message", "description"]) {
-		primitives::push_line(out, message);
+		push_line(out, message);
 	}
 	if let Some(backtrace) = map.get("backtrace").and_then(|value| value.as_array()) {
 		for frame in backtrace {
 			if let Some(frame) = frame.as_str()
 				&& !is_gem_backtrace(frame)
 			{
-				primitives::push_line(out, frame);
+				push_line(out, frame);
 				break;
 			}
 		}
@@ -435,12 +431,12 @@ fn filter_minitest(input: &str, exit_code: i32) -> String {
 		let trimmed = line.trim();
 		if starts_minitest_failure(trimmed) {
 			in_failure = true;
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 			continue;
 		}
 		if is_minitest_summary_line(trimmed) {
 			in_failure = false;
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 			continue;
 		}
 		if in_failure {
@@ -449,12 +445,12 @@ fn filter_minitest(input: &str, exit_code: i32) -> String {
 				continue;
 			}
 			if !trimmed.is_empty() {
-				primitives::push_line(&mut out, line);
+				push_line(&mut out, line);
 			}
 		}
 	}
 
-	if primitives::has_content(&out) {
+	if has_content(&out) {
 		out
 	} else {
 		primitives::head_tail_lines(input, 80, 80)
@@ -479,11 +475,11 @@ fn filter_rubocop(input: &str, exit_code: i32) -> String {
 			&& trimmed.contains("autocorrected")
 			&& let Some(compact) = compact_rubocop_autocorrect(trimmed)
 		{
-			primitives::push_line(&mut out, &compact);
+			push_line(&mut out, &compact);
 			replaced = true;
 			continue;
 		}
-		primitives::push_line(&mut out, line);
+		push_line(&mut out, line);
 	}
 
 	if replaced { out } else { condensed }
@@ -535,14 +531,14 @@ fn filter_rake(input: &str, exit_code: i32) -> String {
 		if trimmed == "rake aborted!" {
 			in_aborted = true;
 			aborted_frames = 0;
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 			continue;
 		}
 		if in_aborted {
 			// Keep the head of the traceback — the first few frames pinpoint the
 			// cause — then drop the long tail.
 			if aborted_frames < MAX_ABORTED_FRAMES {
-				primitives::push_line(&mut out, line);
+				push_line(&mut out, line);
 				aborted_frames += 1;
 				continue;
 			}
@@ -554,11 +550,11 @@ fn filter_rake(input: &str, exit_code: i32) -> String {
 		}
 
 		if is_rake_keep_line(trimmed) {
-			primitives::push_line(&mut out, line);
+			push_line(&mut out, line);
 		}
 	}
 
-	if primitives::has_content(&out) {
+	if has_content(&out) {
 		out
 	} else {
 		primitives::head_tail_lines(input, 80, 80)
@@ -606,21 +602,17 @@ fn ruby_test_success(input: &str) -> String {
 	for line in input.lines() {
 		let trimmed = line.trim();
 		if is_rspec_summary_line(trimmed) || is_minitest_summary_line(trimmed) {
-			primitives::push_line(&mut summary, line);
-			primitives::push_line(&mut out, line);
+			push_line(&mut summary, line);
+			push_line(&mut out, line);
 			continue;
 		}
 		if is_ruby_pass_noise(trimmed) {
 			continue;
 		}
-		primitives::push_line(&mut out, line);
+		push_line(&mut out, line);
 	}
 
-	if primitives::has_content(&out) {
-		out
-	} else {
-		summary
-	}
+	if has_content(&out) { out } else { summary }
 }
 
 fn starts_minitest_failure(trimmed: &str) -> bool {
@@ -662,11 +654,24 @@ fn is_ruby_pass_noise(trimmed: &str) -> bool {
 		|| trimmed.starts_with("Progress:")
 }
 
+fn is_rspec_noise(trimmed: &str) -> bool {
+	trimmed.starts_with("# ") && is_gem_backtrace(trimmed)
+}
+
 fn is_gem_backtrace(trimmed: &str) -> bool {
 	trimmed.contains("/gems/")
 		|| trimmed.contains("lib/rspec")
 		|| trimmed.contains("lib/ruby/")
 		|| trimmed.contains("vendor/bundle")
+}
+
+fn push_line(out: &mut String, line: &str) {
+	out.push_str(line);
+	out.push('\n');
+}
+
+fn has_content(text: &str) -> bool {
+	text.lines().any(|line| !line.trim().is_empty())
 }
 
 #[cfg(test)]

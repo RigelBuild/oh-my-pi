@@ -83,7 +83,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 			pendingImages: [] as ImageContent[],
 			pendingImageLinks: [] as (string | undefined)[],
 		},
-		keybindings: { getKeys: () => ["alt+up"] },
+		keybindings: { getDisplayString: () => "Alt+Up" },
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures: new Set<string>(),
 		isKnownSlashCommand: (text: string) => text.startsWith("/"),

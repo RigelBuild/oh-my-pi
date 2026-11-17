@@ -160,7 +160,11 @@ describe("Agent hub Enter activation", () => {
 			status: "aborted",
 		});
 		const focusAgent = vi.fn(async () => {});
-		const showOverlay = vi.fn((_component: unknown, _options: unknown) => ({ hide: () => {} }));
+		let viewer: { render(width: number): readonly string[] } | undefined;
+		const showOverlay = vi.fn((component: { render(width: number): readonly string[] }) => {
+			viewer = component;
+			return { hide: () => {} };
+		});
 		const setFocus = vi.fn();
 		const onDone = vi.fn();
 		const hub = new AgentHubOverlayComponent({
@@ -189,6 +193,7 @@ describe("Agent hub Enter activation", () => {
 			fullscreen: true,
 		});
 		expect(setFocus).toHaveBeenCalledWith(expect.anything());
+		expect(Bun.stripANSI(viewer!.render(120).join("\n"))).not.toContain("Enter:send");
 		expect(onDone).not.toHaveBeenCalled();
 		hub.dispose();
 	});

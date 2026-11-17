@@ -905,17 +905,14 @@ export async function changelogPaths(repoRoot: string): Promise<string[]> {
 	const glob = new Glob(CHANGELOG_GLOB);
 	const paths: string[] = [];
 	for await (const changelogPath of glob.scan(repoRoot)) {
-		const relative = path.isAbsolute(changelogPath) ? path.relative(repoRoot, changelogPath) : changelogPath;
-		// Repo-relative paths feed git pathspecs and GitHub archive URLs, so they
-		// must use `/` even when the glob reports Windows separators.
-		paths.push(relative.split(path.sep).join("/"));
+		paths.push(path.isAbsolute(changelogPath) ? path.relative(repoRoot, changelogPath) : changelogPath);
 	}
 	paths.sort();
 	return paths;
 }
 
 async function changelogDiff(repoRoot: string, since: string, paths: readonly string[]): Promise<string> {
-	if (paths.length === 0) return "";
+	if (paths.length === 0 || since === "") return "";
 	return git(["diff", "--unified=0", "--no-color", "--no-ext-diff", since, "--", ...paths], repoRoot);
 }
 

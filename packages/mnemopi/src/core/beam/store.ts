@@ -147,9 +147,13 @@ function emitEvent(beam: BeamMemoryState, type: string, data: EventPayload): voi
 	void beam.pluginManager?.emit?.(event);
 }
 
-/** Drop cached recall results after a write that can change what recall returns. */
 function invalidateCaches(beam: BeamMemoryState): void {
-	beam.caches.queryCache?.invalidate();
+	const cache = beam.caches as {
+		queryCache?: { invalidate?: () => void };
+		_queryCache?: { invalidate?: () => void };
+	};
+	cache.queryCache?.invalidate?.();
+	cache._queryCache?.invalidate?.();
 }
 
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {

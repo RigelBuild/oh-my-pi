@@ -15,10 +15,11 @@ import type {
 	UsageResetCredits,
 	UsageWindow,
 } from "../usage";
+import { canonicalizePlan } from "../usage";
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
 import { listCodexResetCredits } from "./openai-codex-reset";
-import { HOUR_MS, usageStatus } from "./shared";
+import { HOUR_MS } from "./shared";
 
 const CODEX_USAGE_PATH = "wham/usage";
 const CODEX_VERIFIED_ACCESS_PATH = "accounts/verified_access";
@@ -341,8 +342,10 @@ function buildUsageAmount(window: ParsedUsageWindow): UsageAmount {
 }
 
 function buildUsageStatus(args: { usedFraction?: number; explicitlyAllowed: boolean }): UsageLimit["status"] {
-	const status = usageStatus(args.usedFraction);
-	return status === "exhausted" && args.explicitlyAllowed ? "warning" : status;
+	if (args.usedFraction === undefined) return "unknown";
+	if (args.usedFraction >= 1) return args.explicitlyAllowed ? "warning" : "exhausted";
+	if (args.usedFraction >= 0.9) return "warning";
+	return "ok";
 }
 
 /**
@@ -720,11 +723,7 @@ function getUsagePlanType(report: UsageReport | null): string | undefined {
 	if (!metadata) return undefined;
 	const planType = metadata.planType;
 	if (typeof planType !== "string") return undefined;
-	const normalized = planType
-		.trim()
-		.toLowerCase()
-		.replace(/[\s-]+/g, "_");
-	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
+	return canonicalizePlan(planType);
 }
 
 function classifyOpenAICodexPlan(report: UsageReport | null): OpenAICodexPlanClass {

@@ -1,6 +1,6 @@
 import { vi } from "bun:test";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
-import { ProcessTerminal, type ProcessTerminalOptions } from "@oh-my-pi/pi-tui/terminal";
+import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
 // Pristine descriptors, captured once at module load. Every dispose() restores
@@ -76,7 +76,6 @@ export interface ProcessTerminalRenderHarness {
 export function createProcessTerminalRenderHarness(
 	initialColumns = 100,
 	initialRows = 30,
-	terminalOptions: ProcessTerminalOptions = { conpty: false },
 ): ProcessTerminalRenderHarness {
 	// This harness exercises the real ProcessTerminal I/O pipeline, so it opts
 	// out of the test-default headless suppression and restores the prior value
@@ -104,10 +103,10 @@ export function createProcessTerminalRenderHarness(
 		}),
 	];
 
-	// Default to non-ConPTY behavior so kitty-flag and write-chunking assertions
-	// are hermetic: the ambient WSL env (WSL_DISTRO_NAME / WSL_INTEROP) must not
+	// Force non-ConPTY behavior so kitty-flag and write-chunking assertions are
+	// hermetic: the ambient WSL env (WSL_DISTRO_NAME / WSL_INTEROP) must not
 	// change what the suite observes. See ProcessTerminalOptions.
-	const terminal = new ProcessTerminal(terminalOptions);
+	const terminal = new ProcessTerminal({ conpty: false });
 	const tui = new TUI(terminal);
 	const probe = new WidthProbe();
 	tui.addChild(probe);

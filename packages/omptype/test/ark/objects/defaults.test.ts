@@ -313,6 +313,14 @@ describe("string parsing", () => {
 		expect(T.json).toEqual(Expected.json);
 	});
 
+	it("false", () => {
+		const T = type({ key: "boolean = false" });
+		const Expected = type({ key: ["boolean", "=", false] });
+
+		const _type60: Eq<typeof T, typeof Expected> = true;
+		expect(T.json).toEqual(Expected.json);
+	});
+
 	it("null", () => {
 		// ideally we could infer a better type here,
 		// but attaching attributes to null or undefined
@@ -332,6 +340,13 @@ describe("string parsing", () => {
 
 		const _type65: Eq<typeof T, typeof Expected> = true;
 		expect(T.json).toEqual(Expected.json);
+	});
+
+	it("incorrect default type", () => {
+		// @ts-expect-error
+		expect(() => type({ foo: "string", bar: "number = true" })).toThrow(
+			"ParseError: Default for bar must be a number (was boolean)",
+		);
 	});
 
 	it("non-literal", () => {
@@ -441,6 +456,13 @@ describe("works properly with types", () => {
 	});
 
 	describe("bad values", () => {
+		it("primitive", () => {
+			expect(
+				// @ts-expect-error
+				() => type({ foo: ["number", "=", true] }),
+			).toThrow("ParseError: Default for foo must be a number (was boolean)");
+		});
+
 		it("array", () => {
 			expect(
 				// @ts-expect-error

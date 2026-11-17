@@ -7,8 +7,6 @@ import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import { ToolExecutionComponent, type ToolExecutionUi } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 
-import { cfgMcpRenderMarkdownResults } from "@oh-my-pi/pi-coding-agent/mcp/settings";
-
 class BoldTypeErrorComponent implements Component {
 	render(_width: number): readonly string[] {
 		throw new TypeError("th.bold is not a function");
@@ -31,7 +29,7 @@ describe("ToolExecutionComponent custom renderer failures", () => {
 	});
 
 	afterEach(() => {
-		cfgMcpRenderMarkdownResults.set(settings, true);
+		settings.set("mcp.renderMarkdownResults", true);
 	});
 
 	it("falls back to the custom tool label when a renderCall child component throws during render", () => {
@@ -153,7 +151,7 @@ describe("MCP result Markdown rendering", () => {
 	});
 
 	afterEach(() => {
-		cfgMcpRenderMarkdownResults.set(settings, true);
+		settings.set("mcp.renderMarkdownResults", true);
 	});
 
 	it("renders inline Markdown by default", () => {
@@ -170,7 +168,7 @@ describe("MCP result Markdown rendering", () => {
 	});
 
 	it("keeps Markdown syntax literal when the setting is disabled", () => {
-		cfgMcpRenderMarkdownResults.set(settings, false);
+		settings.set("mcp.renderMarkdownResults", false);
 		const component = renderMCPResult(
 			{ content: [{ type: "text", text: "**bold result**" }], details },
 			{ expanded: true, isPartial: false },
@@ -181,7 +179,7 @@ describe("MCP result Markdown rendering", () => {
 	});
 
 	it("preserves structured JSON rendering when Markdown is enabled", () => {
-		cfgMcpRenderMarkdownResults.set(settings, true);
+		settings.set("mcp.renderMarkdownResults", true);
 		const component = renderMCPResult(
 			{ content: [{ type: "text", text: '{"status":"**ok**"}' }], details },
 			{ expanded: true, isPartial: false },

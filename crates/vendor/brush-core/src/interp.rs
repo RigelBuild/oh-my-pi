@@ -161,7 +161,10 @@ impl ExecutionParameters {
 	/// # Arguments
 	///
 	/// * `shell` - The shell context.
-	pub fn stdin(&self, shell: &Shell<impl extensions::ShellExtensions>) -> OpenFile {
+	pub fn stdin(
+		&self,
+		shell: &Shell<impl extensions::ShellExtensions>,
+	) -> impl std::io::Read + 'static {
 		self.try_stdin(shell).unwrap_or_else(|| {
 			ioutils::FailingReaderWriter::new("standard input not available").into()
 		})
@@ -184,7 +187,10 @@ impl ExecutionParameters {
 	/// # Arguments
 	///
 	/// * `shell` - The shell context.
-	pub fn stdout(&self, shell: &Shell<impl extensions::ShellExtensions>) -> OpenFile {
+	pub fn stdout(
+		&self,
+		shell: &Shell<impl extensions::ShellExtensions>,
+	) -> impl std::io::Write + 'static {
 		self.try_stdout(shell).unwrap_or_else(|| {
 			ioutils::FailingReaderWriter::new("standard output not available").into()
 		})
@@ -206,7 +212,10 @@ impl ExecutionParameters {
 	/// # Arguments
 	///
 	/// * `shell` - The shell context.
-	pub fn stderr(&self, shell: &Shell<impl extensions::ShellExtensions>) -> OpenFile {
+	pub fn stderr(
+		&self,
+		shell: &Shell<impl extensions::ShellExtensions>,
+	) -> impl std::io::Write + 'static {
 		self.try_stderr(shell).unwrap_or_else(|| {
 			ioutils::FailingReaderWriter::new("standard error not available").into()
 		})
@@ -346,7 +355,7 @@ impl Execute for ast::Program {
 				Ok(exec_result) => result = exec_result,
 				Err(err) => {
 					// Display the error and convert to an execution result.
-					let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+					let _ = shell.display_error(&mut params.stderr(shell), &err);
 					result = err.into_result(shell);
 				},
 			}
@@ -383,10 +392,7 @@ impl Execute for ast::CompoundList {
 				let job_formatted = job.to_pid_style_string();
 
 				if shell.options().interactive && !shell.is_subshell() {
-					params
-						.stderr(shell)
-						.write_all_async(format!("{job_formatted}\n").as_bytes())
-						.await?;
+					writeln!(params.stderr(shell), "{job_formatted}")?;
 				}
 
 				result = ExecutionResult::success();
@@ -690,15 +696,6 @@ impl Execute for ast::Pipeline {
 		let mut result =
 			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await?;
 
-		// Virtual files the pipeline's redirections opened close in the
-		// background once dropped. Settle them so the next command observes
-		// committed contents, and so a failed commit fails this pipeline.
-		if let Err(close_error) = shell.filesystem().drain_closes().await {
-			let close_error = error::Error::from(close_error);
-			let _ = shell.display_error(&mut params.stderr(shell), &close_error).await;
-			result.exit_code = ExecutionExitCode::GeneralError;
-		}
-
 		// Invert the exit code if requested.
 		if self.bang {
 			result.exit_code = ExecutionExitCode::from(if result.is_success() { 1 } else { 0 });
@@ -729,22 +726,23 @@ impl Execute for ast::Pipeline {
 			&& let Some(mut stderr) = params.try_fd(shell, openfiles::OpenFiles::STDERR_FD)
 		{
 			let timing = stopwatch.stop()?;
-			let report = if timed.is_posix_output() {
-				std::format!(
+			if timed.is_posix_output() {
+				std::write!(
+					stderr,
 					"real {}\nuser {}\nsys {}\n",
 					timing::format_duration_posixly(&timing.wall),
 					timing::format_duration_posixly(&timing.user),
 					timing::format_duration_posixly(&timing.system),
-				)
+				)?;
 			} else {
-				std::format!(
+				std::write!(
+					stderr,
 					"\nreal\t{}\nuser\t{}\nsys\t{}\n",
 					timing::format_duration_non_posixly(&timing.wall),
 					timing::format_duration_non_posixly(&timing.user),
 					timing::format_duration_non_posixly(&timing.system),
-				)
-			};
-			stderr.write_all_async(report.as_bytes()).await?;
+				)?;
+			}
 		}
 
 		Ok(result)
@@ -861,24 +859,6 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// Clear our the pipeline status so we can start filling it out.
 	shell.last_pipeline_statuses_mut().clear();
 
-	// Use the exact external member set as the stop scope for a multi-process
-	// pipeline. A process group remains an additional scope because a detached
-	// pipe-input stage can leave the recorded group while still belonging to
-	// the pipeline. A lone process needs no shared scope: its wait checks its
-	// own PID.
-	let external_pid = |result: &ExecutionSpawnResult| match result {
-		ExecutionSpawnResult::StartedProcess(child) => child.pid(),
-		ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
-	};
-	if process_spawn_results.iter().filter_map(external_pid).nth(1).is_some() {
-		let pipeline_pids: Arc<[_]> = process_spawn_results.iter().filter_map(external_pid).collect();
-		for result in &mut process_spawn_results {
-			if let ExecutionSpawnResult::StartedProcess(child) = result {
-				child.set_stop_pids(Arc::clone(&pipeline_pids));
-			}
-		}
-	}
-
 	while let Some(child) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
 		let wait_result = if !stopped_children.is_empty() {
@@ -935,10 +915,7 @@ async fn wait_for_pipeline_processes_and_update_status(
 		let formatted = job.to_string();
 
 		// N.B. We use the '\r' to overwrite any ^Z output.
-		params
-			.stderr(shell)
-			.write_all_async(format!("\r{formatted}\n").as_bytes())
-			.await?;
+		writeln!(params.stderr(shell), "\r{formatted}")?;
 	}
 
 	Ok(result)
@@ -1059,7 +1036,7 @@ impl Execute for ast::CompoundCommand {
 					Err(error) => {
 						// Display the error to stderr, but prevent fatal error propagation
 						let mut stderr = params.stderr(shell);
-						let _ = shell.display_error(&mut stderr, &error).await;
+						let _ = shell.display_error(&mut stderr, &error);
 
 						// Convert error to result in subshell context
 						error.into_result(&subshell)
@@ -1102,10 +1079,7 @@ impl Execute for ast::CoprocessCommand {
 			.map_or_else(|| "COPROC".to_string(), |w| w.to_string());
 
 		if !valid_variable_name(&name) {
-			params
-				.stderr(shell)
-				.write_all_async(format!("coproc {name}: not a valid identifier\n").as_bytes())
-				.await?;
+			writeln!(params.stderr(shell), "coproc {name}: not a valid identifier")?;
 			return Ok(ExecutionExitCode::GeneralError.into());
 		}
 
@@ -1561,10 +1535,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
 					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						params
-							.stderr(&context.shell)
-							.write_all_async(format!("error: {e}\n").as_bytes())
-							.await?;
+						writeln!(params.stderr(&context.shell), "error: {e}")?;
 						return Ok(ExecutionResult::general_error().into());
 					}
 				},
@@ -1674,7 +1645,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
 				Err(err) => {
-					let _ = parent_shell.display_error(&mut stderr, &err).await;
+					let _ = parent_shell.display_error(&mut stderr, &err);
 
 					let result = err.into_result(parent_shell);
 					Ok(result.into())
@@ -2004,13 +1975,13 @@ pub(crate) async fn setup_redirect(
 			}
 
 			let expanded_file_path = expanded_fields.remove(0);
-			setup_redirect_output_and_error_to(shell, params, &expanded_file_path, *append).await?;
+			setup_redirect_output_and_error_to(shell, params, &expanded_file_path, *append)?;
 		},
 
 		ast::IoRedirect::File(specified_fd_num, kind, target) => {
 			match target {
 				ast::IoFileRedirectTarget::Filename(f) => {
-					let mut options = pi_vfs::OpenOptions::new();
+					let mut options = std::fs::File::options();
 
 					let mut expanded_fields =
 						expansion::full_expand_and_split_word(shell, params, f).await?;
@@ -2034,7 +2005,7 @@ pub(crate) async fn setup_redirect(
 							{
 								// First check to see if the path points to an existing regular
 								// file.
-								if !shell.filesystem().is_file(&expanded_file_path).await {
+								if !expanded_file_path.is_file() {
 									options.create(true);
 								} else {
 									options.create_new(true);
@@ -2073,7 +2044,6 @@ pub(crate) async fn setup_redirect(
 
 					let opened_file = shell
 						.open_file(&options, &expanded_file_path, params)
-						.await
 						.map_err(|err| {
 							error::ErrorKind::RedirectionFailure(
 								expanded_file_path.to_string_lossy().to_string(),
@@ -2157,8 +2127,7 @@ pub(crate) async fn setup_redirect(
 						// given by `expanded`.
 						setup_redirect_output_and_error_to(
 							shell, params, &expanded, false, /* append? */
-						)
-						.await?;
+						)?;
 					} else {
 						return Err(error::ErrorKind::InvalidRedirection.into());
 					}
@@ -2239,7 +2208,7 @@ pub(crate) async fn setup_redirect(
 /// * `params` - The execution parameters to modify.
 /// * `file_path` - The path to the file to redirect output and error to.
 /// * `append` - Whether to append. If `false`, the file will be truncated.
-async fn setup_redirect_output_and_error_to(
+fn setup_redirect_output_and_error_to(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	params: &mut ExecutionParameters,
 	file_path: &str,
@@ -2247,7 +2216,7 @@ async fn setup_redirect_output_and_error_to(
 ) -> Result<(), error::Error> {
 	let abs_file_path: PathBuf = shell.absolute_path(Path::new(file_path));
 
-	let mut file_options = pi_vfs::OpenOptions::new();
+	let mut file_options = std::fs::File::options();
 	file_options
 		.create(true)
 		.write(true)
@@ -2256,7 +2225,6 @@ async fn setup_redirect_output_and_error_to(
 
 	let stdout_file = shell
 		.open_file(&file_options, &abs_file_path, params)
-		.await
 		.map_err(|err| {
 			error::ErrorKind::RedirectionFailure(
 				abs_file_path.to_string_lossy().to_string(),

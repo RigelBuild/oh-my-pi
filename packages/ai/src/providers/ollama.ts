@@ -1,7 +1,5 @@
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey } from "../stream";
 import type {
 	Api,
@@ -406,7 +404,7 @@ function endToolCallBlock(stream: AssistantMessageEventStream, output: Assistant
 	}
 	const toolCall = block as InternalToolCallBlock;
 	if (toolCall[kStreamingPartialJson]) {
-		toolCall.arguments = parseToolCallArguments(toolCall[kStreamingPartialJson]);
+		toolCall.arguments = parseStreamingJson<Record<string, unknown>>(toolCall[kStreamingPartialJson]);
 		clearStreamingPartialJson(toolCall);
 	}
 	stream.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
@@ -712,7 +710,6 @@ const streamOllamaOnce = (
 					output.usage.input = (chunk.prompt_eval_count ?? 0) - output.usage.cacheRead;
 					output.usage.output = chunk.eval_count ?? 0;
 					output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead;
-					calculateCost(model, output.usage, output.timestamp);
 				}
 			}
 			if (streamMarkupHealing) {
@@ -726,7 +723,6 @@ const streamOllamaOnce = (
 			}
 			endActiveThinkingBlock();
 			endActiveTextBlock();
-			for (const index of activeToolIndices) endToolCallBlock(stream, output, index);
 			if (output.stopReason === "length" && !hasVisibleAssistantContent(output)) {
 				output.stopReason = "error";
 				output.errorMessage = EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE;

@@ -4,8 +4,6 @@ import { refreshAgentDiscovery, TaskTool } from "@oh-my-pi/pi-coding-agent/task"
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
-import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
-
 const TEST_AGENTS = [
 	{
 		name: "task",
@@ -109,7 +107,7 @@ describe("TaskTool.create discovery memo", () => {
 			effectiveExtensionRoots: () => ({
 				explicit: [],
 				mode: "merge" as const,
-				configured: cfgExtensions.get(settings) ?? [],
+				configured: settings.get("extensions") ?? [],
 				configuredLevel: "user" as const,
 			}),
 			getSessionFile: () => null,
@@ -119,7 +117,7 @@ describe("TaskTool.create discovery memo", () => {
 		const before = await TaskTool.create(session);
 		expect(before.description).toContain("General-purpose task agent");
 
-		cfgExtensions.override(settings, ["/extensions/live"]);
+		settings.override("extensions", ["/extensions/live"]);
 		const after = await TaskTool.create(session);
 		expect(after.description).toContain("Refreshed task agent");
 		expect(spy).toHaveBeenCalledTimes(2);

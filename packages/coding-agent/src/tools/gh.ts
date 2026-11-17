@@ -44,8 +44,6 @@ import { executeRepoView } from "./gh-view";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-import { cfgImagesAutoResize } from "../modes/settings";
-
 export { formatRepoRef, parsePositiveDecimalInt, resolveDefaultRepoMemoized } from "./gh-common";
 export {
 	getOrFetchPrDiff,
@@ -261,7 +259,7 @@ async function executeFileRead(
 			image: { type: "image", data: encoded, mimeType: imageMetadata.mimeType },
 			label: filePath,
 			uri: sourceUrl,
-			autoResize: cfgImagesAutoResize.get(session.settings),
+			autoResize: session.settings.get("images.autoResize"),
 			excludeWebP: webpExclusionForModel(session.getActiveModel?.()),
 		});
 		if (image) {

@@ -171,8 +171,6 @@ export class TokenRateMeter {
 	#inflightHiddenRate = 0;
 	#pendingIndex = -1;
 	#pending = "";
-	/** Token count of {@link #pending}, or -1 when it changed since last counted. */
-	#pendingTokens = -1;
 	/** Decayed sums behind the hidden-token rate estimate. */
 	#hiddenTokens = 0;
 	#hiddenSpanMs = 0;
@@ -199,7 +197,6 @@ export class TokenRateMeter {
 			this.#pendingIndex = index;
 		}
 		this.#pending += text;
-		this.#pendingTokens = -1;
 	}
 
 	/**
@@ -257,7 +254,7 @@ export class TokenRateMeter {
 	/** Tokens per second over the decayed window, or null until enough tokens have accumulated. */
 	rate(nowMs: number = Date.now()): number | null {
 		const dtMs = this.#startedAt === null ? 0 : nowMs - this.#advancedTo;
-		const pendingTokens = this.#countPending();
+		const pendingTokens = this.#pending.length > 0 ? this.#count(this.#pending) : 0;
 		let tokens = 0;
 		let time = 0;
 		let evidenceTokens = 0;
@@ -295,13 +292,6 @@ export class TokenRateMeter {
 		this.#inflightHiddenRate = 0;
 		this.#pendingIndex = -1;
 		this.#pending = "";
-		this.#pendingTokens = -1;
-	}
-
-	#countPending(): number {
-		if (this.#pending.length === 0) return 0;
-		if (this.#pendingTokens < 0) this.#pendingTokens = this.#count(this.#pending);
-		return this.#pendingTokens;
 	}
 
 	/** Tokenize the pending bucket into the in-flight sums, optionally holding back the trailing partial word. */
@@ -317,7 +307,6 @@ export class TokenRateMeter {
 			}
 		}
 		this.#pending = tail;
-		this.#pendingTokens = -1;
 		if (text.length === 0) return;
 		this.#advance(nowMs);
 		const tokens = this.#count(text);

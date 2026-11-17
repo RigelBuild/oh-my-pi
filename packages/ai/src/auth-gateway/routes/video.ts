@@ -1,13 +1,12 @@
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { ResolvedApiKey } from "../../auth-retry";
 import { classifyGatewayError } from "../../error/gateway";
 import * as videoServer from "../../providers/video-server";
 import { downloadVideo, pollVideo, submitVideo } from "../../video";
 import type { VideoJob } from "../../video/types";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayRouteOptions,
+	type AuthGatewayBootOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
@@ -18,7 +17,7 @@ interface ResolvedVideoRequest {
 	model: Model<Api>;
 	upstreamId: string;
 	sessionId: string;
-	apiKey: ResolvedApiKey;
+	apiKey: string;
 	controller: AbortController;
 }
 
@@ -27,7 +26,7 @@ function aborted(): Response {
 }
 
 async function resolveVideoJob(
-	bootOpts: AuthGatewayRouteOptions,
+	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
 	gatewayId: string,
@@ -59,11 +58,11 @@ async function resolveVideoJob(
 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if (typeof apiKey !== "string") return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	return { model, upstreamId: identity.upstreamId, sessionId, apiKey, controller };
 }
 
-function videoOptions(bootOpts: AuthGatewayRouteOptions, resolved: ResolvedVideoRequest, peer: string) {
+function videoOptions(bootOpts: AuthGatewayBootOptions, resolved: ResolvedVideoRequest, peer: string) {
 	return {
 		apiKey: buildGatewayApiKeyResolver(
 			bootOpts.storage,
@@ -97,7 +96,7 @@ function logVideoRequest(
 }
 
 function recordCompletedUsage(
-	bootOpts: AuthGatewayRouteOptions,
+	bootOpts: AuthGatewayBootOptions,
 	resolved: ResolvedVideoRequest,
 	req: Request,
 	job: VideoJob,
@@ -114,7 +113,7 @@ function recordCompletedUsage(
 
 /** OpenRouter-compatible `POST /v1/videos` asynchronous video submit handler. */
 export async function handleVideoSubmit(
-	bootOpts: AuthGatewayRouteOptions,
+	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
 ): Promise<Response> {
@@ -142,7 +141,7 @@ export async function handleVideoSubmit(
 	const sessionId = deterministicUuid(`video\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if (typeof apiKey !== "string") return videoServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 	logger.info("auth-gateway request", {
 		requestId,
 		format: "video-submit",
@@ -186,7 +185,7 @@ export async function handleVideoSubmit(
 
 /** OpenRouter-compatible `GET /v1/videos/:id` asynchronous video poll handler. */
 export async function handleVideoPoll(
-	bootOpts: AuthGatewayRouteOptions,
+	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
 	gatewayId: string,
@@ -218,7 +217,7 @@ export async function handleVideoPoll(
 
 /** OpenRouter-compatible `GET /v1/videos/:id/content` streaming video content handler. */
 export async function handleVideoContent(
-	bootOpts: AuthGatewayRouteOptions,
+	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
 	gatewayId: string,

@@ -1,5 +1,4 @@
 import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
-import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -36,7 +35,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 
 			if (!toolName) {
 				runtime.ctx.showError("Usage: /force:<tool-name> [prompt]");
-				clearSubmittedText(runtime);
+				runtime.ctx.editor.setText("");
 				return;
 			}
 
@@ -45,11 +44,11 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showStatus(`Next turn forced to use ${toolName}.`);
 			} catch (error) {
 				runtime.ctx.showError(errorMessage(error));
-				clearSubmittedText(runtime);
+				runtime.ctx.editor.setText("");
 				return;
 			}
 
-			clearSubmittedText(runtime);
+			runtime.ctx.editor.setText("");
 
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
@@ -60,7 +59,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "voice",
 		description: "Start Codex-backed realtime voice mode",
 		handleTui: async (_command, runtime) => {
-			clearSubmittedText(runtime);
+			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleLiveCommand();
 		},
 	},
@@ -69,7 +68,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "export",
 		description: "Start or stop recording this screen to a replayable file (omp play)",
 		handleTui: async (_command, runtime) => {
-			clearSubmittedText(runtime);
+			runtime.ctx.editor.setText("");
 			await runtime.ctx.toggleRecording();
 		},
 	},
@@ -78,7 +77,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "pause",
 		description: "Freeze all agents (main, subagents, advisor) until resumed",
 		handleTui: async (_command, runtime) => {
-			clearSubmittedText(runtime);
+			runtime.ctx.editor.setText("");
 			await runPauseScreen(runtime.ctx);
 		},
 	},

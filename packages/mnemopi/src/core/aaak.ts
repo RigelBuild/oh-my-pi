@@ -80,28 +80,8 @@ function reverseMap<const T extends Readonly<Record<string, string>>>(source: T)
 
 export const REV_CATEGORY = reverseMap(CATEGORY_MAP);
 
-/**
- * Literal pattern for `phrase` that never matches inside a longer word: an edge that is a
- * word character must sit on a word boundary, so `complete` leaves `incomplete` and
- * `completed` intact. Space and punctuation edges match as before.
- */
-function wholeWordPattern(phrase: string): RegExp {
-	const start = /^[\p{L}\p{N}_]/u.test(phrase) ? "(?<![\\p{L}\\p{N}_])" : "";
-	const end = /[\p{L}\p{N}_]$/u.test(phrase) ? "(?![\\p{L}\\p{N}_])" : "";
-	return new RegExp(`${start}${RegExp.escape(phrase)}${end}`, "gu");
-}
-
-const PHRASE_PATTERNS = Object.entries(PHRASE_MAP)
-	.sort(([left], [right]) => right.length - left.length)
-	.map(([phrase, shorthand]) => [wholeWordPattern(phrase), shorthand] as const);
+const SORTED_PHRASES = Object.entries(PHRASE_MAP).sort(([left], [right]) => right.length - left.length);
 export const REV_PHRASE = reverseMap(PHRASE_MAP);
-
-const STATUS_SHORTHANDS = [
-	[wholeWordPattern("working correctly"), "OK"],
-	[wholeWordPattern("working"), "OK"],
-	[wholeWordPattern("complete"), "DONE"],
-	[wholeWordPattern("completed"), "DONE"],
-] as const;
 
 function replaceAllLiteral(text: string, pattern: string, replacement: string): string {
 	return text.replaceAll(pattern, replacement);
@@ -120,8 +100,8 @@ export function applyCategoryPrefixes(text: string): string {
 
 export function applyPhrases(text: string): string {
 	let result = text;
-	for (const [pattern, shorthand] of PHRASE_PATTERNS) {
-		result = result.replace(pattern, shorthand);
+	for (const [phrase, shorthand] of SORTED_PHRASES) {
+		result = replaceAllLiteral(result, phrase, shorthand);
 	}
 	return result;
 }
@@ -152,9 +132,10 @@ export function encode(text: string): string {
 	result = applyPhrases(result);
 	result = applyStructural(result);
 	result = compactParens(result);
-	for (const [pattern, shorthand] of STATUS_SHORTHANDS) {
-		result = result.replace(pattern, shorthand);
-	}
+	result = result.replaceAll("working correctly", "OK");
+	result = result.replaceAll("working", "OK");
+	result = result.replaceAll("complete", "DONE");
+	result = result.replaceAll("completed", "DONE");
 	return result.trim();
 }
 

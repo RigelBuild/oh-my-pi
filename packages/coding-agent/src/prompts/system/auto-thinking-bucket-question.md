@@ -1,14 +1,11 @@
-Classify the coding request by how open-ended its problem is. Volume of work never raises it.
+Classify the coding request by reasoning needed.
 
 Examples:
 <request>rename a local constant and its two uses</request>
 trivial
 
-<request>make the failing pagination test pass</request>
+<request>add a CLI flag and its focused test</request>
 moderate
-
-<request>convert the fixtures in five repos to the new JSON format</request>
-trivial
 
 <request>diagnose an intermittent deadlock across two services</request>
 hard

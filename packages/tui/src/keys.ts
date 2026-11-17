@@ -24,7 +24,7 @@ import {
 	parseKey as parseKeyNative,
 	parseKittySequence as parseKittySequenceNative,
 } from "@oh-my-pi/pi-natives";
-import { isInsideTerminalMultiplexer, isSshSession } from "./terminal-capabilities";
+import { isInsideTerminalMultiplexer } from "./terminal-capabilities";
 
 // =============================================================================
 // Platform Detection
@@ -32,7 +32,9 @@ import { isInsideTerminalMultiplexer, isSshSession } from "./terminal-capabiliti
 
 /** Whether the local process is running directly under Windows Terminal. */
 export function isWindowsTerminalSession(): boolean {
-	return Boolean(process.env.WT_SESSION) && !isSshSession();
+	return (
+		Boolean(process.env.WT_SESSION) && !process.env.SSH_CONNECTION && !process.env.SSH_CLIENT && !process.env.SSH_TTY
+	);
 }
 
 /**
@@ -175,8 +177,7 @@ type SpecialKey =
 	| "f12";
 
 type BaseKey = Letter | Digit | KeySymbol | SpecialKey;
-/** Modifier key names as they appear in {@link KeyId} chords. */
-export type ModifierName = "ctrl" | "shift" | "alt" | "super";
+type ModifierName = "ctrl" | "shift" | "alt" | "super";
 
 type ModifiedKeyId<Key extends string, RemainingModifiers extends ModifierName = ModifierName> = {
 	[M in RemainingModifiers]: `${M}+${Key}` | `${M}+${ModifiedKeyId<Key, Exclude<RemainingModifiers, M>>}`;

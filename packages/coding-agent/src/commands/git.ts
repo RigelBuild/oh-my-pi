@@ -10,8 +10,6 @@ import { runGitTui } from "../cli/git-tui";
 import { Settings, settings } from "../config/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
-import { cfgColorBlindMode, cfgSymbolPreset, cfgThemeDark, cfgThemeLight } from "../modes/settings";
-
 export default class Git extends Command {
 	static description = commandHelp.description;
 
@@ -39,10 +37,10 @@ export default class Git extends Command {
 		await Settings.init({ cwd: getProjectDir() });
 		await initTheme(
 			false,
-			cfgSymbolPreset.get(settings),
-			cfgColorBlindMode.get(settings),
-			cfgThemeDark.get(settings),
-			cfgThemeLight.get(settings),
+			settings.get("symbolPreset"),
+			settings.get("colorBlindMode"),
+			settings.get("theme.dark"),
+			settings.get("theme.light"),
 		);
 		await runGitTui({ cwd: flags.dir, revision: args.revision });
 	}

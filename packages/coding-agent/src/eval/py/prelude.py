@@ -57,20 +57,12 @@ if "__omp_prelude_loaded__" not in globals():
 
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
 
-    def _omp_url_roots() -> dict:
-        """On-disk roots for internal-URL schemes, keyed by scheme (PI_EVAL_LOCAL_ROOTS)."""
-        try:
-            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
-        except (ValueError, TypeError):
-            return {}
-        return roots if isinstance(roots, dict) else {}
-
     def _should_delegate_read(path: str | Path) -> bool:
-        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root."""
-        if not isinstance(path, str):
-            return False
-        match = _OMP_INTERNAL_URL_RE.match(path)
-        return match is not None and match.group(1).lower() not in _omp_url_roots()
+        return (
+            isinstance(path, str)
+            and _OMP_INTERNAL_URL_RE.match(path) is not None
+            and not path.lower().startswith("local://")
+        )
 
     def _read_line_selector(offset: int, limit: int | None) -> str | None:
         if offset <= 1 and limit is None:
@@ -89,18 +81,22 @@ if "__omp_prelude_loaded__" not in globals():
     def _resolve_omp_path(path: str | Path) -> Path:
         """Map a helper path to a real filesystem Path.
 
-        A `scheme://…` whose scheme has an injected on-disk root (via
-        PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it lands where
-        `read scheme://…` resolves — not a literal `scheme:/` directory under
-        the cwd (which `Path("scheme://x")` collapses to). Plain paths pass
-        through unchanged; any other `scheme://` is rejected."""
+        A `scheme://…` whose scheme has an injected on-disk root (e.g.
+        `local://`, via PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it
+        lands where `read local://…` resolves — not a literal `local:/`
+        directory under the cwd (which `Path("local://x")` collapses to). Plain
+        paths pass through unchanged; any other `scheme://` is rejected."""
         if not isinstance(path, str):
             return Path(path)
         match = _OMP_INTERNAL_URL_RE.match(path)
         if not match:
             return Path(path)
         scheme = match.group(1).lower()
-        root = _omp_url_roots().get(scheme)
+        try:
+            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+        except (ValueError, TypeError):
+            roots = {}
+        root = roots.get(scheme) if isinstance(roots, dict) else None
         if not root:
             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
         relative = unquote(match.group(2).replace("\\", "/"))
@@ -735,9 +731,10 @@ if "__omp_prelude_loaded__" not in globals():
             return bool(result.get("cancelled")) if isinstance(result, dict) else False
 
         def __await__(self):
-            # `to_thread` copies the cell's contextvars into the worker; a bare
-            # `run_in_executor` drops them, so the bridge loses its run identity.
-            return asyncio.to_thread(self.wait).__await__()
+            return asyncio.get_running_loop().run_in_executor(
+                None,
+                self.wait,
+            ).__await__()
 
     class AgentHandle(_Handle):
         """Background subagent handle returned by ``agent()``."""
@@ -1000,7 +997,6 @@ if "__omp_prelude_loaded__" not in globals():
         apply=None,
         merge=None,
         tools=None,
-        model=None,
     ):
         """Start a background subagent and return its handle."""
         args = {"prompt": prompt}
@@ -1020,8 +1016,6 @@ if "__omp_prelude_loaded__" not in globals():
             args["merge"] = bool(merge)
         if tools is not None:
             args["tools"] = list(tools)
-        if model is not None:
-            args["model"] = model
         result = _bridge_call("__agent__", args)
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
             raise RuntimeError("agent() did not return a handle")
@@ -1067,7 +1061,7 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<workpool {self.name} ({self.agent}) {self.limit} agents>"
 
-    def workpool(agent=None, *, name=None, context=None, tools=None, model=None):
+    def workpool(agent=None, *, name=None, context=None, tools=None):
         """Create a pool of keep-alive subagents."""
         args = {"op": "create"}
         if agent is not None:
@@ -1078,8 +1072,6 @@ if "__omp_prelude_loaded__" not in globals():
             args["context"] = context
         if tools is not None:
             args["tools"] = list(tools)
-        if model is not None:
-            args["model"] = model
         result = _bridge_call("__workpool__", args)
         if not isinstance(result, dict) or not isinstance(result.get("name"), str):
             raise RuntimeError("workpool() did not return a pool")

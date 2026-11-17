@@ -77,7 +77,7 @@ export default factory;
 **Custom rendering:**
 
 ```typescript
-renderCall(args, options, theme) {
+renderCall(args, theme) {
   return new Text(
     theme.fg("toolTitle", theme.bold("my_tool ")) + args.action,
     0, 0  // No padding - Box handles it

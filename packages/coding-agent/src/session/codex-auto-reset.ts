@@ -61,7 +61,7 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
-import type { ResetAutoRedeemMode } from "./settings";
+import type { ResetAutoRedeemMode } from "../config/settings-schema";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 
 /** A chat window counts as exhausted at `usedFraction >= 0.999` (used_percent >= 99.9). */
@@ -537,21 +537,6 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 	return { actions, skipped };
 }
 
-/**
- * Fence saved-reset spending by upstream provider, organization, and account,
- * never by a credential row id that another store may reuse.
- */
-export function resetAccountLockKey(identity: {
-	provider: string;
-	accountId?: string;
-	email?: string;
-	orgId?: string;
-}): string | undefined {
-	const account = (identity.accountId ?? identity.email)?.trim().toLowerCase();
-	if (!account) return undefined;
-	return `${identity.provider}|${identity.orgId?.trim().toLowerCase() ?? "-"}|${account}`;
-}
-
 /** One attempt per (account, weekly-reset-minute) block episode. */
 export function blockedAttemptKey(accountKey: string, weeklyResetsAtMs: number): string {
 	return `block|${accountKey}|${Math.round(weeklyResetsAtMs / DEBOUNCE_BUCKET_MS)}`;
@@ -661,12 +646,6 @@ export function isTerminalRedeemOutcome(code: string): boolean {
 	return code === "reset" || code === "already_redeemed" || code === "no_credit";
 }
 
-/** A confirmed reset, or a safe eligibility read that must wait before retrying. */
-export interface ResetRecoveryResult {
-	restored: boolean;
-	retryAfterMs?: number;
-}
-
 /**
  * Process-wide (NOT per-session) coordinator state. Parallel sessions share
  * provider accounts and must not race a double-spend; Claude reuses the same
@@ -694,9 +673,7 @@ export interface CodexAutoRedeemCoordinator {
 	attemptedKeys: Set<string>;
 	deferredUntilByKey: Map<string, number>;
 	lastAttemptAtByAccount: Map<string, number>;
-	/** Alternate lock root for isolated sessions (production uses the shared agent database path). */
-	resetLockPath?: string;
-	inFlightByAccount: Map<string, Promise<ResetRecoveryResult>>;
+	inFlightByAccount: Map<string, Promise<boolean>>;
 	sweepInFlight: boolean;
 	lastSweepAt: number;
 	/** Settlement of the most recently scheduled sweep (never rejects). */

@@ -12,13 +12,13 @@
 use std::{
 	collections::HashSet,
 	ffi::{OsStr, OsString},
+	fs::File,
 	io::{BufRead, BufReader, Write},
 	sync::atomic::{AtomicBool, Ordering},
 };
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
-use pi_vfs::File;
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -118,11 +118,8 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 	let input1 = open_input(file1, host)?;
 	let input2 = open_input(file2, host)?;
 	let cancel = host.cancel_flag();
-	// One write per line on pipes, block-buffered into files; created before
-	// the readers, as it method-borrows `host`.
-	let mut out = host.stdout_writer();
 
-	let operated = match (input1, input2) {
+	match (input1, input2) {
 		(Some(input1), Some(input2)) => operate(
 			BufReader::new(input1),
 			file1,
@@ -130,7 +127,7 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut out,
+			&mut host.stdout,
 		),
 		(None, Some(input2)) => operate(
 			BufReader::new(&mut host.stdin),
@@ -139,7 +136,7 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut out,
+			&mut host.stdout,
 		),
 		(Some(input1), None) => operate(
 			BufReader::new(input1),
@@ -148,14 +145,10 @@ fn execute(file1: &OsStr, op: &str, file2: &OsStr, host: &mut Host) -> Result<()
 			file2,
 			op,
 			&cancel,
-			&mut out,
+			&mut host.stdout,
 		),
 		(None, None) => unreachable!("two stdin operands were rejected above"),
-	};
-	// Output before a failure still lands, ahead of the error message.
-	let flushed = out.flush().map_err(|err| Error::Msg(err.to_string()));
-	operated?;
-	flushed
+	}
 }
 
 fn operate(
@@ -210,7 +203,7 @@ fn open_input(name: &OsStr, host: &Host) -> Result<Option<File>, Error> {
 		return Ok(None);
 	}
 	let path = host.resolve(name);
-	let file = host.fs().open(path).map_err(|err| input_failure(name, &err))?;
+	let file = File::open(path).map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
 	Ok(Some(file))
 }
 
@@ -230,7 +223,7 @@ fn each_line(
 		line.clear();
 		let n = reader
 			.read_until(b'\n', &mut line)
-			.map_err(|err| input_failure(name, &err))?;
+			.map_err(|err| Error::Msg(input_error(name, &err.to_string())))?;
 		if n == 0 {
 			return Ok(());
 		}
@@ -262,14 +255,8 @@ fn write_line(out: &mut impl Write, line: &[u8]) -> Result<(), Error> {
 		.map_err(|err| Error::Msg(err.to_string()))
 }
 
-/// Classifies an input failure; a cancelled provider operation is the shell
-/// abort itself, not an error in `name`.
-fn input_failure(name: &OsStr, err: &std::io::Error) -> Error {
-	if pi_vfs::is_cancelled(err) {
-		Error::Cancelled
-	} else {
-		Error::Msg(format!("{}: {err}", name.to_string_lossy()))
-	}
+fn input_error(name: &OsStr, err: &str) -> String {
+	format!("{}: {}", name.to_string_lossy(), err)
 }
 
 /// Creates the `combine` builtin registration.

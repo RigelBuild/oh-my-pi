@@ -15,8 +15,6 @@ import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
 
-import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
-
 // 1x1 PNG so the read tool takes its image branch.
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -42,7 +40,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
-	cfgTuiHyperlinks.clearOverride(settings);
+	settings.clearOverride("tui.hyperlinks");
 });
 
 afterAll(() => {
@@ -51,7 +49,7 @@ afterAll(() => {
 
 describe("tool output OSC 8 file:// hyperlinks", () => {
 	it("links plain text and image read titles to the resolved filesystem path", async () => {
-		cfgTuiHyperlinks.override(settings, "always");
+		settings.override("tui.hyperlinks", "always");
 		const theme = (await getThemeByName("dark"))!;
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-link-read-"));
 		try {
@@ -91,7 +89,7 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 	});
 
 	it("links the write header to the absolute path it wrote", async () => {
-		cfgTuiHyperlinks.override(settings, "always");
+		settings.override("tui.hyperlinks", "always");
 		const theme = (await getThemeByName("dark"))!;
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-link-write-"));
 		try {
@@ -114,7 +112,7 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 	});
 
 	it("resolves scoped search links against cwd, not the (sub)scope path", async () => {
-		cfgTuiHyperlinks.override(settings, "always");
+		settings.override("tui.hyperlinks", "always");
 		const theme = (await getThemeByName("dark"))!;
 		// Scoped search: scope dir (`searchPath`) is below cwd, and the grouped
 		// display paths are cwd-relative. Resolving against searchPath would double
@@ -144,7 +142,7 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 	});
 
 	it("resolves scoped ast-grep links against cwd, not the (sub)scope path", async () => {
-		cfgTuiHyperlinks.override(settings, "always");
+		settings.override("tui.hyperlinks", "always");
 		const theme = (await getThemeByName("dark"))!;
 		const projectRoot = path.resolve("/tmp/omp-project");
 		const srcRoot = path.join(projectRoot, "src");
@@ -173,7 +171,7 @@ describe("tool output OSC 8 file:// hyperlinks", () => {
 	});
 
 	it("links the edit header to the absolute details.path even when the arg path is relative", async () => {
-		cfgTuiHyperlinks.override(settings, "always");
+		settings.override("tui.hyperlinks", "always");
 		const theme = (await getThemeByName("dark"))!;
 		const editPath = path.resolve("/tmp/omp-project/src/a.ts");
 		const rendered = editToolRenderer

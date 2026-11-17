@@ -55,7 +55,7 @@ pub enum KeyName {
 }
 
 impl KeyName {
-	#[cfg(any(target_os = "windows", target_os = "macos"))]
+	#[cfg(target_os = "windows")]
 	pub(crate) const fn is_modifier(self) -> bool {
 		matches!(self, Self::Ctrl | Self::Alt | Self::Shift | Self::Meta)
 	}
@@ -214,47 +214,41 @@ pub fn parse_modifiers(mods: &[String]) -> CoreResult<Modifiers> {
 	Ok(result)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyDirection {
 	Press,
 	Release,
+	Click,
 }
 
-/// Presses `keys` in order, runs `operation` while they are held, then
-/// releases them in reverse order, even when a press or `operation` fails.
-///
-/// A failed press releases only the keys already down, never the failed one.
-/// `merge(primary, cleanup)` folds each release result into the cleanup
-/// result and that into the primary result, so each backend keeps its own
-/// policy for reporting cleanup failures next to the delivery failure.
-#[cfg(any(target_os = "windows", test))]
-pub(crate) fn hold_keys<C, E>(
-	ctx: &mut C,
-	keys: impl IntoIterator<Item = KeyName>,
-	mut emit: impl FnMut(&mut C, KeyName, KeyDirection) -> Result<(), E>,
-	operation: impl FnOnce(&mut C) -> Result<(), E>,
-	mut merge: impl FnMut(Result<(), E>, Result<(), E>) -> Result<(), E>,
+#[cfg(test)]
+pub fn execute_chord_with<E>(
+	keys: &[KeyName],
+	mut emit: impl FnMut(KeyName, KeyDirection) -> Result<(), E>,
 ) -> Result<(), E> {
-	let keys = keys.into_iter();
-	let mut pressed = Vec::with_capacity(keys.size_hint().0);
-	let mut result = Ok(());
-	for key in keys {
-		if let Err(error) = emit(ctx, key, KeyDirection::Press) {
-			result = Err(error);
-			break;
+	if keys.len() == 1 {
+		return emit(keys[0], KeyDirection::Click);
+	}
+	let mut pressed = Vec::with_capacity(keys.len());
+	for &key in keys {
+		if let Err(error) = emit(key, KeyDirection::Press) {
+			for &held in pressed.iter().rev() {
+				let _ = emit(held, KeyDirection::Release);
+			}
+			return Err(error);
 		}
 		pressed.push(key);
 	}
-	if result.is_ok() {
-		result = operation(ctx);
-	}
-	let mut cleanup = Ok(());
+	let mut first_error = None;
 	for &key in pressed.iter().rev() {
-		let release = emit(ctx, key, KeyDirection::Release);
-		cleanup = merge(cleanup, release);
+		if let Err(error) = emit(key, KeyDirection::Release)
+			&& first_error.is_none()
+		{
+			first_error = Some(error);
+		}
 	}
-	merge(result, cleanup)
+	first_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -295,56 +289,32 @@ mod tests {
 	#[test]
 	fn presses_in_order_and_releases_in_reverse_even_after_errors() {
 		let keys = [KeyName::Ctrl, KeyName::Shift, KeyName::Char('p')];
-		let record = |events: &mut Vec<(KeyName, KeyDirection)>, key, direction| {
-			events.push((key, direction));
-			Ok::<_, &str>(())
-		};
 		let mut events = Vec::new();
-		hold_keys(
-			&mut events,
-			keys,
-			record,
-			|events| {
-				events.push((KeyName::Space, KeyDirection::Press));
-				Ok(())
-			},
-			Result::and,
-		)
+		execute_chord_with(&keys, |key, direction| {
+			events.push((key, direction));
+			Ok::<_, ()>(())
+		})
 		.unwrap();
 		assert_eq!(events, [
 			(KeyName::Ctrl, KeyDirection::Press),
 			(KeyName::Shift, KeyDirection::Press),
 			(KeyName::Char('p'), KeyDirection::Press),
-			(KeyName::Space, KeyDirection::Press),
 			(KeyName::Char('p'), KeyDirection::Release),
 			(KeyName::Shift, KeyDirection::Release),
 			(KeyName::Ctrl, KeyDirection::Release)
 		]);
-
 		let mut events = Vec::new();
-		let result = hold_keys(
-			&mut events,
-			keys,
-			|events, key, direction| {
-				events.push((key, direction));
-				match (key, direction) {
-					(KeyName::Char('p'), KeyDirection::Press) => Err("press"),
-					(KeyName::Ctrl, KeyDirection::Release) => Err("release"),
-					_ => Ok(()),
-				}
-			},
-			|_| unreachable!("operation must not run after a failed press"),
-			Result::and,
-		);
-		assert_eq!(result, Err("press"));
+		let _ = execute_chord_with(&keys, |key, direction| {
+			events.push((key, direction));
+			if key == KeyName::Char('p') && direction == KeyDirection::Press {
+				Err(())
+			} else {
+				Ok(())
+			}
+		});
 		assert_eq!(events[3..], [
 			(KeyName::Shift, KeyDirection::Release),
 			(KeyName::Ctrl, KeyDirection::Release)
 		]);
-
-		let mut events = Vec::new();
-		let result = hold_keys(&mut events, keys, record, |_| Err("operation"), Result::and);
-		assert_eq!(result, Err("operation"));
-		assert_eq!(events.len(), 6);
 	}
 }

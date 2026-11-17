@@ -173,63 +173,48 @@ impl History {
 	///
 	/// # Arguments
 	///
-	/// * `filesystem` - The filesystem holding the history file.
-	/// * `history_file_path` - The absolute path to the history file.
+	/// * `history_file_path` - The path to the history file.
 	/// * `append` - Whether to append to the file or overwrite it.
 	/// * `unsaved_items_only` - Whether to only write unsaved items; if true,
 	///   any items will be marked as "saved" once saved.
 	/// * `write_timestamps` - Whether to write timestamps for each command line.
-	pub async fn flush(
+	pub fn flush(
 		&mut self,
-		filesystem: &pi_vfs::Fs,
 		history_file_path: impl AsRef<Path>,
 		append: bool,
 		unsaved_items_only: bool,
 		write_timestamps: bool,
 	) -> Result<(), error::Error> {
 		// Open the file
-		let mut file_options = pi_vfs::OpenOptions::new();
+		let mut file_options = std::fs::File::options();
 
 		if append {
 			file_options.append(true);
 		} else {
 			file_options.write(true).truncate(true);
 		}
-		file_options.create(true);
 
-		let file = filesystem
-			.open_with(history_file_path.as_ref(), &file_options)
-			.await?;
+		let mut file = file_options.create(true).open(history_file_path.as_ref())?;
 
-		let mut contents = Vec::new();
-		let mut saved = Vec::new();
 		for item_id in &self.items {
-			if let Some(item) = self.id_map.get(item_id) {
+			if let Some(item) = self.id_map.get_mut(item_id) {
 				if unsaved_items_only && !item.dirty {
 					continue;
 				}
 
 				if write_timestamps && let Some(timestamp) = item.timestamp {
-					writeln!(contents, "#{}", timestamp.timestamp())?;
+					writeln!(file, "#{}", timestamp.timestamp())?;
 				}
 
-				writeln!(contents, "{}", item.command_line)?;
+				writeln!(file, "{}", item.command_line)?;
 
 				if unsaved_items_only {
-					saved.push(*item_id);
+					item.dirty = false;
 				}
 			}
 		}
 
-		file.write_all_async(&contents).await?;
-		file.close_async().await?;
-
-		// Items count as saved only once the backing store accepted them.
-		for item_id in saved {
-			if let Some(item) = self.id_map.get_mut(&item_id) {
-				item.dirty = false;
-			}
-		}
+		file.flush()?;
 
 		Ok(())
 	}

@@ -21,7 +21,6 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 	const ctx = {
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
-		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),
@@ -85,17 +84,18 @@ describe("InteractiveMode.showStatus", () => {
 				for (const item of items) ctx.chatContainer.addChild(item);
 				ctx.ui.requestRender();
 			},
-			lastStatus: undefined,
+			lastStatusSpacer: undefined,
+			lastStatusText: undefined,
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);
 
 		helpers.showStatus("STATUS_ONE");
-		expect(ctx.chatContainer.children).toHaveLength(1);
+		expect(ctx.chatContainer.children).toHaveLength(2);
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_ONE");
 
 		helpers.showStatus("STATUS_TWO");
-		// second status updates the previous notice instead of appending
-		expect(ctx.chatContainer.children).toHaveLength(1);
+		// second status updates the previous line instead of appending
+		expect(ctx.chatContainer.children).toHaveLength(2);
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_TWO");
 		expect(renderLastLine(ctx.chatContainer)).not.toContain("STATUS_ONE");
 	});
@@ -109,22 +109,22 @@ describe("InteractiveMode.showStatus", () => {
 				for (const item of items) ctx.chatContainer.addChild(item);
 				ctx.ui.requestRender();
 			},
-			lastStatus: undefined,
+			lastStatusSpacer: undefined,
+			lastStatusText: undefined,
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);
 
 		helpers.showStatus("STATUS_ONE");
-		expect(ctx.chatContainer.children).toHaveLength(1);
+		expect(ctx.chatContainer.children).toHaveLength(2);
 
 		// Something else gets added to the chat in between status updates
 		ctx.chatContainer.addChild({ render: () => ["OTHER"], invalidate: () => {} });
-		expect(ctx.chatContainer.children).toHaveLength(2);
+		expect(ctx.chatContainer.children).toHaveLength(3);
 
 		helpers.showStatus("STATUS_TWO");
-		// adds a fresh notice rather than rewriting the stale one
-		expect(ctx.chatContainer.children).toHaveLength(3);
+		// adds spacer + text
+		expect(ctx.chatContainer.children).toHaveLength(5);
 		expect(renderLastLine(ctx.chatContainer)).toContain("STATUS_TWO");
-		expect(ctx.chatContainer.children[0]?.render(120).join("\n")).toContain("STATUS_ONE");
 	});
 
 	test("preserves startup notifications while rendering the initial transcript", async () => {

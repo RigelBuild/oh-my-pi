@@ -131,8 +131,7 @@ function setupProcessTerminal() {
 		return true;
 	});
 
-	// Pin non-ConPTY so the bundle is asserted as one write; ConPTY hosts (win32, WSL) split it.
-	const terminal = new ProcessTerminal({ conpty: false });
+	const terminal = new ProcessTerminal();
 	terminal.onGlyphProtocolReport(supported => reports.push(supported));
 	terminal.start(
 		data => received.push(data),

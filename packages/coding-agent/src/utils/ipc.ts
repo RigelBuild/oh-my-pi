@@ -1,6 +1,12 @@
 import { logger } from "@oh-my-pi/pi-utils";
 
-/** Narrow a value to a thenable so a rejection handler can be attached. */
+/**
+ * Narrow a value to a thenable so a rejection handler can be attached.
+ *
+ * Mirrors the local helper in `mcp/transports/stdio.ts` (kept separate because
+ * that copy serves the FileSink stdin-write path and is battle-tested there).
+ * This shared copy is the home for the IPC `send()` sites.
+ */
 export function isThenable(value: unknown): value is PromiseLike<unknown> {
 	return (
 		value != null &&

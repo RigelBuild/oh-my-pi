@@ -65,37 +65,16 @@ impl IsolationBackend for ZfsBackend {
 mod imp {
 	use std::{
 		fs, io,
-		path::Path,
+		path::{Path, PathBuf},
 		process::{Command, Output},
-		sync::atomic::{AtomicBool, Ordering},
 	};
 
-	use crate::{IsoError, IsoResult, ProbeResult, tree};
+	use crate::{IsoError, IsoResult, ProbeResult};
 
 	const SNAP_PREFIX: &str = "pi-iso-";
-	/// `statfs` magic of a ZFS dataset on Linux.
-	#[cfg(target_os = "linux")]
-	const ZFS_SUPER_MAGIC: u32 = 0x2fc1_2fc2;
-
-	/// Set once the zfs CLI has run and listed datasets; a host that has it
-	/// keeps it, so later calls skip the spawns. A failure is not cached: it
-	/// can be transient (module not loaded yet, pool still importing), so the
-	/// next call probes again.
-	static CLI_AVAILABLE: AtomicBool = AtomicBool::new(false);
-
-	fn cli_available() -> bool {
-		if CLI_AVAILABLE.load(Ordering::Relaxed) {
-			return true;
-		}
-		let available = command_available(["version"]) || command_available(["list", "-H"]);
-		if available {
-			CLI_AVAILABLE.store(true, Ordering::Relaxed);
-		}
-		available
-	}
 
 	pub fn probe() -> ProbeResult {
-		if cli_available() {
+		if command_available(["version"]) || command_available(["list", "-H"]) {
 			ProbeResult::available()
 		} else {
 			ProbeResult::unavailable("zfs CLI is unavailable or cannot list datasets")
@@ -103,24 +82,11 @@ mod imp {
 	}
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		if !cli_available() {
-			return Err(IsoError::unavailable("zfs CLI is unavailable or cannot list datasets"));
-		}
+		ensure_zfs_available()?;
 
-		let lower = tree::canonical_existing_dir(lower, "ZFS clone source", IsoError::unavailable)?;
-		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
-		// Linux `statfs` tells a source off ZFS apart without listing every
-		// dataset to find no match.
-		#[cfg(target_os = "linux")]
-		let on_zfs = crate::statfs_magic(&lower) == Some(ZFS_SUPER_MAGIC);
-		#[cfg(not(target_os = "linux"))]
-		let on_zfs = true;
-		let source = if on_zfs {
-			dataset_for_mountpoint(&lower)?
-		} else {
-			None
-		}
-		.ok_or_else(|| {
+		let lower = canonical_existing_dir(lower)?;
+		let merged = absolute_path(merged);
+		let source = dataset_for_mountpoint(&lower)?.ok_or_else(|| {
 			IsoError::unavailable(format!(
 				"{} is not exactly a mounted ZFS dataset mountpoint",
 				lower.display()
@@ -155,7 +121,7 @@ mod imp {
 	}
 
 	pub fn stop(merged: &Path) -> IsoResult<()> {
-		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
+		let merged = absolute_path(merged);
 		if !merged.exists() {
 			return Ok(());
 		}
@@ -181,6 +147,28 @@ mod imp {
 				))),
 			},
 		}
+	}
+
+	fn ensure_zfs_available() -> IsoResult<()> {
+		if command_available(["version"]) || command_available(["list", "-H"]) {
+			Ok(())
+		} else {
+			Err(IsoError::unavailable("zfs CLI is unavailable or cannot list datasets"))
+		}
+	}
+
+	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
+		let resolved = absolute_path(path);
+		let meta = fs::metadata(&resolved).map_err(|err| {
+			IsoError::unavailable(format!("invalid ZFS clone source {}: {err}", resolved.display()))
+		})?;
+		if !meta.is_dir() {
+			return Err(IsoError::unavailable(format!(
+				"ZFS clone source {} is not a directory",
+				resolved.display()
+			)));
+		}
+		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
 	}
 
 	fn dataset_for_mountpoint(path: &Path) -> IsoResult<Option<String>> {
@@ -306,8 +294,7 @@ mod imp {
 	}
 
 	fn dataset_suffix(path: &Path) -> String {
-		let normalized =
-			normalize_path(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+		let normalized = normalize_path(&absolute_path(path));
 		let bytes = normalized.as_bytes();
 		let a = fnv1a64(bytes, 0xcbf29ce484222325);
 		let b = fnv1a64(bytes, 0x84222325cbf29ce4 ^ bytes.len() as u64);
@@ -342,6 +329,14 @@ mod imp {
 			return false;
 		};
 		is_own_name(name) && is_own_snapshot(origin)
+	}
+
+	fn absolute_path(path: &Path) -> PathBuf {
+		if path.is_absolute() {
+			path.to_path_buf()
+		} else {
+			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+		}
 	}
 
 	fn normalize_path(path: &Path) -> String {

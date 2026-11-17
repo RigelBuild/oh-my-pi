@@ -16,9 +16,6 @@
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 
-/** Whether the model registered under a provider id and requested model id has known pricing. */
-export type TelemetryModelPricingResolver = (providerId: string, modelId: string) => boolean;
-
 /** Per-signal OTLP export toggles resolved from the `OTEL_*` env contract. */
 export interface TelemetrySignalConfig {
 	readonly trace: boolean;
@@ -32,10 +29,7 @@ type TelemetrySignal = "trace" | "log" | "metric";
 interface OtlpExportModule {
 	registerProviders(signalConfig: TelemetrySignalConfig): Promise<void>;
 	isTelemetryExportEnabled(): boolean;
-	createTelemetryExportConfig(
-		config: AgentTelemetryConfig | undefined,
-		modelPricingResolver?: TelemetryModelPricingResolver,
-	): AgentTelemetryConfig | undefined;
+	createTelemetryExportConfig(config: AgentTelemetryConfig | undefined): AgentTelemetryConfig | undefined;
 	flushTelemetryExport(): Promise<void>;
 }
 
@@ -55,31 +49,26 @@ export function isTelemetryExportEnabled(): boolean {
 /**
  * Merge OTLP metrics/log hooks into an existing agent telemetry config.
  *
- * The caller still owns content-capture policy and custom attributes, and its
- * own `costEstimator` wins. Without one, `modelPricingResolver` makes chat
- * telemetry report each request's provider-computed cost. Beyond that, this
- * only appends host-level metrics/log forwarding for the providers registered
- * by {@link initTelemetryExport}; a passthrough when export is disabled.
+ * The caller still owns content-capture policy, cost estimation, and custom
+ * attributes. This only appends host-level metrics/log forwarding for the
+ * providers registered by {@link initTelemetryExport}; a passthrough when
+ * export is disabled.
  */
 export function createTelemetryExportConfig(
 	config: AgentTelemetryConfig | undefined,
-	modelPricingResolver?: TelemetryModelPricingResolver,
 ): AgentTelemetryConfig | undefined {
-	return otlp ? otlp.createTelemetryExportConfig(config, modelPricingResolver) : config;
+	return otlp ? otlp.createTelemetryExportConfig(config) : config;
 }
 
 /**
- * Register global trace/log/meter providers when enabled and OTLP endpoints are
- * configured through env. Idempotent, and a no-op when disabled, no signal has
- * an endpoint, or the OTEL kill-switch is engaged.
- *
- * @param exportEnabled `telemetry.otlpExportEnabled`; required so every caller
- *   decides whether the user's opt-out applies.
+ * Register global trace/log/meter providers when OTLP endpoints are configured
+ * through env. Idempotent, and a no-op when no signal has an endpoint (or when
+ * the OTEL kill-switches are engaged), so startup can call it unconditionally.
  */
-export async function initTelemetryExport(exportEnabled: boolean): Promise<void> {
+export async function initTelemetryExport(): Promise<void> {
 	if (initPromise) return initPromise;
 
-	if (!exportEnabled || process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") return;
+	if (process.env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") return;
 
 	const signalConfig = resolveSignalConfig();
 	if (!signalConfig.trace && !signalConfig.log && !signalConfig.metric) return;

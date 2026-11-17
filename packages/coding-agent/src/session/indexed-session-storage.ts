@@ -1,7 +1,5 @@
-import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
 import {
-	directChildKeyName,
 	SessionWriteConflictError,
 	type SessionStorage,
 	type SessionStorageStat,
@@ -10,7 +8,6 @@ import {
 	type WriteTextAtomicOptions,
 } from "./session-storage";
 import { isAssistantMessageLine } from "./session-entries";
-import { enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
 	overlayTitleSlotPrefix,
@@ -78,6 +75,15 @@ interface IndexAppend {
 }
 
 const RESOLVED = Promise.resolve();
+
+function enoent(p: string): NodeJS.ErrnoException {
+	const err = new Error(`ENOENT: no such file, '${p}'`) as NodeJS.ErrnoException;
+	err.code = "ENOENT";
+	err.errno = -2;
+	err.path = p;
+	err.syscall = "open";
+	return err;
+}
 
 function matchesGlob(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
@@ -245,12 +251,14 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	listFilesSync(dir: string, pattern: string): string[] {
-		const resolvedDir = path.resolve(dir);
+		const prefix = dir.endsWith("/") ? dir : `${dir}/`;
 		const out: string[] = [];
-		for (const key of this.#index.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
-			if (name === undefined || !matchesGlob(name, pattern)) continue;
-			out.push(key);
+		for (const path of this.#index.keys()) {
+			if (!path.startsWith(prefix)) continue;
+			const name = path.slice(prefix.length);
+			if (name.includes("/") || name.includes("\\")) continue;
+			if (!matchesGlob(name, pattern)) continue;
+			out.push(path);
 		}
 		return out;
 	}

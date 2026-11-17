@@ -31,10 +31,6 @@ import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { resetYieldTurnState } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 
-import { cfgExternalThinking } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
-import { cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
-
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
 		name: "default_inactive_tool",
@@ -132,8 +128,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	});
 
 	afterAll(() => {
-		// The discovered auth DB lives in registryAuthDir; Windows cannot delete it while open.
-		modelRegistry.authStorage.close();
 		removeSyncWithRetries(registryAuthDir);
 	});
 
@@ -244,19 +238,15 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getToolByName("think")).toBeUndefined();
 			expect(session.getActiveToolNames()).not.toContain("think");
 
-			// The setting watch fires on the next microtask and queues the tool-registry
-			// mutation; a prompt refresh serializes behind it.
-			cfgExternalThinking.set(settings, true);
-			await Promise.resolve();
-			await session.refreshBaseSystemPrompt();
+			settings.set("externalThinking", true);
+			await session.setThinkToolEnabled(true);
 
 			expect(session.getToolByName("think")).toBeDefined();
 			expect(session.getActiveToolNames()).toContain("think");
 			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("think");
 
-			cfgExternalThinking.set(settings, false);
-			await Promise.resolve();
-			await session.refreshBaseSystemPrompt();
+			settings.set("externalThinking", false);
+			await session.setThinkToolEnabled(false);
 			expect(session.getActiveToolNames()).not.toContain("think");
 		} finally {
 			await session.dispose();
@@ -1830,7 +1820,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const tempDir = makeTempDir();
 
 		const settings = Settings.isolated();
-		cfgPlanEnabled.set(settings, false);
+		settings.set("plan.enabled", false);
 
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
@@ -2533,7 +2523,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		// because the absence of that state is precisely what is under test.
 		const tempDir = makeTempDir();
 		const settings = Settings.isolated();
-		cfgToolsXdev.set(settings, false);
+		settings.set("tools.xdev", false);
 
 		await withProviderAuth(["openai"], async () => {
 			const { session } = await createAgentSession({ ...baseOptions(tempDir), settings });

@@ -1,28 +1,16 @@
 import type { ModelHubSource } from "@oh-my-pi/pi-tui/overlays/model-hub";
-import { findActiveModelPreset, getModelPresetNames } from "../config/model-presets";
 import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 
-import {
-	cfgCycleOrder,
-	cfgDisabledProviders,
-	cfgModelProviderOrder,
-	cfgModelRoleStorage,
-} from "../config/model-settings";
-import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../session/settings";
-
 /** Supply live model-overlay preferences and runtime resolution from the host. */
 export function createModelBrowserSource(settings: Settings): ModelHubSource {
 	return {
-		get revision() {
-			return settings.revision;
-		},
 		get defaultThinkingLevel() {
-			return cfgDefaultThinkingLevel.get(settings);
+			return settings.get("defaultThinkingLevel");
 		},
 		get modelProviderOrder() {
-			return cfgModelProviderOrder.get(settings);
+			return settings.get("modelProviderOrder");
 		},
 		get knownRoleIds() {
 			return getKnownRoleIds(settings);
@@ -34,16 +22,16 @@ export function createModelBrowserSource(settings: Settings): ModelHubSource {
 			return settings.getStorage()?.getModelPerf() ?? new Map();
 		},
 		get disabledProviders() {
-			return cfgDisabledProviders.get(settings);
+			return settings.get("disabledProviders");
 		},
 		get fallbackChains() {
-			return cfgRetryFallbackChains.get(settings);
+			return settings.get("retry.fallbackChains");
 		},
 		get modelRoleStorage() {
-			return cfgModelRoleStorage.get(settings);
+			return settings.get("modelRoleStorage");
 		},
 		get cycleOrder() {
-			return cfgCycleOrder.get(settings);
+			return settings.get("cycleOrder");
 		},
 		getModelRole: role => settings.getModelRole(role),
 		getProjectModelRole: role => settings.getProjectModelRole(role),
@@ -52,6 +40,5 @@ export function createModelBrowserSource(settings: Settings): ModelHubSource {
 		getRoleInfo: role => getRoleInfo(role, settings),
 		defaultRoleChain: role => rolePriorityDefaults(role),
 		resolveRoleValue: (value, models, roleLookup) => resolveModelRoleValue(value, models, { settings, roleLookup }),
-		getModelPresets: () => ({ names: getModelPresetNames(settings), active: findActiveModelPreset(settings) }),
 	};
 }

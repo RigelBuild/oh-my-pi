@@ -36,15 +36,16 @@ import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
 
 /**
- * Runtime dependencies injected into setters that need to validate input.
- * `args.ts` constructs one object at module load and passes it to each
- * {@link STRING_SETTERS} call.
+ * Runtime dependencies injected into setters that need to validate input or
+ * warn about bad values. `args.ts` constructs one object at module load and
+ * passes it to each {@link STRING_SETTERS} call.
  *
  * Keeping these out of the setter closures means this module stays free of
  * runtime imports from `@oh-my-pi/pi-utils`, which is the whole reason it can
  * be safely imported by `profile-bootstrap.ts` before `setProfile` runs.
  */
 export interface ParseDeps {
+	logger: { warn: (message: string, meta?: Record<string, unknown>) => void };
 	parseThinking: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
 	normalizeToolNames: (values: Iterable<string>) => string[];
 	thinkingEfforts: readonly string[];
@@ -122,14 +123,13 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--mode": (result, value) => {
 		if (value === "text" || value === "json" || value === "rpc" || value === "acp" || value === "rpc-ui") {
 			result.mode = value;
-		} else {
-			result.invalidFlagValues.push(
-				`Invalid --mode value: ${JSON.stringify(value)}. Expected one of: text, json, rpc, rpc-ui, acp.`,
-			);
 		}
 	},
 	"--fork": (result, value) => {
 		result.fork = value;
+	},
+	"--session-id": (result, value) => {
+		result.sessionId = value;
 	},
 	"--provider": (result, value) => {
 		result.provider = value;
@@ -142,10 +142,6 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--slow": (result, value) => {
 		result.slow = value;
-	},
-	"--goal": (result, value) => {
-		if (!value.trim()) throw new CliUsageError("--goal requires a non-empty objective.");
-		result.goal = value.trim();
 	},
 	"--plan": (result, value) => {
 		result.plan = value;
@@ -204,13 +200,14 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--thinking": (result, value, deps) => {
 		const thinking = deps.parseThinking(value);
-		if (thinking === undefined) {
-			result.invalidFlagValues.push(
-				`Invalid --thinking value: ${JSON.stringify(value)}. Expected one of: ${deps.thinkingEfforts.join(", ")}.`,
-			);
-			return;
+		if (thinking !== undefined) {
+			result.thinking = thinking;
+		} else {
+			deps.logger.warn("Invalid thinking level passed to --thinking", {
+				level: value,
+				validThinkingLevels: deps.thinkingEfforts,
+			});
 		}
-		result.thinking = thinking;
 	},
 	"--export": (result, value) => {
 		result.export = value;
@@ -232,14 +229,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--skills": (result, value) => {
 		result.skills = value.split(",").map(s => s.trim());
 	},
-	"--approval-mode": (result, value) => {
-		if (value !== "always-ask" && value !== "write" && value !== "yolo") {
-			result.invalidFlagValues.push(
-				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, write, yolo.`,
-			);
-			return;
+	"--approval-mode": (result, value, deps) => {
+		if (value === "always-ask" || value === "write" || value === "yolo") {
+			result.approvalMode = value;
+		} else {
+			deps.logger.warn("Invalid value passed to --approval-mode", {
+				value,
+				validValues: ["always-ask", "write", "yolo"],
+			});
 		}
-		result.approvalMode = value;
 	},
 };
 
@@ -315,13 +313,13 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--prewalk",
 	"--no-prewalk",
 	"--plan-yolo",
+	"--reapply-config",
 	"--print",
 	"--print-thoughts",
 	"--no-extensions",
 	"--no-skills",
 	"--no-rules",
 	"--no-title",
-	"--no-ui",
 	"--auto-approve",
 	"--yolo",
 ]);
@@ -379,6 +377,7 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
 	"--session",
 	"--continue",
 	"-c",
+	"--session-id",
 	"--fork",
 	"--from-claude",
 	"--from-codex",
@@ -397,16 +396,20 @@ const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
  * `resumeSessionId` is omitted for a session that never materialized on disk;
- * the relaunch then starts fresh with the same configuration.
+ * the relaunch then starts fresh with the same configuration. A launch pinned
+ * with `--session-id` re-pins that id while it is still the active session
+ * (even before the first write), where `--resume` would prefix-match.
  */
 export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
 	const kept: string[] = [];
+	let pinnedSessionId: string | undefined;
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") break; // end-of-options: the rest is literal prompt text
 		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
 		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
 		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
+		if (flag === "--session-id") pinnedSessionId = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : argv[i + 1];
 		if (SESSION_SOURCE_FLAGS.has(flag)) {
 			if (consumesNext) i++;
 			continue;
@@ -414,6 +417,10 @@ export function restartArgv(argv: string[], resumeSessionId: string | undefined)
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
+	if (pinnedSessionId !== undefined && (resumeSessionId === undefined || resumeSessionId === pinnedSessionId)) {
+		kept.push("--session-id", pinnedSessionId);
+	} else if (resumeSessionId !== undefined) {
+		kept.push("--resume", resumeSessionId);
+	}
 	return kept;
 }

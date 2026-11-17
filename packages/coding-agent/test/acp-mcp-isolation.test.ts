@@ -60,7 +60,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { invalidFlagValues: [] },
+				parsedArgs: {},
 				rawArgs: [],
 				createSession,
 			});
@@ -92,7 +92,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { tools: ["read", "missing"], invalidFlagValues: [] },
+				parsedArgs: { tools: ["read", "missing"] },
 				rawArgs: ["--tools", "read,missing"],
 				createSession: async () => ({ session: fakeSession }) as CreateAgentSessionResult,
 			});
@@ -130,7 +130,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { trustedExtensions: [trustedPath], invalidFlagValues: [] },
+				parsedArgs: { trustedExtensions: [trustedPath] },
 				rawArgs: [],
 				createSession: async options => {
 					captured = options;
@@ -171,7 +171,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { trustedExtensions: [trustedPath], invalidFlagValues: [] },
+				parsedArgs: { trustedExtensions: [trustedPath] },
 				rawArgs: [],
 				createSession: async () => {
 					createCalls++;
@@ -226,7 +226,7 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 				sessionDir: tempDir.join("sessions"),
 				authStorage,
 				modelRegistry,
-				parsedArgs: { invalidFlagValues: [] },
+				parsedArgs: {},
 				rawArgs: [],
 				createSession,
 			});

@@ -104,9 +104,7 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 		},
 	});
 
-	const sessionManager = options.inMemory
-		? SessionManager.inMemory()
-		: SessionManager.create(tempDir, SessionManager.getDefaultSessionDir(tempDir, path.join(tempDir, "agent")));
+	const sessionManager = options.inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir, tempDir);
 	const settings = Settings.isolated(options.settingsOverrides);
 
 	const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));

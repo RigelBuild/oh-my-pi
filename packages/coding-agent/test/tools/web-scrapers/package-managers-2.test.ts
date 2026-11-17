@@ -54,6 +54,13 @@ describe.skipIf(SKIP)("handleHackage", () => {
 		expect(result?.content).toContain("JSON");
 		expect(result?.contentType).toBe("text/markdown");
 	}, 20000);
+
+	it("fetches text package", async () => {
+		const result = await handleHackage("https://hackage.haskell.org/package/text", 20);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("hackage");
+		expect(result?.content).toContain("text");
+	}, 20000);
 });
 
 describe.skipIf(SKIP)("handleDockerHub", () => {
@@ -102,6 +109,13 @@ describe.skipIf(SKIP)("handleChocolatey", () => {
 		expect(result?.method).toBe("chocolatey");
 		expect(result?.content).toContain("choco install");
 		expect(result?.contentType).toBe("text/markdown");
+	});
+
+	it("fetches nodejs package", async () => {
+		const result = await handleChocolatey("https://community.chocolatey.org/packages/nodejs", 20);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("chocolatey");
+		expect(result?.content).toMatch(/node/i);
 	});
 });
 
@@ -161,5 +175,12 @@ describe.skipIf(SKIP)("handleTerraform", () => {
 		expect(result?.content).toContain("vpc");
 		expect(result?.content).toContain("terraform-aws-modules");
 		expect(result?.content).toContain("module");
+	});
+
+	it("fetches hashicorp/random provider", async () => {
+		const result = await handleTerraform("https://registry.terraform.io/providers/hashicorp/random", 20);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("terraform");
+		expect(result?.content).toContain("random");
 	});
 });

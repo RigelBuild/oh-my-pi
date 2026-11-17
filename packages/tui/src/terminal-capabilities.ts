@@ -1,6 +1,5 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
-import { writeTerminalSequence } from "./active-terminal";
 import { sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
 import {
 	detectKittyUnicodePlaceholdersSupport,
@@ -40,8 +39,6 @@ export type TerminalId =
 	| "orca"
 	| "otty"
 	| "rio"
-	| "tern"
-	| "monstar"
 	| "base"
 	| "trueColor";
 
@@ -253,17 +250,17 @@ export class TerminalInfo {
 		// has that the agent finished or is waiting for input. `Bell` protocol
 		// already self-flags via tmux's bell monitoring, so leave it alone.
 		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideTmux()) {
-			writeTerminalSequence(`${wrapTmuxPassthrough(formatted)}\x07`);
+			process.stdout.write(`${wrapTmuxPassthrough(formatted)}\x07`);
 			return;
 		}
 		// Zellij drops OSC 9/99 and has no DCS passthrough envelope, but raises its
 		// `[!]` bell flag on a bare BEL — the same backgrounded-pane signal tmux
 		// users get. So follow the (Zellij-swallowed) OSC with a plain BEL.
 		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideZellij()) {
-			writeTerminalSequence(`${formatted}\x07`);
+			process.stdout.write(`${formatted}\x07`);
 			return;
 		}
-		writeTerminalSequence(formatted);
+		process.stdout.write(formatted);
 		// VTE-family terminals (Ptyxis, GNOME Terminal, Tilix, …) plus Alacritty
 		// and bare xterm-on-Wayland have no in-band escape that surfaces an
 		// arbitrary desktop toast (#3685). When the chosen `notifyProtocol` is
@@ -283,14 +280,6 @@ export class TerminalInfo {
  */
 export function isInsideZellij(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	return Boolean(env.ZELLIJ);
-}
-
-/**
- * Whether the agent process runs in an SSH session, so the terminal emulator
- * is remote and host-local input/keyboard modes cannot be assumed.
- */
-export function isSshSession(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	return Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
 }
 
 export function isNotificationSuppressed(): boolean {
@@ -415,7 +404,6 @@ export function shouldEnableSynchronizedOutputByDefault(
 	switch (terminalId) {
 		case "kitty":
 		case "ghostty":
-		case "monstar":
 		case "wezterm":
 		case "iterm2":
 		case "alacritty":
@@ -481,7 +469,6 @@ export function detectStyledUnderlineSupport(terminalId: TerminalId, env: NodeJS
 	switch (terminalId) {
 		case "kitty":
 		case "ghostty":
-		case "monstar":
 		case "wezterm":
 			return true;
 		case "iterm2": {
@@ -527,15 +514,11 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  * Policy (highest precedence first):
  *   1. Explicit user override (`PI_NO_HYPERLINKS=1` off, `PI_FORCE_HYPERLINKS=1`
  *      on). Opt-out wins ties.
- *   2. Herdr pane with no nested screen/tmux: on. Herdr hides the outer
- *      terminal (`TERM=xterm-256color`, no `TERM_PROGRAM`), but it renders
- *      OSC 8 in its own grid and opens links itself on Ctrl+click, so the
- *      outer terminal's support does not matter.
- *   3. Static terminal capability — terminals whose {@link TerminalInfo} marks
+ *   2. Static terminal capability — terminals whose {@link TerminalInfo} marks
  *      `hyperlinks: false` (e.g. `base`) stay off unless the user forced on.
- *   4. GNU screen's explicit session marker (`STY`) always off, even if tmux is
+ *   3. GNU screen's explicit session marker (`STY`) always off, even if tmux is
  *      also present: a screen layer anywhere in the path cannot forward OSC 8.
- *   5. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
+ *   4. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
  *      `TERM_PROGRAM_VERSION` (tmux 3.4 stores OSC 8 as a cell attribute and
  *      forwards it to outer terminals whose `terminal-features` include
  *      `hyperlinks`). Older or unknown versions stay off; on outer terminals
@@ -543,11 +526,11 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  *      identical to today. Checked before the screen-family TERM heuristic
  *      because tmux's historical `default-terminal` is `screen-256color`, so
  *      `TERM=screen*` inside a tmux session must NOT short-circuit to off.
- *   6. screen-family TERM without `TMUX` always off: screen never gained OSC 8
+ *   5. screen-family TERM without `TMUX` always off: screen never gained OSC 8
  *      support.
- *   7. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
+ *   6. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
  *      no version available, so off.
- *   8. Otherwise honor the static terminal capability.
+ *   7. Otherwise honor the static terminal capability.
  */
 export function shouldEnableHyperlinksByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -555,8 +538,6 @@ export function shouldEnableHyperlinksByDefault(
 ): boolean {
 	const override = hyperlinksUserOverride(env);
 	if (override !== null) return override;
-
-	if (isInsideHerdr(env) && !env.STY && !env.TMUX) return true;
 
 	if (!getTerminalInfo(terminalId).hyperlinks) return false;
 
@@ -711,24 +692,6 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
 	// the conservative defaults.
 	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
-	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
-	// implements Kitty graphics, OSC 8 and OSC 9/99 notifications. Whether omp
-	// renders natively (Tern Surface Protocol) is decided by the `hello`
-	// handshake alone, never by this identity.
-	tern: new TerminalInfo("tern", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
-	// Monstar (rockorager/monstar) is a Wayland terminal built on libghostty. It
-	// sets TERM=monstar and answers XTVERSION with `monstar <version>`. It
-	// documents Kitty graphics with Unicode placeholders, OSC 8 hyperlinks, and
-	// synchronized output. libghostty reports Hangul Jamo as 2 cells, and the
-	// Monstar renderer draws curly underlines in the SGR 58 underline color, so
-	// the id-keyed allowlists treat Monstar like Ghostty.
-	// Monstar clears OSC 9;4 progress after 15 s without an update, so it also
-	// gets the Ghostty progress keepalive. The Ghostty initial image delay stays
-	// Ghostty-only: it works around a Ghostty app startup race, not libghostty.
-	// Monstar turns OSC 9 into a D-Bus notification with a default action;
-	// activating it focuses the Monstar window. The BEL path uses omp's own
-	// `notify-send` fallback instead, which cannot focus a window.
-	monstar: new TerminalInfo("monstar", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, false, false, false, 2),
 });
 
 /** Resolve terminal identity from environment markers used by common emulators. */
@@ -749,8 +712,6 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		if (caseEq(program, "orca")) return "orca";
 		if (caseEq(program, "otty")) return "otty";
 		if (caseEq(program, "rio")) return "rio";
-		if (caseEq(program, "tern")) return "tern";
-		if (caseEq(program, "monstar")) return "monstar";
 		return null;
 	}
 
@@ -782,7 +743,6 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	if (clientProgramId) return clientProgramId;
 
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";
-	if (TERM && caseEq(TERM, "monstar")) return "monstar";
 
 	if (COLORTERM) {
 		if (caseEq(COLORTERM, "truecolor") || caseEq(COLORTERM, "24bit")) return "trueColor";
@@ -933,13 +893,6 @@ export interface ImageRenderOptions {
 	placementId?: number;
 	/** When true (Kitty + {@link imageId}), also return the one-time transmit sequence. */
 	includeTransmit?: boolean;
-	/**
-	 * SIXEL sequence for the target pixel size renderImage computes, so the
-	 * caller can encode off the JS thread: answer `undefined` while the encode
-	 * is pending (the image's rows stay reserved) and `null` once it failed.
-	 * Without a provider, renderImage encodes synchronously.
-	 */
-	sixel?: (widthPx: number, heightPx: number) => string | null | undefined;
 }
 
 // Default cell dimensions - updated by TUI when terminal responds to query
@@ -1340,19 +1293,6 @@ export function getImageDimensions(base64Data: string, mimeType: string): ImageD
 	return null;
 }
 
-/**
- * SIXEL sequence for `base64Data` at the given pixel size, encoded on the JS
- * thread; `null` when the encode fails. For output that cannot wait for an
- * off-thread encode.
- */
-export function encodeSixelNow(base64Data: string, widthPx: number, heightPx: number): string | null {
-	try {
-		return encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx);
-	} catch {
-		return null;
-	}
-}
-
 export function renderImage(
 	base64Data: string,
 	imageDimensions: ImageDimensions,
@@ -1406,28 +1346,29 @@ export function renderImage(
 	}
 
 	if (TERMINAL.imageProtocol === ImageProtocol.Sixel) {
-		// SIXEL encodes in 6-pixel vertical bands. A height that is not a
-		// multiple of 6 is padded with transparent rows, but the terminal
-		// still allocates cell rows for the padded height. When the padded
-		// height crosses a cell boundary the terminal uses one more row
-		// than fit.rows, so the next line of content overwrites the bottom
-		// of the image — a visible slice stripped from the image. Round the
-		// encode height DOWN to the largest multiple of 6 that fits within
-		// the requested row budget, so the band boundary aligns without
-		// padding and the reserved row count never exceeds fit.rows. Scale
-		// the width by the same ratio so resize_exact preserves the aspect
-		// ratio instead of squashing the image vertically.
-		const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
-		const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
-		const heightScale = targetHeightPx / rawHeightPx;
-		const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
-		const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
-		const sequence = options.sixel
-			? options.sixel(targetWidthPx, targetHeightPx)
-			: encodeSixelNow(base64Data, targetWidthPx, targetHeightPx);
-		if (sequence === null) return null;
-		// Undefined while the provider's encode is pending: the rows stay reserved.
-		return { sequence, rows };
+		try {
+			// SIXEL encodes in 6-pixel vertical bands. A height that is not a
+			// multiple of 6 is padded with transparent rows, but the terminal
+			// still allocates cell rows for the padded height. When the padded
+			// height crosses a cell boundary the terminal uses one more row
+			// than fit.rows, so the next line of content overwrites the bottom
+			// of the image — a visible slice stripped from the image. Round the
+			// encode height DOWN to the largest multiple of 6 that fits within
+			// the requested row budget, so the band boundary aligns without
+			// padding and the reserved row count never exceeds fit.rows. Scale
+			// the width by the same ratio so resize_exact preserves the aspect
+			// ratio instead of squashing the image vertically.
+			const rawHeightPx = Math.max(1, fit.rows * cellDims.heightPx);
+			const targetHeightPx = Math.max(6, Math.floor(rawHeightPx / 6) * 6);
+			const heightScale = targetHeightPx / rawHeightPx;
+			const targetWidthPx = Math.max(1, Math.round(fit.columns * cellDims.widthPx * heightScale));
+			const rows = Math.max(1, Math.ceil(targetHeightPx / cellDims.heightPx));
+			const decoded = new Uint8Array(Buffer.from(base64Data, "base64"));
+			const sequence = encodeSixel(decoded, targetWidthPx, targetHeightPx);
+			return { sequence, rows };
+		} catch {
+			return null;
+		}
 	}
 	if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
 		const sequence = encodeITerm2(base64Data, {

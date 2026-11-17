@@ -1,7 +1,7 @@
 /**
  * Hook runner - executes hooks and manages their lifecycle.
  */
-import { type AgentMessage, isNonBlankContext, joinAdditionalContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { SessionManager } from "../../session/session-manager";
@@ -280,7 +280,6 @@ export class HookRunner {
 			| SessionCompactingResult
 			| ToolResultEventResult
 			| undefined;
-		const toolResultContexts: string[] = [];
 
 		for (const hook of this.hooks) {
 			const handlers = hook.handlers.get(event.type);
@@ -299,19 +298,9 @@ export class HookRunner {
 						}
 					}
 
-					// For tool_result events, merge overrides per field (a later handler's defined
-					// field wins; undefined leaves earlier patches intact, as in ExtensionRunner) and
-					// keep every handler's passive context in registration order. A details-only,
-					// isError-only or context-only return must not erase an earlier content redaction.
+					// For tool_result events, capture the result
 					if (event.type === "tool_result" && handlerResult) {
-						const toolResult = handlerResult as ToolResultEventResult;
-						const patch: ToolResultEventResult = { ...(result as ToolResultEventResult | undefined) };
-						if (toolResult.content !== undefined) patch.content = toolResult.content;
-						if (toolResult.details !== undefined) patch.details = toolResult.details;
-						if (toolResult.isError !== undefined) patch.isError = toolResult.isError;
-						if (Object.keys(patch).length > 0) result = patch;
-						if (isNonBlankContext(toolResult.additionalContext))
-							toolResultContexts.push(toolResult.additionalContext);
+						result = handlerResult as ToolResultEventResult;
 					}
 					if (event.type === "session.compacting" && handlerResult) {
 						result = handlerResult as SessionCompactingResult;
@@ -327,8 +316,6 @@ export class HookRunner {
 			}
 		}
 
-		const additionalContext = joinAdditionalContext(toolResultContexts);
-		if (additionalContext !== undefined) return { ...result, additionalContext };
 		return result;
 	}
 

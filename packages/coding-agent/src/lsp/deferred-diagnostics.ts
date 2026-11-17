@@ -3,14 +3,15 @@ import { getDiagnosticsLedger } from "./diagnostics-ledger";
 import type { FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import type { WritethroughDeferredHandle } from "./index";
 
-import { cfgLspDiagnosticsDeduplicate } from "./settings";
-
 /** Coordinates late LSP diagnostics for one mutation tool instance. */
 export class DeferredDiagnostics {
 	readonly #pendingFetches = new Map<string, AbortController>();
 	readonly #fallbackVersions = new Map<string, number>();
 
-	constructor(private readonly session: ToolSession) {}
+	constructor(
+		private readonly session: ToolSession,
+		private readonly deduplicate: boolean,
+	) {}
 
 	/** Begin a file mutation and return the handle consumed by LSP writethrough. */
 	begin(path: string): WritethroughDeferredHandle {
@@ -39,10 +40,8 @@ export class DeferredDiagnostics {
 	}
 
 	#inject(path: string, diagnostics: FileDiagnosticsResult, mutationVersion: number): void {
-		// Read at delivery time so `lsp.diagnosticsDeduplicate` changes apply to in-flight fetches too.
-		const deduplicate = cfgLspDiagnosticsDeduplicate.get(this.session.settings);
-		const effective = deduplicate ? getDiagnosticsLedger(this.session).reduce(path, diagnostics) : diagnostics;
-		if (deduplicate && effective.messages.length === 0) return;
+		const effective = this.deduplicate ? getDiagnosticsLedger(this.session).reduce(path, diagnostics) : diagnostics;
+		if (this.deduplicate && effective.messages.length === 0) return;
 
 		const entry: DeferredDiagnosticsEntry = {
 			path,

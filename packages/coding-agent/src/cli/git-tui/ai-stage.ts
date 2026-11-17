@@ -15,7 +15,10 @@ import type { VcsHunkSelection } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { parseFileDiffs, parseFileHunks } from "../../commit/git/diff";
-import { openStandaloneJudge } from "../../judgment/standalone";
+import { ModelRegistry } from "../../config/model-registry";
+import { Settings } from "../../config/settings";
+import { resolveJudge } from "../../judgment";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
 import { mapWithConcurrencyLimitAllSettled } from "../../task/parallel";
 import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
 import type { AiStageOutcome } from "@oh-my-pi/pi-tui/apps/git/git-tui";
@@ -107,8 +110,18 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 	if (tracked.length === 0 && untracked.length === 0) throw new Error("No unstaged changes to filter");
 
 	onProgress?.("Resolving model…");
-	const { judge, close } = await openStandaloneJudge(cwd, "git_stage");
+	const settings = await Settings.init({ cwd });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
+		const registry = new ModelRegistry(authStorage);
+		await registry.refresh();
+		await loadCliExtensionProviders(registry, settings, cwd);
+		const judge = resolveJudge({
+			settings,
+			registry,
+			sessionId: Bun.randomUUIDv7(),
+		});
+
 		onProgress?.("Reading changes…");
 		const rawDiff = tracked.length > 0 ? await repo.diffText({ files: tracked.map(file => file.path) }, signal) : "";
 		const deleted = new Set(tracked.flatMap(file => (file.kind === "deleted" ? [file.path] : [])));
@@ -255,7 +268,7 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 			wholeFiles: binaryAccepted.length + untrackedAccepted.length,
 		};
 	} finally {
-		close();
+		authStorage.close();
 	}
 }
 

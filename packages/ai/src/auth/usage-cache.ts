@@ -12,8 +12,8 @@ const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
 /**
  * Per-credential cool-down after a usage fetch fails. While this window is
  * active we serve the last successful value to avoid dropping the credential
- * from the report; without a previous value we return null until the
- * cooldown expires. Report invalidation does not bypass this cooldown.
+ * from the report; without a previous value we just return null and retry
+ * on the next poll. Used by UsageService.
  */
 export const USAGE_FAILURE_BACKOFF_MS = 10_000;
 /**
@@ -28,7 +28,19 @@ const USAGE_FORCE_REFRESH_TTL_MS = 5 * 60_000;
 export const DEFAULT_USAGE_REQUEST_TIMEOUT_MS = 10_000;
 
 /** A single usage fetch target; used by usage probes and the cache. */
-export type UsageRequestDescriptor = { provider: Provider; credential: UsageCredential; baseUrl?: string };
+export type UsageRequestDescriptor = {
+	provider: Provider;
+	credential: UsageCredential;
+	baseUrl?: string;
+	/**
+	 * Stored row id of the credential this request came from, when it came from
+	 * one. Carried so a report that recovers NO identity of its own still has a
+	 * stable, non-secret discriminator downstream — see the `credentialKey`
+	 * stamp in `UsageService`. Absent for env- and override-derived
+	 * credentials, which have no row.
+	 */
+	credentialId?: number;
+};
 /** Forced-refresh markers active for one reports pass; used by UsageService. */
 export type ForcedUsageRefresh = { all: boolean; providers: Set<Provider> };
 /** Cached value and its logical expiry; used by UsageService. */
@@ -65,9 +77,6 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
-		region: credential.region,
-		inferenceRegion: credential.inferenceRegion,
-		activeOrganizationId: credential.activeOrganizationId,
 	};
 }
 
@@ -84,9 +93,6 @@ export function usageCacheIdentity(credential: UsageCredential): string {
 	if (projectId) parts.push(`project:${projectId}`);
 	const enterpriseUrl = credential.enterpriseUrl?.trim().toLowerCase();
 	if (enterpriseUrl) parts.push(`enterprise:${enterpriseUrl}`);
-	if (credential.region) parts.push(`region:${credential.region}`);
-	if (credential.inferenceRegion) parts.push(`inference:${credential.inferenceRegion}`);
-	if (credential.activeOrganizationId) parts.push(`selected-org:${credential.activeOrganizationId}`);
 	// Only fall back to a secret-derived key when a stable account identifier is
 	// unavailable. Including the token hash when accountId/email/orgId are present
 	// causes cache misses on every OAuth refresh — usage data is per-account (or
@@ -124,9 +130,6 @@ export function oauthUsageRequest(
 /** Store-backed usage report cache: keys, epoch, force-refresh markers, invalidation; used by AuthStorage. */
 export class UsageCache {
 	#epoch = 0;
-	#recoveryEpochs: Map<Provider, number> = new Map();
-	#refreshEpochs: Map<Provider, number> = new Map();
-	#allRefreshEpoch = 0;
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
@@ -155,30 +158,6 @@ export class UsageCache {
 
 	bumpEpoch(): void {
 		this.#epoch += 1;
-	}
-
-	/** Identifies confirmed recoveries that supersede an in-flight failed probe. */
-	recoveryEpoch(provider: Provider): number {
-		return this.#recoveryEpochs.get(provider) ?? 0;
-	}
-
-	/**
-	 * Changes when a user refresh, confirmed reset, or usage-implementation swap
-	 * makes an in-flight probe too old to answer. Block marks do not change it:
-	 * they stop a racing report from being cached, never trigger a re-probe.
-	 */
-	refreshEpoch(provider: Provider): number {
-		return this.#allRefreshEpoch + (this.#refreshEpochs.get(provider) ?? 0);
-	}
-
-	#bumpRefreshEpoch(provider: Provider | undefined): void {
-		if (provider === undefined) this.#allRefreshEpoch += 1;
-		else this.#refreshEpochs.set(provider, (this.#refreshEpochs.get(provider) ?? 0) + 1);
-	}
-
-	/** Failure cooldowns survive report invalidation and process restarts. */
-	failureKey(reportKey: string): string {
-		return `failure:${reportKey}`;
 	}
 
 	get<T>(key: string): UsageCacheEntry<T> | undefined {
@@ -293,37 +272,19 @@ export class UsageCache {
 	/**
 	 * Force the next usage fetch for `provider` to bypass the 5-min cache, so
 	 * `/usage` reflects a freshly-redeemed reset instead of stale numbers.
-	 * `resetSpentCredentialId` also forgets that credential's cached saved-reset
-	 * block, so a failed follow-up reset probe cannot carry the pre-spend
-	 * inventory forward.
 	 */
-	invalidate(provider: string, baseUrl?: string, options?: { resetSpentCredentialId?: number }): void {
+	invalidate(provider: string, baseUrl?: string): void {
 		this.#epoch += 1;
 		const expired = Date.now() - 1;
 		for (const entry of this.#pool.entries(provider)) {
 			if (entry.credential.type !== "oauth") continue;
 			const cacheKey = this.reportKey(oauthUsageRequest(provider, entry.credential, baseUrl));
-			let value = this.getStale<UsageReport | null>(cacheKey)?.value ?? null;
-			if (value?.resetCredits && entry.id === options?.resetSpentCredentialId) {
-				const { resetCredits: _spent, ...rest } = value;
-				value = rest;
-			}
-			this.set(cacheKey, { value, expiresAt: expired });
+			const existing = this.getStale<UsageReport | null>(cacheKey);
+			this.set(cacheKey, {
+				value: existing?.value ?? null,
+				expiresAt: expired,
+			});
 		}
-	}
-
-	/** A confirmed reset permits one fresh probe even during a pre-reset failure cooldown. */
-	invalidateAfterReset(provider: Provider, baseUrl?: string, options?: { resetSpentCredentialId?: number }): void {
-		this.#recoveryEpochs.set(provider, this.recoveryEpoch(provider) + 1);
-		this.#bumpRefreshEpoch(provider);
-		if (!this.deletePrefix(`failure:report:${this.#usageCacheProviderKey(provider)}:`)) {
-			const keys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
-			for (const entry of this.#pool.entries(provider)) {
-				keys.add(this.reportKey(usageRequest(provider, buildUsageCredential(entry.credential), baseUrl)));
-			}
-			for (const key of keys) this.set(this.failureKey(key), { value: null, expiresAt: 0 });
-		}
-		this.invalidate(provider, baseUrl, options);
 	}
 
 	/**
@@ -332,7 +293,6 @@ export class UsageCache {
 	 */
 	invalidateForProvider(provider: Provider): void {
 		this.#epoch += 1;
-		this.#bumpRefreshEpoch(provider);
 		const expired = Date.now() - 1;
 		const prefix = `report:${this.#usageCacheProviderKey(provider)}:`;
 		if (this.deletePrefix(prefix)) return;
@@ -360,7 +320,6 @@ export class UsageCache {
 		collectRequests: () => Promise<UsageRequestDescriptor[]>,
 	): Promise<void> {
 		this.#epoch += 1;
-		this.#bumpRefreshEpoch(provider);
 		const prefix = provider ? `report:${this.#usageCacheProviderKey(provider)}:` : "report:";
 		if (!this.deletePrefix(prefix)) {
 			// Third-party stores may not support prefix deletion. Clear every active

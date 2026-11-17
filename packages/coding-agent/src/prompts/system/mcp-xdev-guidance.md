@@ -1,9 +1,9 @@
 ## MCP Tool Routes
 
 {{#if tools.length}}
-Execute each mounted tool: write JSON arguments to its path.{{#if hasCatalogOnlyTools}} Paths with a summary: read for docs + JSON schema before first use.{{/if}}
+Execute each mounted tool: write JSON arguments to its path.
 {{#each tools}}
-- {{mcpToolName}} → `{{path}}`{{#if summary}} — {{summary}}{{/if}}
+- {{mcpToolName}} → `{{path}}`
 {{/each}}
 {{/if}}
 {{#if hasOmittedTools}}

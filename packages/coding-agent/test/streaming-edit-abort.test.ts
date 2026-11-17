@@ -26,6 +26,7 @@ function createGuard(
 		} as Agent,
 		settings,
 		sessionManager: { getCwd: () => cwd } as SessionManager,
+		obfuscator: undefined,
 		model: () => undefined,
 		isDisposed: () => false,
 		promptGeneration: () => 0,

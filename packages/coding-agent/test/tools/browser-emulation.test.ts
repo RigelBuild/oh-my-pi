@@ -18,7 +18,6 @@ const session: ToolSession = {
 		"browser.enabled": true,
 		"browser.headless": true,
 		"browser.cmux": false,
-		"browser.tern": false,
 		"tools.maxTimeout": 0,
 	}),
 };

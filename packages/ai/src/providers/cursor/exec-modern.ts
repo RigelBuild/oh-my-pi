@@ -74,7 +74,7 @@ import type { ToolResultMessage } from "../../types";
  * and their translation are consumed together.
  */
 export {
-	cursorExecReadPath,
+	cursorEditOwnedReadPath,
 	cursorRawReadPath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
@@ -86,7 +86,6 @@ export {
 	piReadPath,
 	piReadPathHasRange,
 	piTimeout,
-	shellTimeoutSeconds,
 } from "../cursor-pi-args";
 
 /** Flatten a tool result's content into the single `output` string the Pi frames carry. */

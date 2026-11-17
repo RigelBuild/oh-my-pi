@@ -11,7 +11,6 @@ import {
 } from "../src/blob-broker/uploader-runtime";
 import { createLegacyUploader } from "../src/blob-broker/uploaders-legacy";
 import { createSelfHostedUploader } from "../src/blob-broker/uploaders-self-hosted";
-import { compileFakeExecutable } from "./helpers/fake-executable";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const request: BlobUploadRequest = {
@@ -79,17 +78,11 @@ describe("self-hosted uploader wire contracts", () => {
 	it("does not corrupt FTP command stdin or mis-map the remote path to its public URL", async () => {
 		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ftp-uploader-"));
 		try {
+			const executable = path.join(temp, "fake-curl");
 			const argsFile = path.join(temp, "args");
 			const bodyFile = path.join(temp, "body");
-			// Compiled on Windows: the percent-encoded upload URL cannot pass through a .cmd launcher.
-			const executable = await compileFakeExecutable(
-				temp,
-				"fake-curl",
-				`import * as fs from "node:fs";
-fs.writeFileSync(${JSON.stringify(argsFile)}, process.argv.slice(2).map(arg => \`\${arg}\\n\`).join(""));
-fs.writeFileSync(${JSON.stringify(bodyFile)}, new Uint8Array(await Bun.stdin.arrayBuffer()));
-`,
-			);
+			fs.writeFileSync(executable, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argsFile}'\ncat > '${bodyFile}'\n`);
+			fs.chmodSync(executable, 0o755);
 			const uploader = requiredUploader(
 				createSelfHostedUploader(
 					"ftp",

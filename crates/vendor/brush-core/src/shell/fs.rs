@@ -13,37 +13,29 @@ use crate::{
 };
 
 impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
-	/// Sets the shell's current working directory to the given path, which
-	/// must name a directory in the shell's filesystem. Virtual (`scheme://`)
-	/// directories keep their URL spelling.
+	/// Sets the shell's current working directory to the given path.
 	///
 	/// # Arguments
 	///
 	/// * `target_dir` - The path to set as the working directory.
-	pub async fn set_working_dir(
-		&mut self,
-		target_dir: impl AsRef<Path>,
-	) -> Result<(), error::Error> {
+	pub fn set_working_dir(&mut self, target_dir: impl AsRef<Path>) -> Result<(), error::Error> {
 		let abs_path = self.absolute_path(target_dir.as_ref());
 
-		// Native directories are checked as spelled and then normalized (but
-		// not canonicalized, so symlinks are not resolved, preserving logical
-		// `cd`), with 8.3 short-name components (e.g. `ADMINI~1`) expanded so
-		// the stored working_dir has one spelling. Virtual providers only ever
-		// see the lexically normalized path: `..` in a URL is not theirs to
-		// resolve.
-		let native = self.filesystem.is_native_local(&abs_path);
-		let checked_path = if native { abs_path } else { pi_vfs::normalize_lexically(&abs_path) };
-
-		if !self.filesystem.metadata(&checked_path).await?.is_dir() {
-			return Err(error::ErrorKind::NotADirectory(checked_path).into());
+		match std::fs::metadata(&abs_path) {
+			Ok(m) => {
+				if !m.is_dir() {
+					return Err(error::ErrorKind::NotADirectory(abs_path).into());
+				}
+			},
+			Err(e) => {
+				return Err(e.into());
+			},
 		}
 
-		let cleaned_path = if native {
-			crate::sys::fs::expand_to_long_path(&checked_path.normalize())
-		} else {
-			checked_path
-		};
+		// Normalize the path (but don't canonicalize it), then expand 8.3
+		// short-name components (e.g. `ADMINI~1`) so the stored working_dir has
+		// one spelling. Symlinks are not resolved, preserving logical `cd`.
+		let cleaned_path = crate::sys::fs::expand_to_long_path(&abs_path.normalize());
 
 		let pwd = cleaned_path.to_string_lossy().to_string();
 
@@ -92,17 +84,20 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		}
 	}
 
-	/// Finds every executable named `filename` in the shell's current PATH, in
-	/// PATH order.
+	/// Finds executables in the shell's current default PATH, matching the given
+	/// glob pattern.
 	///
 	/// # Arguments
 	///
-	/// * `filename` - The name of the executable to look for.
-	pub async fn find_executables_in_path(&self, filename: &str) -> Vec<PathBuf> {
+	/// * `required_glob_pattern` - The glob pattern to match against.
+	pub fn find_executables_in_path<'a>(
+		&'a self,
+		filename: &'a str,
+	) -> impl Iterator<Item = PathBuf> + 'a {
 		let path_var = self.env.get_str("PATH", self).unwrap_or_default();
 		let paths = crate::sys::fs::split_paths(path_var.as_ref());
 
-		pathsearch::find_executables(&self.filesystem, paths, Path::new(filename)).await
+		pathsearch::search_for_executable(paths, filename)
 	}
 
 	/// Finds executables in the shell's current default PATH, with filenames
@@ -111,21 +106,15 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// # Arguments
 	///
 	/// * `filename_prefix` - The prefix to match against executable filenames.
-	pub async fn find_executables_in_path_with_prefix(
+	pub fn find_executables_in_path_with_prefix(
 		&self,
 		filename_prefix: &str,
 		case_insensitive: bool,
-	) -> Vec<PathBuf> {
+	) -> impl Iterator<Item = PathBuf> {
 		let path_var = self.env.get_str("PATH", self).unwrap_or_default();
 		let paths = crate::sys::fs::split_paths(path_var.as_ref());
 
-		pathsearch::find_executables_with_prefix(
-			&self.filesystem,
-			paths,
-			filename_prefix,
-			case_insensitive,
-		)
-		.await
+		pathsearch::search_for_executable_with_prefix(paths, filename_prefix, case_insensitive)
 	}
 
 	/// Determines whether the given filename is the name of an executable in one
@@ -135,13 +124,13 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// # Arguments
 	///
 	/// * `candidate_name` - The name of the file to look for.
-	pub async fn find_first_executable_in_path<S: AsRef<str>>(
+	pub fn find_first_executable_in_path<S: AsRef<str>>(
 		&self,
 		candidate_name: S,
 	) -> Option<PathBuf> {
 		let path_var = self.env_str("PATH").unwrap_or_default();
 		let paths = crate::sys::fs::split_paths(path_var.as_ref());
-		pathsearch::find_executable(&self.filesystem, paths, Path::new(candidate_name.as_ref())).await
+		pathsearch::search_for_executable(paths, candidate_name.as_ref()).next()
 	}
 
 	/// Uses the shell's hash-based path cache to check whether the given
@@ -152,7 +141,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// # Arguments
 	///
 	/// * `candidate_name` - The name of the file to look for.
-	pub async fn find_first_executable_in_path_using_cache<S: AsRef<str>>(
+	pub fn find_first_executable_in_path_using_cache<S: AsRef<str>>(
 		&mut self,
 		candidate_name: S,
 	) -> Option<PathBuf>
@@ -161,7 +150,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	{
 		if let Some(cached_path) = self.program_location_cache.get(&candidate_name) {
 			Some(cached_path)
-		} else if let Some(found_path) = self.find_first_executable_in_path(&candidate_name).await {
+		} else if let Some(found_path) = self.find_first_executable_in_path(&candidate_name) {
 			self
 				.program_location_cache
 				.set(candidate_name, found_path.clone());
@@ -171,29 +160,23 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		}
 	}
 
-	/// Gets the absolute form of the given path. Virtual (`scheme://`) paths
-	/// are already absolute; relative paths join the working directory, which
-	/// may itself be virtual.
+	/// Gets the absolute form of the given path.
 	///
 	/// # Arguments
 	///
 	/// * `path` - The path to get the absolute form of.
 	pub fn absolute_path(&self, path: impl AsRef<Path>) -> PathBuf {
-		let path = path.as_ref();
-		if pi_vfs::is_virtual_path(path) {
-			return path.to_owned();
-		}
-		let normalized_path = crate::sys::fs::normalize_shell_path(path);
+		let normalized_path = crate::sys::fs::normalize_shell_path(path.as_ref());
 		let path = normalized_path.as_ref();
 		if path.as_os_str().is_empty() || path.is_absolute() {
 			path.to_owned()
 		} else {
-			pi_vfs::join_path(self.working_dir(), path)
+			self.working_dir().join(path)
 		}
 	}
 
-	/// Opens the given file through the shell's filesystem, using the context
-	/// of this shell and the provided execution parameters.
+	/// Opens the given file, using the context of this shell and the provided
+	/// execution parameters.
 	///
 	/// # Arguments
 	///
@@ -201,9 +184,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// * `path` - The path to the file to open; may be relative to the shell's
 	///   working directory.
 	/// * `params` - Execution parameters.
-	pub(crate) async fn open_file(
+	pub(crate) fn open_file(
 		&self,
-		options: &pi_vfs::OpenOptions,
+		options: &std::fs::OpenOptions,
 		path: impl AsRef<Path>,
 		params: &ExecutionParameters,
 	) -> Result<openfiles::OpenFile, std::io::Error> {
@@ -211,9 +194,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		// (e.g. /dev/null on Windows, which needs to open NUL instead).
 		// This is checked before absolute_path so that paths like /dev/null
 		// are intercepted on platforms where they aren't valid native paths.
-		if let Some(result) = crate::sys::fs::try_open_special_file(path.as_ref())
-			&& self.filesystem.is_native_local(path.as_ref())
-		{
+		if let Some(result) = crate::sys::fs::try_open_special_file(path.as_ref()) {
 			return result.map(openfiles::OpenFile::from);
 		}
 
@@ -236,7 +217,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			{
 				Err(descriptor.unavailable_error())
 			},
-			_ => Ok(self.filesystem.open_with(&path_to_open, options).await?.into()),
+			_ => Ok(options.open(path_to_open)?.into()),
 		}
 	}
 

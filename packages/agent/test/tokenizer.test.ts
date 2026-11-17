@@ -35,6 +35,13 @@ describe("Tokenizer", () => {
 		expect(tokenizer.countTokens("hello world")).toBe(3);
 	});
 
+	test("encoding is fixed at construction from the catalog model", () => {
+		expect(new Tokenizer({ tokenizer: "claude-v47" }).encoding).toBe(natives.Encoding.ClaudeV47);
+		expect(new Tokenizer({ tokenizer: "claude-v5" }).encoding).toBe(natives.Encoding.ClaudeV5);
+		expect(new Tokenizer({}).encoding).toBeNull();
+		expect(new Tokenizer(undefined).encoding).toBeNull();
+	});
+
 	test("separate instances do not interfere with each other", () => {
 		const t1 = new Tokenizer({ tokenizer: "claude-v47" });
 		const t2 = new Tokenizer({ tokenizer: "qwen3" });
@@ -66,8 +73,6 @@ describe("countTokens with modes", () => {
 	test("strict mode uses native counting regardless of encoding", () => {
 		const noEncoding = new Tokenizer();
 		expect(noEncoding.countTokens("hello world", "strict")).toBe(2);
-		expect(noEncoding.countTokens("hello world", "approximate")).toBe(3);
-		expect(noEncoding.countTokens("hello world", "upperbound")).toBe(11);
 		const claudeEncoding = new Tokenizer({ tokenizer: "claude-v47" });
 		expect(claudeEncoding.countTokens("hello world", "strict")).toBeGreaterThan(0);
 	});
@@ -81,27 +86,8 @@ describe("countTokens with modes", () => {
 		expect(claude.countTokens("hello world", "strict")).not.toBe(generic.countTokens("hello world", "strict"));
 	});
 
-	test("counts current fragment values without merging boundaries or retaining mutable arrays", () => {
-		const tokenizer = new Tokenizer();
-		const fragments = ["hel", "lo", "こんにちは 🌏", "e\u0301\u0000\ud800", ""];
-		const initial = natives.countTokens(fragments);
-		expect(tokenizer.countTokens(fragments, "strict")).toBe(initial);
-		expect(tokenizer.countTokens([...fragments], "strict")).toBe(initial);
-		for (const fragment of fragments) {
-			expect(tokenizer.countTokens(fragment, "strict")).toBe(natives.countTokens(fragment));
-		}
-
-		fragments[1] = "changed streaming content";
-		fragments.push("hel");
-		expect(tokenizer.countTokens(fragments, "strict")).toBe(natives.countTokens(fragments));
-		fragments.splice(0, 4);
-		expect(tokenizer.countTokens(fragments, "strict")).toBe(natives.countTokens(fragments));
-		fragments.length = 0;
-		expect(tokenizer.countTokens(fragments, "strict")).toBe(0);
-	});
-
 	test("falls back conservatively when native encoding is unknown", () => {
-		const nativeCount = vi.spyOn(natives, "countTokens").mockImplementation(() => {
+		vi.spyOn(natives, "countTokens").mockImplementation(() => {
 			throw new Error('value "DeepSeekV3" does not match any variant of enum Encoding');
 		});
 		const tokenizer = new Tokenizer({ tokenizer: "deepseek-v3" });
@@ -112,26 +98,15 @@ describe("countTokens with modes", () => {
 			tokens: 40,
 			exact: false,
 		});
-		expect(tokenizer.checkTokenBudget([], -1)).toEqual({ fits: false, tokens: 0, exact: false });
-
-		// A failed native attempt must never seed an "exact" fallback entry.
-		nativeCount.mockRestore();
-		const exact = natives.countTokens("hello world", tokenizer.encoding);
-		expect(tokenizer.countTokens("hello world", "strict")).toBe(exact);
-		expect(tokenizer.checkTokenBudget("hello world", 0)).toEqual({
-			fits: false,
-			tokens: exact,
-			exact: true,
-		});
 	});
 
 	test("does not swallow unrelated native tokenizer errors", () => {
 		vi.spyOn(natives, "countTokens").mockImplementation(() => {
 			throw new Error("native tokenizer exploded");
 		});
-		const tokenizer = new Tokenizer({ tokenizer: "deepseek-v3" });
-		expect(() => tokenizer.countTokens("hello world", "strict")).toThrow("native tokenizer exploded");
-		expect(() => tokenizer.countTokens(["hello world"], "strict")).toThrow("native tokenizer exploded");
+		expect(() => new Tokenizer({ tokenizer: "deepseek-v3" }).countTokens("hello world", "strict")).toThrow(
+			"native tokenizer exploded",
+		);
 	});
 });
 

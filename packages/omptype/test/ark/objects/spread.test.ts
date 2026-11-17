@@ -108,3 +108,7 @@ it("errors on proto node", () => {
 		}),
 	).toThrow("object spread must resolve to an object literal (was a Date)");
 });
+
+it.todo("autocompletes shallow string");
+
+it.todo("autocompletes nested strings");

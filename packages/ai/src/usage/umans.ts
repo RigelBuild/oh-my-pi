@@ -1,5 +1,6 @@
 import { ProviderHttpError } from "../error";
 import type {
+	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
 	UsageLimit,
@@ -9,7 +10,7 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { buildUsageAmount, HOUR_MS, usageStatus } from "./shared";
+import { HOUR_MS } from "./shared";
 
 const UMANS_PROVIDER = "umans";
 const DEFAULT_ENDPOINT = "https://api.code.umans.ai";
@@ -52,6 +53,13 @@ function toFiniteNumber(value: unknown): number | undefined {
 	return value;
 }
 
+function resolveStatus(usedFraction: number | undefined): UsageStatus | undefined {
+	if (usedFraction === undefined) return undefined;
+	if (usedFraction >= 1) return "exhausted";
+	if (usedFraction >= 0.9) return "warning";
+	return "ok";
+}
+
 /**
  * Soft-cap status never reaches `exhausted`: hitting the effective-request
  * limit only means burst headroom is being consumed — Umans throttles (429)
@@ -62,6 +70,26 @@ function softCapStatus(usedFraction: number | undefined): UsageStatus | undefine
 	if (usedFraction === undefined) return undefined;
 	if (usedFraction >= 0.9) return "warning";
 	return "ok";
+}
+
+function buildAmount(args: {
+	used: number | undefined;
+	limit: number | undefined;
+	remaining: number | undefined;
+	unit: UsageAmount["unit"];
+}): UsageAmount {
+	const used = args.used;
+	const limit = args.limit;
+	const usedFraction = used !== undefined && limit !== undefined && limit > 0 ? Math.min(used / limit, 1) : undefined;
+	const remainingFraction = usedFraction !== undefined ? Math.max(1 - usedFraction, 0) : undefined;
+	return {
+		used,
+		limit,
+		remaining: args.remaining,
+		usedFraction,
+		remainingFraction,
+		unit: args.unit,
+	};
 }
 
 function buildRequestsLimits(payload: UmansUsagePayload, provider: string): UsageLimit[] {
@@ -99,7 +127,7 @@ function buildRequestsLimits(payload: UmansUsagePayload, provider: string): Usag
 	// limit still never drives exhaustion on its own: weighted headroom stays
 	// decisive (https://github.com/can1357/oh-my-pi/issues/7858).
 	if (weightedUsed === undefined || hardCap === undefined) {
-		const amount = buildUsageAmount({
+		const amount = buildAmount({
 			used: weightedUsed ?? rawUsed,
 			limit,
 			remaining: weightedUsed !== undefined ? weightedRemaining : rawRemaining,
@@ -112,7 +140,7 @@ function buildRequestsLimits(payload: UmansUsagePayload, provider: string): Usag
 				scope: { provider, windowId: window.id, shared: true },
 				window,
 				amount,
-				status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
+				status: resolveStatus(amount.usedFraction),
 			},
 		];
 	}
@@ -123,7 +151,7 @@ function buildRequestsLimits(payload: UmansUsagePayload, provider: string): Usag
 	// read as exhausted mid-window while the account still has weighted
 	// headroom (https://github.com/can1357/oh-my-pi/issues/7858). Soft cap hits
 	// warn; only the burst ceiling (`hard_cap`, raw counts) can exhaust.
-	const softAmount = buildUsageAmount({ used: weightedUsed, limit, remaining: weightedRemaining, unit: "requests" });
+	const softAmount = buildAmount({ used: weightedUsed, limit, remaining: weightedRemaining, unit: "requests" });
 	const limits: UsageLimit[] = [
 		{
 			id: "umans:requests:soft",
@@ -135,14 +163,14 @@ function buildRequestsLimits(payload: UmansUsagePayload, provider: string): Usag
 		},
 	];
 	if (hardCap !== undefined && rawUsed !== undefined) {
-		const hardAmount = buildUsageAmount({ used: rawUsed, limit: hardCap, remaining: undefined, unit: "requests" });
+		const hardAmount = buildAmount({ used: rawUsed, limit: hardCap, remaining: undefined, unit: "requests" });
 		limits.push({
 			id: "umans:requests:hard",
 			label: "Requests (burst ceiling)",
 			scope: { provider, windowId: window.id, shared: true },
 			window,
 			amount: hardAmount,
-			status: hardAmount.usedFraction === undefined ? undefined : usageStatus(hardAmount.usedFraction),
+			status: resolveStatus(hardAmount.usedFraction),
 		});
 	}
 	return limits;
@@ -152,14 +180,14 @@ function buildConcurrencyLimit(payload: UmansUsagePayload, provider: string): Us
 	const limit = toFiniteNumber(payload.limits?.concurrency?.limit);
 	const used = toFiniteNumber(payload.usage?.concurrent_sessions);
 	if (limit === undefined && used === undefined) return null;
-	const amount = buildUsageAmount({ used, limit, remaining: undefined, unit: "requests" });
+	const amount = buildAmount({ used, limit, remaining: undefined, unit: "requests" });
 	return {
 		id: "umans:concurrency",
 		label: "Concurrency",
 		// Concurrency is instantaneous, not windowed.
 		scope: { provider, windowId: "concurrency" },
 		amount,
-		status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
+		status: resolveStatus(amount.usedFraction),
 	};
 }
 

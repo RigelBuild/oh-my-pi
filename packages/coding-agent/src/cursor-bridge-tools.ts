@@ -10,7 +10,7 @@
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { EditTool } from "./edit";
-import type { ExtensionAgentIdentity, ExtensionRunner } from "./extensibility/extensions";
+import type { ExtensionRunner } from "./extensibility/extensions";
 import { ExtensionToolWrapper } from "./extensibility/extensions";
 import type { GrepToolOptions, Tool, ToolSession } from "./tools";
 import { GrepTool } from "./tools";
@@ -24,17 +24,15 @@ import { GrepTool } from "./tools";
  * constructed — so honoring them needs a fresh tool per call.
  *
  * The result is wrapped exactly like a registry tool: the approval gate runs on
- * every call site, and a per-call instance is no exception. `agent` is the
- * `ctx.agent` its extension events report (see `ExtensionToolWrapper`).
+ * every call site, and a per-call instance is no exception.
  */
 export function createBridgeGrepFactory(
 	session: ToolSession,
 	extensionRunner: ExtensionRunner,
-	agent?: ExtensionAgentIdentity,
 ): (options: GrepToolOptions) => AgentTool {
 	return options => {
 		const grepTool: Tool = new GrepTool(session, options);
-		return new ExtensionToolWrapper(grepTool, extensionRunner, agent);
+		return new ExtensionToolWrapper(grepTool, extensionRunner);
 	};
 }
 
@@ -51,13 +49,9 @@ export function createBridgeGrepFactory(
  * tool is constructed rather than looked up, so building one unconditionally
  * hands a restricted agent a mutating tool it was denied (issue #5680).
  */
-export function createBridgeEditTool(
-	session: ToolSession,
-	extensionRunner: ExtensionRunner,
-	agent?: ExtensionAgentIdentity,
-): AgentTool {
+export function createBridgeEditTool(session: ToolSession, extensionRunner: ExtensionRunner): AgentTool {
 	const editTool: Tool = new EditTool(session, "replace");
-	return new ExtensionToolWrapper(editTool, extensionRunner, agent);
+	return new ExtensionToolWrapper(editTool, extensionRunner);
 }
 
 /**

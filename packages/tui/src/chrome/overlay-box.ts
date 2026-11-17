@@ -6,9 +6,6 @@
  * (rounded corners, sharp tee/cross junctions) and the `border`/`accent` theme
  * colors so all outlined overlays read identically.
  */
-import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
-import { node } from "../native/describe";
-import { overlayCard } from "../native/overlay";
 import { type Component, visibleWidth } from "../tui";
 import { Ellipsis, truncateToWidth } from "../utils";
 import { padToWidth } from "../render/utils";
@@ -172,23 +169,11 @@ export class PanelRows implements Component {
 	}
 }
 
-const RULE_NODE: NativeNode = node("rule");
-
-/** Sentinel child rendered by {@link OverlayPanel} as a `├───┤` section rule (a `rule` natively). */
+/** Sentinel child rendered by {@link OverlayPanel} as a `├───┤` section rule. */
 export class PanelDivider implements Component {
 	render(): readonly string[] {
 		return NO_LINES;
 	}
-
-	describe(): NativeNode {
-		return RULE_NODE;
-	}
-}
-
-interface OverlayPanelNativeMemo {
-	title: string;
-	children: readonly Component[];
-	node: NativeNode;
 }
 
 interface OverlayPanelMemo {
@@ -210,26 +195,14 @@ function collapseTitle(title: string): string {
  * so inline overlays share the chrome of fullscreen overlays. The top border
  * is exactly one row — `routeMouse` offsets written for a one-line top rule
  * stay valid — and content is inset two columns on each side.
- *
- * Natively the panel is a root `card` (`head` = title, `role` =
- * `omp.overlay.<name>`) over its children; the frame is the terminal's.
- * Subclasses whose body is not a plain child list override `describe`.
  */
 export class OverlayPanel implements Component {
 	children: Component[] = [];
 	#title: string;
-	readonly #role: string;
 	#memo: OverlayPanelMemo | undefined;
-	#nativeMemo: OverlayPanelNativeMemo | undefined;
 
-	constructor(title = "", role = "omp.overlay") {
+	constructor(title = "") {
 		this.#title = collapseTitle(title);
-		this.#role = role;
-	}
-
-	/** The `role` of the panel's native root card. */
-	get nativeRole(): string {
-		return this.#role;
 	}
 
 	get title(): string {
@@ -287,22 +260,6 @@ export class OverlayPanel implements Component {
 			if (child instanceof PanelDivider) continue;
 			result.push(...child.render(width));
 		}
-		return result;
-	}
-
-	describe(_cx: DescribeContext): NativeNode | null {
-		const memo = this.#nativeMemo;
-		if (
-			memo !== undefined &&
-			memo.title === this.#title &&
-			memo.children.length === this.children.length &&
-			this.children.every((child, i) => memo.children[i] === child)
-		) {
-			return memo.node;
-		}
-		const children: NativeChild[] = [...this.children];
-		const result = overlayCard(this.#role, this.#title, children);
-		this.#nativeMemo = { title: this.#title, children: [...this.children], node: result };
 		return result;
 	}
 

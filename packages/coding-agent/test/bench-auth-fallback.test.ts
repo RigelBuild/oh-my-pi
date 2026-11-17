@@ -401,7 +401,10 @@ describe("bench empty-output guard", () => {
 
 function settingsStub(serviceTier: string | undefined): Settings | undefined {
 	if (serviceTier === undefined) return undefined;
-	return Settings.isolated({ "tier.openai": serviceTier, "tier.anthropic": "none", "tier.google": "none" });
+	return {
+		get: (key: string) =>
+			key === "tier.openai" ? serviceTier : key === "tier.anthropic" || key === "tier.google" ? "none" : undefined,
+	} as unknown as Settings;
 }
 
 async function captureServiceTier(opts: {

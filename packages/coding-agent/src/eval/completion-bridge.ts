@@ -42,9 +42,6 @@ import {
 import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { JsStatusEvent } from "./js/shared/types";
 
-import { cfgDisabledProviders } from "../config/model-settings";
-import { cfgRetry } from "../session/settings";
-
 /** Synthetic bridge name reserved for the `completion()` helper across both runtimes. */
 export const EVAL_COMPLETION_BRIDGE_NAME = "__completion__";
 
@@ -250,7 +247,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	const candidates: CompletionCandidate[] = [
 		{ selector: primary.selector, model: primary.model, ...reasoningForCandidate(tier, primary.model) },
 	];
-	const retry = cfgRetry.get(session.settings);
+	const retry = session.settings.getGroup("retry");
 	if (!retry.enabled || !retry.modelFallback) return candidates;
 
 	appendFallbackCandidates(
@@ -263,7 +260,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 			modelRegistry,
 			settings: session.settings,
 			tier,
-			disabledProviders: new Set(cfgDisabledProviders.get(session.settings)),
+			disabledProviders: new Set(session.settings.get("disabledProviders")),
 		},
 		primary.selector,
 		primary.model,
@@ -316,7 +313,7 @@ async function executeCompletion(
 	// Each fallback that issues a model request consumes one retry attempt,
 	// mirroring session recovery. Keyless candidates are skipped without
 	// consuming budget so a usable later fallback is still attempted.
-	const maxRetries = Math.max(0, cfgRetry.get(session.settings).maxRetries);
+	const maxRetries = Math.max(0, session.settings.getGroup("retry").maxRetries ?? 0);
 	let response: AssistantMessage | undefined;
 	let model: Model<Api> | undefined;
 	let lastError: unknown;

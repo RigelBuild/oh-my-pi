@@ -1,5 +1,5 @@
 /**
- * Regressions #12281 and #13246: pressing Enter at lm-studio's "Optional: Paste
+ * Regression #12281 (defect C): pressing Enter at lm-studio's "Optional: Paste
  * LM Studio API key" login prompt stores the KDL `empty-fallback` placeholder
  * (`lm-studio-local`). On base that placeholder counted as a real credential:
  * `hasAuth()` reported authenticated — the /models hub rendered the provider
@@ -21,15 +21,14 @@
  *      without Authorization and succeeds, with AND without a stored
  *      placeholder, and the models stay selectable.
  *   4. Sibling guard: a placeholder-only vllm (same `empty-fallback` pattern,
- *      but no implicit keyless mark) stays available and resolves request auth
- *      to the no-auth sentinel.
+ *      but no implicit keyless mark) keeps its discovered models available.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 
 const LM_KEY = "sk-lm-12281-test-key";
@@ -156,15 +155,6 @@ function bootRegistry(storage: AuthStorage): ModelRegistry {
 	});
 }
 
-/**
- * Refresh only lm-studio discovery. A full `refresh("online")` also rebuilds
- * every built-in catalog and its SQLite cache synchronously on this event loop,
- * which delays the in-process server's reply; on a loaded CI runner that
- * pushed the 10s discovery timeout ahead of the 401 this suite asserts on.
- */
-const refreshLmStudio = (registry: ModelRegistry): Promise<void> =>
-	registry.refreshDiscoverableProviders(["lm-studio"], "online");
-
 const lmModels = (registry: ModelRegistry): string[] =>
 	registry
 		.getAll()
@@ -181,7 +171,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		await storage.oauth.login("lm-studio", { onAuth: () => {}, onPrompt: async () => LM_KEY });
 
 		const registry = bootRegistry(storage);
-		await refreshLmStudio(registry);
+		await registry.refresh("online");
 
 		const requests = wire.filter(w => w.path === "/v1/models" || w.path === "/api/v0/models");
 		expect(requests.length).toBeGreaterThan(0);
@@ -220,7 +210,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		}
 
 		const registry = bootRegistry(storage);
-		await refreshLmStudio(registry);
+		await registry.refresh("online");
 
 		// Against an auth-required server the keyless assumption fails: the
 		// bare requests are rejected and the rejection must surface as an
@@ -249,7 +239,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		// Fresh setup: no login ever performed.
 		const fresh = await bootStorage("keyless-fresh");
 		const freshRegistry = bootRegistry(fresh);
-		await refreshLmStudio(freshRegistry);
+		await freshRegistry.refresh("online");
 
 		const freshRequests = wire.filter(w => w.path === "/v1/models" || w.path === "/api/v0/models");
 		expect(freshRequests.length).toBeGreaterThan(0);
@@ -267,7 +257,7 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		const placeholder = await bootStorage("keyless-placeholder");
 		await placeholder.oauth.login("lm-studio", { onAuth: () => {}, onPrompt: async () => "" });
 		const placeholderRegistry = bootRegistry(placeholder);
-		await refreshLmStudio(placeholderRegistry);
+		await placeholderRegistry.refresh("online");
 
 		const placeholderRequests = wire.filter(w => w.path === "/v1/models" || w.path === "/api/v0/models");
 		expect(placeholderRequests.length).toBeGreaterThan(0);
@@ -281,12 +271,12 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		placeholder.close();
 	}, 30_000);
 
-	test("a placeholder-only vllm login keeps discovered models requestable without bearer auth", async () => {
-		// Failure mode (#13246): vllm shares the empty-fallback pattern but
-		// receives no implicit keyless mark. Availability recognizes the stored
-		// placeholder as keyless, while request credential resolution dropped it
-		// and returned undefined, so AgentSession rejected the prompt before any
-		// request reached the local server.
+	test("a placeholder-only vllm login keeps its discovered models available and off the wire as a bearer", async () => {
+		// Failure mode (sibling regression): vllm shares the empty-fallback
+		// placeholder pattern but never receives an implicit keyless mark,
+		// so filtering placeholders out of hasAuth without treating
+		// placeholder-only providers as keyless would lock a working
+		// keyless vllm server out of the model picker.
 		const storage = await bootStorage("vllm-placeholder");
 		await storage.oauth.login("vllm", { onAuth: () => {}, onPrompt: async () => "" });
 		expect(await storage.keys.peek("vllm")).toBe("vllm-local");
@@ -298,15 +288,8 @@ describe("issue #12281 — lm-studio empty-fallback placeholder vs. wire auth", 
 		for (const auth of vllmProbeAuth) {
 			expect(auth).toBeUndefined();
 		}
-		const model = registry.find("vllm", "qwen3-8b");
-		expect(model).toBeDefined();
-		if (!model) throw new Error("Expected discovered vllm model");
-		expect(await registry.getApiKey(model)).toBe(kNoAuth);
-		// Explicit selection (`--model`, /model, setModel) gates on these.
-		expect(registry.hasConfiguredAuth(model)).toBe(true);
-		expect(registry.hasConcreteAuth("vllm")).toBe(true);
-		expect(registry.getAll().some(entry => entry.provider === "vllm" && entry.id === "qwen3-8b")).toBe(true);
-		expect(registry.getAvailable().some(entry => entry.provider === "vllm" && entry.id === "qwen3-8b")).toBe(true);
+		expect(registry.getAll().some(model => model.provider === "vllm" && model.id === "qwen3-8b")).toBe(true);
+		expect(registry.getAvailable().some(model => model.provider === "vllm" && model.id === "qwen3-8b")).toBe(true);
 		storage.close();
 	}, 30_000);
 });

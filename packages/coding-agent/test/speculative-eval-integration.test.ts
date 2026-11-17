@@ -162,11 +162,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-control-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -217,11 +213,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-final-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -275,11 +267,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-final-keep-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -327,11 +315,7 @@ describe("streamed eval speculation", () => {
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "a.txt"), "stale content");
 		await fs.writeFile(path.join(directory, "b.txt"), "fresh content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -386,11 +370,7 @@ describe("streamed eval speculation", () => {
 	it("derives dependent arguments from committed results", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-committed-"));
 		temporaryDirectories.push(directory);
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -458,11 +438,7 @@ describe("streamed eval speculation", () => {
 	it("rejects appended source at reconcile even when the prefix matches", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-appended-"));
 		temporaryDirectories.push(directory);
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -507,11 +483,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-child-ids-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -561,11 +533,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-denied-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -608,11 +576,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-discard-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -678,11 +642,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-restart-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -795,11 +755,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-reset-gate-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,
@@ -880,11 +836,7 @@ describe("streamed eval speculation", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-eval-failure-"));
 		temporaryDirectories.push(directory);
 		await fs.writeFile(path.join(directory, "note.txt"), "content");
-		const settings = Settings.isolated({
-			"eval.autoBackground.enabled": false,
-			"images.autoResize": false,
-			"tools.speculativeExecution.enabled": true,
-		});
+		const settings = Settings.isolated({ "eval.autoBackground.enabled": false, "images.autoResize": false });
 		const session: ToolSession = {
 			cwd: directory,
 			hasUI: false,

@@ -5,11 +5,9 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getCommitCacheDbPath } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
-import { cfgCommit } from "../settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
 import { resolvePrimaryModel, resolveSmolModel } from "../model-selection";
 import type { ConventionalCommit } from "../types";
-import { renderStat } from "../utils";
 import { CommitInferenceCache } from "./cache";
 import { type ConventionalGenerationConfig, conventionalGenerationConfig } from "./config";
 import { type ConventionalGenerationContext, generateConventionalCommit } from "./generate";
@@ -37,7 +35,6 @@ export interface GeneratedGitCommit {
 	validationError: string | null;
 	stagedAll: boolean;
 }
-
 function renderNumstat(entries: VcsNumstatEntry[]): string {
 	return entries
 		.map(entry => `${entry.added ?? "-"}\t${entry.removed ?? "-"}\t${entry.path}`)
@@ -45,11 +42,28 @@ function renderNumstat(entries: VcsNumstatEntry[]): string {
 		.concat(entries.length > 0 ? "\n" : "");
 }
 
+function renderStat(entries: VcsNumstatEntry[]): string {
+	if (entries.length === 0) return "";
+	let insertions = 0;
+	let deletions = 0;
+	const lines = entries.map(entry => {
+		const added = entry.added ?? 0;
+		const removed = entry.removed ?? 0;
+		insertions += added;
+		deletions += removed;
+		return ` ${entry.path} | ${added + removed} ${"+".repeat(Math.min(added, 40))}${"-".repeat(Math.min(removed, 40))}`;
+	});
+	lines.push(
+		` ${entries.length} file${entries.length === 1 ? "" : "s"} changed, ${insertions} insertion${insertions === 1 ? "" : "s"}(+), ${deletions} deletion${deletions === 1 ? "" : "s"}(-)`,
+	);
+	return `${lines.join("\n")}\n`;
+}
+
 /** Generate a commit message from the staged tree, staging all only when the index is empty. */
 export async function generateGitCommit(options: GenerateGitCommitOptions): Promise<GeneratedGitCommit> {
 	const repo = vcs.requireGit(options.cwd);
 	const settings = await Settings.init({ cwd: options.cwd });
-	const config = conventionalGenerationConfig(cfgCommit.get(settings));
+	const config = conventionalGenerationConfig(settings.getGroup("commit"));
 	let stagedFiles = await repo.changedFiles({ cached: true }, options.signal);
 	let stagedAll = false;
 	if (stagedFiles.length === 0 && options.stageIfEmpty !== false) {

@@ -2,8 +2,11 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::{
 	ffi::OsString,
+	fs::{File, metadata},
 	io::{self, ErrorKind, Read, Write},
 	path::Path,
 };
@@ -14,9 +17,8 @@ use thiserror::Error;
 use uucore::{display::Quotable, fast_inc::fast_inc_one};
 
 use brush_core::{ShellExtensions, builtins::Registration};
-use pi_vfs::BlockingFs;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
 const LINE_NUMBER_BUF_SIZE: usize = 32;
 
@@ -77,6 +79,14 @@ enum CatError {
 	NoSuchDeviceOrAddress,
 	#[error("Too many levels of symbolic links")]
 	TooManySymlinks,
+}
+
+fn strip_errno(error: &io::Error) -> String {
+	let mut message = error.to_string();
+	if let Some(position) = message.find(" (os error ") {
+		message.truncate(position);
+	}
+	message
 }
 
 type CatResult<T> = Result<T, CatError>;
@@ -324,7 +334,7 @@ fn cat_path(
 ) -> CatResult<()> {
 	// Resolve every operand at the boundary, but retain `path` for diagnostics.
 	let resolved = host.resolve(path);
-	match get_input_type(host.fs(), path, &resolved)? {
+	match get_input_type(path, &resolved)? {
 		InputType::StdIn => {
 			let mut handle = InputHandle { reader: &mut host.stdin, is_interactive: false };
 			cat_handle(&mut handle, options, state, stdout)
@@ -333,7 +343,7 @@ fn cat_path(
 		#[cfg(unix)]
 		InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
 		_ => {
-			let file = host.fs().open(resolved)?;
+			let file = File::open(resolved)?;
 			let mut handle = InputHandle { reader: file, is_interactive: false };
 			cat_handle(&mut handle, options, state, stdout)
 		},
@@ -357,9 +367,6 @@ where
 	};
 
 	for path in files {
-		if host.is_cancelled() {
-			break;
-		}
 		match cat_path(path, options, &mut state, host, stdout) {
 			Ok(()) => {},
 			Err(CatError::Io(error)) if error.kind() == ErrorKind::BrokenPipe => {
@@ -376,12 +383,12 @@ where
 }
 
 /// Classifies the input at `resolved`; `path` is retained to recognize `-`.
-fn get_input_type(fs: &BlockingFs, path: &OsString, resolved: &Path) -> CatResult<InputType> {
+fn get_input_type(path: &OsString, resolved: &Path) -> CatResult<InputType> {
 	if path == "-" {
 		return Ok(InputType::StdIn);
 	}
 
-	let file_type = match fs.metadata(resolved) {
+	let file_type = match metadata(resolved) {
 		Ok(metadata) => metadata.file_type(),
 		Err(error) => {
 			if let Some(raw_error) = error.raw_os_error() {

@@ -1,13 +1,10 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { ensureBankExists } from "../hindsight/bank";
 import reflectDescription from "../prompts/tools/reflect.md" with { type: "text" };
-import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
-
-import { cfgMemoryBackend } from "../memory-backend/settings";
 
 const memoryReflectSchema = type({
 	query: type("string").describe("question to answer"),
@@ -20,11 +17,7 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 	readonly name = "reflect";
 	readonly approval = "read" as const;
 	readonly label = "Reflect";
-	get description(): string {
-		return prompt.render(reflectDescription, {
-			toolRefs: sessionMemoryToolRefs(this.session),
-		});
-	}
+	readonly description = reflectDescription;
 	readonly parameters = memoryReflectSchema;
 	readonly strict = true;
 	readonly loadMode = "discoverable";
@@ -33,7 +26,7 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): MemoryReflectTool | null {
-		const backend = cfgMemoryBackend.get(session.settings);
+		const backend = session.settings.get("memory.backend");
 		if (backend !== "hindsight" && backend !== "mnemopi") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
 		return new MemoryReflectTool(session);
@@ -41,7 +34,7 @@ export class MemoryReflectTool implements AgentTool<typeof memoryReflectSchema> 
 
 	async execute(_id: string, params: MemoryReflectParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
-			const backend = cfgMemoryBackend.get(this.session.settings);
+			const backend = this.session.settings.get("memory.backend");
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {

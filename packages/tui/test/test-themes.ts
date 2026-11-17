@@ -57,7 +57,7 @@ const defaultSelectListTheme: SelectListTheme = {
 	symbols: defaultSymbols,
 };
 
-export const defaultMarkdownTheme = {
+export const defaultMarkdownTheme: MarkdownTheme = {
 	heading: (text: string) => chalk.bold.cyan(text),
 	link: (text: string) => chalk.blue(text),
 	linkUrl: (text: string) => chalk.dim(text),
@@ -73,7 +73,7 @@ export const defaultMarkdownTheme = {
 	strikethrough: (text: string) => chalk.strikethrough(text),
 	underline: (text: string) => chalk.underline(text),
 	symbols: defaultSymbols,
-} satisfies MarkdownTheme;
+};
 
 export const defaultEditorTheme: EditorTheme = {
 	borderColor: (text: string) => chalk.dim(text),

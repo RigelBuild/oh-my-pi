@@ -45,21 +45,17 @@ export interface ModelMentionHost {
 	sessionManager: SessionManager;
 	modelRegistry: ModelRegistry;
 	scopedModels(): ReadonlyArray<Model>;
-	/** User-authorized model agents inherited from the parent session. */
-	inheritedAgents?: readonly AgentDefinition[];
 }
 
 /** Owns branch-local pseudonyms for models explicitly tagged by the user. */
 export class ModelMentionRegistry {
 	readonly #host: ModelMentionHost;
-	readonly #inheritedAgents: readonly AgentDefinition[];
 	#mentions: ModelMention[] = [];
 	readonly #bySelector = new Map<string, ModelMention>();
 	readonly #agents = new Set<string>();
 
 	constructor(host: ModelMentionHost) {
 		this.#host = host;
-		this.#inheritedAgents = host.inheritedAgents ?? [];
 	}
 
 	/** Rebuild pseudonyms after resume, rewind, or a session switch. */
@@ -67,9 +63,6 @@ export class ModelMentionRegistry {
 		this.#mentions = readModelMentions(this.#host.sessionManager.getBranch());
 		this.#bySelector.clear();
 		this.#agents.clear();
-		for (const agent of this.#inheritedAgents) {
-			this.#agents.add(agent.name);
-		}
 		for (const mention of this.#mentions) {
 			this.#bySelector.set(mention.selector, mention);
 			this.#agents.add(mention.agent);
@@ -108,22 +101,16 @@ export class ModelMentionRegistry {
 		});
 	}
 
-	/** Expose inherited and session-tagged models as general-purpose task agents. */
+	/** Expose tagged models as general-purpose task agents without changing the bundled template. */
 	sessionAgents(): AgentDefinition[] {
 		const task = getBundledAgent("task");
 		if (!task) throw new Error("Bundled task agent is unavailable");
-		const inheritedNames = new Set(this.#inheritedAgents.map(agent => agent.name));
-		return [
-			...this.#inheritedAgents,
-			...this.#mentions
-				.filter(mention => !inheritedNames.has(mention.agent))
-				.map(mention => ({
-					...task,
-					name: mention.agent,
-					description: prompt.render(modelMentionDescription, { name: mention.name, selector: mention.selector }),
-					model: [mention.selector],
-					filePath: undefined,
-				})),
-		];
+		return this.#mentions.map(mention => ({
+			...task,
+			name: mention.agent,
+			description: prompt.render(modelMentionDescription, { name: mention.name, selector: mention.selector }),
+			model: [mention.selector],
+			filePath: undefined,
+		}));
 	}
 }

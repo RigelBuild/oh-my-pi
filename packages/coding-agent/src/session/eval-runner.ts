@@ -15,8 +15,6 @@ import { outputMeta } from "../tools/output-meta";
 import type { PythonExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
-import { cfgPythonInterpreter, cfgPythonKernelMode } from "../eval/settings";
-
 /** Capabilities the eval runner borrows from its owning session. */
 export interface EvalRunnerHost {
 	agent: Agent;
@@ -32,14 +30,16 @@ export interface EvalRunnerHost {
 export class EvalRunner {
 	readonly #host: EvalRunnerHost;
 	readonly #kernelOwnerId: string;
+	readonly #parentSessionId: string | undefined;
 	#abortControllers = new Set<AbortController>();
 	#pendingMessages: PythonExecutionMessage[] = [];
 	#activeExecutions = new Set<Promise<unknown>>();
 	#disposing = false;
 
-	constructor(host: EvalRunnerHost, options: { kernelOwnerId: string }) {
+	constructor(host: EvalRunnerHost, options: { kernelOwnerId: string; parentSessionId: string | undefined }) {
 		this.#host = host;
 		this.#kernelOwnerId = options.kernelOwnerId;
+		this.#parentSessionId = options.parentSessionId;
 	}
 
 	/** Executes Python in the session's shared kernel. */
@@ -67,12 +67,18 @@ export class EvalRunner {
 					return hookResult.result;
 				}
 			}
+			const sessionId =
+				this.getSessionId() ??
+				defaultEvalSessionId({
+					cwd,
+					getSessionFile: () => this.#host.sessionManager.getSessionFile() ?? null,
+				});
 			const result = await executePythonCommand(code, {
 				cwd,
-				sessionId: namespacePythonSessionId(this.getSessionId()),
+				sessionId: namespacePythonSessionId(sessionId),
 				kernelOwnerId: this.#kernelOwnerId,
-				kernelMode: cfgPythonKernelMode.get(this.#host.settings),
-				interpreter: cfgPythonInterpreter.get(this.#host.settings)?.trim() || undefined,
+				kernelMode: this.#host.settings.get("python.kernelMode"),
+				interpreter: this.#host.settings.get("python.interpreter")?.trim() || undefined,
 				onChunk,
 				signal: abortController.signal,
 				toolSession: this.#host.evalToolSession,
@@ -146,8 +152,9 @@ export class EvalRunner {
 		return this.#kernelOwnerId;
 	}
 
-	/** Returns this session's eval executor id, shared by the eval tool and user Python shortcuts. */
-	getSessionId(): string {
+	/** Returns the eval session shared with the Python backend. */
+	getSessionId(): string | null {
+		if (this.#parentSessionId !== undefined) return this.#parentSessionId;
 		return defaultEvalSessionId({
 			cwd: this.#host.sessionManager.getCwd(),
 			getSessionFile: () => this.#host.sessionManager.getSessionFile() ?? null,

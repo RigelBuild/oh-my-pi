@@ -33,7 +33,6 @@ function createBrowserHost() {
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
-			"browser.tern": false,
 			"tools.maxTimeout": 0,
 		}),
 	};
@@ -64,7 +63,7 @@ describe("browser open during first-use Chromium download", () => {
 				hasUI: false,
 				getSessionFile: () => null,
 				getSessionSpawns: () => null,
-				settings: Settings.isolated({ "async.enabled": false, "browser.cmux": false, "browser.tern": false }),
+				settings: Settings.isolated({ "async.enabled": false, "browser.cmux": false }),
 				getEvalSessionId: () => "browser-download-regression",
 				getEvalPreludes: () => [prelude],
 			};

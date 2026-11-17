@@ -1,4 +1,4 @@
-import { InternalUrlRouter } from "../internal-urls/router";
+import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** Shape forwarded from the plan-proposal handler to InteractiveMode's
@@ -91,10 +91,10 @@ function firstLevelOneHeading(planContent: string): string {
 	return match?.[1]?.trim() ?? "";
 }
 
-/** Stem of a `scheme://…/name.md` URL (or bare `name.md` path) — the filename without
+/** Stem of a `local://name.md` (or bare `name.md`) URL — the filename without
  *  scheme or extension. Returns the empty string for inputs that have no stem. */
 function planFilenameStem(planFilePath: string): string {
-	const withoutScheme = planFilePath.replace(/^[a-z][a-z0-9+.-]*:\/+/i, "");
+	const withoutScheme = planFilePath.replace(/^local:\/+/, "");
 	const lastSegment = withoutScheme.split(/[\\/]/).pop() ?? "";
 	return lastSegment.replace(/\.md$/i, "");
 }
@@ -169,10 +169,9 @@ export async function resolveApprovedPlan(input: ResolveApprovedPlanInput): Prom
 	// could shadow the deliberately-set current plan. A state plan already inside
 	// the scan competes purely on the newest-first ordering below (issue #6569).
 	// Compare canonical `local://` spellings so a resumed `local:/…` state path
-	// still matches the scanner's `local://…` entry (InternalUrlRouter.normalize).
-	const router = InternalUrlRouter.instance();
-	const canonicalListed = new Set(listed.map(url => router.normalize(url)));
-	if (input.statePlanFilePath && !canonicalListed.has(router.normalize(input.statePlanFilePath))) {
+	// still matches the scanner's `local://…` entry (normalizeLocalScheme).
+	const canonicalListed = new Set(listed.map(normalizeLocalScheme));
+	if (input.statePlanFilePath && !canonicalListed.has(normalizeLocalScheme(input.statePlanFilePath))) {
 		consider(input.statePlanFilePath);
 	}
 	for (const url of listed) consider(url);

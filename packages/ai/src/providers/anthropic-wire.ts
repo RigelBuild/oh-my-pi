@@ -272,18 +272,7 @@ export type ThinkingConfigAdaptive = {
 	block_binding?: ThinkingBlockBinding;
 };
 
-/**
- * Sonnet 5.5's replacement for `disabled`: no up-front thinking, progress
- * updates between tool calls only. Takes no other field, and effort above
- * `high` is rejected alongside it.
- */
-export type ThinkingConfigBetweenTools = { type: "between_tools" };
-
-export type ThinkingConfigParam =
-	| ThinkingConfigEnabled
-	| ThinkingConfigDisabled
-	| ThinkingConfigAdaptive
-	| ThinkingConfigBetweenTools;
+export type ThinkingConfigParam = ThinkingConfigEnabled | ThinkingConfigDisabled | ThinkingConfigAdaptive;
 
 export type OutputConfig = {
 	/** Adaptive-thinking effort level (effort beta). */

@@ -1,8 +1,8 @@
+// @ts-nocheck — example file; install @oh-my-pi/pi-coding-agent before running
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 /**
- * Safety hook: blocks bash tool calls matching `rm -rf` followed by an absolute path.
- * This is a narrow example, not a shell parser or a complete deletion policy.
+ * Safety hook: blocks any bash tool call that contains "rm -rf /".
  *
  * Demonstrates the tool_call blocking contract:
  *   return { block: true, reason: "..." }
@@ -16,11 +16,11 @@ export default function safetyHook(pi: ExtensionAPI) {
 
     const command = String((event.input as { command?: unknown }).command ?? "");
 
-    // Matches root and other absolute targets such as /tmp; many equivalent commands do not match.
+    // Exact pattern match: "rm -rf /" (with any surrounding whitespace)
     if (/\brm\s+-rf\s+\//.test(command)) {
       return {
         block: true,
-        reason: "safety-hook: refusing rm -rf with an absolute-path target",
+        reason: "safety-hook: refusing to delete root filesystem (rm -rf /)",
       };
     }
   });

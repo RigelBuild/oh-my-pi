@@ -1,5 +1,5 @@
 /**
- * omp auth-gateway router and HTTP server.
+ * omp auth-gateway HTTP server.
  *
  * Accepts any provider-format request (OpenAI chat-completions, Anthropic
  * messages, OpenAI Responses) and dispatches through pi-ai's `streamSimple()`
@@ -23,9 +23,7 @@
  *   POST /v1/audio/transcriptions          → speech-to-text, multipart or JSON base64 in (routes/transcriptions)
  *
  * Chat routes live in this file; every other modality is a `routes/*` module
- * built on the shared plumbing in `dispatch.ts`. {@link createAuthGatewayRouter}
- * answers the `/v1/*` routes for any transport: {@link startAuthGateway}
- * serves them over HTTP behind bearer auth, `stdio.ts` over JSON lines.
+ * built on the shared plumbing in `dispatch.ts`.
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -43,7 +41,6 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
 	type AuthGatewayBootOptions,
-	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	normalizeClientSessionKey,
@@ -55,7 +52,6 @@ import {
 	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
-	hasMisplacedBearer,
 	isAuthorized,
 	json,
 	resolveClientIdentity,
@@ -252,7 +248,7 @@ function chatRouteRejection(model: Model<Api>): string | undefined {
 
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
-	bootOpts: AuthGatewayRouteOptions,
+	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
@@ -350,7 +346,7 @@ async function handleFormatEndpoint(
 	// broker override on AuthStorage when needed).
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return clientClosedResponse(route);
-	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if (typeof apiKey !== "string") return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
@@ -364,7 +360,7 @@ async function handleFormatEndpoint(
 		clientKey,
 		model,
 		context: parsed.context,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
+		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey),
 	});
 	streamOpts.providerSessionState = lease.states;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
@@ -496,7 +492,7 @@ async function handleFormatEndpoint(
  * path.
  */
 async function handlePiNative(
-	bootOpts: AuthGatewayRouteOptions,
+	bootOpts: AuthGatewayBootOptions,
 	req: Request,
 	peer: string,
 	sessionStates: AuthGatewaySessionStateStore,
@@ -543,7 +539,7 @@ async function handlePiNative(
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if ("status" in apiKey) return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if (typeof apiKey !== "string") return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	// Per-session provider learning, owned by this gateway instance. The map is
 	// non-serializable, so `parseRequest` cannot accept one from the wire and
@@ -554,7 +550,7 @@ async function handlePiNative(
 		clientKey,
 		model,
 		context: parsed.context,
-		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
+		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey),
 	});
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
 	// trust the client's options (already allow-listed by `parseRequest`) and
@@ -562,6 +558,7 @@ async function handlePiNative(
 	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
 	const streamOpts: SimpleStreamOptions = {
 		...parsed.options,
+		apiKey,
 		signal: controller.signal,
 		cursorExternalToolExecutor: true,
 		providerSessionState: lease.states,
@@ -743,7 +740,7 @@ interface ModelListRow {
 	supports_tools?: boolean;
 }
 
-function handleModelsList(opts: AuthGatewayRouteOptions): Response {
+function handleModelsList(opts: AuthGatewayBootOptions): Response {
 	const seen = new Set<string>();
 	const data: ModelListRow[] = [];
 	for (const model of opts.listModels?.() ?? []) {
@@ -770,181 +767,128 @@ function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 /** `GET /v1/videos/:id` (poll) and `GET /v1/videos/:id/content` (download); group 1 = id, group 2 = `/content`. */
 const VIDEO_JOB_PATH = /^\/v1\/videos\/([^/]+)(\/content)?$/;
 
-// Only exact static routes are safe to include in unauthorized request logs.
-// Dynamic video IDs and unknown paths may carry credentials.
-const LOGGABLE_PATHS: Record<string, true> = {
-	"/v1/usage": true,
-	"/v1/credentials/check": true,
-	"/v1/pi/stream": true,
-	"/v1/systemone": true,
-	"/alpha/decisions": true,
-	"/v1/images/generations": true,
-	"/v1/images": true,
-	"/v1/images/edits": true,
-	"/v1/audio/speech": true,
-	"/v1/audio/transcriptions": true,
-	"/v1/embeddings": true,
-	"/v1/rerank": true,
-	"/v1/videos": true,
-	"/v1/models": true,
-};
-
-/** Only static routes reach logs verbatim; dynamic or unknown paths may carry caller-supplied secrets. */
-function loggablePath(pathname: string): string {
-	return Object.hasOwn(FORMAT_ROUTES, pathname) || Object.hasOwn(LOGGABLE_PATHS, pathname) ? pathname : "<unrouted>";
-}
-
-/** The gateway's `/v1/*` routes, for a transport that has already admitted the caller. */
-export interface AuthGatewayRouter {
-	/** Answers one request; `peer` names the caller in logs. Never rejects: a crashed route answers 500. */
-	route(req: Request, peer: string): Promise<Response>;
-	/**
-	 * Closes the retained provider session state (Codex WebSockets, GitLab Duo
-	 * workflows), whose sockets and timers would otherwise keep the process alive.
-	 */
-	close(): void;
-}
-
-/**
- * The gateway's routes over `opts`, owning their per-session provider state:
- * two routers in one process never share (or tear down) each other's.
- */
-export function createAuthGatewayRouter(opts: AuthGatewayRouteOptions): AuthGatewayRouter {
-	const sessionStates = new AuthGatewaySessionStateStore();
-	const route = async (req: Request, peer: string): Promise<Response> => {
-		const pathname = new URL(req.url).pathname;
-		try {
-			// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
-			// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
-			// same client struct.
-			if (req.method === "GET" && pathname === "/v1/usage") {
-				return await handleUsage(opts.storage, req.signal);
-			}
-
-			// Per-credential auth probe — diagnoses which row in a multi-account
-			// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
-			// credentials, so we need a separate endpoint that captures errors.
-			if (req.method === "GET" && pathname === "/v1/credentials/check") {
-				return await handleCredentialsCheck(opts.storage, req.signal);
-			}
-
-			// Provider-format dispatch.
-			const formatRoute = FORMAT_ROUTES[pathname];
-			if (formatRoute && req.method === "POST") {
-				return await handleFormatEndpoint(formatRoute, opts, req, peer, sessionStates);
-			}
-
-			// Pi-native fast path. Same auth + provider plumbing as the
-			// foreign-wire routes, just without the wire-format translation.
-			if (req.method === "POST" && pathname === "/v1/pi/stream") {
-				return await handlePiNative(opts, req, peer, sessionStates);
-			}
-
-			// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
-			// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
-			// reach the same handler through their Decisions path.
-			if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
-				return await handleSystemOne(opts, req, peer);
-			}
-
-			// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
-			// (JSON), and OpenAI multipart / OpenRouter JSON edits.
-			if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
-				return await handleImageGenerations(opts, req, peer);
-			}
-			if (req.method === "POST" && pathname === "/v1/images/edits") {
-				return await handleImageEdits(opts, req, peer);
-			}
-
-			// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
-			if (req.method === "POST" && pathname === "/v1/audio/speech") {
-				return await handleSpeech(opts, req, peer);
-			}
-
-			// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
-			if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
-				return await handleTranscriptions(opts, req, peer);
-			}
-
-			// Embeddings, OpenAI wire (OpenRouter is compatible).
-			if (req.method === "POST" && pathname === "/v1/embeddings") {
-				return await handleEmbeddings(opts, req, peer);
-			}
-
-			// Rerank, OpenRouter wire.
-			if (req.method === "POST" && pathname === "/v1/rerank") {
-				return await handleRerank(opts, req, peer);
-			}
-
-			// Video generation, OpenRouter's asynchronous wire: submit, then poll
-			// and download by the gateway-issued job id (stateless — the id
-			// encodes provider, model, and upstream job).
-			if (req.method === "POST" && pathname === "/v1/videos") {
-				return await handleVideoSubmit(opts, req, peer);
-			}
-			const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
-			if (videoJob) {
-				const gatewayId = decodeURIComponent(videoJob[1]);
-				const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
-				return await handler(opts, req, peer, gatewayId);
-			}
-
-			// Model catalog.
-			if (req.method === "GET" && pathname === "/v1/models") {
-				return handleModelsList(opts);
-			}
-
-			// Route-table miss: no format module to defer to, so we emit a
-			// plain JSON 404 rather than guessing at a protocol-specific envelope.
-			return json(404, { error: `No route: ${req.method} ${pathname}` });
-		} catch (error) {
-			logger.error("auth-gateway handler crashed", {
-				method: req.method,
-				path: loggablePath(pathname),
-				peer,
-				error: String(error),
-			});
-			return json(500, { error: "internal error" });
-		}
-	};
-	return { route, close: () => sessionStates.close() };
-}
-
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
 	const version = opts.version;
-	const router = createAuthGatewayRouter(opts);
+	// Owned by this server instance so two gateways in one process never share
+	// (or tear down) each other's provider state, and so `close()` can drain it.
+	const sessionStates = new AuthGatewaySessionStateStore();
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
 		port: bind.port,
-		fetch: async (req, server): Promise<Response> => {
+		fetch: async (req): Promise<Response> => {
 			const url = new URL(req.url);
 			const pathname = url.pathname;
-			const socketPeer = server.requestIP(req)?.address ?? "unknown";
+			const peer = resolvePeer(req);
 			// CORS preflight is always answered without auth — browsers send
 			// preflights pre-authentication and a 401 here breaks the actual
 			// request before the bearer is ever attached.
 			if (req.method === "OPTIONS") {
 				return new Response(null, { status: 204, headers: corsHeaders(req) });
 			}
-			if (req.method === "GET" && pathname === "/healthz") {
-				return withCors(json(200, { ok: true, version }), req);
-			}
-			if (!isAuthorized(req, tokens)) {
-				logger.info("auth-gateway request unauthorized", {
+			try {
+				if (req.method === "GET" && pathname === "/healthz") {
+					return withCors(json(200, { ok: true, version }), req);
+				}
+				if (!isAuthorized(req, tokens)) {
+					logger.info("auth-gateway request unauthorized", { method: req.method, path: pathname, peer });
+					return withCors(json(401, { error: "unauthorized" }), req);
+				}
+
+				// Aggregated usage — backed by AuthStorage's 5-min per-credential cache.
+				// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
+				// same client struct.
+				if (req.method === "GET" && pathname === "/v1/usage") {
+					return withCors(await handleUsage(opts.storage, req.signal), req);
+				}
+
+				// Per-credential auth probe — diagnoses which row in a multi-account
+				// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
+				// credentials, so we need a separate endpoint that captures errors.
+				if (req.method === "GET" && pathname === "/v1/credentials/check") {
+					return withCors(await handleCredentialsCheck(opts.storage, req.signal), req);
+				}
+
+				// Provider-format dispatch.
+				const formatRoute = FORMAT_ROUTES[pathname];
+				if (formatRoute && req.method === "POST") {
+					return withCors(await handleFormatEndpoint(formatRoute, opts, req, peer, sessionStates), req);
+				}
+
+				// Pi-native fast path. Same auth + provider plumbing as the
+				// foreign-wire routes, just without the wire-format translation.
+				if (req.method === "POST" && pathname === "/v1/pi/stream") {
+					return withCors(await handlePiNative(opts, req, peer, sessionStates), req);
+				}
+
+				// TypeSafe System One judgments (jev). TypeSafe SDKs and omp's own
+				// judge point `TYPESAFE_BASE_URL` at the gateway; OpenRouter SDKs
+				// reach the same handler through their Decisions path.
+				if (req.method === "POST" && (pathname === "/v1/systemone" || pathname === "/alpha/decisions")) {
+					return withCors(await handleSystemOne(opts, req, peer), req);
+				}
+
+				// Image generation: OpenAI `/v1/images/generations` + OpenRouter `/v1/images`
+				// (JSON), and OpenAI multipart / OpenRouter JSON edits.
+				if (req.method === "POST" && (pathname === "/v1/images/generations" || pathname === "/v1/images")) {
+					return withCors(await handleImageGenerations(opts, req, peer), req);
+				}
+				if (req.method === "POST" && pathname === "/v1/images/edits") {
+					return withCors(await handleImageEdits(opts, req, peer), req);
+				}
+
+				// Text-to-speech, OpenAI/OpenRouter wire; answers raw audio bytes.
+				if (req.method === "POST" && pathname === "/v1/audio/speech") {
+					return withCors(await handleSpeech(opts, req, peer), req);
+				}
+
+				// Speech-to-text, OpenAI multipart or OpenRouter JSON base64 wire.
+				if (req.method === "POST" && pathname === "/v1/audio/transcriptions") {
+					return withCors(await handleTranscriptions(opts, req, peer), req);
+				}
+
+				// Embeddings, OpenAI wire (OpenRouter is compatible).
+				if (req.method === "POST" && pathname === "/v1/embeddings") {
+					return withCors(await handleEmbeddings(opts, req, peer), req);
+				}
+
+				// Rerank, OpenRouter wire.
+				if (req.method === "POST" && pathname === "/v1/rerank") {
+					return withCors(await handleRerank(opts, req, peer), req);
+				}
+
+				// Video generation, OpenRouter's asynchronous wire: submit, then poll
+				// and download by the gateway-issued job id (stateless — the id
+				// encodes provider, model, and upstream job).
+				if (req.method === "POST" && pathname === "/v1/videos") {
+					return withCors(await handleVideoSubmit(opts, req, peer), req);
+				}
+				const videoJob = req.method === "GET" ? VIDEO_JOB_PATH.exec(pathname) : null;
+				if (videoJob) {
+					const gatewayId = decodeURIComponent(videoJob[1]);
+					const handler = videoJob[2] ? handleVideoContent : handleVideoPoll;
+					return withCors(await handler(opts, req, peer, gatewayId), req);
+				}
+
+				// Model catalog.
+				if (req.method === "GET" && pathname === "/v1/models") {
+					return withCors(handleModelsList(opts), req);
+				}
+
+				// Route-table miss: no format module to defer to, so we emit a
+				// plain JSON 404 rather than guessing at a protocol-specific envelope.
+				return withCors(json(404, { error: `No route: ${req.method} ${pathname}` }), req);
+			} catch (error) {
+				logger.error("auth-gateway handler crashed", {
 					method: req.method,
-					path: loggablePath(pathname),
-					peer: socketPeer,
+					path: pathname,
+					peer,
+					error: String(error),
 				});
-				return withCors(json(401, { error: "unauthorized" }), req);
+				return withCors(json(500, { error: "internal error" }), req);
 			}
-			if (hasMisplacedBearer(req, url, tokens)) {
-				return withCors(json(400, { error: "gateway bearer token outside Authorization" }), req);
-			}
-			const peer = resolvePeer(req, socketPeer, opts.trustProxyHeaders);
-			return withCors(await router.route(req, peer), req);
 		},
 		// Max-out Bun's idle timeout. Long thinking-budget calls can sit idle
 		// for minutes before the first token arrives; the default kills them.
@@ -977,7 +921,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			}
 			// Retained provider sessions own sockets and timers; close them after
 			// requests complete or the listener force-stops.
-			router.close();
+			sessionStates.close();
 		},
 	};
 }

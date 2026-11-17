@@ -14,14 +14,8 @@ import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
-import {
-	formatPersistenceDurabilityFailure,
-	formatPersistenceFailure,
-	formatPersistenceNotice,
-} from "./persistence-failure";
+import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
-
-import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 
 /**
  * Options for print mode.
@@ -179,8 +173,8 @@ async function runPrintModeCore(
 	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
 	// which is wired independently through the prewalk coordinator.
 	const planStartupIgnored =
-		cfgPlanDefaultOnStartup.get(session.settings) &&
-		cfgPlanEnabled.get(session.settings) &&
+		session.settings.get("plan.defaultOnStartup") &&
+		session.settings.get("plan.enabled") &&
 		session.sessionManager.buildSessionContext().messages.length === 0 &&
 		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change") &&
 		!planYolo;
@@ -223,9 +217,6 @@ async function runPrintModeCore(
 	session.sessionManager.onPersistenceError(error => {
 		persistenceFailure = error;
 		writeStderrLine(formatPersistenceFailure(error.message));
-	});
-	session.sessionManager.onPersistenceNotice(notice => {
-		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
 	});
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
@@ -340,11 +331,10 @@ async function runPrintModeCore(
 	// A turn-fatal exit cannot hold automation for the full normal drain budget.
 	if (!strictMCPFailure) {
 		// Print mode's drain budget covers a fallback-chain switch; the reviewer's
-		// verdict is the point of a headless advisor run, so wait through recovery,
-		// and wait on `strict` reviewers past the budget like every primary boundary.
+		// verdict is the point of a headless advisor run, so wait through recovery.
 		await session.waitForAdvisorCatchup(
 			terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
-			{ waitThroughRecovery: true, strictWithoutDeadline: true },
+			{ waitThroughRecovery: true },
 		);
 	}
 	// Error spans must reach the exporter; the postmortem `exit` handler can't await.

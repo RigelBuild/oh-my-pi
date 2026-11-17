@@ -5,8 +5,6 @@ import { OAuthSelectorComponent } from "@oh-my-pi/pi-tui/overlays/oauth-selector
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 
-import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
-
 beforeAll(async () => {
 	await initTheme();
 });
@@ -133,7 +131,7 @@ describe("OAuthSelectorComponent", () => {
 				authStorage,
 				() => {},
 				() => {},
-				{ disabledProviders: cfgDisabledProviders.get(settings) },
+				{ disabledProviders: settings.get("disabledProviders") },
 			);
 			for (const char of victim.id) {
 				component.handleInput(char);
@@ -159,7 +157,7 @@ describe("OAuthSelectorComponent", () => {
 				authStorage,
 				() => {},
 				() => {},
-				{ disabledProviders: cfgDisabledProviders.get(settings) },
+				{ disabledProviders: settings.get("disabledProviders") },
 			);
 			for (const char of alias.id) {
 				component.handleInput(char);
@@ -187,7 +185,7 @@ describe("OAuthSelectorComponent", () => {
 				} as unknown as AuthStorage,
 				providerId => selected.push(providerId),
 				() => {},
-				{ disabledProviders: cfgDisabledProviders.get(settings) },
+				{ disabledProviders: settings.get("disabledProviders") },
 			);
 			for (const char of "opencode-go") {
 				component.handleInput(char);

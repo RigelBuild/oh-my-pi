@@ -29,8 +29,6 @@ function restoreEnv(key: string, value: string | undefined): void {
 }
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-import { cfgExtensionHandlersToolCallTimeoutMs } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
-
 const providerName = "restricted-session-provider";
 const modelId = "restricted-session-model";
 const apiId = "restricted-session-api";
@@ -273,7 +271,7 @@ describe("restricted sessions sharing extension providers", () => {
 	test("fails closed when inherited tool policy throws, times out, or is cancelled", async () => {
 		const blocked = path.join(tempDir, "blocked.txt");
 		await Bun.write(blocked, "must not be read");
-		cfgExtensionHandlersToolCallTimeoutMs.set(settings, 25);
+		settings.set("extensionHandlers.toolCallTimeoutMs", 25);
 		await withRestrictedChild(
 			pi => {
 				pi.on("tool_call", event => {

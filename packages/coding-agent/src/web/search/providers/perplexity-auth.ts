@@ -3,11 +3,16 @@ import { $env } from "@oh-my-pi/pi-utils";
 
 export const PERPLEXITY_CHAT_BASE_URL = "https://api.perplexity.ai";
 export const PERPLEXITY_RESPONSES_BASE_URL = "https://api.perplexity.ai/v1";
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
 export interface ApiConfig {
 	type: "api_key";
 	apiKey: string;
+	provider: "perplexity" | "openrouter";
+	chatBaseUrl: string;
+	responsesBaseUrl: string;
+	modelPrefix: string;
 	useResponses: boolean;
 }
 
@@ -30,16 +35,15 @@ export interface PerplexityAuthOptions {
 	forceRefresh?: boolean;
 }
 
-/**
- * Resolve the direct Perplexity API-key endpoint. OpenRouter keys are never
- * borrowed: OpenRouter-hosted Perplexity runs only through an explicit
- * `openrouter/perplexity/…` selector.
- */
-async function getApiConfig(
+/** Detect API-key endpoints to try in priority order (Perplexity direct, then OpenRouter). */
+export async function getApiConfigs(
 	authStorage: AuthStorage,
 	sessionId: string | undefined,
 	options?: PerplexityAuthOptions,
-): Promise<ApiConfig | undefined> {
+): Promise<ApiConfig[]> {
+	const useResponses = $env.PI_PERPLEXITY_RESPONSES === "1";
+	const configs: ApiConfig[] = [];
+
 	// A Perplexity OAuth session and a real API key are mutually exclusive here:
 	// when the active credential origin is OAuth, `getApiKey("perplexity")`
 	// returns the OAuth session JWT (OAuth wins in AuthStorage.keys.get), not an
@@ -47,9 +51,35 @@ async function getApiConfig(
 	// search loop send the session token as a Bearer to the direct API endpoint,
 	// which rejects it with 401 and masks the real (transport) failure — see #5315.
 	// Skip the direct config in that case; the OAuth ask-endpoint method covers it.
-	if (authStorage.keys.source("perplexity")?.kind === "oauth") return undefined;
-	const apiKey = await authStorage.keys.get("perplexity", sessionId, options);
-	return apiKey ? { type: "api_key", apiKey, useResponses: $env.PI_PERPLEXITY_RESPONSES === "1" } : undefined;
+	if (authStorage.keys.source("perplexity")?.kind !== "oauth") {
+		const perplexityKey = await authStorage.keys.get("perplexity", sessionId, options);
+		if (perplexityKey) {
+			configs.push({
+				type: "api_key",
+				apiKey: perplexityKey,
+				provider: "perplexity",
+				chatBaseUrl: PERPLEXITY_CHAT_BASE_URL,
+				responsesBaseUrl: PERPLEXITY_RESPONSES_BASE_URL,
+				modelPrefix: "",
+				useResponses,
+			});
+		}
+	}
+
+	const openrouterKey = await authStorage.keys.get("openrouter", sessionId, options);
+	if (openrouterKey) {
+		configs.push({
+			type: "api_key",
+			apiKey: openrouterKey,
+			provider: "openrouter",
+			chatBaseUrl: OPENROUTER_BASE_URL,
+			responsesBaseUrl: OPENROUTER_BASE_URL,
+			modelPrefix: "perplexity/",
+			useResponses,
+		});
+	}
+
+	return configs;
 }
 
 /**
@@ -99,9 +129,9 @@ export async function getAvailableAuthMethods(
 		// ignored
 	}
 
-	// 3. Direct API key
-	const apiConfig = await getApiConfig(authStorage, sessionId, options);
-	if (apiConfig) methods.push(apiConfig);
+	// 3. API key configs (direct, then openrouter)
+	const apiConfigs = await getApiConfigs(authStorage, sessionId, options);
+	methods.push(...apiConfigs);
 
 	// 4. Fallback to Perplexity free (anonymous)
 	if (methods.length === 0) {

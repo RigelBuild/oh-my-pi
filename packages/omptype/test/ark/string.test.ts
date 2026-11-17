@@ -21,3 +21,11 @@ it("errors on bad whitespace", () => {
 it("unterminated string", () => {
 	expect(() => type("'bob")).toThrow();
 });
+
+it.todo("shallow single autocomplete");
+
+it.todo("shallow multi autocomplete");
+
+it.todo("post-operator autocomplete");
+
+it.todo("post-operator autocomplete with spaces");

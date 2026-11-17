@@ -282,16 +282,6 @@ export class MnemopiSessionState {
 	}
 
 	/**
-	 * Bank for `scope: "global"` writes: the retain bank under `global` scoping, the shared bank
-	 * under `per-project-tagged`. Throws under `per-project`, which has no bank every project recalls.
-	 */
-	getGlobalRetainTarget(): MnemopiScopedMemory {
-		const target = this.config.scoping === "global" ? this.scoped.retain : this.scoped.global;
-		if (!target) throw new Error("Mnemopi global scope requires global or per-project-tagged scoping.");
-		return target;
-	}
-
-	/**
 	 * Read counterpart to {@link editScopedMemory}: fetch a memory row by id
 	 * from any bank this session recalls from (retain, recall, global). First
 	 * hit wins in the same order {@link editScopedMemory} would touch, so the
@@ -477,17 +467,10 @@ export class MnemopiSessionState {
 		}
 	}
 
-	/**
-	 * Explicit write: throws the storage error, so the caller can report why nothing was stored.
-	 * `target` defaults to the retain bank; pass {@link getGlobalRetainTarget} for a global write.
-	 */
-	rememberScoped(
-		memory: MnemopiRememberInput,
-		options: MnemopiRememberOptions = {},
-		target: MnemopiScopedMemory = this.scoped.retain,
-	): string {
+	/** Explicit write: throws the storage error, so the caller can report why nothing was stored. */
+	rememberScoped(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string {
 		const [scrubbed, scrubbedOptions] = redactRememberWrite(memory, options);
-		return target.memory.remember(scrubbed, scrubbedOptions);
+		return this.scoped.retain.memory.remember(scrubbed, scrubbedOptions);
 	}
 
 	async recallForContext(query: string, signal?: AbortSignal): Promise<string | undefined> {
@@ -825,11 +808,15 @@ export class MnemopiSessionState {
 }
 
 // `per-project-tagged` is implemented by opening both the project bank and the
-// shared bank, then merging recall results while keeping writes project-local by default.
+// shared bank, then merging recall results while keeping writes project-local.
 function createScopedResources(config: MnemopiBackendConfig): MnemopiScopedResources {
-	// Recall feature flags are per memory instance (see `createMemory`) so concurrent
-	// sessions with different settings cannot clobber each other through process-wide
-	// defaults. MNEMOPI_POLYPHONIC_RECALL / MNEMOPI_ENHANCED_RECALL still override them.
+	// Env vars (MNEMOPI_POLYPHONIC_RECALL / MNEMOPI_ENHANCED_RECALL) still override
+	// these config-driven defaults inside the core gates. Proactive linking is
+	// per-memory instance below so concurrent sessions cannot clobber each other.
+	requireMnemopi().configureRecallFeatures({
+		polyphonicRecall: config.polyphonicRecall,
+		enhancedRecall: config.enhancedRecall,
+	});
 	const banks = resolveScopedBanks(config);
 	const memories = new Map<string, MnemopiScopedMemory>();
 	const open = (bank: string): MnemopiScopedMemory => {
@@ -952,8 +939,6 @@ function createMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
 		channelId: bank,
 		...providerOptions,
 		proactiveLinking: config.proactiveLinking,
-		polyphonicRecall: config.polyphonicRecall,
-		enhancedRecall: config.enhancedRecall,
 	} as ConstructorParameters<typeof Mnemopi>[0]);
 }
 

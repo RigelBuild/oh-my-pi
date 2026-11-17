@@ -28,12 +28,12 @@ export interface ProtoMessage {
 
 /** A bidirectional codec for one protobuf message type. */
 export interface MessageCodec<T extends ProtoMessage = ProtoMessage> {
-	(value: T): Uint8Array<ArrayBuffer>;
+	(value: T): Uint8Array;
 	(value: Uint8Array): T;
 	/** Creates a message with protobuf defaults for omitted fields. */
 	create(value?: Partial<T>): T;
 	/** Encodes one message into protobuf wire bytes. */
-	encode(value: T): Uint8Array<ArrayBuffer>;
+	encode(value: T): Uint8Array;
 	/** Decodes one protobuf message from wire bytes. */
 	decode(value: Uint8Array): T;
 	/** Converts a message to its protobuf JSON representation. */
@@ -144,7 +144,7 @@ export function pb<T extends ProtoMessage = ProtoMessage>(
 	}) as MessageCodec<T>;
 
 	codec.create = (value?: Partial<T>): T => getCodec().create(value);
-	codec.encode = (value: T): Uint8Array<ArrayBuffer> => getCodec().encode(value);
+	codec.encode = (value: T): Uint8Array => getCodec().encode(value);
 	codec.decode = (value: Uint8Array): T => getCodec().decode(value);
 	codec.toJson = (value: T): JsonValue => getCodec().toJson(value);
 
@@ -160,10 +160,7 @@ export function create<TMessage extends ProtoMessage>(
 }
 
 /** Encodes a message using its codec. */
-export function toBinary<TMessage extends ProtoMessage>(
-	codec: MessageCodec<TMessage>,
-	value: TMessage,
-): Uint8Array<ArrayBuffer> {
+export function toBinary<TMessage extends ProtoMessage>(codec: MessageCodec<TMessage>, value: TMessage): Uint8Array {
 	return codec.encode(value);
 }
 
@@ -241,7 +238,7 @@ function compileCodec<T extends ProtoMessage>(typeName: string, fieldDescs: read
 		return message;
 	};
 
-	codec.encode = (value: T): Uint8Array<ArrayBuffer> => {
+	codec.encode = (value: T): Uint8Array => {
 		const writer = new Writer();
 		for (const f of compiledFields) {
 			f.encode(value, writer);
@@ -739,10 +736,6 @@ function assertWireType(actual: WireType, expected: WireType): void {
 	if (actual !== expected) throw new Error(`Unexpected protobuf wire type ${actual}; expected ${expected}`);
 }
 
-function isArrayBufferBacked(bytes: Uint8Array | undefined): bytes is Uint8Array<ArrayBuffer> {
-	return bytes?.buffer instanceof ArrayBuffer;
-}
-
 class Writer {
 	#chunks: Uint8Array[] = [];
 	#length = 0;
@@ -821,10 +814,8 @@ class Writer {
 		this.#length += chunk.byteLength;
 	}
 
-	/** Wire bytes on a plain `ArrayBuffer`, so they satisfy `fetch`'s `BodyInit` as-is. */
-	finish(): Uint8Array<ArrayBuffer> {
-		const [only] = this.#chunks;
-		if (this.#chunks.length === 1 && isArrayBufferBacked(only)) return only;
+	finish(): Uint8Array {
+		if (this.#chunks.length === 1) return this.#chunks[0];
 		const result = new Uint8Array(this.#length);
 		let offset = 0;
 		for (const chunk of this.#chunks) {

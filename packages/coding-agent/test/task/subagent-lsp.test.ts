@@ -82,7 +82,6 @@ function createYieldingSession(): AgentSession {
 				},
 				isError: false,
 			});
-			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 	} as unknown as AgentSession;

@@ -35,12 +35,10 @@ const primitiveMap: Record<JTDPrimitive, string> = {
 };
 
 function convertSchema(schema: unknown): unknown {
-	if (schema === null || typeof schema !== "object") return {};
-	const converted = convertSchemaForm(schema);
-	return "nullable" in schema && schema.nullable === true ? { anyOf: [converted, { type: "null" }] } : converted;
-}
+	if (schema === null || typeof schema !== "object") {
+		return {};
+	}
 
-function convertSchemaForm(schema: unknown): unknown {
 	// Enum form: { enum: ["a", "b"] } → { enum: ["a", "b"] }
 	if (isJTDEnum(schema)) {
 		return { enum: schema.enum };

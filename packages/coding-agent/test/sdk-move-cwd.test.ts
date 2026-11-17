@@ -9,7 +9,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectAgentDir, getProjectDir, setProjectDir, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -30,8 +29,6 @@ describe("createAgentSession cwd after /move", () => {
 	const tempDirs: string[] = [];
 
 	afterEach(() => {
-		// `Settings.loadIsolated` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
-		AgentStorage.close();
 		for (const tempDir of tempDirs.splice(0)) {
 			removeSyncWithRetries(tempDir);
 		}
@@ -90,7 +87,7 @@ describe("createAgentSession cwd after /move", () => {
 					),
 				);
 				const settings = await Settings.loadIsolated({ cwd: cwdA, agentDir });
-				const sessionManager = SessionManager.create(cwdA, SessionManager.getDefaultSessionDir(cwdA, agentDir));
+				const sessionManager = SessionManager.create(cwdA, path.join(tempDir, "sessions"));
 				authStorage.keys.setRuntime("openai", "test-key");
 				({ session } = await createAgentSession({
 					cwd: cwdA,
@@ -122,7 +119,6 @@ describe("createAgentSession cwd after /move", () => {
 
 				moved = true;
 				await sessionManager.moveTo(cwdB);
-				expect(sessionManager.getSessionDir().startsWith(`${agentDir}${path.sep}`)).toBe(true);
 				await settings.reloadForCwd(cwdB);
 				// Rebinding must clear memory without depending on a later skill/tool refresh.
 				await rebindMemoryBackendForCwd(session);
@@ -152,19 +148,21 @@ describe("createAgentSession cwd after /move", () => {
 		const cwdB = path.join(tempDir, "cwd-b");
 		fs.mkdirSync(cwdA, { recursive: true });
 		fs.mkdirSync(cwdB, { recursive: true });
-		await Bun.write(path.join(cwdB, "moved.txt"), "moved cwd");
-		const agentDir = path.join(tempDir, "agent");
 
-		const sessionManager = SessionManager.create(cwdA, SessionManager.getDefaultSessionDir(cwdA, agentDir));
+		const sessionManager = SessionManager.create(cwdA, path.join(tempDir, "sessions"));
 		const authStorage = createInMemoryAuthStorage();
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const { session } = await createAgentSession({
 			cwd: cwdA,
-			agentDir,
+			agentDir: tempDir,
 			sessionManager,
 			authStorage,
 			modelRegistry,
-			settings: Settings.isolated({ "async.enabled": false }),
+			settings: Settings.isolated({
+				"async.enabled": false,
+				"bash.autoBackground.enabled": false,
+				"bashInterceptor.enabled": false,
+			}),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -176,19 +174,17 @@ describe("createAgentSession cwd after /move", () => {
 			skipPythonPreflight: true,
 			rules: [],
 			preloadedCustomToolPaths: [],
-			toolNames: ["read"],
+			toolNames: ["bash"],
 		});
 
 		try {
 			await sessionManager.moveTo(cwdB);
-			expect(sessionManager.getSessionDir().startsWith(`${agentDir}${path.sep}`)).toBe(true);
 
-			// A relative read proves cwd rebinding without creating the process-scoped shell snapshot cache.
-			const readTool = session.getToolByName("read");
-			if (!readTool) throw new Error("Expected read tool");
-			const result = await readTool.execute("read-after-move", { path: "moved.txt" });
+			const bashTool = session.getToolByName("bash");
+			if (!bashTool) throw new Error("Expected bash tool");
+			const result = await bashTool.execute("pwd-after-move", { command: "pwd" });
 
-			expect(textContent(result)).toContain("moved cwd");
+			expect(textContent(result)).toContain(cwdB);
 		} finally {
 			try {
 				await session.dispose();
@@ -216,7 +212,7 @@ describe("createAgentSession cwd after /move", () => {
 			),
 		);
 		const settings = await Settings.loadIsolated({ cwd: cwdA, agentDir });
-		const sessionManager = SessionManager.create(cwdA, SessionManager.getDefaultSessionDir(cwdA, agentDir));
+		const sessionManager = SessionManager.create(cwdA, path.join(tempDir, "sessions"));
 		const authStorage = createInMemoryAuthStorage();
 		const { session } = await createAgentSession({
 			cwd: cwdA,
@@ -257,7 +253,6 @@ describe("createAgentSession cwd after /move", () => {
 			});
 			expect(output.join("\n")).toContain("Moved to ");
 			expect(sessionManager.getCwd()).toBe(cwdB);
-			expect(sessionManager.getSessionDir().startsWith(`${agentDir}${path.sep}`)).toBe(true);
 			expect(session.getHindsightSessionState()).toBeUndefined();
 			expect(session.getMnemopiSessionState()).toBeUndefined();
 			// Explicit backend reapplication must preserve the same startup policy.

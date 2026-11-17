@@ -8,7 +8,6 @@ import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isCompletionProbeEnabled } from "./completion-probe";
 import { runSubagentFollowUpTurn } from "./executor";
 import {
 	type EffectiveSubagentPolicy,
@@ -17,9 +16,6 @@ import {
 } from "./structured-subagent";
 import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { buildWorkPoolOutputSchema, type WorkPoolYieldItem } from "./workpool-yield";
-
-import { cfgEvalWorkpoolFreshAgents } from "../eval/settings";
-import { cfgTaskMaxConcurrency, cfgTaskMaxRuntimeMs } from "./settings";
 
 /** One user-supplied unit tracked through a workpool batch. */
 export interface WorkPoolItem {
@@ -89,8 +85,6 @@ export interface WorkPoolPeekResult {
 /** Resolved policy and optional shared context used to create a pool. */
 export interface WorkPoolCreateOptions {
 	name: string;
-	/** Raw selector applied to each worker at creation, never to follow-up turns. */
-	model?: string | string[];
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
@@ -112,7 +106,6 @@ export class WorkPool {
 	readonly ownerId: string;
 	readonly session: ToolSession;
 	readonly policy: EffectiveSubagentPolicy;
-	readonly #model?: string | string[];
 	readonly context?: string;
 	readonly customTools: CustomTool[];
 	readonly freshAgents: boolean;
@@ -135,10 +128,9 @@ export class WorkPool {
 		this.ownerId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 		this.session = session;
 		this.policy = options.policy;
-		this.#model = Array.isArray(options.model) ? [...options.model] : options.model;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
-		this.freshAgents = cfgEvalWorkpoolFreshAgents.get(session.settings);
+		this.freshAgents = session.settings.get("eval.workpool.freshAgents");
 		if (!session.asyncJobManager) {
 			throw new ToolError("workpool() needs the session's async job manager; unavailable here");
 		}
@@ -149,7 +141,7 @@ export class WorkPool {
 
 	/** Current worker ceiling from the live `task.maxConcurrency` setting. */
 	limit(): number {
-		const configured = cfgTaskMaxConcurrency.get(this.session.settings);
+		const configured = this.session.settings.get("task.maxConcurrency");
 		return configured > 0 ? configured : Infinity;
 	}
 
@@ -388,7 +380,6 @@ export class WorkPool {
 							assignment: message,
 							...(this.context ? { context: this.context } : {}),
 							agent: this.policy.agentName,
-							...(this.#model !== undefined ? { model: this.#model } : {}),
 							identity: { id: agent.id },
 							customTools: this.customTools,
 							outputSchema,
@@ -396,6 +387,7 @@ export class WorkPool {
 							workPoolYieldItems,
 							keepAlive: true,
 							retainArtifacts: true,
+							shareEvalSession: false,
 							enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 							signal,
 							onProgress,
@@ -415,8 +407,7 @@ export class WorkPool {
 							eventBus: this.session.eventBus,
 							subagentEventBus: this.session.subagentEventBus,
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
-							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
-							completionProbe: isCompletionProbeEnabled(this.session.settings, this.session.taskDepth ?? 0),
+							maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 						});
 					}
 				} catch (error) {

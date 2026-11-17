@@ -60,6 +60,7 @@ async function resolveTarget(
 	const advertised = await fetchAntigravityImageModel({
 		token: credentials.accessToken,
 		endpoint: endpoints.length === 1 ? endpoints[0] : undefined,
+		userAgent: getAntigravityUserAgent(),
 		signal,
 		fetcher: fetchImpl,
 	});

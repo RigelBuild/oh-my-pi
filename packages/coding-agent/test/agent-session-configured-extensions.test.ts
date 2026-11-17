@@ -25,8 +25,6 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
-import { cfgExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
-
 interface SessionInputs {
 	additionalExtensionPaths?: readonly string[];
 	disableExtensionDiscovery?: boolean;
@@ -156,7 +154,7 @@ describe("AgentSession extension-root discovery (post-startup)", () => {
 		expect(session.skills.map(skill => skill.name)).not.toContain("configured-skill");
 
 		// The live getter reads settings per call, so the override lands on refresh.
-		cfgExtensions.override(session.settings, [configuredExt]);
+		session.settings.override("extensions", [configuredExt]);
 		await session.refreshSkills();
 		expect(session.skills.map(skill => skill.name)).toContain("configured-skill");
 	});

@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -94,6 +94,10 @@ async function readPluginManifest(root: ClaudePluginRoot): Promise<ClaudePluginM
 	} catch {
 		return null;
 	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** Env maps must hold only string values; anything else is malformed. */
@@ -234,7 +238,6 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						level: root.scope,
 						includeSelf: true,
 						origin: root.origin,
-						pluginName: root.plugin,
 					}),
 				),
 			);

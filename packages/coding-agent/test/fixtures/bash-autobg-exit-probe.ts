@@ -7,7 +7,6 @@
  * process must exit promptly. The parent test measures wall-clock exit time.
  */
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 
@@ -25,11 +24,16 @@ const session = {
 	getSessionId: () => "autobg-probe",
 	getAgentId: () => null,
 	asyncJobManager: manager,
-	settings: Settings.isolated({
-		"async.enabled": false,
-		"bash.autoBackground.enabled": true,
-		"bash.autoBackground.thresholdMs": THRESHOLD_MS,
-	}),
+	settings: {
+		get(key: string) {
+			if (key === "bash.autoBackground.enabled") return true;
+			if (key === "bash.autoBackground.thresholdMs") return THRESHOLD_MS;
+			return undefined;
+		},
+		getBashInterceptorRules() {
+			return [];
+		},
+	},
 	getClientBridge: () => undefined,
 } as unknown as ToolSession;
 

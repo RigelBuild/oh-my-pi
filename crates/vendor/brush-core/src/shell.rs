@@ -71,14 +71,8 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// Manages files opened and accessible via redirection operators.
 	open_files: openfiles::OpenFiles,
 
-	/// The current working directory. May be a virtual (`scheme://`) path
-	/// served by [`Shell::filesystem`].
+	/// The current working directory.
 	working_dir: PathBuf,
-
-	/// Filesystem through which all shell-owned path access goes (redirects,
-	/// `cd`, tests, globbing, sourcing, command lookup). Native by default.
-	#[cfg_attr(feature = "serde", serde(skip))]
-	filesystem: pi_vfs::Fs,
 
 	/// The shell environment, containing shell variables.
 	env: ShellEnvironment,
@@ -154,17 +148,6 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 
 	/// History of commands executed in the shell.
 	history: Option<crate::history::History>,
-
-	/// Resource limits applied to spawned external commands (`ulimit`).
-	#[cfg_attr(feature = "serde", serde(skip))]
-	resource_limits: crate::rlimits::ResourceLimits,
-
-	/// File mode creation mask set by `umask`; `None` inherits the host
-	/// process's. Like the resource limits it never touches the host process:
-	/// it reaches external commands between fork and exec and files created
-	/// through the shell's filesystem (see [`Shell::set_umask`]).
-	#[cfg_attr(feature = "serde", serde(skip))]
-	umask: Option<u32>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -174,7 +157,6 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			traps: self.traps.clone(),
 			open_files: self.open_files.clone(),
 			working_dir: self.working_dir.clone(),
-			filesystem: self.filesystem.clone(),
 			env: self.env.clone(),
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
@@ -204,8 +186,6 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			parser_impl: self.parser_impl,
 			key_bindings: self.key_bindings.clone(),
 			history: self.history.clone(),
-			resource_limits: self.resource_limits.clone(),
-			umask: self.umask,
 			depth: self.depth + 1,
 		}
 	}
@@ -254,7 +234,6 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 				options.working_dir,
 				std::env::current_dir(),
 			)?),
-			filesystem: options.filesystem.unwrap_or_default(),
 			builtins: options.builtins,
 			parser_impl: options.parser,
 			key_bindings: options.key_bindings,
@@ -283,37 +262,19 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 			shell.env.set_global(var_name, var_value)?;
 		}
 
+		// Set up history, if relevant. Do NOT fail if we can't load history.
+		if shell.options.enable_command_history {
+			shell.history = shell
+				.load_history()
+				.unwrap_or_default()
+				.or_else(|| Some(crate::history::History::default()));
+		}
+
 		Ok(shell)
 	}
 }
 
 impl<SE: extensions::ShellExtensions> Shell<SE> {
-	/// Returns the resource limits applied to spawned external commands.
-	pub const fn resource_limits(&self) -> &crate::rlimits::ResourceLimits {
-		&self.resource_limits
-	}
-
-	/// Returns a mutable reference to the resource limits applied to spawned
-	/// external commands.
-	pub const fn resource_limits_mut(&mut self) -> &mut crate::rlimits::ResourceLimits {
-		&mut self.resource_limits
-	}
-
-	/// Returns the file mode creation mask set by `umask`, or `None` while the
-	/// shell still inherits the host process's.
-	pub const fn umask(&self) -> Option<u32> {
-		self.umask
-	}
-
-	/// Sets the shell's file mode creation mask. The host process umask is left
-	/// alone: the mask is applied to each external command between fork and
-	/// exec, and to files created through the shell's filesystem, which keeps
-	/// it across later [`Shell::set_filesystem`] calls.
-	pub fn set_umask(&mut self, mask: u32) {
-		self.umask = Some(mask);
-		self.filesystem = self.filesystem.with_creation_mask(Some(mask));
-	}
-
 	/// Increments the interactive line offset in the shell by the indicated
 	/// number of lines.
 	///
@@ -585,21 +546,6 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 		self.key_bindings = key_bindings;
 	}
 
-	/// Returns the filesystem the shell resolves user paths through.
-	pub fn filesystem(&self) -> &pi_vfs::Fs {
-		&self.filesystem
-	}
-
-	/// Replaces the filesystem the shell resolves user paths through. Takes
-	/// effect for subsequent operations; files already open stay bound to the
-	/// filesystem that opened them.
-	pub fn set_filesystem(&mut self, filesystem: pi_vfs::Fs) {
-		self.filesystem = match self.umask {
-			Some(mask) => filesystem.with_creation_mask(Some(mask)),
-			None => filesystem,
-		};
-	}
-
 	/// Returns the shell's current working directory.
 	pub fn working_dir(&self) -> &Path {
 		&self.working_dir
@@ -614,31 +560,6 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 	/// Returns the product display name for this shell.
 	pub fn product_display_str(&self) -> Option<&str> {
 		self.product_display_str.as_deref()
-	}
-}
-
-impl<SE: extensions::ShellExtensions> Shell<SE> {
-	/// Returns a copy of this shell at the same depth and call stack (not a
-	/// subshell) for running a builtin off the async runtime. The copy has an
-	/// empty job table: jobs own their processes, so they never leave this
-	/// shell. Adopt its final state with [`Self::settle_lease`]; if it is never
-	/// settled, this shell is unchanged.
-	pub(crate) fn lease(&self) -> Self {
-		let mut lease = self.clone();
-		lease.depth = self.depth;
-		lease.call_stack = self.call_stack.clone();
-		lease
-	}
-
-	/// Adopts the state a builtin left in a [`Self::lease`], keeping this
-	/// shell's jobs and taking over any jobs the builtin started.
-	pub(crate) fn settle_lease(&mut self, mut lease: Self) {
-		let started = std::mem::take(&mut lease.jobs);
-		lease.jobs = std::mem::take(&mut self.jobs);
-		*self = lease;
-		for job in started.jobs {
-			self.jobs.add_as_current(job);
-		}
 	}
 }
 

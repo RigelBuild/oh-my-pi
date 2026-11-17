@@ -21,20 +21,13 @@ const URL_PATTERN = /https?:\/\/\S+/g;
 /**
  * Quote-aware argv split for the command template. Supports single/double
  * quotes and backslash escapes outside single quotes — enough for uploader
- * command lines without invoking a shell. On Windows a backslash is the path
- * separator, so it only escapes a following quote (or whitespace outside
- * quotes) and `C:\tools\upload.exe {file}` stays intact.
+ * command lines without invoking a shell.
  */
-export function splitCommandTemplate(template: string, platform: NodeJS.Platform = process.platform): string[] {
+export function splitCommandTemplate(template: string): string[] {
 	const argv: string[] = [];
 	let current = "";
 	let started = false;
 	let quote: '"' | "'" | undefined;
-	const isEscape = (next: string): boolean => {
-		if (platform !== "win32") return true;
-		if (quote === '"') return next === '"';
-		return next === '"' || next === "'" || next === " " || next === "\t";
-	};
 	for (let i = 0; i < template.length; i++) {
 		const ch = template[i];
 		if (quote === "'") {
@@ -42,7 +35,7 @@ export function splitCommandTemplate(template: string, platform: NodeJS.Platform
 			else current += ch;
 			continue;
 		}
-		if (ch === "\\" && i + 1 < template.length && isEscape(template[i + 1])) {
+		if (ch === "\\" && i + 1 < template.length) {
 			current += template[++i];
 			started = true;
 			continue;

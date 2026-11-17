@@ -22,8 +22,6 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { AutocompleteProvider } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
-
 function makeTool(name: string): AgentTool {
 	return {
 		name,
@@ -58,7 +56,7 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		originalHome = process.env.HOME;
 		process.env.HOME = tempDir.path();
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		cfgStartupQuiet.set(Settings.instance, true);
+		Settings.instance.set("startup.quiet", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		// ModelRegistry (bundled-model load) and the resolved model are immutable across

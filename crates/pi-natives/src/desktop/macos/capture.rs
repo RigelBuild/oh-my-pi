@@ -8,13 +8,10 @@ use std::{
 use image::{DynamicImage, Rgba, RgbaImage, imageops::FilterType};
 use xcap::{Monitor, Window};
 
-use super::{
-	super::{
-		error::{CoreResult, DesktopError},
-		frame::{FrameGeometry, MAX_COMPOSITE_PIXELS, compose},
-		types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
-	},
-	ax,
+use super::super::{
+	error::{CoreResult, DesktopError},
+	frame::{FrameGeometry, MAX_COMPOSITE_PIXELS},
+	types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 };
 const MAX_LISTED_WINDOWS: usize = 48;
 const MIN_WINDOW_EDGE: u32 = 16;
@@ -112,9 +109,6 @@ impl MacCapture {
 		})?;
 		let mut result = Vec::new();
 		let mut seen = HashSet::new();
-		// The active application's listed windows, front to back.
-		let mut active = Vec::new();
-		let mut active_pid = None;
 		for window in windows {
 			if result.len() >= MAX_LISTED_WINDOWS {
 				break;
@@ -136,31 +130,17 @@ impl MacCapture {
 			if title.is_empty() && app.is_empty() {
 				continue;
 			}
-			let pid = window.pid().ok();
-			// xcap's `is_focused` only says the owner is the active application.
-			if window.is_focused().unwrap_or(false) {
-				active.push(id);
-				active_pid = active_pid.or(pid);
-			}
 			result.push(DesktopWindow {
 				id: id.to_string(),
 				title,
 				app,
-				pid,
+				pid: window.pid().ok(),
 				x,
 				y,
 				width,
 				height,
-				focused: false,
+				focused: window.is_focused().unwrap_or(false),
 			});
-		}
-		let ax_focused = active_pid
-			.and_then(|pid| libc::pid_t::try_from(pid).ok())
-			.and_then(ax::focused_window_id);
-		if let Some(key) = key_window(&active, ax_focused).map(|id| id.to_string())
-			&& let Some(window) = result.iter_mut().find(|window| window.id == key)
-		{
-			window.focused = true;
 		}
 		Ok(result)
 	}
@@ -253,36 +233,36 @@ impl MacCapture {
 				"composite {target_width}x{target_height} exceeds the native safety limit",
 			)));
 		}
+		let mut composite = RgbaImage::from_pixel(target_width, target_height, Rgba([0, 0, 0, 255]));
 		let mut metadata = Vec::with_capacity(regions.len());
-		let composite = compose(
-			target_width,
-			target_height,
-			Rgba([0, 0, 0, 255]),
-			regions.into_iter().map(|(mut display, image)| {
-				let offset_x = u32::try_from(i64::from(display.x) - min_x)
-					.map_err(|_| DesktopError::capture_failed("display x offset overflow"))?;
-				let offset_y = u32::try_from(i64::from(display.y) - min_y)
-					.map_err(|_| DesktopError::capture_failed("display y offset overflow"))?;
-				display.pixel_x = scaled_edge(offset_x, render_scale);
-				display.pixel_y = scaled_edge(offset_y, render_scale);
-				display.pixel_width = scaled_edge(display.width, render_scale).max(1);
-				display.pixel_height = scaled_edge(display.height, render_scale).max(1);
-				let rendered =
-					if image.width() == display.pixel_width && image.height() == display.pixel_height {
-						image
-					} else {
-						image::imageops::resize(
-							&image,
-							display.pixel_width,
-							display.pixel_height,
-							FilterType::Triangle,
-						)
-					};
-				let placement = (rendered, display.pixel_x, display.pixel_y);
-				metadata.push(display);
-				Ok(placement)
-			}),
-		)?;
+		for (mut display, image) in regions {
+			let offset_x = u32::try_from(i64::from(display.x) - min_x)
+				.map_err(|_| DesktopError::capture_failed("display x offset overflow"))?;
+			let offset_y = u32::try_from(i64::from(display.y) - min_y)
+				.map_err(|_| DesktopError::capture_failed("display y offset overflow"))?;
+			display.pixel_x = scaled_edge(offset_x, render_scale);
+			display.pixel_y = scaled_edge(offset_y, render_scale);
+			display.pixel_width = scaled_edge(display.width, render_scale).max(1);
+			display.pixel_height = scaled_edge(display.height, render_scale).max(1);
+			let rendered =
+				if image.width() == display.pixel_width && image.height() == display.pixel_height {
+					image
+				} else {
+					image::imageops::resize(
+						&image,
+						display.pixel_width,
+						display.pixel_height,
+						FilterType::Triangle,
+					)
+				};
+			image::imageops::replace(
+				&mut composite,
+				&rendered,
+				i64::from(display.pixel_x),
+				i64::from(display.pixel_y),
+			);
+			metadata.push(display);
+		}
 		let geometry = FrameGeometry::for_displays(&metadata);
 		Ok((composite, geometry))
 	}
@@ -296,17 +276,6 @@ fn scaled_edge(value: u32, scale: f64) -> u32 {
 	(f64::from(value) * scale)
 		.round()
 		.clamp(0.0, f64::from(u32::MAX)) as u32
-}
-
-/// The window holding input focus among the active application's listed
-/// windows (front to back): its `AXFocusedWindow`, or the frontmost when
-/// accessibility cannot name one (for example without the Accessibility
-/// permission). A focused window that was not listed marks nothing.
-fn key_window(active: &[u32], ax_focused: Option<u32>) -> Option<u32> {
-	match ax_focused {
-		Some(id) => active.contains(&id).then_some(id),
-		None => active.first().copied(),
-	}
 }
 
 fn run_screencapture(args: &[String]) -> CoreResult<RgbaImage> {
@@ -365,25 +334,4 @@ fn run_screencapture(args: &[String]) -> CoreResult<RgbaImage> {
 			DesktopError::capture_failed(format!("failed to decode macOS screenshot: {error}"))
 		})
 		.map(DynamicImage::into_rgba8)
-}
-
-#[cfg(test)]
-mod tests {
-	use super::key_window;
-
-	#[test]
-	fn key_window_is_the_accessibility_focused_window_not_the_frontmost() {
-		assert_eq!(key_window(&[41, 42, 43], Some(42)), Some(42));
-	}
-
-	#[test]
-	fn key_window_falls_back_to_the_frontmost_window_without_accessibility() {
-		assert_eq!(key_window(&[41, 42], None), Some(41));
-		assert_eq!(key_window(&[], None), None);
-	}
-
-	#[test]
-	fn key_window_marks_nothing_when_the_focused_window_is_not_listed() {
-		assert_eq!(key_window(&[41, 42], Some(99)), None);
-	}
 }

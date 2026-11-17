@@ -1,4 +1,4 @@
-import type { Database, SQLQueryBindings, Statement } from "bun:sqlite";
+import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { checkpointWal, getHistoryDbPath, logger, openSqliteDatabaseSync, postmortem } from "@oh-my-pi/pi-utils";
@@ -19,14 +19,6 @@ export interface HistoryEntry {
 	useCount: number;
 }
 
-/** Narrows history reads; omitted fields match every prompt. */
-export interface HistoryFilter {
-	/** Exact project working directory of the prompt's latest submission. */
-	cwd?: string;
-	/** Exact session id of the prompt's latest submission. */
-	sessionId?: string;
-}
-
 type HistoryRow = {
 	id: number;
 	prompt: string;
@@ -37,16 +29,6 @@ type HistoryRow = {
 };
 
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
-
-/**
- * SQL predicate for a {@link HistoryFilter}, bound as numbered parameters
- * `?first` (cwd) and `?first+1` (session id); binding NULL disables that half.
- * `table` qualifies the columns (`"h."`) when the statement joins.
- */
-function historyFilterClause(table: string, first: number): string {
-	const session = first + 1;
-	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session})`;
-}
 
 // Escape LIKE wildcards so user input is treated as literal text.
 // Matches the `ESCAPE '\\'` clause used by substring-search statements.
@@ -93,9 +75,6 @@ export class HistoryStorage {
 	#db: Database;
 	static #instance?: HistoryStorage;
 	#sessionResolver?: () => string | undefined;
-	#addListener?: () => void;
-	#errorListener?: (error: unknown) => void;
-	#writeFailureReported = false;
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
@@ -107,9 +86,7 @@ export class HistoryStorage {
 	private constructor(db: Database) {
 		this.#db = db;
 
-		// One-shot statements go through the query cache, which close() finalizes; a
-		// stray prepare() would turn close() into a zombie that keeps the files open.
-		const hadFts = this.#db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
+		const hadFts = this.#db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
 		this.#db.run(`
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -137,10 +114,10 @@ END;
 			}
 		}
 		this.#recentStmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?3`,
+			"SELECT id, prompt, created_at, cwd, session_id, use_count FROM history ORDER BY created_at DESC, id DESC LIMIT ?",
 		);
 		this.#searchStmt = this.#db.prepare(
-			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?4`,
+			"SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ORDER BY h.created_at DESC, h.id DESC LIMIT ?",
 		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
@@ -212,23 +189,12 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#sessionResolver = resolver;
 	}
 
-	/** Register a callback run after each successful {@link add}, once the row is durable. */
-	setAddListener(listener: () => void): void {
-		this.#addListener = listener;
-	}
-
-	/** Register a callback for the first failed write in each outage, reset by a successful write. */
-	setErrorListener(listener: (error: unknown) => void): void {
-		this.#errorListener = listener;
-	}
-
 	/**
 	 * Stores a prompt, replaces its provenance with the latest submission, and
 	 * bumps its use count on resubmission.
 	 * The write is synchronous: prompt submission is human-paced, not a hot
-	 * path. On success the row is durable the moment `add()` returns and cannot
-	 * be lost to an exit racing a deferred flush. Failures are logged, not thrown;
-	 * the error listener is notified once per outage until a write succeeds.
+	 * path, so the row is durable the moment `add()` returns and can never be
+	 * lost to an exit racing a deferred flush. Failures are logged, not thrown.
 	 */
 	add(prompt: string, cwd?: string, sessionId?: string): Promise<void> {
 		const trimmed = normalizePrompt(prompt);
@@ -238,24 +204,17 @@ ON CONFLICT(prompt) DO UPDATE SET
 			this.#insertBatch([{ prompt: trimmed, cwd: cwd ?? undefined, sessionId: session || undefined }]);
 		} catch (error) {
 			logger.error("HistoryStorage add failed", { error: String(error) });
-			if (!this.#writeFailureReported) {
-				this.#writeFailureReported = true;
-				this.#errorListener?.(error);
-			}
-			return Promise.resolve();
 		}
-		this.#writeFailureReported = false;
-		this.#addListener?.();
 		return Promise.resolve();
 	}
 
 	/** Returns unique prompts ordered by their most recent submission. */
-	getRecent(limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
+	getRecent(limit: number): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
 		try {
-			const rows = this.#recentStmt.all(filter.cwd ?? null, filter.sessionId ?? null, safeLimit) as HistoryRow[];
+			const rows = this.#recentStmt.all(safeLimit) as HistoryRow[];
 			return rows.map(row => this.#toEntry(row));
 		} catch (error) {
 			logger.error("HistoryStorage getRecent failed", { error: String(error) });
@@ -264,7 +223,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/** Finds unique prompts matching every query token, newest first. */
-	search(query: string, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
+	search(query: string, limit: number): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
@@ -277,12 +236,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
-			ftsRows = this.#searchStmt.all(
-				ftsQuery,
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				safeLimit,
-			) as HistoryRow[];
+			ftsRows = this.#searchStmt.all(ftsQuery, safeLimit) as HistoryRow[];
 		} catch (error) {
 			// Malformed FTS expression - fall through to substring path.
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
@@ -293,7 +247,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		//    by safeLimit, ordered by recency - no full-table load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit, filter);
+			subRows = this.#searchSubstring(tokens, safeLimit);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -334,7 +288,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#historySchemaHasColumn(column: string): boolean {
-		const columns = this.#db.query("PRAGMA table_info(history)").all() as Array<{ name: string }>;
+		const columns = this.#db.prepare("PRAGMA table_info(history)").all() as Array<{ name: string }>;
 		return columns.some(col => col.name === column);
 	}
 
@@ -356,13 +310,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * caller can rebuild the FTS index.
 	 */
 	#rebuildHistory(): boolean {
-		const versionRow = this.#db.query("PRAGMA user_version").get() as { user_version: number };
+		const versionRow = this.#db.prepare("PRAGMA user_version").get() as { user_version: number };
 		if (versionRow.user_version >= HISTORY_DATA_VERSION) return false;
 		let rows: HistoryRow[];
 		try {
 			const sessionIdSelection = this.#historySchemaHasColumn("session_id") ? "session_id" : "NULL AS session_id";
 			rows = this.#db
-				.query(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
+				.prepare(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
 				.all() as HistoryRow[];
 		} catch (error) {
 			logger.error("HistoryStorage rebuild dump failed", { error: String(error) });
@@ -390,7 +344,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 			this.#db.run("DROP TABLE IF EXISTS history_fts");
 			this.#db.run("DROP TABLE history");
 			this.#db.run(HISTORY_TABLE_DDL);
-			const insert = this.#db.query(
+			const insert = this.#db.prepare(
 				"INSERT INTO history (id, prompt, created_at, cwd, session_id, use_count) VALUES (?, ?, ?, ?, ?, ?)",
 			);
 			for (const row of winners.values()) {
@@ -422,23 +376,19 @@ ON CONFLICT(prompt) DO UPDATE SET
 			.filter(tok => tok.length > 0);
 	}
 
-	#searchSubstring(tokens: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
+	#searchSubstring(tokens: string[], limit: number): HistoryRow[] {
 		const stmt = this.#getSubstringStmt(tokens.length);
-		const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
-		params.push(filter.cwd ?? null, filter.sessionId ?? null, limit);
-		return stmt.all(...params) as HistoryRow[];
+		const params: unknown[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+		params.push(limit);
+		return stmt.all(...(params as [string, ...unknown[]])) as HistoryRow[];
 	}
 
 	#getSubstringStmt(tokenCount: number): Statement {
 		let stmt = this.#substringStmts.get(tokenCount);
 		if (stmt) return stmt;
-		const tokenClauses = Array.from(
-			{ length: tokenCount },
-			(_, index) => `prompt LIKE ?${index + 1} ESCAPE '\\' COLLATE NOCASE`,
-		);
-		const whereClause = [...tokenClauses, historyFilterClause("", tokenCount + 1)].join(" AND ");
+		const whereClause = Array(tokenCount).fill("prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
 		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + 3}`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
 		);
 		this.#substringStmts.set(tokenCount, stmt);
 		return stmt;

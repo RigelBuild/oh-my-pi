@@ -65,11 +65,10 @@ impl builtins::Command for CdCommand {
 			// -e is only relevant in physical mode. `canonicalize()` is the
 			// cwd-resolution step this implementation supports; failures already
 			// propagate as a non-zero result before updating PWD/OLDPWD.
-			let absolute = context.shell.absolute_path(target_dir);
-			target_dir = context.shell.filesystem().canonicalize(absolute).await?;
+			target_dir = context.shell.absolute_path(target_dir).canonicalize()?;
 		}
 
-		context.shell.set_working_dir(&target_dir).await?;
+		context.shell.set_working_dir(&target_dir)?;
 
 		// Bash compatibility
 		// https://www.gnu.org/software/bash/manual/bash.html#index-cd

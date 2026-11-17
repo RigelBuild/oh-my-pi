@@ -4,6 +4,7 @@
 
 use std::{
 	ffi::OsString,
+	fs::File,
 	io::{self, BufRead, BufReader, Read, Write},
 };
 
@@ -743,13 +744,8 @@ where
 	let mut out = host.stdout_writer();
 
 	for (filename, path) in inputs {
-		if host.is_cancelled() {
-			break;
-		}
 		let result = if let Some(path) = path {
-			host
-				.fs()
-				.open(path)
+			File::open(path)
 				.map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", filename.maybe_quote())))
 				.and_then(|file| match mode {
 					Mode::Bytes(ranges, opts) | Mode::Characters(ranges, opts) => {

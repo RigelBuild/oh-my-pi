@@ -10,7 +10,6 @@ import type { CDPSession, Page } from "puppeteer-core";
 import { resizeImage } from "../../utils/image-resize";
 import { buildChangedFrameContactSheetPng, requireMediaBinary, runFfmpeg } from "../../utils/video";
 import { resolveToCwd } from "../path-utils";
-import { readPageViewport } from "./launch";
 import type { RunOutput } from "./run-output";
 
 const DEFAULT_FPS = 30;
@@ -124,51 +123,14 @@ interface ValidatedRecordingOptions {
 	quality: number;
 }
 
-/** One captured viewport frame delivered by a `RecordingFrameSource`. */
-export interface RecordingFrame {
-	/** JPEG bytes. */
-	data: Uint8Array;
-	/** Capture time in milliseconds on a monotonic-enough clock shared by every frame of one recording. */
-	timestampMs: number;
-}
-
-/** Parameters for `RecordingFrameSource.start`. */
-export interface RecordingFrameSourceStartParams {
-	/** JPEG quality, 0 through 100. */
-	quality: number;
-	/** Maximum frame width in CSS px. */
-	maxWidth: number;
-	/** Maximum frame height in CSS px. */
-	maxHeight: number;
-	/** Deliver every Nth rendered frame (60 Hz basis); sources without a render clock MAY ignore it. */
-	everyNthFrame?: number;
-	/** Persist one frame; resolves once persisted (backpressure/ack) and never rejects. */
-	onFrame(frame: RecordingFrame): Promise<void>;
-}
-
-/** Delivers JPEG viewport frames to a recording. */
-export interface RecordingFrameSource {
-	/** Viewport size in CSS px, used to bound frame dimensions. */
-	viewport(signal?: AbortSignal): Promise<{ width: number; height: number }>;
-	/** Start delivering frames; `onFrame` resolves once the frame is persisted (backpressure/ack). */
-	start(params: RecordingFrameSourceStartParams, signal?: AbortSignal): Promise<void>;
-	/** Stop delivering frames (idempotent); no `onFrame` call starts after it resolves. */
-	stop(): Promise<void>;
-	/** Capture one JPEG of the viewport; used when a recording ends without any delivered frame. */
-	captureFrame(quality: number, signal?: AbortSignal): Promise<Uint8Array>;
-	/** Install the cursor overlay page script (`installCursorOverlay`) for current and future documents. */
-	installCursor(signal?: AbortSignal): Promise<void>;
-	/** Remove the cursor overlay from future and current documents; never throws. */
-	removeCursor(): Promise<void>;
-}
-
 interface RecordedFrame {
 	path: string;
 	timestampMs: number;
 }
 
 interface ActiveRecording {
-	source: RecordingFrameSource;
+	page: Page;
+	session: CDPSession;
 	spool: TempDir;
 	path: string;
 	options: ValidatedRecordingOptions;
@@ -177,7 +139,9 @@ interface ActiveRecording {
 	pendingWrites: Set<Promise<void>>;
 	nextFrame: number;
 	writeError?: unknown;
+	cursorScriptId?: string;
 	finalizing: boolean;
+	onFrame: (event: Protocol.Page.ScreencastFrameEvent) => void;
 }
 
 /** Named user-facing recording failure raised by every `tab.record*` helper. */
@@ -222,8 +186,7 @@ function recordingError(error: unknown, action: string): BrowserRecordingError {
 	return new BrowserRecordingError(`${action} failed: ${message}`);
 }
 
-/** Page function (self-contained): draw a pointer and click ripples that follow page mouse events. Re-entrant. */
-export function installCursorOverlay(): void {
+function installCursorOverlay(): void {
 	const state = globalThis as unknown as CursorPageGlobal;
 	const document = state.document;
 	state.__ompRecordingCursorCleanup?.();
@@ -272,95 +235,10 @@ export function installCursorOverlay(): void {
 	};
 }
 
-/** Page function removing the cursor overlay `installCursorOverlay` drew, and its listeners. */
-export function removeCursorOverlay(): void {
+function removeCursorOverlay(): void {
 	const state = globalThis as unknown as CursorPageGlobal;
 	state.__ompRecordingCursorCleanup?.();
 	state.document.getElementById("__omp_recording_cursor__")?.remove();
-}
-
-class CdpRecordingSource implements RecordingFrameSource {
-	readonly #page: Page;
-	#session?: CDPSession;
-	#deliver?: (frame: RecordingFrame) => Promise<void>;
-	#stopping?: Promise<void>;
-	#cursorScriptId?: string;
-
-	readonly #onScreencastFrame = (event: Protocol.Page.ScreencastFrameEvent): void => {
-		const session = this.#session;
-		const deliver = this.#deliver;
-		if (!session || !deliver) return;
-		const timestampMs = typeof event.metadata.timestamp === "number" ? event.metadata.timestamp * 1_000 : Date.now();
-		const ack = (): void => {
-			void session.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => undefined);
-		};
-		void deliver({ data: Buffer.from(event.data, "base64"), timestampMs }).then(ack, ack);
-	};
-
-	constructor(page: Page) {
-		this.#page = page;
-	}
-
-	async viewport(signal?: AbortSignal): Promise<{ width: number; height: number }> {
-		return await readPageViewport(this.#page, signal);
-	}
-
-	async start(params: RecordingFrameSourceStartParams, signal?: AbortSignal): Promise<void> {
-		this.#stopping = undefined;
-		const session = await untilAborted(signal, () => this.#page.createCDPSession());
-		this.#session = session;
-		this.#deliver = params.onFrame;
-		session.on("Page.screencastFrame", this.#onScreencastFrame);
-		await untilAborted(signal, () =>
-			session.send("Page.startScreencast", {
-				format: "jpeg",
-				quality: params.quality,
-				maxWidth: params.maxWidth,
-				maxHeight: params.maxHeight,
-				everyNthFrame: params.everyNthFrame,
-			}),
-		);
-	}
-
-	async stop(): Promise<void> {
-		this.#stopping ??= this.#stopSession();
-		await this.#stopping;
-	}
-
-	async captureFrame(quality: number, signal?: AbortSignal): Promise<Uint8Array> {
-		return await untilAborted(signal, () => this.#page.screenshot({ type: "jpeg", quality }));
-	}
-
-	async installCursor(signal?: AbortSignal): Promise<void> {
-		const script = await untilAborted(signal, () => this.#page.evaluateOnNewDocument(installCursorOverlay));
-		this.#cursorScriptId = script.identifier;
-		await untilAborted(signal, () => this.#page.evaluate(installCursorOverlay));
-	}
-
-	async removeCursor(): Promise<void> {
-		const scriptId = this.#cursorScriptId;
-		this.#cursorScriptId = undefined;
-		if (scriptId) await this.#page.removeScriptToEvaluateOnNewDocument(scriptId).catch(() => undefined);
-		await this.#page.evaluate(removeCursorOverlay).catch(() => undefined);
-	}
-
-	async #stopSession(): Promise<void> {
-		const session = this.#session;
-		if (!session) return;
-		try {
-			await session.send("Page.stopScreencast");
-		} finally {
-			session.off("Page.screencastFrame", this.#onScreencastFrame);
-			this.#session = undefined;
-			this.#deliver = undefined;
-			await session.detach().catch(() => undefined);
-		}
-	}
-}
-
-/** Frame source backed by a CDP `Page.startScreencast` session on `page`. */
-export function createCdpRecordingSource(page: Page): RecordingFrameSource {
-	return new CdpRecordingSource(page);
 }
 
 function concatPath(filePath: string): string {
@@ -459,14 +337,14 @@ async function encodeRecording(active: ActiveRecording, durationMs: number, sign
 	}
 }
 
-/** Persistent, disk-backed recording state owned by one tab worker. */
+/** Persistent, disk-backed CDP screencast state owned by one tab worker. */
 export class RecordingController {
 	#active?: ActiveRecording;
 	#starting = false;
 
-	/** Start recording frames from `source` to an absolute cwd-resolved MP4 or WebM path. */
+	/** Start recording a page to an absolute cwd-resolved MP4 or WebM path. */
 	async start(
-		source: RecordingFrameSource,
+		page: Page,
 		rawPath: string,
 		cwd: string,
 		options?: RecordingOptions,
@@ -490,12 +368,27 @@ export class RecordingController {
 		}
 		this.#starting = true;
 		let spool: TempDir | undefined;
+		let session: CDPSession | undefined;
+		let cursorScriptId: string | undefined;
 		try {
 			spool = await TempDir.create("omp-browser-recording-");
-			if (validated.cursor) await source.installCursor(signal);
-			const viewport = await source.viewport(signal);
+			session = await untilAborted(signal, () => page.createCDPSession());
+			if (validated.cursor) {
+				const script = await untilAborted(signal, () => page.evaluateOnNewDocument(installCursorOverlay));
+				cursorScriptId = script.identifier;
+				await untilAborted(signal, () => page.evaluate(installCursorOverlay));
+			}
+			const viewport =
+				page.viewport() ??
+				(await untilAborted(signal, () =>
+					page.evaluate(() => {
+						const pageGlobal = globalThis as unknown as { innerWidth: number; innerHeight: number };
+						return { width: pageGlobal.innerWidth, height: pageGlobal.innerHeight };
+					}),
+				));
 			const active: ActiveRecording = {
-				source,
+				page,
+				session,
 				spool,
 				path: absolutePath,
 				options: validated,
@@ -503,38 +396,45 @@ export class RecordingController {
 				frames: [],
 				pendingWrites: new Set(),
 				nextFrame: 0,
+				cursorScriptId,
 				finalizing: false,
+				onFrame: () => {},
 			};
-			const onFrame = (frame: RecordingFrame): Promise<void> => {
+			active.onFrame = event => {
 				const index = active.nextFrame++;
 				const framePath = active.spool.join(`frame-${String(index).padStart(9, "0")}.jpg`);
-				active.frames.push({ path: framePath, timestampMs: frame.timestampMs });
-				const write: Promise<void> = Bun.write(framePath, frame.data)
+				const timestampMs =
+					typeof event.metadata.timestamp === "number" ? event.metadata.timestamp * 1_000 : Date.now();
+				active.frames.push({ path: framePath, timestampMs });
+				const write: Promise<void> = Bun.write(framePath, Buffer.from(event.data, "base64"))
 					.then(() => undefined)
 					.catch(error => {
 						active.writeError ??= error;
 					})
 					.finally(() => {
 						active.pendingWrites.delete(write);
+						void active.session
+							.send("Page.screencastFrameAck", { sessionId: event.sessionId })
+							.catch(() => undefined);
 					});
 				active.pendingWrites.add(write);
-				return write;
 			};
-			await source.start(
-				{
+			session.on("Page.screencastFrame", active.onFrame);
+			await untilAborted(signal, () =>
+				session!.send("Page.startScreencast", {
+					format: "jpeg",
 					quality: validated.quality,
 					maxWidth: Math.max(1, Math.round(viewport.width)),
 					maxHeight: Math.max(1, Math.round(viewport.height)),
 					everyNthFrame: Math.max(1, Math.round(60 / validated.fps)),
-					onFrame,
-				},
-				signal,
+				}),
 			);
 			this.#active = active;
 			return { path: absolutePath, fps: validated.fps };
 		} catch (error) {
-			if (validated.cursor) await source.removeCursor();
-			await source.stop().catch(() => undefined);
+			if (cursorScriptId) await page.removeScriptToEvaluateOnNewDocument(cursorScriptId).catch(() => undefined);
+			if (validated.cursor) await page.evaluate(removeCursorOverlay).catch(() => undefined);
+			await session?.detach().catch(() => undefined);
 			await spool?.remove().catch(() => undefined);
 			throw recordingError(error, "tab.recordStart()");
 		} finally {
@@ -553,13 +453,19 @@ export class RecordingController {
 		const contactPath = `${active.path}.contact.png`;
 		let finalized = false;
 		try {
-			await untilAborted(context.signal, () => active.source.stop());
+			await untilAborted(context.signal, () => active.session.send("Page.stopScreencast"));
+			active.session.off("Page.screencastFrame", active.onFrame);
 			await Promise.all(active.pendingWrites);
 			if (active.writeError) throw active.writeError;
-			if (active.options.cursor) await active.source.removeCursor();
+			if (active.cursorScriptId) {
+				await active.page.removeScriptToEvaluateOnNewDocument(active.cursorScriptId).catch(() => undefined);
+			}
+			if (active.options.cursor) await active.page.evaluate(removeCursorOverlay).catch(() => undefined);
 			if (active.frames.length === 0) {
 				const fallback = active.spool.join("frame-000000000.jpg");
-				const bytes = await active.source.captureFrame(active.options.quality, context.signal);
+				const bytes = await untilAborted(context.signal, () =>
+					active.page.screenshot({ type: "jpeg", quality: active.options.quality }),
+				);
 				await Bun.write(fallback, bytes);
 				active.frames.push({ path: fallback, timestampMs: 0 });
 			}
@@ -597,9 +503,14 @@ export class RecordingController {
 		} catch (error) {
 			throw recordingError(error, "tab.recordStop()");
 		} finally {
-			await active.source.stop().catch(() => undefined);
+			active.session.off("Page.screencastFrame", active.onFrame);
+			await active.session.send("Page.stopScreencast").catch(() => undefined);
 			await Promise.all(active.pendingWrites);
-			if (active.options.cursor) await active.source.removeCursor();
+			if (active.cursorScriptId) {
+				await active.page.removeScriptToEvaluateOnNewDocument(active.cursorScriptId).catch(() => undefined);
+			}
+			if (active.options.cursor) await active.page.evaluate(removeCursorOverlay).catch(() => undefined);
+			await active.session.detach().catch(() => undefined);
 			await active.spool.remove().catch(() => undefined);
 			if (this.#active === active) this.#active = undefined;
 			if (!finalized) {
@@ -611,14 +522,14 @@ export class RecordingController {
 
 	/** Finalize an active recording, then immediately begin another. */
 	async restart(
-		source: RecordingFrameSource,
+		page: Page,
 		rawPath: string,
 		cwd: string,
 		options: RecordingOptions | undefined,
 		context: RecordingStopContext = {},
 	): Promise<RecordingStartResult> {
 		if (this.#active) await this.stop(context);
-		return await this.start(source, rawPath, cwd, options, context.signal);
+		return await this.start(page, rawPath, cwd, options, context.signal);
 	}
 
 	/** Return the current persistent recording state without touching the page. */

@@ -32,8 +32,6 @@ import { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 
-import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
-
 function makeTool(name: string): AgentTool {
 	return {
 		name,
@@ -89,7 +87,7 @@ describe("extension autocomplete provider API (#4919)", () => {
 		originalHome = process.env.HOME;
 		process.env.HOME = tempDir.path();
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		cfgStartupQuiet.set(Settings.instance, true);
+		Settings.instance.set("startup.quiet", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));

@@ -71,13 +71,13 @@ impl DeviceConfig {
 
 /// Running default-speaker playback stream driven by a fill callback.
 pub struct PlaybackDevice {
-	inner: imp::Device,
+	inner: imp::PlaybackDevice,
 }
 
 impl PlaybackDevice {
 	/// Open and start the default speaker; `fill` runs on the audio thread.
 	pub fn start(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
-		Ok(Self { inner: imp::Device::start_playback(config, fill)? })
+		Ok(Self { inner: imp::PlaybackDevice::start(config, fill)? })
 	}
 
 	/// Stop playback and release the device. Idempotent; no callback runs
@@ -106,13 +106,13 @@ pub const fn playback_drain_periods(_config: DeviceConfig) -> u32 {
 
 /// Running default-microphone capture stream driven by a sink callback.
 pub struct CaptureDevice {
-	inner: imp::Device,
+	inner: imp::CaptureDevice,
 }
 
 impl CaptureDevice {
 	/// Open and start the default microphone; `sink` runs on the audio thread.
 	pub fn start(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
-		Ok(Self { inner: imp::Device::start_capture(config, sink)? })
+		Ok(Self { inner: imp::CaptureDevice::start(config, sink)? })
 	}
 
 	/// Stop capture and release the device. Idempotent; no callback runs

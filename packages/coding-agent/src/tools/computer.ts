@@ -6,7 +6,6 @@ import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { once } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
-import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/protocol";
@@ -16,14 +15,6 @@ import { renderCallChain, renderFunctionRun } from "./run-code";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
-
-import {
-	cfgComputerDisplay,
-	cfgComputerEnabled,
-	cfgComputerMaxHeight,
-	cfgComputerMaxWidth,
-	cfgToolsMaxTimeout,
-} from "./settings";
 
 // Image transports that cannot preserve native screenshot detail resize frames
 // without returning transformed dimensions. Keep their native coordinate frames
@@ -146,9 +137,8 @@ export function createComputerPrelude(
 		python: computerPreludeAssets.python,
 		exports: ["computer"],
 		codeModeDeclarations: computerPreludeAssets.codeModeDeclarations,
-		guidance: computerUsePrompt,
 		approval: computerApproval,
-		enabled: () => cfgComputerEnabled.get(session.settings) === true,
+		enabled: () => session.settings.get("computer.enabled") === true,
 		invoke: async (parameters, context) => {
 			const parsed = getComputerParamsSchema()(parameters);
 			if (parsed instanceof type.errors) {
@@ -237,8 +227,8 @@ function resolveComputerRunCode(params: ComputerRunParams | ComputerCallParams):
 /** Freezes the current session settings into the snapshot every worker command carries. */
 function buildComputerSnapshot(session: ToolSession, readOnly: boolean): ComputerSessionSnapshot {
 	const coordinateSafe = usesCoordinateSafeImageSizing(session.getActiveModel?.());
-	const configuredMaxWidth = cfgComputerMaxWidth.get(session.settings);
-	const configuredMaxHeight = cfgComputerMaxHeight.get(session.settings);
+	const configuredMaxWidth = session.settings.get("computer.maxWidth");
+	const configuredMaxHeight = session.settings.get("computer.maxHeight");
 	return {
 		cwd: session.cwd,
 		sessionId: session.getEvalSessionId?.() ?? session.getSessionId?.() ?? "computer",
@@ -248,7 +238,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 		captureMaxHeight: coordinateSafe
 			? Math.min(configuredMaxHeight, COORDINATE_SAFE_MAX_CAPTURE_HEIGHT)
 			: configuredMaxHeight,
-		display: cfgComputerDisplay.get(session.settings),
+		display: session.settings.get("computer.display") ?? "all",
 		readOnly,
 	};
 }
@@ -262,7 +252,7 @@ async function runComputer(
 	const code = resolveComputerRunCode(params);
 	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
 	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
-	const timeoutSeconds = clampTimeout("computer", params.timeout, cfgToolsMaxTimeout.get(session.settings));
+	const timeoutSeconds = clampTimeout("computer", params.timeout, session.settings.get("tools.maxTimeout"));
 	const snapshot = buildComputerSnapshot(session, readOnly);
 	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal);
 	throwIfAborted(signal);

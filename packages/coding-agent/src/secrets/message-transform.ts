@@ -12,7 +12,6 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
-import { SecretValueSet } from "./placeholder";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Display restore (inbound, persisted/provider → local display)
@@ -120,14 +119,8 @@ export function obfuscateToolArguments(
 	sharedRegexSecretValues?: ReadonlySet<string>,
 ): Record<string, unknown> {
 	if (!obfuscator.hasSecrets()) return args;
-	// `batch()` joins an outer batch when one is already open.
-	return obfuscator.batch(() => {
-		const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
-		return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<
-			string,
-			unknown
-		>;
-	});
+	const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
+	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
 }
 
 /** Copy native replay containers only when a provider-visible plaintext field changes. */
@@ -583,7 +576,7 @@ function obfuscateAssistantContentForReplay(
 
 /**
  * Harness file metadata riding on a natively-replayed compaction summary.
- * The provider converter emits it beside the verbatim block's retained tail, so it must pass
+ * The provider converter emits it after the verbatim block, so it must pass
  * the same outbound boundary as the summary text it was split from. The
  * verbatim block content itself stays untouched: it must match the opaque
  * provider state replayed beside it.
@@ -599,26 +592,8 @@ function anthropicCompactionFilesText(message: Message): string | undefined {
 	return typeof filesText === "string" && filesText.length > 0 ? filesText : undefined;
 }
 
-function obfuscateAnthropicCompactionFiles(
-	obfuscator: SecretObfuscator,
-	payload: AnthropicCompactionPayload,
-	sharedRegexSecretValues: SecretValueSet,
-): AnthropicCompactionPayload {
-	const filesText =
-		payload.filesText === undefined ? undefined : obfuscator.obfuscate(payload.filesText, sharedRegexSecretValues);
-	let retainedChanged = false;
-	const retainedFiles = payload.retainedFiles?.map(files => {
-		const text = obfuscator.obfuscate(files.text, sharedRegexSecretValues);
-		if (text === files.text) return files;
-		retainedChanged = true;
-		return { ...files, text };
-	});
-	if (filesText === payload.filesText && !retainedChanged) return payload;
-	return { ...payload, filesText, retainedFiles };
-}
-
-function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): SecretValueSet {
-	const values = new SecretValueSet();
+function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): Set<string> {
+	const values = new Set<string>();
 	const addText = (text: string | undefined): void => {
 		if (text === undefined) return;
 		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) {
@@ -631,7 +606,6 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 		// join the shared set.
 		const compactionFiles = anthropicCompactionFilesText(message);
 		if (compactionFiles !== undefined) addText(compactionFiles);
-		for (const files of anthropicCompactionPayload(message)?.retainedFiles ?? []) addText(files.text);
 		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
 			collectNativeReplayRegexSecretValues(obfuscator, message, values);
 		}
@@ -676,24 +650,17 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
  * image bytes are never walked.
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
-	if (!obfuscator.obfuscates()) return messages;
-	return obfuscator.batch(() => obfuscateMessageBatch(obfuscator, messages));
-}
-
-function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
+	if (!obfuscator.hasSecrets()) return messages;
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
 	let changed = false;
 	const result = messages.map((message): Message => {
 		let current = message;
 		const compactionPayload = anthropicCompactionPayload(current);
-		if (compactionPayload !== undefined) {
-			const providerPayload = obfuscateAnthropicCompactionFiles(
-				obfuscator,
-				compactionPayload,
-				sharedRegexSecretValues,
-			);
-			if (providerPayload !== compactionPayload) {
-				current = { ...current, providerPayload } as Message;
+		const compactionFiles = anthropicCompactionFilesText(current);
+		if (compactionPayload !== undefined && compactionFiles !== undefined) {
+			const filesText = obfuscator.obfuscate(compactionFiles, sharedRegexSecretValues);
+			if (filesText !== compactionFiles) {
+				current = { ...current, providerPayload: { ...compactionPayload, filesText } } as Message;
 				changed = true;
 			}
 		}
@@ -735,7 +702,7 @@ function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]
  * the static system prompt and tool schemas pass through unchanged.
  */
 export function obfuscateProviderContext(obfuscator: SecretObfuscator | undefined, context: Context): Context {
-	if (!obfuscator?.obfuscates()) return context;
+	if (!obfuscator?.hasSecrets()) return context;
 	const messages = obfuscateMessages(obfuscator, context.messages);
 	return messages === context.messages ? context : { ...context, messages };
 }

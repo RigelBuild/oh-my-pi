@@ -3,7 +3,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which, getToolsDir, logger, ptree, TempDir, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { extractArchive } from "@oh-my-pi/pi-utils/ar";
-import { type DownloadTracker, trackDownload, withDownload } from "../downloads/activity";
 
 const TOOLS_DIR = getToolsDir();
 const TOOL_DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -40,8 +39,7 @@ async function readBodyChunk(reader: BodyReader, signal: AbortSignal | undefined
 async function writeResponseBody(
 	dest: string,
 	body: NonNullable<Response["body"]>,
-	signal: AbortSignal | undefined,
-	onChunk: ((bytes: number) => void) | undefined,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const reader = body.getReader();
 	const sink = Bun.file(dest).writer();
@@ -53,7 +51,6 @@ async function writeResponseBody(
 			if (done) break;
 			if (value) {
 				await sink.write(value);
-				onChunk?.(value.byteLength);
 			}
 		}
 		await sink.end();
@@ -195,19 +192,9 @@ async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<str
 	return data.tag_name.replace(/^v/, "");
 }
 
-/** Options for {@link downloadFile}. */
-export interface DownloadFileOptions {
-	signal?: AbortSignal;
-	/** Bound on the whole transfer (default 2 minutes; raise it for large model weights). */
-	timeoutMs?: number;
-	/** Bytes written so far and the `Content-Length` total (undefined when the server omits it). */
-	onProgress?: (loaded: number, total: number | undefined) => void;
-}
-
 /** Download a tool asset without handing the streaming Response to Bun.write. */
-export async function downloadFile(url: string, dest: string, options: DownloadFileOptions = {}): Promise<void> {
-	const { signal, timeoutMs = TOOL_DOWNLOAD_TIMEOUT_MS, onProgress } = options;
-	const downloadSignal = ptree.combineSignals(signal, timeoutMs);
+export async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
+	const downloadSignal = ptree.combineSignals(signal, TOOL_DOWNLOAD_TIMEOUT_MS);
 	let response: Response;
 	try {
 		response = await fetch(url, {
@@ -218,19 +205,7 @@ export async function downloadFile(url: string, dest: string, options: DownloadF
 		} else if (!response.body) {
 			throw new Error("No response body");
 		}
-		const length = Number(response.headers.get("content-length"));
-		const total = Number.isFinite(length) && length > 0 ? length : undefined;
-		let loaded = 0;
-		await writeResponseBody(
-			dest,
-			response.body,
-			downloadSignal,
-			onProgress &&
-				(bytes => {
-					loaded += bytes;
-					onProgress(loaded, total);
-				}),
-		);
+		await writeResponseBody(dest, response.body, downloadSignal);
 	} catch (err) {
 		if (isAbortLikeError(err)) {
 			throw new Error(`Download timed out: ${url}`);
@@ -240,11 +215,7 @@ export async function downloadFile(url: string, dest: string, options: DownloadF
 }
 
 // Download and install a tool
-async function downloadTool(
-	tool: ToolName,
-	signal: AbortSignal | undefined,
-	tracker: DownloadTracker,
-): Promise<string> {
+async function downloadTool(tool: ToolName, signal?: AbortSignal): Promise<string> {
 	const config = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
 
@@ -268,9 +239,8 @@ async function downloadTool(
 	const binaryPath = path.join(TOOLS_DIR, config.binaryName + binaryExt);
 
 	// Handle direct binary downloads (no archive extraction needed)
-	const onProgress = (loaded: number, total: number | undefined): void => tracker.update({ loaded, total });
 	if (config.isDirectBinary) {
-		await downloadFile(downloadUrl, binaryPath, { signal, onProgress });
+		await downloadFile(downloadUrl, binaryPath, signal);
 		if (plat !== "win32") {
 			await fs.promises.chmod(binaryPath, 0o755);
 		}
@@ -279,8 +249,7 @@ async function downloadTool(
 
 	// Download archive
 	const archivePath = path.join(TOOLS_DIR, assetName);
-	await downloadFile(downloadUrl, archivePath, { signal, onProgress });
-	tracker.update({ detail: "extracting" });
+	await downloadFile(downloadUrl, archivePath, signal);
 
 	// Extract
 	const tmp = await TempDir.create("@omp-tools-extract-");
@@ -399,20 +368,17 @@ export async function ensureTool(tool: ToolName, silentOrOptions?: EnsureToolOpt
 			logger.debug(`${pythonConfig.name} not found. Installing via uv/pip...`);
 		}
 		notify?.(`Installing ${pythonConfig.name}…`);
-		const tracker = trackDownload(pythonConfig.name, { detail: "installing" });
 		const success = await installPythonPackage(pythonConfig.package, signal);
 		if (success) {
 			// Re-check for the command after installation
 			const path = $which(pythonConfig.binaryName);
 			if (path) {
-				tracker.done();
 				if (!silent) {
 					logger.debug(`${pythonConfig.name} installed successfully`);
 				}
 				return path;
 			}
 		}
-		tracker.fail(new Error(`could not install ${pythonConfig.package} with uv or pip`));
 		if (!silent) {
 			logger.warn(`Failed to install ${pythonConfig.name}`);
 		}
@@ -429,7 +395,7 @@ export async function ensureTool(tool: ToolName, silentOrOptions?: EnsureToolOpt
 	notify?.(`Downloading ${config.name}…`);
 
 	try {
-		const path = await withDownload(config.name, tracker => downloadTool(tool, signal, tracker));
+		const path = await downloadTool(tool, signal);
 		if (!silent) {
 			logger.debug(`${config.name} installed to ${path}`);
 		}

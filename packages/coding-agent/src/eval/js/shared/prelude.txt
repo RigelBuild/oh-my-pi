@@ -38,7 +38,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 	const callHelper = (name, ...args) => globalThis.__omp_helpers__[name](...args);
 	const hasScheme = path => typeof path === "string" && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path);
-	const shouldDelegateRead = path => hasScheme(path) && !callHelper("hasRoot", path);
+	const shouldDelegateRead = path => hasScheme(path) && !path.toLowerCase().startsWith("local://");
 	const withReadLineSelector = (path, options) => {
 		const offset = typeof options.offset === "number" ? options.offset : 1;
 		const limit = typeof options.limit === "number" ? options.limit : undefined;
@@ -137,10 +137,9 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			return (await this.status()) !== "running";
 		}
 
-		async wait(opts, ...rest) {
+		async wait({ timeout } = {}) {
 			if (this._result !== HANDLE_UNSET) return this._result;
-			const options = optionsArg("AgentHandle.wait", opts, rest, ["timeout"], "{ timeout }");
-			return (await wait([this], options))[0];
+			return (await wait([this], { timeout }))[0];
 		}
 
 		async cancel() {
@@ -217,8 +216,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			return (await this._promise).done();
 		}
 
-		async wait(...args) {
-			return (await this._promise).wait(...args);
+		async wait(options) {
+			return (await this._promise).wait(options);
 		}
 
 		async cancel() {
@@ -249,8 +248,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return value;
 	};
 
-	const wait = async (handles, opts, ...rest) => {
-		const { timeout, raiseErrors = true } = optionsArg("wait", opts, rest, ["timeout", "raiseErrors"], "{ timeout, raiseErrors }");
+	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
 		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
 		const items = await Promise.all(raw);
@@ -439,8 +437,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				"agent",
 				opts,
 				rest,
-				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools", "model"],
-				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools, model }",
+				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
+				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
 			);
 			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
 			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
@@ -503,8 +501,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			"workpool",
 			opts,
 			rest,
-			["name", "context", "tools", "model"],
-			"{ name, context, tools, model }",
+			["name", "context", "tools"],
+			"{ name, context, tools }",
 		);
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
 			op: "create",

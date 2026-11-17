@@ -5,204 +5,185 @@
 
 import { useMemo, useState } from "react";
 import { getSessions } from "../api";
-import {
-	formatCompact,
-	formatElapsed,
-	formatEstimatedCost,
-	formatInteger,
-	formatRelativeTime,
-} from "../data/formatters";
-import { useQuery } from "../data/query";
+import { formatCompact, formatDurationMs, formatEstimatedCost, formatRelativeTime } from "../data/formatters";
+import { useResource } from "../data/useResource";
 import { TraceView } from "../traces/TraceView";
 import type { SessionSummary } from "../types";
-import {
-	Card,
-	type Column,
-	EmptyState,
-	LabelCell,
-	MeterCell,
-	PageHeader,
-	QueryView,
-	SearchInput,
-	Table,
-	TableSkeleton,
-} from "../ui";
-import "../traces/traces.css";
+import { AsyncBoundary, DataTable, Panel } from "../ui";
 
 export interface TracesRouteProps {
 	active: boolean;
 	session: string | null;
 	onOpenSession: (file: string | null) => void;
+	refreshTrigger: number;
 }
 
-const SESSION_LIMIT = 200;
-
-function ModelList({ models }: { models: string[] }) {
-	if (models.length === 0) return <span className="dim">-</span>;
+function ModelChips({ models }: { models: string[] }) {
+	const shown = models.slice(0, 3);
 	return (
-		<span className="traces-models" title={models.join("\n")}>
-			<span className="mono truncate">{models[0]}</span>
-			{models.length > 1 && <span className="badge">+{models.length - 1}</span>}
-		</span>
+		<div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+			{shown.map(model => (
+				<span
+					key={model}
+					className="stats-text-muted truncate"
+					style={{
+						fontSize: 10,
+						border: "1px solid var(--border)",
+						borderRadius: 999,
+						padding: "1px 6px",
+						maxWidth: 140,
+					}}
+				>
+					{model}
+				</span>
+			))}
+			{models.length > 3 && (
+				<span className="stats-text-muted" style={{ fontSize: 10 }}>
+					+{models.length - 3}
+				</span>
+			)}
+		</div>
 	);
 }
 
-export function TracesRoute({ active, session, onOpenSession }: TracesRouteProps) {
+export function TracesRoute({ active, session, onOpenSession, refreshTrigger }: TracesRouteProps) {
 	const [filter, setFilter] = useState("");
-	const sessions = useQuery(["sessions", SESSION_LIMIT], () => getSessions(SESSION_LIMIT), {
+
+	const {
+		data: sessions,
+		error,
+		loading,
+	} = useResource(["sessions", refreshTrigger], signal => getSessions(200, undefined, signal), {
 		pollMs: 30000,
 		enabled: active && session === null,
 	});
 
 	const filtered = useMemo(() => {
-		const rows = sessions.data ?? [];
+		if (!sessions) return [];
 		const needle = filter.trim().toLowerCase();
-		if (!needle) return rows;
-		return rows.filter(
+		if (!needle) return sessions;
+		return sessions.filter(
 			row =>
 				(row.title ?? "").toLowerCase().includes(needle) ||
 				row.folder.toLowerCase().includes(needle) ||
 				row.models.some(model => model.toLowerCase().includes(needle)),
 		);
-	}, [sessions.data, filter]);
+	}, [sessions, filter]);
 
-	const maxCost = useMemo(() => Math.max(0, ...filtered.map(row => row.costTotal)), [filtered]);
-
-	const columns = useMemo<Column<SessionSummary>[]>(
+	const columns = useMemo(
 		() => [
 			{
 				key: "title",
-				header: "Session",
-				width: "32%",
-				render: row => (
-					<LabelCell
-						primary={row.title ?? row.file.split("/").pop()}
-						secondary={<span className="mono">{row.folder.split("/").slice(-2).join("/")}</span>}
-					/>
+				header: "Title",
+				render: (item: SessionSummary) => (
+					<div className="stats-font-medium stats-text-primary truncate" style={{ maxWidth: 280 }}>
+						{item.title ?? item.file.split("/").pop()}
+					</div>
 				),
-				sort: row => (row.title ?? row.file).toLowerCase(),
 			},
-			{ key: "models", header: "Models", render: row => <ModelList models={row.models} /> },
+			{
+				key: "folder",
+				header: "Project",
+				render: (item: SessionSummary) => (
+					<span className="stats-text-muted truncate" style={{ maxWidth: 160, display: "inline-block" }}>
+						{item.folder.split("/").slice(-2).join("/")}
+					</span>
+				),
+			},
 			{
 				key: "started",
 				header: "Started",
-				align: "right",
-				render: row => (
-					<span className="muted" title={new Date(row.startedAt).toLocaleString()}>
-						{formatRelativeTime(row.startedAt)}
-					</span>
-				),
-				sort: row => row.startedAt,
+				render: (item: SessionSummary) => formatRelativeTime(item.startedAt),
 			},
 			{
 				key: "duration",
 				header: "Duration",
-				align: "right",
-				render: row => <span className="num">{formatElapsed(row.endedAt - row.startedAt)}</span>,
-				sort: row => row.endedAt - row.startedAt,
+				numeric: true,
+				render: (item: SessionSummary) => formatDurationMs(item.endedAt - item.startedAt),
 			},
-			{
-				key: "requests",
-				header: "Requests",
-				align: "right",
-				render: row => <span className="num">{formatInteger(row.requests)}</span>,
-				sort: row => row.requests,
-			},
-			{
-				key: "toolCalls",
-				header: "Tools",
-				align: "right",
-				render: row => <span className="num">{formatInteger(row.toolCalls)}</span>,
-				sort: row => row.toolCalls,
-			},
-			{
-				key: "subagents",
-				header: "Agents",
-				align: "right",
-				render: row =>
-					row.subagents > 0 ? (
-						<span className="num">{formatInteger(row.subagents)}</span>
-					) : (
-						<span className="num dim">0</span>
-					),
-				sort: row => row.subagents,
-			},
+			{ key: "requests", header: "Requests", numeric: true, render: (item: SessionSummary) => item.requests },
+			{ key: "toolCalls", header: "Tools", numeric: true, render: (item: SessionSummary) => item.toolCalls },
+			{ key: "subagents", header: "Agents", numeric: true, render: (item: SessionSummary) => item.subagents },
 			{
 				key: "tokens",
 				header: "Tokens",
-				align: "right",
-				render: row => <span className="num">{formatCompact(row.totalTokens)}</span>,
-				sort: row => row.totalTokens,
+				numeric: true,
+				render: (item: SessionSummary) => formatCompact(item.totalTokens),
 			},
 			{
 				key: "cost",
 				header: "Cost",
-				align: "right",
-				width: 150,
-				render: row => (
-					<MeterCell
-						value={row.costTotal}
-						max={maxCost}
-						display={formatEstimatedCost(row.costTotal, row.unpricedRequests)}
-					/>
-				),
-				sort: row => row.costTotal,
+				numeric: true,
+				render: (item: SessionSummary) => formatEstimatedCost(item.costTotal, item.unpricedRequests),
 			},
+			{ key: "models", header: "Models", render: (item: SessionSummary) => <ModelChips models={item.models} /> },
 		],
-		[maxCost],
+		[],
+	);
+
+	const renderMobileCard = (item: SessionSummary, onClick?: () => void) => (
+		<div className="stats-mobile-card" onClick={onClick}>
+			<div className="stats-mobile-card-header">
+				<div className="stats-font-semibold stats-text-primary truncate">
+					{item.title ?? item.file.split("/").pop()}
+				</div>
+			</div>
+			<div className="stats-mobile-card-grid">
+				<div>
+					<div className="stats-mobile-card-label">Started</div>
+					<div className="stats-mobile-card-value">{formatRelativeTime(item.startedAt)}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Duration</div>
+					<div className="stats-mobile-card-value">{formatDurationMs(item.endedAt - item.startedAt)}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Requests</div>
+					<div className="stats-mobile-card-value">{item.requests}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Cost</div>
+					<div className="stats-mobile-card-value">
+						{formatEstimatedCost(item.costTotal, item.unpricedRequests)}
+					</div>
+				</div>
+			</div>
+		</div>
 	);
 
 	if (session !== null) {
 		return <TraceView file={session} active={active} onBack={() => onOpenSession(null)} />;
 	}
 
-	const total = sessions.data?.length ?? 0;
 	return (
-		<div className="stack traces-page">
-			<PageHeader
-				title="Traces"
-				description="Recent sessions with subagent activity folded in. Open one to inspect its timeline."
-			/>
-			<Card
+		<div className="stats-route-container">
+			<Panel
 				title="Sessions"
-				description={
-					sessions.data
-						? filter.trim()
-							? `${formatInteger(filtered.length)} of ${formatInteger(total)} most recent`
-							: `${formatInteger(total)} most recent`
-						: undefined
-				}
+				subtitle="Recent sessions with subagent activity folded in — click one to open its trace"
 				actions={
-					<SearchInput
+					<input
+						type="search"
 						value={filter}
-						onChange={setFilter}
+						onChange={event => setFilter(event.target.value)}
 						placeholder="Filter by title, project, model…"
-						width={260}
+						aria-label="Filter sessions"
+						spellCheck={false}
+						className="stats-trace-input"
+						style={{ width: 220 }}
 					/>
 				}
-				flush
-				index={0}
-				stale={sessions.stale}
 			>
-				<QueryView
-					query={sessions}
-					skeleton={<TableSkeleton rows={10} />}
-					isEmpty={rows => rows.length === 0}
-					empty={<EmptyState title="No sessions found" hint="Run a sync to index recent activity." />}
-				>
-					{() => (
-						<Table
-							columns={columns}
-							rows={filtered}
-							rowKey={row => row.file}
-							onRowClick={row => onOpenSession(row.file)}
-							initialSort={{ key: "started", dir: "desc" }}
-							limit={50}
-							empty={<EmptyState title="No matching sessions" hint="Try a different filter." />}
-						/>
-					)}
-				</QueryView>
-			</Card>
+				<AsyncBoundary loading={loading} error={error} data={sessions}>
+					<DataTable
+						columns={columns}
+						data={filtered}
+						keyExtractor={item => item.file}
+						onRowClick={item => onOpenSession(item.file)}
+						renderMobileCard={renderMobileCard}
+						emptyText="No sessions found — run a Sync to index recent activity"
+					/>
+				</AsyncBoundary>
+			</Panel>
 		</div>
 	);
 }

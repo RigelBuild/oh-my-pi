@@ -7,8 +7,9 @@
  * them into a combined `answer` string on the SearchResponse.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import { $env, asRecord } from "@oh-my-pi/pi-utils";
-import { settings } from "../../../config/settings";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { getDefault, settings } from "../../../config/settings";
+import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
 import { readMcpJsonRpcResponse } from "../../../mcp/json-rpc";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -18,20 +19,18 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-import { cfgExaEnabled, cfgExaSearchDelayMs } from "../../settings";
-
 const EXA_API_URL = "https://api.exa.ai/search";
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
 const EXA_MCP_SOURCE = "oh-my-pi";
 const MAX_EXA_SNIPPET_CHARS = 500;
-const DEFAULT_EXA_SEARCH_DELAY_MS = cfgExaSearchDelayMs.default;
+const DEFAULT_EXA_SEARCH_DELAY_MS = getDefault("exa.searchDelayMs");
 
 let nextExaSearchRequestAt = 0;
 let exaSearchThrottle = Promise.resolve();
 
 function configuredExaSearchDelayMs(): number {
 	try {
-		const delayMs = cfgExaSearchDelayMs.get(settings);
+		const delayMs = settings.get("exa.searchDelayMs");
 		return Number.isFinite(delayMs) && delayMs > 0 ? Math.floor(delayMs) : 0;
 	} catch {
 		return DEFAULT_EXA_SEARCH_DELAY_MS;
@@ -147,13 +146,8 @@ interface ExaSearchResponse {
 	costDollars?: { total: number };
 	searchTime?: number;
 }
-
-function isSearchResponse(data: unknown): data is ExaSearchResponse {
-	return (
-		typeof data === "object" &&
-		data !== null &&
-		("results" in data || "statuses" in data || "costDollars" in data || "searchTime" in data)
-	);
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return isRecord(value) ? value : null;
 }
 
 function parseJsonContent(text: string): unknown | null {
@@ -358,7 +352,7 @@ function buildExaMcpArgs(params: ExaSearchParams): Record<string, unknown> {
 
 async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchResponse> {
 	const query = new URLSearchParams();
-	const apiKey = $env.EXA_API_KEY;
+	const apiKey = findApiKey();
 	if (apiKey) query.set("exaApiKey", apiKey);
 	query.set("tools", "web_search_exa");
 	const fetchImpl = params.fetch ?? fetch;
@@ -486,13 +480,25 @@ export class ExaProvider extends SearchProvider {
 	readonly id = "exa";
 	readonly label = "Exa";
 
+	isAvailable(authStorage: AuthStorage): boolean {
+		if (!this.#settingsAllowSearch()) return false;
+		return !!getEnvApiKey("exa") || authStorage.keys.source("exa") !== undefined;
+	}
+
 	/**
-	 * Available unless disabled in settings: without a credential, search runs
-	 * through Exa's unauthenticated public MCP.
+	 * Exa ships an unauthenticated public MCP fallback, so an explicit
+	 * selection (programmatic or via `providers.webSearch: exa`) routes
+	 * through MCP even when no credential is configured. The auto chain
+	 * still uses {@link isAvailable} so an unrelated configured provider
+	 * keeps priority over the public fallback.
 	 */
-	isAvailable(_authStorage: AuthStorage): boolean {
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+		return this.#settingsAllowSearch();
+	}
+
+	#settingsAllowSearch(): boolean {
 		try {
-			if (cfgExaEnabled.get(settings) === false) {
+			if (settings.get("exa.enabled") === false) {
 				return false;
 			}
 		} catch {

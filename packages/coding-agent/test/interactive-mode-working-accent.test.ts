@@ -3,14 +3,11 @@ import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { Loader, type WorkingRowSpec } from "@oh-my-pi/pi-tui";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import * as sessionColor from "@oh-my-pi/pi-tui/theme/session-color";
 import { adjustHsv, TempDir } from "@oh-my-pi/pi-utils";
-
-import { cfgStatusLineSessionAccent } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 type Harness = {
 	mode: InteractiveMode;
@@ -66,6 +63,7 @@ async function createHarness(sessionName: string): Promise<Harness> {
 		model: undefined,
 		thinkingLevel: undefined,
 		titleGenerationSignal: new AbortController().signal,
+		notifyTitleGenerationStart: () => undefined,
 	} as unknown as AgentSession;
 	const mode = new InteractiveMode(session, "test");
 	harness = { mode, sessionManager, tempDir };
@@ -176,12 +174,12 @@ describe("InteractiveMode working-message session accent cache", () => {
 		expect(renderLoader(mode)).toContain(accentAnsi);
 		expect(getHex).toHaveBeenCalledTimes(1);
 
-		cfgStatusLineSessionAccent.set(settings, false);
+		settings.set("statusLine.sessionAccent", false);
 		mode.loadingAnimation?.setMessage("Accent disabled");
 		expect(renderLoader(mode)).not.toContain(accentAnsi);
 		expect(getHex).toHaveBeenCalledTimes(1);
 
-		cfgStatusLineSessionAccent.set(settings, true);
+		settings.set("statusLine.sessionAccent", true);
 		mode.loadingAnimation?.setMessage("Accent enabled");
 		expect(renderLoader(mode)).toContain(accentAnsi);
 		expect(getHex).toHaveBeenCalledTimes(2);
@@ -222,28 +220,5 @@ describe("InteractiveMode working activity", () => {
 		expect(mode.statusContainer.children).toContain(loader);
 		expect(loader.debugState()).toMatchObject({ running: true });
 		loader.stop();
-	});
-
-	it("keeps the run's elapsed origin when a focus switch recreates the loader", async () => {
-		const { mode } = await createHarness("Focus round-trip session");
-		const runStartedAt = Date.now() - 90_000;
-		Object.defineProperty(mode.session, "runStartedAt", { configurable: true, value: runStartedAt });
-		const specs: (() => WorkingRowSpec)[] = [];
-		vi.spyOn(Loader.prototype, "setWorkingRow").mockImplementation(spec => {
-			specs.push(spec);
-		});
-
-		try {
-			mode.ensureLoadingAnimation();
-			// Session focus attach drops the loader, then synthesizes `agent_start`.
-			mode.clearTransientSessionUi();
-			mode.ensureLoadingAnimation();
-
-			expect(specs).toHaveLength(2);
-			expect(specs.map(spec => spec().startedAt)).toEqual([runStartedAt, runStartedAt]);
-		} finally {
-			mode.loadingAnimation?.stop();
-			Reflect.deleteProperty(mode.session, "runStartedAt");
-		}
 	});
 });

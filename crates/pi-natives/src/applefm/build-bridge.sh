@@ -1,25 +1,18 @@
 #!/bin/sh
-# Builds the Apple Foundation Models bridge dylib that pi-natives embeds.
+# Builds the Apple Foundation Models bridge static library for pi-natives.
 # Shared by build.rs and the Bazel `applefm_bridge` genrule/repository rule.
 #
 #   build-bridge.sh detect
 #       Prints "<swiftc>\t<sdk>\t<fingerprint>" for the first toolchain able to
 #       build bridge.swift (Swift 6.4+ with the macOS 27+ SDK), or nothing.
-#       Candidates: $OMP_APPLEFM_SWIFTC and the xcode-select'ed toolchain with
-#       the selected SDK, then the Command Line Tools with their own SDK. A set
-#       $SDKROOT is the SDK for every candidate, so the bridge never links
-#       against a different SDK than the rest of the addon. Probes versions
+#       Candidates: $OMP_APPLEFM_SWIFTC with $SDKROOT (or the selected SDK), the
+#       xcode-select'ed toolchain, then the Command Line Tools. Probes versions
 #       only; never compiles.
 #
-#   build-bridge.sh build <out.dylib> <arch> [<swiftc> <sdk>]
-#       Compiles bridge.swift into a standalone <out.dylib> with the given
-#       toolchain. Without a toolchain, or for a non-arm64 <arch> (Foundation
-#       Models needs Apple silicon), writes an empty <out.dylib>, which the
-#       addon reports as not built.
-#
-# The bridge is never linked into the addon: the addon embeds these bytes and
-# dlopens them only on macOS 27+, so the Swift runtime and FoundationModels
-# never load on older systems (linking them in crashed every launch there).
+#   build-bridge.sh build <out.a> <arch> [<swiftc> <sdk>]
+#       Compiles bridge.swift into <out.a> with the given toolchain. Without a
+#       toolchain, or for a non-arm64 <arch> (Foundation Models needs Apple
+#       silicon), compiles stub.c instead, which reports the bridge as not built.
 #
 # Swift module caches live in $OMP_APPLEFM_MODULE_CACHE (default: under
 # $TMPDIR) so repeated builds skip re-importing the SDK.
@@ -50,7 +43,7 @@ detect() {
 	for candidate in \
 		"${OMP_APPLEFM_SWIFTC:-}|$selected_sdk" \
 		"$(/usr/bin/xcrun --find swiftc 2>/dev/null || true)|$selected_sdk" \
-		"$clt/usr/bin/swiftc|${SDKROOT:-$clt/SDKs/MacOSX.sdk}"; do
+		"$clt/usr/bin/swiftc|$clt/SDKs/MacOSX.sdk"; do
 		swiftc=${candidate%%|*}
 		sdk=${candidate#*|}
 		if usable "$swiftc" "$sdk"; then
@@ -70,16 +63,19 @@ build() {
 	rm -f "$out"
 	if [ "$arch" = arm64 ] && [ -n "$swiftc" ]; then
 		cache=${OMP_APPLEFM_MODULE_CACHE:-${TMPDIR:-/tmp}/omp-applefm-module-cache}
-		# Loaded only on macOS 27+, so it targets 27 and needs no Swift
-		# back-deployment runtime.
-		"$swiftc" -emit-library -parse-as-library -module-name OmpAppleFm \
-			-sdk "$sdk" -target arm64-apple-macos27.0 -swift-version 6 -O \
+		# FoundationModels is weak-linked by the addon link step instead of
+		# autolinked, so the addon still loads on macOS releases without it.
+		"$swiftc" -emit-library -static -parse-as-library -module-name OmpAppleFm \
+			-sdk "$sdk" -target arm64-apple-macos12.0 -swift-version 6 -O \
 			-module-cache-path "$cache" \
-			-Xlinker -install_name -Xlinker @rpath/libomp_applefm.dylib \
+			-Xfrontend -disable-autolink-framework -Xfrontend FoundationModels \
 			"$here/bridge.swift" -o "$out"
 		return
 	fi
-	: >"$out"
+	objects=$(mktemp -d)
+	trap 'rm -rf "$objects"' EXIT
+	/usr/bin/xcrun clang -c -O2 -arch "$arch" -mmacosx-version-min=11.0 "$here/stub.c" -o "$objects/stub.o"
+	/usr/bin/xcrun libtool -static -o "$out" "$objects/stub.o"
 }
 
 case "${1:-}" in
@@ -89,7 +85,7 @@ build)
 	build "$@"
 	;;
 *)
-	echo "usage: $0 detect | build <out.dylib> <arch> [<swiftc> <sdk>]" >&2
+	echo "usage: $0 detect | build <out.a> <arch> [<swiftc> <sdk>]" >&2
 	exit 2
 	;;
 esac

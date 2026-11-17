@@ -42,7 +42,6 @@ function makeHost(active: Model<Api>, artifactsDir: string): SessionProviderBoun
 		model: () => active,
 		sessionId: () => "test-session",
 		localProtocolOptions: () => ({ getArtifactsDir: () => artifactsDir, getSessionId: () => "test-session" }),
-		obfuscator: () => undefined,
 	} as unknown as SessionProviderBoundaryHost;
 }
 

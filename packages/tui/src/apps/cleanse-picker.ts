@@ -41,15 +41,7 @@ export async function pickCleanseTarget(checkers: readonly CleanseCheckerChoice[
 			description: "A discovery agent figures out the command to run",
 		},
 	];
-	const selection = await selectStandaloneItem("Select what to cleanse:", items, {
-		maxVisible: 12,
-		picker: {
-			icon: "wand",
-			noun: "checkers",
-			subtitle: "Run the checkers, then repair what they find",
-			confirm: "Cleanse",
-		},
-	});
+	const selection = await selectStandaloneItem("Select what to cleanse:", items, { maxVisible: 12 });
 	if (selection === null) return { kind: "cancel" };
 	if (selection === "all") return { kind: "all" };
 	if (selection === "request") {

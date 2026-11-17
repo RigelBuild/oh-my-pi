@@ -78,7 +78,6 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 				client_id: client.clientId,
 				client_secret: client.clientSecret,
 				refresh_token: credentials.refresh,
-				organization_id: credentials.activeOrganizationId,
 			},
 			vars,
 			context,

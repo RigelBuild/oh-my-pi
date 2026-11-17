@@ -23,13 +23,7 @@ import type {
 	ScoreQuestion,
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import {
-	type ChainJudge,
-	type JudgmentUsage,
-	journalJudgmentUsage,
-	resolveJudge,
-	sharedJudgmentCache,
-} from "../judgment";
+import { type ChainJudge, type JudgmentUsage, journalJudgmentUsage, resolveJudge } from "../judgment";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { type EvalCompletionBridgeOptions, evalRequestSlots } from "./completion-bridge";
@@ -179,14 +173,11 @@ export function sessionJudge(
 	const { session } = options;
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("judge() has no model registry.");
-	const journal = journalJudgmentUsage(session.sessionManager);
+	const journal = journalJudgmentUsage(session.sessionManager, purpose);
 	return resolveJudge({
 		settings: session.settings,
 		registry,
 		sessionId: session.getSessionId?.() ?? undefined,
-		purpose,
-		telemetry: session.getTelemetry?.(),
-		cache: sharedJudgmentCache(),
 		onUsage:
 			onUsage && journal
 				? usage => {

@@ -170,6 +170,24 @@ export function resolveUsedFraction(limit: UsageLimit): number | undefined {
 }
 
 /**
+ * Canonicalize a provider plan identifier: trim, lowercase, fold whitespace and
+ * hyphen runs to `_`, and strip a leading `chatgpt_`.
+ *
+ * One implementation for every reader of these identifiers. Credential
+ * classification (`classifyOpenAICodexPlan`) and the auth-broker's exported
+ * `plan` label both interpret the same strings, so a change reaching only one
+ * would make a credential's plan class and its exported subscription label
+ * disagree about the same account.
+ */
+export function canonicalizePlan(plan: string): string {
+	const normalized = plan
+		.trim()
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
+	return normalized.startsWith("chatgpt_") ? normalized.slice("chatgpt_".length) : normalized;
+}
+
+/**
  * One recorded usage-limit snapshot: a single limit window of one account at
  * a point in time. The usage cache itself is latest-snapshot-only; history
  * rows are appended by the auth storage layer whenever a fresh report is
@@ -377,10 +395,6 @@ export interface UsageCredential {
 	/** Human-readable organization name for display. */
 	orgName?: string;
 	enterpriseUrl?: string;
-	/** Account residency used for region-aware provider routing. */
-	region?: string;
-	inferenceRegion?: "global" | "eu" | "us";
-	activeOrganizationId?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
 }
@@ -400,12 +414,6 @@ export interface UsageFetchContext {
 	fetch: FetchImpl;
 	logger?: UsageLogger;
 	retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
-	/**
-	 * Last report cached for this exact credential cache key, when one exists.
-	 * Lets a fetcher keep a field it could not re-read this time (a failed
-	 * secondary probe) instead of reporting it as absent.
-	 */
-	previousReport?: UsageReport;
 }
 
 /** Provider implementation for fetching usage information. */
@@ -500,8 +508,6 @@ export interface CredentialRankingStrategy {
 	 * non-empty limits with none exhausted.
 	 */
 	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[]; healthy?: boolean }[];
-	/** Whether fresh reports can heal legacy account-wide quota backoffs. */
-	healsGlobalBlocks?: boolean;
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

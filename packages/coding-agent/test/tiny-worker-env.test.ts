@@ -1,8 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { nativeLibraryPathOverlay, workerEnvFromParent } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgProvidersTinyModelDevice } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { tinyWorkerEnvOverlay } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { tinyWorkerEndpoint, tinyWorkerLogPath } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
 
@@ -27,31 +25,26 @@ describe("workerEnvFromParent", () => {
 
 describe("tinyWorkerEnvOverlay", () => {
 	it("maps non-default settings onto the worker env vars when neither is already set", () => {
-		expect(tinyWorkerEnvOverlay("cuda", "fp16")).toEqual({
+		expect(tinyWorkerEnvOverlay({}, "cuda", "fp16")).toEqual({
 			PI_TINY_DEVICE: "cuda",
 			PI_TINY_DTYPE: "fp16",
 		});
 	});
 
-	it("omits a var when its setting is the default sentinel or unset", () => {
-		expect(tinyWorkerEnvOverlay("default", "default")).toEqual({});
-		expect(tinyWorkerEnvOverlay(undefined, undefined)).toEqual({});
+	it("lets a present env var win over the persisted setting", () => {
+		expect(tinyWorkerEnvOverlay({ PI_TINY_DEVICE: "cpu" }, "cuda", "fp16")).toEqual({
+			PI_TINY_DEVICE: "cpu",
+			PI_TINY_DTYPE: "fp16",
+		});
+		expect(tinyWorkerEnvOverlay({ PI_TINY_DTYPE: "q8" }, "cuda", "fp16")).toEqual({
+			PI_TINY_DEVICE: "cuda",
+			PI_TINY_DTYPE: "q8",
+		});
 	});
-});
 
-describe("PI_TINY_DEVICE", () => {
-	it("wins over the persisted setting case-insensitively and ignores unknown devices", () => {
-		const previous = process.env.PI_TINY_DEVICE;
-		const settings = Settings.isolated({ "providers.tinyModelDevice": "cuda" });
-		try {
-			process.env.PI_TINY_DEVICE = "CPU";
-			expect(cfgProvidersTinyModelDevice.get(settings)).toBe("cpu");
-			process.env.PI_TINY_DEVICE = "quantum";
-			expect(cfgProvidersTinyModelDevice.get(settings)).toBe("cuda");
-		} finally {
-			if (previous === undefined) delete process.env.PI_TINY_DEVICE;
-			else process.env.PI_TINY_DEVICE = previous;
-		}
+	it("omits a var when its setting is the default sentinel or unset", () => {
+		expect(tinyWorkerEnvOverlay({}, "default", "default")).toEqual({});
+		expect(tinyWorkerEnvOverlay({}, undefined, undefined)).toEqual({});
 	});
 });
 

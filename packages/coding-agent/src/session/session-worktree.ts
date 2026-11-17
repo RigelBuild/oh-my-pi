@@ -17,8 +17,6 @@ import type { Settings } from "../config/settings";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
 
-import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
-
 export interface SessionWorktree {
 	/** Absolute, realpath'd worktree root. */
 	path: string;
@@ -54,7 +52,7 @@ export async function cleanSourceCheckoutIfConfigured(
 	sourceCwd: string,
 	settings: Settings,
 ): Promise<{ cleaned: boolean; errorMessage?: string }> {
-	if (!cfgWorktreeCleanSource.get(settings)) {
+	if (!settings.get("worktree.cleanSource")) {
 		return { cleaned: false };
 	}
 	try {
@@ -100,8 +98,8 @@ export async function createSessionWorktree(cwd: string, settings: Settings, bra
 	await repository.createBranch(branch, "HEAD", false);
 	const result = await repository.worktreeAdd(worktreePath, branch, {
 		detach: false,
-		clone: cfgWorktreeClone.get(settings),
-		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
+		clone: settings.get("worktree.clone"),
+		backend: parseIsolationBackend(settings.get("isolation.backend")),
 		keepChanges: true,
 	});
 	return {

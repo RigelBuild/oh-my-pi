@@ -120,10 +120,9 @@ async function createHarness(): Promise<ShutdownHarness> {
 	const session = {
 		extensionRunner: undefined,
 		model: { provider: "anthropic", id: "test-model" },
-		settings: Settings.isolated(),
+		settings: { get: () => false },
 		sessionManager: manager,
 		subscribe: () => {},
-		addDisposer: () => {},
 		getAllToolNames: () => [],
 		getLastAssistantMessage: () => undefined,
 		prepareForHeadlessAdvisorDrain: () => {},

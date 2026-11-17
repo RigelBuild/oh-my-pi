@@ -12,8 +12,6 @@ export interface TabSnapshot {
 	url: string;
 	title: string;
 	active: boolean;
-	/** Chrome discarded this tab; it reloads when activated. */
-	discarded: boolean;
 	windowId: number;
 	/** Pinned tabs are never grouped (Chrome would silently unpin them). */
 	pinned: boolean;
@@ -37,9 +35,6 @@ export type RelayRpcRequest =
 /** Messages sent relay → extension. */
 export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" };
 
-/** Required capability for safe relay target discovery and auto-attach. */
-export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
-
 /** Messages sent extension → relay. */
 export type ExtToRelayMessage =
 	| {
@@ -49,8 +44,6 @@ export type ExtToRelayMessage =
 			tabs: TabSnapshot[];
 			/** Tabs that already have a `chrome.debugger` attachment (relay reconciles after a service-worker restart). */
 			attachedTabIds: number[];
-			/** Present when snapshots include Chrome's discarded state. Absent in older extensions. */
-			discardedTabsProtocol?: number;
 			/**
 			 * Stable per-install browser identity (persisted in `chrome.storage.local`).
 			 * Lets the relay serve several browsers at once: tabs are namespaced per

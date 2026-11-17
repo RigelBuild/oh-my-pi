@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { AgentsHubDeps } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
@@ -9,6 +10,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import { getConfigDirs } from "../config";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	modelCatalogForClassification,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
 	resolveAgentPrewalkPattern,
@@ -23,14 +25,6 @@ import { refreshAgentDiscovery } from "../task";
 import { discoverAgents } from "../task/discovery";
 import { resolveAgentPrewalkDefault } from "../task/prewalk";
 import { createModelBrowserSource } from "./model-browser-source";
-
-import {
-	cfgTaskAgentAdvisor,
-	cfgTaskAgentModelOverrides,
-	cfgTaskAgentPrewalk,
-	cfgTaskDisabledAgents,
-	cfgTaskPrewalk,
-} from "../task/settings";
 
 function extractAssistantText(messages: AgentMessage[]): string | null {
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -57,6 +51,7 @@ export function createAgentsHubDeps(
 	settings: Settings,
 	modelRegistry: ModelRegistry,
 	extensionRoots: () => EffectiveExtensionRoots,
+	activeModel: () => Model | undefined,
 	activeModelPattern?: string,
 	defaultModelPattern?: string,
 ): AgentsHubDeps {
@@ -64,10 +59,10 @@ export function createAgentsHubDeps(
 		browserSource: createModelBrowserSource(settings),
 		loadAgents: async () => {
 			const { agents } = await discoverAgents(cwd, undefined, extensionRoots());
-			const disabled = new Set(cfgTaskDisabledAgents.get(settings));
-			const overrides = cfgTaskAgentModelOverrides.get(settings);
-			const prewalkOverrides = cfgTaskAgentPrewalk.get(settings);
-			const advisorOverrides = cfgTaskAgentAdvisor.get(settings);
+			const disabled = new Set(settings.get("task.disabledAgents") ?? []);
+			const overrides = settings.get("task.agentModelOverrides") ?? {};
+			const prewalkOverrides = settings.get("task.agentPrewalk") ?? {};
+			const advisorOverrides = settings.get("task.agentAdvisor") ?? {};
 			return agents.map(agent => {
 				const override = overrides[agent.name];
 				const overrideModel = (Array.isArray(override) ? override.join(",") : (override ?? "")).trim();
@@ -88,6 +83,7 @@ export function createAgentsHubDeps(
 				settings,
 				activeModelPattern,
 				fallbackModelPattern: defaultModelPattern,
+				availableModels: modelCatalogForClassification(modelRegistry.getAvailable(), activeModel()),
 			}),
 		resolvePatterns: patterns => {
 			if (patterns.length === 0) return undefined;
@@ -103,7 +99,7 @@ export function createAgentsHubDeps(
 		effectivePrewalkPattern: agent =>
 			resolveAgentPrewalkPattern({
 				settingsOverride: agent.prewalkOverride,
-				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk") ?? false),
 			}),
 		effectiveAdvisorPattern: agent => {
 			const selection = resolveAgentAdvisorSelection({
@@ -112,30 +108,15 @@ export function createAgentsHubDeps(
 			});
 			return selection ? (selection.model ?? "@advisor") : undefined;
 		},
-		setAgentDisabled: (name, { disabled }) => cfgTaskDisabledAgents.setMember(settings, name, { member: disabled }),
-		setAgentOverride: (property, name, value) => {
-			const setting =
+		setDisabledAgents: names => settings.set("task.disabledAgents", names),
+		setOverrides: (property, overrides) => {
+			const key =
 				property === "model"
-					? cfgTaskAgentModelOverrides
+					? "task.agentModelOverrides"
 					: property === "prewalk"
-						? cfgTaskAgentPrewalk
-						: cfgTaskAgentAdvisor;
-			if (property !== "model") {
-				setting.setEntry(settings, name, value);
-				return;
-			}
-			// A session-only pick (Alt+P) is a runtime override of the whole map and would mask this
-			// saved entry. Drop the override for `name` only; other agents keep their session picks.
-			const active = cfgTaskAgentModelOverrides.get(settings);
-			cfgTaskAgentModelOverrides.setEntry(settings, name, value);
-			cfgTaskAgentModelOverrides.clearOverride(settings);
-			const persisted = cfgTaskAgentModelOverrides.get(settings);
-			const sessionPicks = Object.entries(active).filter(
-				([agent, pick]) => agent !== name && JSON.stringify(pick) !== JSON.stringify(persisted[agent]),
-			);
-			if (sessionPicks.length > 0) {
-				cfgTaskAgentModelOverrides.override(settings, { ...persisted, ...Object.fromEntries(sessionPicks) });
-			}
+						? "task.agentPrewalk"
+						: "task.agentAdvisor";
+			settings.set(key, overrides);
 		},
 		generateAgent: async (description, onText) => {
 			await modelRegistry.refresh();
@@ -163,8 +144,6 @@ export function createAgentsHubDeps(
 				contextFiles: [],
 				promptTemplates: [],
 				slashCommands: [],
-				// A helper for the host session: the host keeps the process-wide effects and provider toggles.
-				bindProcessState: false,
 			});
 			const unsubscribe = session.subscribe(event => {
 				if (event.type === "message_update" && "assistantMessageEvent" in event) {

@@ -18,8 +18,6 @@ import {
 import { Settings } from "../config/settings";
 import { StencilCredential } from "../stencil/credential";
 
-import { cfgSkillsRegistryUrl } from "../extensibility/settings";
-
 /** A registry failure: HTTP status plus the server's `{error}` message (or a local auth failure as 401). */
 export class SkillshareError extends Error {
 	readonly status: number;
@@ -107,7 +105,7 @@ export class SkillshareClient {
 		let registryUrl = options.registryUrl;
 		if (!registryUrl) {
 			const settings = await Settings.loadReadOnly({ cwd: process.cwd() });
-			registryUrl = cfgSkillsRegistryUrl.get(settings) || DEFAULT_SKILLS_URL;
+			registryUrl = settings.get("skills.registryUrl") || DEFAULT_SKILLS_URL;
 		}
 		return new SkillshareClient(normalizeRegistryUrl(registryUrl), options.forPublish === true);
 	}

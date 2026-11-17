@@ -132,34 +132,6 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
 const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
 
-// Prebuilt stylers: each `chalk.<style>` access builds a fresh builder. Builders share the
-// root chalk context, so later `chalk.level` changes still apply.
-const boldStyler = chalk.bold;
-const italicStyler = chalk.italic;
-const underlineStyler = chalk.underline;
-const strikethroughStyler = chalk.strikethrough;
-const inverseStyler = chalk.inverse;
-
-/** Theme token of a thinking/effort level name (`off`…`max`); unknown levels (`auto`) map to `thinkingOff`. */
-export function thinkingLevelToken(level: string): ThemeColor {
-	switch (level) {
-		case "minimal":
-			return "thinkingMinimal";
-		case "low":
-			return "thinkingLow";
-		case "medium":
-			return "thinkingMedium";
-		case "high":
-			return "thinkingHigh";
-		case "xhigh":
-			return "thinkingXhigh";
-		case "max":
-			return "thinkingMax";
-		default:
-			return "thinkingOff";
-	}
-}
-
 export class Theme {
 	#fgColors: Record<ThemeColor, string>;
 	#bgColors: Record<ThemeBg, string>;
@@ -167,10 +139,6 @@ export class Theme {
 	readonly #hexFgColors: Record<ThemeColor, string>;
 	/** Resolved hex strings for background colors — populated at construction. */
 	readonly #hexBgColors: Record<ThemeBg, string>;
-	/** Lazily resolved `fgResolved` ANSI per color; colors and mode are fixed per instance. */
-	readonly #resolvedFgColors = new Map<ThemeColor, string>();
-	/** Lazily built, frozen `sessionAccentInputs`; every input it reads is fixed per instance. */
-	#sessionAccentInputs: SessionAccentTheme | undefined;
 	#symbols: SymbolMap;
 	#spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>>;
 	/**
@@ -311,15 +279,14 @@ export class Theme {
 	 * Theme-derived inputs for `getSessionAccentHex`: the accent hex whose
 	 * OKLCH weight session accents adopt, the major colors they must not
 	 * hue-collide with, and the light-theme surface luminance to contrast
-	 * against. Built once per instance and frozen; callers share the object.
+	 * against.
 	 */
 	get sessionAccentInputs(): SessionAccentTheme {
-		this.#sessionAccentInputs ??= Object.freeze({
+		return {
 			accentHex: this.getAccentColorHex(),
-			colorHexes: Object.freeze(this.getMajorThemeColorHexes()),
+			colorHexes: this.getMajorThemeColorHexes(),
 			surfaceLuminance: this.accentSurfaceLuminance,
-		});
-		return this.#sessionAccentInputs;
+		};
 	}
 
 	fg(color: ThemeColor, text: string): string {
@@ -330,13 +297,9 @@ export class Theme {
 
 	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
 	fgResolved(color: ThemeColor, text: string): string {
-		let resolved = this.#resolvedFgColors.get(color);
-		if (resolved === undefined) {
-			const ansi = this.#fgColors[color];
-			if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-			resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
-			this.#resolvedFgColors.set(color, resolved);
-		}
+		const ansi = this.#fgColors[color];
+		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		const resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
 		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
 	}
 
@@ -369,23 +332,23 @@ export class Theme {
 	}
 
 	bold(text: string): string {
-		return boldStyler(text);
+		return chalk.bold(text);
 	}
 
 	italic(text: string): string {
-		return italicStyler(text);
+		return chalk.italic(text);
 	}
 
 	underline(text: string): string {
-		return underlineStyler(text);
+		return chalk.underline(text);
 	}
 
 	strikethrough(text: string): string {
-		return strikethroughStyler(text);
+		return chalk.strikethrough(text);
 	}
 
 	inverse(text: string): string {
-		return inverseStyler(text);
+		return chalk.inverse(text);
 	}
 
 	getFgAnsi(color: ThemeColor): string {
@@ -439,10 +402,25 @@ export class Theme {
 
 	/** Border color for a thinking/effort level name (`off`…`max`); unknown levels fall back to `thinkingOff`. */
 	getThinkingBorderColor(level: string): (str: string) => string {
-		const token = thinkingLevelToken(level);
-		// thinkingMax is optional; themes without it resolve to the xhigh color.
-		const color = token === "thinkingMax" && !this.#fgColors.thinkingMax ? "thinkingXhigh" : token;
-		return (str: string) => this.fg(color, str);
+		switch (level) {
+			case "off":
+				return (str: string) => this.fg("thinkingOff", str);
+			case "minimal":
+				return (str: string) => this.fg("thinkingMinimal", str);
+			case "low":
+				return (str: string) => this.fg("thinkingLow", str);
+			case "medium":
+				return (str: string) => this.fg("thinkingMedium", str);
+			case "high":
+				return (str: string) => this.fg("thinkingHigh", str);
+			case "xhigh":
+				return (str: string) => this.fg("thinkingXhigh", str);
+			case "max":
+				// thinkingMax is optional; themes without it resolve to the xhigh color.
+				return (str: string) => this.fg(this.#fgColors.thinkingMax ? "thinkingMax" : "thinkingXhigh", str);
+			default:
+				return (str: string) => this.fg("thinkingOff", str);
+		}
 	}
 
 	getBashModeBorderColor(): (str: string) => string {
@@ -614,6 +592,7 @@ export class Theme {
 			advisorClosed: this.#symbols["icon.advisorClosed"],
 			time: this.#symbols["icon.time"],
 			omp: this.#symbols["icon.omp"],
+			esc: this.#symbols["icon.esc"],
 			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
 			job: this.#symbols["icon.job"],

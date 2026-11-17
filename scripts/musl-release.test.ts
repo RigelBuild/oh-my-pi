@@ -53,9 +53,7 @@ describe("musl release artifacts", () => {
 		);
 	});
 
-	// install.sh is the POSIX (Linux/macOS) installer and the test fakes the host by shadowing
-	// uname/ldd/curl via PATH; MSYS sh on Windows prepends /usr/bin, so the stubs never win.
-	test.skipIf(process.platform === "win32")("selects the musl asset when the Linux host reports musl", async () => {
+	test("selects the musl asset when the Linux host reports musl", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-musl-install-"));
 		tempDirs.push(dir);
 		const binDir = path.join(dir, "bin");

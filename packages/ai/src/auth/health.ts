@@ -76,9 +76,6 @@ export class CredentialHealth implements HealthApi {
 			email: credential.email,
 			enterpriseUrl: credential.enterpriseUrl,
 			apiEndpoint: credential.apiEndpoint,
-			orgId: credential.orgId,
-			region: credential.region,
-			inferenceRegion: credential.inferenceRegion,
 		};
 	}
 
@@ -283,7 +280,6 @@ export class CredentialHealth implements HealthApi {
 		const results: CredentialHealthResult[] = [];
 		for (const row of stored) {
 			options?.signal?.throwIfAborted();
-			if (options?.excludeProviders?.has(row.provider)) continue;
 			const base: CredentialHealthResult = {
 				id: row.id,
 				provider: row.provider,

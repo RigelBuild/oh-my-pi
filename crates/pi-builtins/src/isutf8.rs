@@ -19,6 +19,7 @@
 
 use std::{
 	ffi::{OsStr, OsString},
+	fs::File,
 	io::{self, Read, Write},
 	sync::{
 		Arc,
@@ -91,15 +92,9 @@ impl Utility for Isutf8 {
 				let result = if name == "-" {
 					validate(&mut host.stdin, &cancel)
 				} else {
-					host
-						.fs()
-						.open(host.resolve(name))
-						.and_then(|mut file| validate(&mut file, &cancel))
+					File::open(host.resolve(name)).and_then(|mut file| validate(&mut file, &cancel))
 				};
 				let verdict = match result {
-					// A cancelled provider operation is the shell abort itself,
-					// not an I/O failure of this operand.
-					Err(err) if pi_vfs::is_cancelled(&err) => return 130,
 					Err(err) => {
 						host.error(format!("{display}: {err}"), 2);
 						io_error = true;

@@ -5,8 +5,6 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as openModule from "@oh-my-pi/pi-coding-agent/utils/open";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
-import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
-
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
@@ -14,7 +12,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
-	cfgTuiHyperlinks.clearOverride(settings);
+	settings.clearOverride("tui.hyperlinks");
 });
 
 afterAll(() => {
@@ -23,7 +21,7 @@ afterAll(() => {
 
 describe("LoginDialogComponent", () => {
 	it("links every wrapped authorization URL row to the complete URL", () => {
-		cfgTuiHyperlinks.override(settings, "always");
+		settings.override("tui.hyperlinks", "always");
 		const openSpy = spyOn(openModule, "openPath").mockImplementation(() => {});
 		try {
 			const tui = { requestRender() {} } as unknown as TUI;

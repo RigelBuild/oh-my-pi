@@ -289,9 +289,8 @@ fn block_replace_lowers_to_replacement_inserts_and_deletes() {
 		index:    0,
 	};
 	let mut resolutions = Vec::new();
-	let edits = [edit];
 	let lowered = resolve_block_edits(
-		&edits,
+		&[edit],
 		text,
 		"x.rs",
 		Unresolved::Throw,
@@ -314,9 +313,8 @@ fn unresolved_insert_after_block_lowers_and_warns() {
 		index:    0,
 	};
 	let mut warnings = Vec::new();
-	let edits = [edit];
 	let lowered = resolve_block_edits(
-		&edits,
+		&[edit],
 		"plain",
 		"x.unknown",
 		Unresolved::Throw,
@@ -355,7 +353,7 @@ fn unresolved_block_replacement_reports_context() {
 
 #[test]
 fn syntax_helpers_use_pi_ast() {
-	let lines = vec!["mod m {", "\t#[test]", "\tfn f() {}", "}"];
+	let lines = vec!["mod m {".into(), "\t#[test]".into(), "\tfn f() {}".into(), "}".into()];
 	assert!(
 		node_chain(&lines, "x.rs", 2)
 			.iter()
@@ -476,13 +474,15 @@ fn named_register_gap_paste_warns_and_does_nothing_when_empty() {
 	};
 	let mut clipboard = Clipboard::default();
 	let mut warnings = Vec::new();
-	let lines = ["a"];
-	let edits = [paste];
-	let resolved =
-		resolve_clipboard_edits(&edits, &lines, &mut clipboard, EmptyPaste::Throw, &mut |warning| {
-			warnings.push(warning);
-		})
-		.unwrap();
+	let lines = vec!["a".into()];
+	let resolved = resolve_clipboard_edits(
+		&[paste],
+		&lines,
+		&mut clipboard,
+		EmptyPaste::Throw,
+		&mut |warning| warnings.push(warning),
+	)
+	.unwrap();
 	assert!(resolved.is_empty());
 	assert!(warnings[0].starts_with("line 4: `@missing` was empty"));
 }
@@ -500,7 +500,7 @@ fn empty_named_span_paste_is_rejected() {
 	};
 	let error = resolve_clipboard_edits(
 		&[paste],
-		&["a"],
+		&["a".into()],
 		&mut Clipboard::default(),
 		EmptyPaste::Throw,
 		&mut |_| {},
@@ -540,10 +540,9 @@ fn empty_paste_drop_removes_the_incomplete_preview_op() {
 		index:       0,
 		block_start: None,
 	};
-	let edits = [paste];
 	let resolved = resolve_clipboard_edits(
-		&edits,
-		&["a"],
+		&[paste],
+		&["a".into()],
 		&mut Clipboard::default(),
 		EmptyPaste::Drop,
 		&mut |_| {},

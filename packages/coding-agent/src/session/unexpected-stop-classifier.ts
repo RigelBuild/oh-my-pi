@@ -3,12 +3,11 @@
  * text-only assistant turn promised to act and then ended. The judge comes
  * from the live `judge` role chain resolved by {@link resolveJudge}.
  */
-import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
-import { type JudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
+import { resolveJudge } from "../judgment";
 
 /**
  * Yes-probability at or above which a turn counts as an unexpected stop.
@@ -36,9 +35,6 @@ export interface ClassifyUnexpectedStopDeps {
 	/** Active session model; last resort of the judge role chain. */
 	model?: Model;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
-	/** Session ledger for the classification's billed attempts. */
-	onUsage?: (usage: JudgmentUsage) => void;
-	telemetry?: AgentTelemetryConfig;
 	signal?: AbortSignal;
 }
 
@@ -76,10 +72,6 @@ export async function classifyUnexpectedStop(
 			sessionModel: deps.model,
 			sessionId: deps.sessionId,
 			metadataResolver: deps.metadataResolver,
-			purpose: "unexpected-stop",
-			onUsage: deps.onUsage,
-			telemetry: deps.telemetry,
-			cache: sharedJudgmentCache(),
 		});
 		const { answers } = await judge.judge(
 			{ state: { message: text }, questions: { stopped: UNEXPECTED_STOP_QUESTION } },

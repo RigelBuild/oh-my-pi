@@ -34,14 +34,7 @@ function getLockPath(filePath: string): string {
 
 function tryAcquireLock(lockPath: string): NativeFileLock | null {
 	const lock = NativeFileLock.tryAcquire(lockPath);
-	if (lock.acquired) return lock;
-	lock.release();
-	return null;
-}
-
-/** Acquire an exclusive lease without waiting; `null` while another holder owns it. */
-export function tryAcquireFileLock(filePath: string): FileLockHandle | null {
-	return tryAcquireLock(getLockPath(filePath));
+	return lock.acquired ? lock : null;
 }
 
 /** Acquire an exclusive lease; callers must release it when their operation ends. */

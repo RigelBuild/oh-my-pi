@@ -75,6 +75,7 @@ export interface NativeLoaderContext {
 	addonFilenames: string[];
 	addonLabel: string;
 	candidates: string[];
+	versionSentinelExport: string;
 	isWorkspaceLoad: boolean;
 	nativesDir: string;
 }
@@ -117,6 +118,7 @@ export function selectCpuVariant(input: SelectCpuVariantInput): SelectCpuVariant
 export interface ValidateLoadedBindingsContext {
 	isWorkspaceLoad: boolean;
 	packageVersion: string;
+	versionSentinelExport: string;
 }
 
 export function validateLoadedBindings(
@@ -129,8 +131,10 @@ export function validateLoadedBindings(
 export interface NativeAddonStatus {
 	/** Absolute path of the loaded `.node`. */
 	path: string;
-	/** Release the loaded addon reports (post-link stamp or legacy sentinel), or `null` when unidentified. */
-	version: string | null;
+	/** Sentinel the loaded addon carries, or `null` before sentinels existed. */
+	sentinel: string | null;
+	/** Sentinel this loader's package version expects. */
+	expectedSentinel: string;
 	/** `package.json#version` of the loader that loaded it. */
 	packageVersion: string;
 	/** True when the addon carries a different release than this package. */

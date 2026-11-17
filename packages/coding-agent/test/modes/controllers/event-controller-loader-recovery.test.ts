@@ -6,8 +6,6 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
-import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/settings";
-
 /**
  * Faithful model of the shared `statusContainer` + working-loader invariant that
  * InteractiveMode owns:
@@ -24,7 +22,7 @@ import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/setting
  */
 function createContext(options: { terminalProgress?: boolean } = {}) {
 	const streamState = { isStreaming: false };
-	if (options.terminalProgress) cfgTerminalShowProgress.set(settings, true);
+	if (options.terminalProgress) settings.set("terminal.showProgress", true);
 	const setProgress = vi.fn((_active: boolean) => {});
 	const ctx = createInteractiveModeContext({
 		ui: { terminal: { setProgress } },
@@ -240,25 +238,5 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(AGENT_END);
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false, true, false]);
-	});
-
-	it("reports OSC 9;4 activity to Tern even when the setting is off", async () => {
-		const program = Bun.env.TERM_PROGRAM;
-		try {
-			Bun.env.TERM_PROGRAM = "vscode";
-			const outside = createContext();
-			await new EventController(outside.ctx).handleEvent(AGENT_START);
-			expect(outside.setProgress).not.toHaveBeenCalled();
-
-			Bun.env.TERM_PROGRAM = "tern";
-			const { ctx, setProgress } = createContext();
-			const controller = new EventController(ctx);
-			await controller.handleEvent(AGENT_START);
-			await controller.handleEvent(AGENT_END);
-			expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
-		} finally {
-			if (program === undefined) delete Bun.env.TERM_PROGRAM;
-			else Bun.env.TERM_PROGRAM = program;
-		}
 	});
 });

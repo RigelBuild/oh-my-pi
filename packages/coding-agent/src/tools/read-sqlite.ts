@@ -53,8 +53,7 @@ export async function resolveSqliteReadPath(
 
 		try {
 			const stat = await Bun.file(absolutePath).stat();
-			// Sniffing a FIFO or device can block; leave it to the read tool's rejection.
-			if (!stat.isFile()) continue;
+			if (stat.isDirectory()) continue;
 			if (!(await isSqliteFile(absolutePath))) continue;
 
 			return {
@@ -71,7 +70,7 @@ export async function resolveSqliteReadPath(
 
 			try {
 				const retryStat = await Bun.file(suffixMatch.absolutePath).stat();
-				if (!retryStat.isFile()) continue;
+				if (retryStat.isDirectory()) continue;
 				if (!(await isSqliteFile(suffixMatch.absolutePath))) continue;
 
 				absolutePath = suffixMatch.absolutePath;

@@ -1,10 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import {
 	FilterPlugin,
+	getManager,
 	LoggingPlugin,
 	MetricsPlugin,
 	MnemopiPlugin,
 	PluginManager,
+	resetManager,
 } from "@oh-my-pi/pi-mnemopi/core/plugins";
 
 class CountingPlugin extends MnemopiPlugin {
@@ -25,6 +27,8 @@ class CountingPlugin extends MnemopiPlugin {
 }
 
 describe("PluginManager", () => {
+	beforeEach(() => resetManager());
+
 	it("registers, loads, notifies, and unloads plugins", () => {
 		const manager = new PluginManager();
 		manager.registerPlugin("counting", CountingPlugin);
@@ -45,6 +49,15 @@ describe("PluginManager", () => {
 		expect(manager.isLoaded("logging")).toBe(false);
 		expect(manager.getPlugin("logging")).toBeInstanceOf(LoggingPlugin);
 		expect(manager.isLoaded("logging")).toBe(true);
+	});
+
+	it("global manager can be reset", () => {
+		const first = getManager();
+		first.loadPlugin("metrics");
+		resetManager();
+		const second = getManager();
+		expect(second).not.toBe(first);
+		expect(second.isLoaded("metrics")).toBe(false);
 	});
 });
 

@@ -1,6 +1,8 @@
 //! I/O support for shell instances.
 
-use crate::{error, extensions, ioutils, openfiles};
+use std::io::Write;
+
+use crate::{error, extensions, ioutils};
 
 impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// Returns a value that can be used to write to the shell's currently
@@ -63,9 +65,10 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		};
 
 		// If we have a valid trace file, write to it.
-		if let Some(mut trace_file) = trace_file {
-			let line = format!("{prefix}{}\n", command.as_ref());
-			let _ = trace_file.write_all_async(line.as_bytes()).await;
+		if let Some(trace_file) = trace_file
+			&& let Ok(mut trace_file) = trace_file.try_clone()
+		{
+			let _ = writeln!(trace_file, "{prefix}{}", command.as_ref());
 		}
 	}
 
@@ -74,16 +77,17 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	///
 	/// # Arguments
 	///
-	/// * `file` - The file to write the error to.
+	/// * `file_table` - The open file table to use for any file descriptor
+	///   references.
 	/// * `err` - The error to display.
-	pub async fn display_error(
+	pub fn display_error(
 		&self,
-		file: &mut openfiles::OpenFile,
+		file: &mut impl std::io::Write,
 		err: &error::Error,
 	) -> Result<(), error::Error> {
 		use crate::extensions::ErrorFormatter as _;
 		let str = self.error_formatter.format_error(err, self);
-		file.write_all_async(str.as_bytes()).await?;
+		write!(file, "{str}")?;
 
 		Ok(())
 	}

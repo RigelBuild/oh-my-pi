@@ -45,8 +45,6 @@ import { providerFileCachePath, resolveBlobBrokerConfigs } from "../blob-broker/
 import { createConfiguredUploader } from "../blob-broker/uploaders";
 import { Settings } from "../config/settings";
 
-import { cfgImagesUrlsBackends, cfgImagesUrlsEnabled } from "../blob-broker/settings";
-
 export const IMAGES_ACTIONS = ["status", "doctor", "probe", "purge"] as const;
 export type ImagesAction = (typeof IMAGES_ACTIONS)[number];
 
@@ -208,8 +206,8 @@ const BINARY_BY_DESTINATION: Readonly<Partial<Record<BlobDestinationId, string>>
 
 function defaultResolveConfig(settings: Settings, projectDir: string): ImagesResolvedConfig {
 	return {
-		enabled: cfgImagesUrlsEnabled.get(settings),
-		orderedBackends: cfgImagesUrlsBackends.get(settings),
+		enabled: settings.get("images.urls.enabled"),
+		orderedBackends: settings.get("images.urls.backends"),
 		configs: resolveBlobBrokerConfigs(settings, projectDir),
 		providerFileCachePath: providerFileCachePath(settings, projectDir),
 		savingsJournalPath: blobBrokerSavingsJournalPath(settings, projectDir),

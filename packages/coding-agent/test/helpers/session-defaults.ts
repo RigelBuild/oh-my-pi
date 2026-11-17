@@ -9,12 +9,10 @@ export function createSessionDefaults() {
 		waitForAdvisorCatchup: async () => true,
 		getToolByName: () => undefined,
 		getLastAssistantMessage: () => undefined,
-		hasPendingAsyncWork: () => false,
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
-		addDisposer: () => {},
 	} satisfies Partial<AgentSession>;
 }

@@ -46,7 +46,10 @@ describe("DesktopSession", () => {
 			expect(typeof capabilities.input).toBe("boolean");
 			expect(typeof capabilities.ax).toBe("boolean");
 			expect(typeof capabilities.backgroundWindowInput).toBe("boolean");
-			expect(typeof capabilities.takeover).toBe("boolean");
+			expect(Array.isArray(capabilities.deliveryModes)).toBe(true);
+			for (const mode of capabilities.deliveryModes) {
+				expect(typeof mode).toBe("string");
+			}
 			expect(PERMISSION_STATES).toContain(capabilities.capturePermission);
 			expect(PERMISSION_STATES).toContain(capabilities.inputPermission);
 			expect(PERMISSION_STATES).toContain(capabilities.axPermission);

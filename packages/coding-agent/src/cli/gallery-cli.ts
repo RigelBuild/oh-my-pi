@@ -26,8 +26,6 @@ import {
 } from "./gallery-fixtures";
 import { captureGalleryScreenshots } from "./gallery-screenshot";
 
-import { cfgColorBlindMode, cfgSymbolPreset, cfgThemeDark, cfgThemeLight } from "../modes/settings";
-
 /** Lifecycle states the gallery renders, in display order. */
 export const GALLERY_STATES = ["streaming", "progress", "success", "error"] as const;
 export type GalleryState = (typeof GALLERY_STATES)[number];
@@ -332,10 +330,10 @@ export async function runGalleryCommand(args: GalleryCommandArgs): Promise<void>
 	if (args.screenshot) process.env.COLORTERM = "truecolor";
 	await initTheme(
 		false,
-		cfgSymbolPreset.get(settingsInstance),
-		cfgColorBlindMode.get(settingsInstance),
-		cfgThemeDark.get(settingsInstance),
-		cfgThemeLight.get(settingsInstance),
+		settingsInstance.get("symbolPreset"),
+		settingsInstance.get("colorBlindMode"),
+		settingsInstance.get("theme.dark"),
+		settingsInstance.get("theme.light"),
 	);
 
 	const width = resolveWidth(args.width);

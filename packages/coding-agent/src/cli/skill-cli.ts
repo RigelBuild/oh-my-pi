@@ -20,7 +20,6 @@ import { StencilCredential } from "../stencil/credential";
 import { parseSkillSpec, type SkillSpec, SkillshareClient, SkillshareError } from "../skillshare/client";
 import { installSkills, searchSkills, showSkillInfo, uninstallSkills, updateSkills } from "../skillshare/installer";
 import { bumpVersion, type PackResult, packSkill, SEMVER_RE } from "../skillshare/pack";
-import { handleSkillList } from "./skill-list";
 
 export type SkillAction =
 	| "publish"
@@ -35,8 +34,7 @@ export type SkillAction =
 	| "update"
 	| "uninstall"
 	| "search"
-	| "info"
-	| "list";
+	| "info";
 
 export const SKILL_ACTIONS: readonly SkillAction[] = [
 	"publish",
@@ -52,7 +50,6 @@ export const SKILL_ACTIONS: readonly SkillAction[] = [
 	"uninstall",
 	"search",
 	"info",
-	"list",
 ];
 
 export interface SkillCommandArgs {
@@ -83,7 +80,6 @@ Install and discover:
   uninstall <name...> [-g]                        Remove installed skills
   search <query> [--sort relevance|downloads|recent] [--json]
   info <@scope/name[@version]> [--json]
-  list [dir] [--json]                             Skills a session in dir resolves, with warnings
 
 Publish and manage:
   publish [dir] [--scope s] [--tag t] [--dry-run] [--allow-secrets]
@@ -499,8 +495,6 @@ async function dispatch(cmd: SkillCommandArgs): Promise<number> {
 			if (!query) throw new CliUsageError("usage: omp skill search <query>");
 			return searchSkills({ query, sort: flags.sort ?? "relevance", json: flags.json === true });
 		}
-		case "list":
-			return handleSkillList(args, cwd, flags.json === true);
 		case "info": {
 			const spec = args[0];
 			if (!spec) throw new CliUsageError("usage: omp skill info <@scope/name[@version]>");

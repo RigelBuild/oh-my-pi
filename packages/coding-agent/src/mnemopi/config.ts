@@ -5,32 +5,6 @@ import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 
-import {
-	cfgMnemopiAutoRecall,
-	cfgMnemopiAutoRetain,
-	cfgMnemopiBank,
-	cfgMnemopiDbPath,
-	cfgMnemopiDebug,
-	cfgMnemopiEmbeddingApiKey,
-	cfgMnemopiEmbeddingApiUrl,
-	cfgMnemopiEmbeddingModel,
-	cfgMnemopiEmbeddingVariant,
-	cfgMnemopiEnhancedRecall,
-	cfgMnemopiInjectionTokenLimit,
-	cfgMnemopiLlmApiKey,
-	cfgMnemopiLlmBaseUrl,
-	cfgMnemopiLlmMode,
-	cfgMnemopiLlmModel,
-	cfgMnemopiNoEmbeddings,
-	cfgMnemopiPolyphonicRecall,
-	cfgMnemopiProactiveLinking,
-	cfgMnemopiRecallContextTurns,
-	cfgMnemopiRecallLimit,
-	cfgMnemopiRecallMaxQueryChars,
-	cfgMnemopiRetainEveryNTurns,
-	cfgMnemopiScoping,
-} from "./settings";
-
 export type MnemopiLlmMode = "none" | "smol" | "remote";
 
 export type MnemopiScoping = "global" | "per-project" | "per-project-tagged";
@@ -67,24 +41,27 @@ export interface MnemopiBackendConfig {
 }
 
 export function loadMnemopiConfig(settings: Settings, agentDir: string): MnemopiBackendConfig {
-	const configuredDbPath = cfgMnemopiDbPath.get(settings);
+	const configuredDbPath = settings.get("mnemopi.dbPath");
 	const cwd = settings.getCwd();
-	const scoping = cfgMnemopiScoping.get(settings);
+	const scoping = settings.get("mnemopi.scoping");
 	const dbPath = configuredDbPath?.trim()
 		? configuredDbPath
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
-	const scope = computeMnemopiBankScope(cfgMnemopiBank.get(settings), cwd, scoping);
+	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping);
 	const recallBanks =
 		scoping === "global" ? scope.recallBanks : extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);
-	const llmMode = cfgMnemopiLlmMode.get(settings);
-	const embeddingOverride = cfgMnemopiEmbeddingModel.get(settings);
-	const embeddingVariant = cfgMnemopiEmbeddingVariant.get(settings);
+	const llmMode = settings.get("mnemopi.llmMode");
+	const embeddingOverride = settings.get("mnemopi.embeddingModel");
+	const embeddingVariant = settings.get("mnemopi.embeddingVariant");
 	// Map the variant explicitly rather than indexing an object with the raw config
 	// value (which could resolve an inherited property like `__proto__`); any value
 	// other than the multilingual variant falls back to the English default.
 	const variantModel =
 		embeddingVariant === "multilingual" ? "intfloat/multilingual-e5-large" : "BAAI/bge-base-en-v1.5";
-	const embeddingModel = embeddingOverride?.trim() || variantModel;
+	// Precedence: explicit `mnemopi.embeddingModel` setting > `MNEMOPI_EMBEDDING_MODEL`
+	// env (documented model-level override) > variant-derived default. Without the env
+	// term a variant default would silently shadow a user's configured env model.
+	const embeddingModel = embeddingOverride?.trim() || Bun.env.MNEMOPI_EMBEDDING_MODEL?.trim() || variantModel;
 	return {
 		dbPath,
 		baseBank: scope.baseBank,
@@ -93,36 +70,36 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		retainBank: scope.retainBank,
 		recallBanks,
 		scoping,
-		autoRecall: cfgMnemopiAutoRecall.get(settings),
-		autoRetain: cfgMnemopiAutoRetain.get(settings),
-		polyphonicRecall: cfgMnemopiPolyphonicRecall.get(settings),
-		enhancedRecall: cfgMnemopiEnhancedRecall.get(settings),
-		proactiveLinking: cfgMnemopiProactiveLinking.get(settings),
-		retainEveryNTurns: Math.max(1, Math.floor(cfgMnemopiRetainEveryNTurns.get(settings))),
-		recallLimit: Math.max(1, Math.floor(cfgMnemopiRecallLimit.get(settings))),
-		recallContextTurns: Math.max(1, Math.floor(cfgMnemopiRecallContextTurns.get(settings))),
-		recallMaxQueryChars: Math.max(256, Math.floor(cfgMnemopiRecallMaxQueryChars.get(settings))),
-		injectionTokenLimit: Math.max(256, Math.floor(cfgMnemopiInjectionTokenLimit.get(settings))),
-		debug: cfgMnemopiDebug.get(settings),
+		autoRecall: settings.get("mnemopi.autoRecall"),
+		autoRetain: settings.get("mnemopi.autoRetain"),
+		polyphonicRecall: settings.get("mnemopi.polyphonicRecall"),
+		enhancedRecall: settings.get("mnemopi.enhancedRecall"),
+		proactiveLinking: settings.get("mnemopi.proactiveLinking"),
+		retainEveryNTurns: Math.max(1, Math.floor(settings.get("mnemopi.retainEveryNTurns"))),
+		recallLimit: Math.max(1, Math.floor(settings.get("mnemopi.recallLimit"))),
+		recallContextTurns: Math.max(1, Math.floor(settings.get("mnemopi.recallContextTurns"))),
+		recallMaxQueryChars: Math.max(256, Math.floor(settings.get("mnemopi.recallMaxQueryChars"))),
+		injectionTokenLimit: Math.max(256, Math.floor(settings.get("mnemopi.injectionTokenLimit"))),
+		debug: settings.get("mnemopi.debug"),
 		providerOptions: {
-			noEmbeddings: cfgMnemopiNoEmbeddings.get(settings),
-			debug: cfgMnemopiDebug.get(settings),
+			noEmbeddings: settings.get("mnemopi.noEmbeddings"),
+			debug: settings.get("mnemopi.debug"),
 			embeddingModel,
-			embeddingApiUrl: cfgMnemopiEmbeddingApiUrl.get(settings),
-			embeddingApiKey: cfgMnemopiEmbeddingApiKey.get(settings),
+			embeddingApiUrl: settings.get("mnemopi.embeddingApiUrl"),
+			embeddingApiKey: settings.get("mnemopi.embeddingApiKey"),
 			llm:
 				llmMode === "remote"
 					? {
-							baseUrl: cfgMnemopiLlmBaseUrl.get(settings),
-							apiKey: cfgMnemopiLlmApiKey.get(settings),
-							model: cfgMnemopiLlmModel.get(settings),
+							baseUrl: settings.get("mnemopi.llmBaseUrl"),
+							apiKey: settings.get("mnemopi.llmApiKey"),
+							model: settings.get("mnemopi.llmModel"),
 						}
 					: false,
 		},
 		llmMode,
-		llmBaseUrl: cfgMnemopiLlmBaseUrl.get(settings),
-		llmApiKey: cfgMnemopiLlmApiKey.get(settings),
-		llmModel: cfgMnemopiLlmModel.get(settings),
+		llmBaseUrl: settings.get("mnemopi.llmBaseUrl"),
+		llmApiKey: settings.get("mnemopi.llmApiKey"),
+		llmModel: settings.get("mnemopi.llmModel"),
 	};
 }
 

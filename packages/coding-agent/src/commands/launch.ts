@@ -36,15 +36,6 @@ export default class Index extends Command {
 			throw error;
 		}
 		const runRootCommand = await loadRunRootCommand();
-		try {
-			await runRootCommand(parsed, args);
-		} catch (error) {
-			// Usage errors found after startup (e.g. `--tools` checked against the
-			// discovered registry) may leave live handles; exit instead of draining.
-			if (reportCliUsageError(error)) {
-				process.exit(2);
-			}
-			throw error;
-		}
+		await runRootCommand(parsed, args);
 	}
 }

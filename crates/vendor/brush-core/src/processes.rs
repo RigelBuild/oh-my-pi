@@ -1,10 +1,7 @@
 //! Process management
 
 use futures::FutureExt;
-use std::{
-	io::Write,
-	sync::Arc,
-};
+use std::io::Write;
 
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
@@ -34,10 +31,8 @@ pub struct ChildProcess {
 	reaped:      bool,
 	/// If available, the process ID of the child.
 	pid:         Option<sys::process::ProcessId>,
-	/// If available, the shared process group ID of the pipeline.
+	/// If available, the process group ID of the child.
 	pgid:        Option<sys::process::ProcessId>,
-	/// Every external process in this pipeline.
-	stop_pids:   Option<Arc<[sys::process::ProcessId]>>,
 	/// Windows handle duplicated from the child process for safe termination.
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
@@ -58,7 +53,6 @@ impl ChildProcess {
 			exec_future: Box::pin(child.wait_with_output()),
 			pid,
 			pgid,
-			stop_pids: None,
 			reaped: false,
 			#[cfg(windows)]
 			kill_handle,
@@ -74,11 +68,6 @@ impl ChildProcess {
 	/// Returns the process's group ID.
 	pub const fn pgid(&self) -> Option<sys::process::ProcessId> {
 		self.pgid
-	}
-
-	/// Sets the external process IDs that form this pipeline's stop scope.
-	pub(crate) fn set_stop_pids(&mut self, pids: Arc<[sys::process::ProcessId]>) {
-		self.stop_pids = Some(pids);
 	}
 
 	/// Duplicates the process handle for termination use on Windows.
@@ -98,18 +87,6 @@ impl ChildProcess {
 			Some(CompletionMarker { output, end_marker_prefix, end_marker_suffix });
 	}
 
-	/// Checks whether this process, or a stage in its pipeline, stopped.
-	fn poll_for_stop(&self) -> Result<bool, error::Error> {
-		let Some(pid) = self.pid else {
-			return Ok(false);
-		};
-		let pids = self
-			.stop_pids
-			.as_deref()
-			.unwrap_or_else(|| std::slice::from_ref(&pid));
-		sys::signal::poll_for_stopped_processes(pids, self.pgid)
-	}
-
 	/// Waits for the process to exit.
 	///
 	/// If a cancellation token is provided and triggered, the process will be killed.
@@ -121,15 +98,6 @@ impl ChildProcess {
 		let mut sigtstp = sys::signal::tstp_signal_listener()?;
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigchld = sys::signal::chld_signal_listener()?;
-
-		// A SIGCHLD delivered before the subscription above never reaches
-		// `sigchld`. Pipeline stages are all spawned before the first is
-		// waited on, so this process or one in its pipeline can stop before
-		// this point. Exits need no such check: the child's exec future
-		// registered for them when it was spawned.
-		if self.poll_for_stop()? {
-			return Ok(ProcessWaitResult::Stopped);
-		}
 
 		let cancelled = async {
 			match &cancel_token {
@@ -158,7 +126,7 @@ impl ChildProcess {
 					break Ok(ProcessWaitResult::Stopped)
 				},
 				_ = sigchld.recv() => {
-					if self.poll_for_stop()? {
+					if sys::signal::poll_for_stopped_children()? {
 						break Ok(ProcessWaitResult::Stopped);
 					}
 				},

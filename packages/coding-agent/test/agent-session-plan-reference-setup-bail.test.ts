@@ -119,9 +119,9 @@ describe("AgentSession plan-reference delivery tracking (issue #4094)", () => {
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"task.eager": "default",
+			"task.eager": "off",
 			"todo.enabled": false,
-			"todo.eager": "default",
+			"todo.eager": "off",
 			"todo.reminders": false,
 		});
 		const sessionManager = SessionManager.inMemory(tempDir.path());

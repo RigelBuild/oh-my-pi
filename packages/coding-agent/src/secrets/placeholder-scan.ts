@@ -5,7 +5,6 @@ import {
 	type RegexScanSegment,
 	type ReplaceRegexScan,
 	resumePlaceholderScanAfterRejectedCandidate,
-	SecretValueSet,
 } from "./placeholder";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -452,8 +451,8 @@ function isPlainRecord(obj: object): obj is Record<string, unknown> {
 	return prototype === Object.prototype || prototype === null;
 }
 
-export function collectJsonRegexSecretValues(obfuscator: SecretObfuscator, value: JsonValue): SecretValueSet {
-	const values = new SecretValueSet();
+export function collectJsonRegexSecretValues(obfuscator: SecretObfuscator, value: JsonValue): Set<string> {
+	const values = new Set<string>();
 	const collect = (item: JsonValue): void => {
 		if (typeof item === "string") {
 			for (const secretValue of obfuscator.collectRegexSecretValuesForObfuscation(item)) {

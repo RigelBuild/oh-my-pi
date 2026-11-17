@@ -3,8 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	applyDirenvPreflight,
 	buildMinimizerOptions,
@@ -17,9 +16,7 @@ import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
-import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-
-import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
@@ -44,7 +41,7 @@ function shellQuote(value: string): string {
 
 function configureBashUserShell(homeDir: string): boolean {
 	if (process.platform === "win32" || !fs.existsSync("/bin/bash")) return false;
-	cfgShellPath.set(Settings.instance, "/bin/bash");
+	Settings.instance.set("shellPath", "/bin/bash");
 	vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 		shell: "/bin/bash",
 		args: ["-c"],
@@ -211,7 +208,7 @@ describe("executeBash", () => {
 		// load instantly, silently dropping the repo's direnv env. The load keeps
 		// its full `bash.direnvLoadTimeoutMs` budget. Spying on loadDirenvEnv both
 		// captures the timeoutMs and short-circuits real direnv (null diff = no-op).
-		const budget = cfgBashDirenvLoadTimeoutMs.get(await Settings.init());
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
 		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
 
 		await executeBash("true", { cwd: tempDir, timeout: 0 });
@@ -225,7 +222,7 @@ describe("executeBash", () => {
 		// A positive caller timeout below the budget DOES clamp the direnv window,
 		// proving the fix only relaxes the `timeout: 0` case and did not disable
 		// clamping wholesale. Setting and options.timeout are both milliseconds.
-		const budget = cfgBashDirenvLoadTimeoutMs.get(await Settings.init());
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
 		const callerTimeout = 5;
 		expect(callerTimeout).toBeLessThan(budget);
 		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
@@ -253,6 +250,15 @@ describe("executeBash", () => {
 
 		expect(result.output.trim()).toBe(linkDir);
 		expect(result.workingDir).toBe(linkDir);
+	});
+
+	it("passes env vars", async () => {
+		const result = await executeBash("echo $PI_TEST_ENV", {
+			cwd: tempDir,
+			timeout: 5000,
+			env: { PI_TEST_ENV: "hello" },
+		});
+		expect(result.output.trim()).toBe("hello");
 	});
 
 	it("applies non-interactive environment defaults", async () => {
@@ -288,7 +294,7 @@ exit 64
 `,
 		);
 		fs.chmodSync(fakeShell, 0o755);
-		cfgShellPath.set(Settings.instance, fakeShell);
+		Settings.instance.set("shellPath", fakeShell);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fakeShell,
@@ -340,7 +346,7 @@ exit 64
 `,
 		);
 		fs.chmodSync(fakeShell, 0o755);
-		cfgShellPath.set(Settings.instance, fakeShell);
+		Settings.instance.set("shellPath", fakeShell);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fakeShell,
 			args: ["-l", "-c"],
@@ -476,7 +482,7 @@ exit 64
 
 		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-shellpath-"));
 		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_shell_alias='printf zsh-alias-ok\\\\n'\n");
-		cfgShellPath.set(Settings.instance, zshPath);
+		Settings.instance.set("shellPath", zshPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: zshPath,
@@ -532,7 +538,7 @@ exit 64
 			path.join(configDir, "conf.d", "pi-login.fish"),
 			"if status is-login; echo fish-login-side-effect; end\n",
 		);
-		cfgShellPath.set(Settings.instance, fishPath);
+		Settings.instance.set("shellPath", fishPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: fishPath,
@@ -576,7 +582,7 @@ exit 64
 
 		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-pty-"));
 		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_pty_alias='printf pty-alias-ok'\n");
-		cfgShellPath.set(Settings.instance, zshPath);
+		Settings.instance.set("shellPath", zshPath);
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: zshPath,
@@ -616,6 +622,22 @@ exit 64
 		}
 	});
 
+	it("invokes onChunk with command output", async () => {
+		let seenChunk: string | null = null;
+		const result = await executeBash("echo hello", {
+			cwd: tempDir,
+			timeout: 5000,
+			onChunk: chunk => {
+				if (seenChunk === null) {
+					seenChunk = chunk;
+				}
+			},
+		});
+		expect(result.output.trim()).toBe("hello");
+		expect(seenChunk).not.toBeNull();
+		expect(seenChunk ?? "").toContain("hello");
+	});
+
 	it("returns a real PID for background external commands", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -623,10 +645,9 @@ exit 64
 
 		// Redirect the backgrounded job's stdout so it doesn't hold the executor's
 		// output pipe open (which would add the ~250ms background-drain grace);
-		// `$!` reports the real external PID, which is all this test checks.
-		const sleepBin = $which("sleep");
-		if (!sleepBin) throw new Error("sleep executable not found");
-		const result = await executeBash(`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $!`, {
+		// `$!` still reports the real external PID, which is all this test checks.
+		const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+		const result = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $!`, {
 			cwd: tempDir,
 			timeout: 5000,
 		});
@@ -635,6 +656,15 @@ exit 64
 		expect(pid).toBeGreaterThan(0);
 		expect(() => process.kill(pid, 0)).not.toThrow();
 		expect(() => process.kill(pid, "SIGKILL")).not.toThrow();
+	});
+
+	it("times out commands", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const result = await executeBash("sleep 10", { cwd: tempDir, timeout: 50 });
+		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("timed out");
 	});
 
 	it("times out before follow-up output", async () => {
@@ -664,6 +694,25 @@ exit 64
 		const result = await executeBash("sleep 0.03; echo done", { cwd: tempDir, timeout: 0 });
 		expect(result.cancelled).toBe(false);
 		expect(result.output.trim()).toBe("done");
+	});
+
+	it("aborts commands", async () => {
+		if (process.platform === "win32") {
+			return;
+		}
+		const controller = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const promise = executeBash("echo started; sleep 10", {
+			cwd: tempDir,
+			timeout: 5000,
+			signal: controller.signal,
+			onChunk: () => started.resolve(),
+		});
+		await started.promise;
+		controller.abort();
+		const result = await promise;
+		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("Command cancelled");
 	});
 
 	it("returns promptly and quarantines the session key when native abort cleanup stalls", async () => {
@@ -1358,23 +1407,19 @@ describe("executeBash :async: background retention", () => {
 		"keeps a per-job :async: shell's plain-`&` background process alive across turns",
 		async () => {
 			const pidFile = path.join(tmp, "pid");
-			const sleepBin = $which("sleep");
-			if (!sleepBin) throw new Error("sleep executable not found");
+			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
 			let pid: number | undefined;
 			try {
 				// A per-job `:async:` key: its shell is removed from the reuse map at
 				// teardown, which would SIGKILL the backgrounded child (kill-on-drop).
 				// A plain `&` job stays a child of the shell, so `liveBackgroundJobCount`
 				// sees it and the retain logic keeps the shell alive while the child
-				// runs. `$!` is the external child's own pid (no transparent wrapper
-				// to unwrap), so it is the process we assert on.
-				const res = await executeBash(
-					`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`,
-					{
-						sessionKey: "retain-probe:async:job1",
-						cwd: tmp,
-					},
-				);
+				// runs. `$!` is the external child's own pid (no transparent wrapper to
+				// unwrap), so it is the process we assert on.
+				const res = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`, {
+					sessionKey: "retain-probe:async:job1",
+					cwd: tmp,
+				});
 				expect(res.cancelled).toBe(false);
 				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
 				expect(Number.isInteger(pid)).toBe(true);
@@ -1403,8 +1448,7 @@ describe("executeBash :async: background retention", () => {
 		"keeps a nohup-detached background process alive across turns (reparenting)",
 		async () => {
 			const pidFile = path.join(tmp, "nohup-pid");
-			const sleepBin = $which("sleep");
-			if (!sleepBin) throw new Error("sleep executable not found");
+			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
 			let pid: number | undefined;
 			try {
 				// `nohup cmd &` is a transparent background wrapper: brush unwraps it and
@@ -1413,7 +1457,7 @@ describe("executeBash :async: background retention", () => {
 				// short-lived intermediate fork, so `$!` is NOT the surviving process —
 				// the operand writes its own pid before `exec`ing the long sleep, and
 				// that pid (unchanged across exec) is the one we assert stays alive.
-				const operand = `echo $$ > ${shellQuote(pidFile)}; exec ${shellQuote(sleepBin)} 30`;
+				const operand = `echo $$ > ${pidFile}; exec ${sleepBin} 30`;
 				const res = await executeBash(`nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 &`, {
 					sessionKey: "reparent-probe:async:job1",
 					cwd: tmp,

@@ -257,10 +257,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("reserve");
 			continue;
 		}
-		const report =
-			status.report && reportMatchesStatus(status.report, status)
-				? status.report
-				: input.reports?.find(candidate => reportMatchesStatus(candidate, status));
+		const report = input.reports?.find(candidate => reportMatchesStatus(candidate, status));
 		if (!report) {
 			skip("no-report");
 			continue;

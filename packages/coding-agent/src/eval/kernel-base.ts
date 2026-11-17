@@ -218,7 +218,6 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	#alive = true;
 	#disposed = false;
 	#shutdownConfirmed = false;
-	#shutdownInFlight: Promise<KernelShutdownResult> | null = null;
 	#exitedPromise: Promise<number> | null = null;
 	#pending = new Map<string, PendingExecution>();
 	#pendingControls = new Map<string, PromiseWithResolvers<Frame>>();
@@ -359,27 +358,16 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		}
 
 		requestWritten = true;
-		const transportFailed = (err: unknown) => {
-			if (!pending.settled) {
-				pending.status = "error";
-				pending.cancelled = true;
-				// The kernel is retired below and a partial write may have run code: completion is uncertain.
-				pending.kernelKilled = true;
-				pending.error = {
-					name: "TransportError",
-					value: err instanceof Error ? err.message : String(err),
-					traceback: [],
-				};
-				finalize();
-			}
-			// A broken stdin pipe is terminal even if this request already settled (e.g. aborted first):
-			// retire the kernel so the session starts a fresh one.
-			void this.shutdown();
-		};
 		try {
-			await this.#writeLine(payload, transportFailed);
+			await this.#writeLine(payload);
 		} catch (err) {
-			transportFailed(err);
+			pending.cancelled = true;
+			pending.error = {
+				name: "TransportError",
+				value: err instanceof Error ? err.message : String(err),
+				traceback: [],
+			};
+			finalize();
 		}
 
 		return promise;
@@ -393,11 +381,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		const deferred = Promise.withResolvers<Frame>();
 		this.#pendingControls.set(id, deferred);
 		try {
-			// A broken stdin pipe is terminal: fail this control request and retire the kernel.
-			await this.#writeLine(payload, err => {
-				deferred.reject(err);
-				void this.shutdown();
-			});
+			await this.#writeLine(payload);
 			return await raceControlTimeout(
 				deferred.promise,
 				timeoutMs,
@@ -419,19 +403,9 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		}
 	}
 
-	/**
-	 * Concurrent calls (e.g. several in-flight requests hitting the same broken pipe) share one
-	 * shutdown sequence. An unconfirmed shutdown clears the slot so a later call can retry.
-	 */
-	shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
-		if (this.#shutdownConfirmed) return Promise.resolve({ confirmed: true });
-		this.#shutdownInFlight ??= this.#shutdown(options).finally(() => {
-			this.#shutdownInFlight = null;
-		});
-		return this.#shutdownInFlight;
-	}
+	async shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
+		if (this.#shutdownConfirmed) return { confirmed: true };
 
-	async #shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
 		this.#alive = false;
 		this.#abortPendingExecutions(`${this.#options.languageName} kernel shutdown`, { kernelKilled: true });
 
@@ -519,23 +493,15 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		}
 	}
 
-	async #writeLine(line: string, onWriteFailed?: (err: unknown) => void): Promise<void> {
+	async #writeLine(line: string): Promise<void> {
 		if (!this.#stdin) {
 			throw new Error(`${this.#options.languageName} kernel stdin is not open`);
 		}
 		if (this.#options.traceIpc) {
 			logger.debug(`${this.#options.languageName}Kernel send`, { preview: line.slice(0, 120) });
 		}
-		// Not awaited: callers' timeouts start after this returns, so a wedged pipe must not block here.
-		// A failed write (sync throw or rejection) is reported through onWriteFailed; the kernel may stay
-		// alive without an exit event.
-		const stdin = this.#stdin;
-		const write = Promise.try(() => stdin.write(`${line}\n`));
-		void write.catch(() => {});
-		void Promise.all([write, Promise.try(() => stdin.flush())]).catch(err => {
-			logger.debug(`${this.#options.languageName} kernel stdin write failed`, { error: String(err) });
-			onWriteFailed?.(err);
-		});
+		this.#stdin.write(`${line}\n`);
+		this.#stdin.flush();
 	}
 
 	#startReader(stream: ReadableStream<Uint8Array>): void {

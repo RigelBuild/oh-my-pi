@@ -4,6 +4,8 @@ import { Settings } from "../../../src/config/settings";
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 
+const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
+
 describe("PlanSaveOverlay", () => {
 	let uiTheme: Theme;
 
@@ -22,6 +24,7 @@ describe("PlanSaveOverlay", () => {
 
 		expect(lines.join("\n")).toContain(theme.fg("dim", "AUTO_QA_PLAN.md"));
 		expect(lines.map(visibleWidth)).toEqual(Array(lines.length).fill(80));
+		expect(stripAnsi(lines.join("\n"))).toContain("Enter save and quit · Esc cancel");
 	});
 
 	it("uses the latest generated suggestion when entered empty", () => {

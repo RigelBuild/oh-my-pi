@@ -91,7 +91,7 @@ function makeCtx(initialQueue: CompactionQueuedMessage[]) {
 		compactionQueuedMessages: [...initialQueue],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: { addToHistory: () => {}, setText: () => {}, getText: () => "" },
-		keybindings: { getKeys: () => ["alt+up"] },
+		keybindings: { getDisplayString: () => "Alt+Up" },
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures,
 		isKnownSlashCommand,

@@ -331,11 +331,10 @@ impl Spec {
 
 			let expansions = pattern
 				.expand(
-					shell.filesystem(),
 					shell.working_dir(),
+					Some(&patterns::Pattern::accept_all_expand_filter),
 					&patterns::FilenameExpansionOptions::default(),
-				)
-				.await?
+				)?
 				.into_paths();
 
 			for expansion in expansions {
@@ -496,7 +495,7 @@ impl Spec {
 				},
 				CompleteAction::Command => {
 					let mut command_completions =
-						get_external_command_completions(shell, context.token_to_complete).await;
+						get_external_command_completions(shell, context.token_to_complete);
 					candidates.append(&mut command_completions);
 					for name in shell.builtins().keys() {
 						if name.starts_with(token) {
@@ -1212,30 +1211,26 @@ async fn get_file_completions(
 
 	let glob = std::format!("{expanded_token}*");
 
+	let path_filter = |path: &Path| !must_be_dir || shell.absolute_path(path).is_dir();
+
 	let pattern = patterns::Pattern::from(glob)
 		.set_extended_globbing(shell.options().extended_globbing)
 		.set_case_insensitive(shell.options().case_insensitive_pathname_expansion);
 
-	let expansions = pattern
+	let mut completions: Vec<String> = pattern
 		.expand(
-			shell.filesystem(),
 			shell.working_dir(),
+			Some(&path_filter),
 			&patterns::FilenameExpansionOptions::default(),
 		)
-		.await
 		.unwrap_or_default()
-		.into_paths();
-
-	let mut completions = Vec::with_capacity(expansions.len());
-	for path in expansions {
-		if must_be_dir && !shell.filesystem().is_dir(shell.absolute_path(Path::new(&path))).await {
-			continue;
-		}
-		completions.push(match sys::fs::normalize_path_separators(&path) {
-			std::borrow::Cow::Borrowed(_) => path,
+		.into_paths()
+		.into_iter()
+		.map(|p| match sys::fs::normalize_path_separators(&p) {
+			std::borrow::Cow::Borrowed(_) => p,
 			std::borrow::Cow::Owned(normalized) => normalized,
-		});
-	}
+		})
+		.collect();
 
 	match expanded_token.as_str() {
 		"." => {
@@ -1253,20 +1248,17 @@ async fn get_file_completions(
 	completions
 }
 
-async fn get_external_command_completions(
+fn get_external_command_completions(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	prefix: &str,
 ) -> Vec<String> {
 	let mut candidates = Vec::new();
 
 	// Look for external commands.
-	for path in shell
-		.find_executables_in_path_with_prefix(
-			prefix,
-			shell.options().case_insensitive_pathname_expansion,
-		)
-		.await
-	{
+	for path in shell.find_executables_in_path_with_prefix(
+		prefix,
+		shell.options().case_insensitive_pathname_expansion,
+	) {
 		if let Some(file_name) = path.file_name() {
 			candidates.push(file_name.to_string_lossy().to_string());
 		}
@@ -1328,13 +1320,13 @@ fn try_get_variable_completions(
 
 /// Adds command-position completions to candidates.
 /// This includes external commands, builtins, functions, aliases, and keywords.
-async fn add_command_completions(
+fn add_command_completions(
 	shell: &Shell<impl extensions::ShellExtensions>,
 	prefix: &str,
 	candidates: &mut Vec<String>,
 ) {
 	// Add external commands.
-	let mut command_completions = get_external_command_completions(shell, prefix).await;
+	let mut command_completions = get_external_command_completions(shell, prefix);
 	candidates.append(&mut command_completions);
 
 	// Add built-in commands.
@@ -1388,7 +1380,7 @@ async fn get_completions_using_basic_lookup(
 		context.token_index == 0 && !token.is_empty() && !sys::fs::contains_path_separator(token);
 
 	if is_command_position {
-		add_command_completions(shell, token, &mut candidates).await;
+		add_command_completions(shell, token, &mut candidates);
 		candidates.sort();
 	}
 

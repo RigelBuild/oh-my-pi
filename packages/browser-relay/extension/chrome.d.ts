@@ -17,8 +17,6 @@ interface ChromeTab {
 	pendingUrl?: string;
 	title?: string;
 	active: boolean;
-	/** Chrome discarded this tab; it reloads when activated. */
-	discarded: boolean;
 	windowId: number;
 	pinned: boolean;
 	/** -1 when ungrouped. */
@@ -57,7 +55,6 @@ declare const chrome: {
 		ungroup(tabIds: number[]): Promise<void>;
 		onCreated: ChromeEvent<(tab: ChromeTab) => void>;
 		onUpdated: ChromeEvent<(tabId: number, changeInfo: ChromeTabChangeInfo, tab: ChromeTab) => void>;
-		onActivated: ChromeEvent<(info: { tabId: number; windowId: number }) => void>;
 		onRemoved: ChromeEvent<(tabId: number, removeInfo: { windowId: number }) => void>;
 	};
 	tabGroups: {

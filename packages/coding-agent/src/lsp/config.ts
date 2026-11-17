@@ -32,8 +32,7 @@ interface NormalizedConfig {
 	idleTimeoutMs?: number;
 }
 
-/** Parse a config file as YAML (`.yaml`/`.yml`) or JSON. */
-export function parseConfigContent(content: string, filePath: string): unknown {
+function parseConfigContent(content: string, filePath: string): unknown {
 	const extension = path.extname(filePath).toLowerCase();
 	if (extension === ".yaml" || extension === ".yml") {
 		return YAML.parse(content) as unknown;

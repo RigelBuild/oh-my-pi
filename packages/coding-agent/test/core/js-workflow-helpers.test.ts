@@ -95,7 +95,6 @@ describe("executeJs workflow helpers", () => {
 				orchestrationCacheRead: 0,
 				premiumRequests: 0,
 				cost: 0,
-				subagentCost: 0,
 			}),
 		});
 		const result = await executeJs(

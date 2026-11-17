@@ -14,7 +14,7 @@ import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { compileRuleCondition, type Rule } from "../capability/rule";
-import type { TtsrSettings } from "./ttsr-settings";
+import type { TtsrSettings } from "../config/settings";
 
 export type TtsrMatchSource = "text" | "thinking" | "tool";
 
@@ -121,7 +121,7 @@ interface InjectionRecord {
 	lastInjectedAt: number;
 }
 
-const DEFAULT_SETTINGS: TtsrSettings = {
+const DEFAULT_SETTINGS: Required<TtsrSettings> = {
 	enabled: true,
 	judge: "auto",
 	contextMode: "discard",
@@ -132,12 +132,6 @@ const DEFAULT_SETTINGS: TtsrSettings = {
 	disabledRules: [],
 };
 
-/**
- * Fixed TTSR settings (omitted fields take the defaults), or a getter the manager reads on every
- * check so live setting changes apply immediately.
- */
-export type TtsrSettingsSource = Partial<TtsrSettings> | (() => TtsrSettings);
-
 const DEFAULT_SCOPE: TtsrScope = {
 	allowText: true,
 	allowThinking: false,
@@ -146,7 +140,7 @@ const DEFAULT_SCOPE: TtsrScope = {
 };
 
 export class TtsrManager {
-	readonly #settingsSource: () => TtsrSettings;
+	readonly #settings: Required<TtsrSettings>;
 	readonly #rules = new Map<string, TtsrEntry>();
 	readonly #injectionRecords = new Map<string, InjectionRecord>();
 	readonly #buffers = new Map<string, string>();
@@ -157,18 +151,8 @@ export class TtsrManager {
 	#canMatchThinking = false;
 	#hasJudgedRules = false;
 
-	constructor(settings?: TtsrSettingsSource) {
-		if (typeof settings === "function") {
-			this.#settingsSource = settings;
-		} else {
-			const snapshot: TtsrSettings = { ...DEFAULT_SETTINGS, ...settings };
-			this.#settingsSource = () => snapshot;
-		}
-	}
-
-	/** Current settings; resolved per call so a live source is never cached. */
-	get #settings(): TtsrSettings {
-		return this.#settingsSource();
+	constructor(settings?: TtsrSettings) {
+		this.#settings = { ...DEFAULT_SETTINGS, ...settings };
 	}
 
 	/** Check if a rule can be triggered based on repeat settings. */
@@ -426,6 +410,15 @@ export class TtsrManager {
 			if (scope.allowText) this.#canMatchText = true;
 			if (scope.allowThinking) this.#canMatchThinking = true;
 		}
+
+		logger.debug("TTSR rule registered", {
+			ruleName: rule.name,
+			conditions: rule.condition,
+			astConditions: rule.astCondition,
+			question,
+			scope: rule.scope,
+			globs: rule.globs,
+		});
 
 		return true;
 	}
@@ -703,17 +696,6 @@ export class TtsrManager {
 		this.#lastAstSnapshots.clear();
 	}
 
-	/** Clear only one tool stream's transient matcher state. */
-	clearStream(streamKey: string): void {
-		const prefix = `${streamKey}#`;
-		for (const key of this.#buffers.keys()) {
-			if (key === streamKey || key.startsWith(prefix)) this.#buffers.delete(key);
-		}
-		for (const key of this.#lastAstSnapshots.keys()) {
-			if (key === streamKey || key.startsWith(prefix)) this.#lastAstSnapshots.delete(key);
-		}
-	}
-
 	/** Check if any TTSR rules are registered. */
 	hasRules(): boolean {
 		if (!this.#settings.enabled) {
@@ -724,14 +706,13 @@ export class TtsrManager {
 
 	/**
 	 * Atomically replace monitored rules while retaining injection state for names
-	 * that remain registered. While TTSR is disabled nothing registers, so injection
-	 * state is kept intact for when it is re-enabled.
+	 * that remain registered.
 	 *
 	 * Returns the names accepted for TTSR monitoring so the caller can bucket
 	 * rejected conditional rules through its normal fallback path.
 	 */
 	replaceRules(rules: readonly Rule[]): Set<string> {
-		const replacement = new TtsrManager(this.#settingsSource);
+		const replacement = new TtsrManager(this.#settings);
 		for (const rule of rules) {
 			replacement.addRule(rule);
 		}
@@ -746,7 +727,6 @@ export class TtsrManager {
 		this.#hasJudgedRules = replacement.#hasJudgedRules;
 		this.resetBuffer();
 
-		if (!this.#settings.enabled) return registered;
 		for (const name of this.#injectionRecords.keys()) {
 			if (!registered.has(name)) this.#injectionRecords.delete(name);
 		}
@@ -768,8 +748,8 @@ export class TtsrManager {
 		return this.#messageCount;
 	}
 
-	/** Current settings, read live from the manager's source. */
-	getSettings(): TtsrSettings {
+	/** Get settings. */
+	getSettings(): Required<TtsrSettings> {
 		return this.#settings;
 	}
 }

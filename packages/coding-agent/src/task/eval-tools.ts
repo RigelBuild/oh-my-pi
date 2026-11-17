@@ -11,8 +11,6 @@ import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 
-import { cfgEvalToolsEnabled } from "../eval/settings";
-
 interface EvalToolQueryResult {
 	tools: EvalToolDescriptor[];
 	missing: string[];
@@ -78,7 +76,7 @@ async function queryAllEvalTools(
 
 /** Whether this session may expose kernel-defined tools to subagents (`eval.tools.enabled`). */
 export function evalToolsEnabled(session: ToolSession): boolean {
-	return cfgEvalToolsEnabled.get(session.settings) !== false;
+	return session.settings.get("eval.tools.enabled") !== false;
 }
 
 /** Resolve named kernel-defined tools for a child session. */

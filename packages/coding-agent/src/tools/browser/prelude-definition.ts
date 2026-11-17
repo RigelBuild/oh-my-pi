@@ -7,8 +7,6 @@ import browserDeclarations from "./declarations.d.ts" with { type: "text" };
 import browserJavascript from "./prelude.js" with { type: "text" };
 import browserPython from "./prelude.py" with { type: "text" };
 
-import { cfgBrowserEnabled } from "./settings";
-
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
@@ -22,7 +20,7 @@ export function createBrowserPreludeDefinition(
 		exports: ["browser"],
 		codeModeDeclarations: browserDeclarations,
 		approval: "exec",
-		enabled: () => cfgBrowserEnabled.get(session.settings),
+		enabled: () => session.settings.get("browser.enabled"),
 		invoke: host.invoke,
 		status: host.status,
 	};

@@ -50,8 +50,7 @@ export function hasLinuxDesktopSession(
 	if (platform !== "linux") return false;
 	if (env.DBUS_SESSION_BUS_ADDRESS) return true;
 	const runtimeDir = env.XDG_RUNTIME_DIR;
-	// Only reached for Linux, so join with POSIX separators regardless of the host.
-	return Boolean(runtimeDir && fileExists(path.posix.join(runtimeDir, "bus")));
+	return Boolean(runtimeDir && fileExists(path.join(runtimeDir, "bus")));
 }
 
 /**

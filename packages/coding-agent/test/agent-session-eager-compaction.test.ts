@@ -16,8 +16,6 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TodoTool, type ToolSession, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-import { cfgTodoEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
-
 // Re-injecting eager preludes after compaction: the first-message preludes are the
 // oldest messages, so compaction summarizes them away and the agent silently loses
 // the delegate-via-tasks / phased-todo guidance. The post-compaction auto-continuation
@@ -201,7 +199,7 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
-		const todoEnabled = cfgTodoEnabled.get(settings) === true;
+		const todoEnabled = settings.get("todo.enabled") === true;
 		const toolSession: ToolSession = {
 			cwd: tempDir.path(),
 			hasUI: false,

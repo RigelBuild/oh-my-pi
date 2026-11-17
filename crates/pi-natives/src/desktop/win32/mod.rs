@@ -3,12 +3,8 @@ mod ax;
 #[cfg(target_os = "windows")]
 mod capture;
 pub mod delivery;
-#[cfg(any(target_os = "windows", test))]
-mod geometry;
 #[cfg(target_os = "windows")]
 mod input;
-#[cfg(target_os = "windows")]
-mod window;
 
 #[cfg(target_os = "windows")]
 use enigo::Enigo;
@@ -61,7 +57,7 @@ impl Backend for Win32Backend {
 			input: true,
 			ax: true,
 			background_window_input: true,
-			takeover: true,
+			delivery_modes: vec!["background".to_string(), "foreground".to_string()],
 			capture_permission: if display_count > 0 {
 				"granted"
 			} else {
@@ -97,7 +93,7 @@ impl Backend for Win32Backend {
 		_frame: &FrameGeometry,
 		mode: DeliveryMode,
 	) -> CoreResult<()> {
-		input::pointer(&mut self.global_input, &mut self.ax, target, event, mode)
+		input::pointer(&mut self.global_input, target, event, mode)
 	}
 
 	fn type_text(&mut self, target: &Target, text: &str, mode: DeliveryMode) -> CoreResult<()> {

@@ -122,6 +122,7 @@ describe("beam store free functions", () => {
 			],
 			{ veracity: "imported" },
 		);
+		expect(rememberBatch).toBe(rememberBatch);
 
 		expect(ids).toHaveLength(3);
 		expect(getContext(beam, 3).map(row => row.content)).toEqual([

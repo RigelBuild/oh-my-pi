@@ -1,18 +1,12 @@
 import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
-import {
-	resolveOutputMaxColumns,
-	resolveOutputSinkArtifactMaxBytes,
-	resolveOutputSinkHeadBytes,
-} from "../../tools/output-meta";
+import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
 import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
-
-import { cfgEvalAutoProvision } from "../settings";
 
 export interface JsExecutorOptions {
 	cwd?: string;
@@ -28,7 +22,7 @@ export interface JsExecutorOptions {
 	onStatus?: (event: JsStatusEvent) => void;
 	signal?: AbortSignal;
 	sessionId: string;
-	/** Logical owner identifier; scopes retained-worker cleanup. */
+	/** Logical owner identifier; scopes `reset` on shared contexts and retained-worker cleanup. */
 	kernelOwnerId?: string;
 	reset?: boolean;
 	sessionFile?: string;
@@ -51,8 +45,6 @@ export interface JsResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId?: string;
-	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
-	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
@@ -112,7 +104,6 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		artifactId: options.artifactId,
 		spillThreshold: DEFAULT_MAX_BYTES,
 		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
-		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),
 		maxColumns: resolveOutputMaxColumns(options.session.settings),
 		onChunk: chunk => options.onChunk?.(chunk),
 	});
@@ -136,7 +127,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cwd,
 			packages,
 			environment: options.environment,
-			autoProvision: cfgEvalAutoProvision.get(options.session.settings),
+			autoProvision: options.session.settings.get("eval.autoProvision") ?? true,
 			signal: packageSignal,
 		};
 		const install =
@@ -194,7 +185,6 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cancelled: false,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
-			artifactElidedBytes: summary.artifactElidedBytes,
 			artifactError: summary.artifactError,
 			totalLines: summary.totalLines,
 			totalBytes: summary.totalBytes,
@@ -223,7 +213,6 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				cancelled: true,
 				truncated: summary.truncated,
 				artifactId: summary.artifactId,
-				artifactElidedBytes: summary.artifactElidedBytes,
 				artifactError: summary.artifactError,
 				totalLines: summary.totalLines,
 				totalBytes: summary.totalBytes,
@@ -241,7 +230,6 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cancelled: false,
 			truncated: summary.truncated,
 			artifactId: summary.artifactId,
-			artifactElidedBytes: summary.artifactElidedBytes,
 			artifactError: summary.artifactError,
 			totalLines: summary.totalLines,
 			totalBytes: summary.totalBytes,

@@ -1,14 +1,9 @@
 import { logger, once } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../build";
 import { apiRouteFor } from "../compat/behavior";
-import { providerEntry, seedModels } from "../compat/providers";
+import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
-import {
-	type FactoryDroidModelDiscoveryOptions,
-	factoryDroidSeedModels,
-	fetchFactoryDroidModels,
-} from "../discovery/factory-droid";
 import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
@@ -45,12 +40,6 @@ export interface OpenAICodexModelManagerConfig {
 	 * keeps the previous/bundled catalog instead.
 	 */
 	resolveAccounts?: () => Promise<readonly OpenAICodexAccount[] | null>;
-	/**
-	 * Codex backend base URL (e.g. a Codex-compatible gateway from `models.yml`).
-	 * Defaults to the official ChatGPT backend. Also scopes the discovery cache,
-	 * so a gateway roster never serves the official endpoint and vice versa.
-	 */
-	baseUrl?: string;
 	clientVersion?: string;
 	fetch?: FetchImpl;
 }
@@ -58,11 +47,11 @@ export interface OpenAICodexModelManagerConfig {
 export function openaiCodexModelManagerOptions(
 	config: OpenAICodexModelManagerConfig = {},
 ): ModelManagerOptions<"openai-codex-responses"> {
-	const { resolveAccounts, baseUrl, clientVersion, fetch } = config;
+	const { resolveAccounts, clientVersion, fetch } = config;
 	return {
 		providerId: "openai-codex",
-		cacheProviderId: resolveModelCacheProviderId("openai-codex", { baseUrl }),
-		dynamicModelsAuthoritative: providerEntry("openai-codex")?.dynamicModelsAuthoritative === true,
+		cacheProviderId: resolveModelCacheProviderId("openai-codex"),
+		dynamicModelsAuthoritative: true,
 		...(resolveAccounts
 			? {
 					fetchDynamicModels: async () => {
@@ -74,7 +63,6 @@ export function openaiCodexModelManagerOptions(
 								result: await fetchCodexModels({
 									accessToken: account.accessToken,
 									accountId: account.accountId,
-									baseUrl,
 									clientVersion,
 									fetchFn: fetch,
 								}),
@@ -143,8 +131,7 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 	const { apiKey, baseUrl, clientVersion } = config;
 	return {
 		providerId: "cursor",
-		dynamicModelsAuthoritative: true,
-		cacheProviderId: resolveModelCacheProviderId("cursor", { apiKey, baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("cursor"),
 		...(apiKey
 			? {
 					fetchDynamicModels: async () => {
@@ -379,25 +366,6 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 const devinDiscovery = once(() => import("../discovery/devin"));
 
 // ---------------------------------------------------------------------------
-// Factory Droid
-// ---------------------------------------------------------------------------
-
-export function factoryDroidModelManagerOptions(
-	config: FactoryDroidModelDiscoveryOptions = {},
-): ModelManagerOptions<"factory-droid-agent"> {
-	return {
-		providerId: "factory-droid",
-		cacheProviderId: resolveModelCacheProviderId("factory-droid", config),
-		// No model-listing endpoint exists; the registry narrowed offline is the seed.
-		staticModels: factoryDroidSeedModels(config),
-		dynamicModelsAuthoritative: true,
-		fetchDynamicModels: () => fetchFactoryDroidModels(config),
-		// Refresh current policy online; cached eligibility is not current entitlement.
-		alwaysRefetchDynamicModels: true,
-	};
-}
-
-// ---------------------------------------------------------------------------
 // Synthetic role providers
 // ---------------------------------------------------------------------------
 
@@ -447,6 +415,7 @@ export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig =
 			: undefined),
 	};
 }
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

@@ -9,11 +9,9 @@ import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
-import { createMCPProxyTools, createSubagentSettings, followMCPTools } from "../../task/executor";
+import { createMCPProxyTools, createSubagentSettings } from "../../task/executor";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
-
-import { cfgTaskEnableLsp } from "../../task/settings";
 
 const TAN_LABEL_PREVIEW_LENGTH = 80;
 
@@ -111,7 +109,8 @@ export class TanCommandController {
 		// artifacts in place — no copy needed.
 		const sessionDir = parentFile.slice(0, -6);
 		const settings = createSubagentSettings(this.ctx.settings);
-		const enableLsp = cfgTaskEnableLsp.get(this.ctx.settings) !== false;
+		const customTools = mcpManager ? createMCPProxyTools(mcpManager) : undefined;
+		const enableLsp = this.ctx.settings.get("task.enableLsp") !== false;
 		const agentRegistry = AgentRegistry.global();
 		const cloneId = `Tan-${Snowflake.next()}`;
 		const cloneFile = path.join(sessionDir, `${cloneId}.jsonl`);
@@ -144,50 +143,41 @@ export class TanCommandController {
 					if (signal.aborted) throw new Error("Aborted before execution");
 
 					let clone: AgentSession | undefined;
-					// Mint proxies at clone time (not dispatch time) and subscribe first,
-					// so the clone follows MCP reloads for its whole run.
-					const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
 					try {
-						try {
-							const created = await sdk.createAgentSession({
-								cwd,
-								sessionManager: cloneManager,
-								model,
-								thinkingLevel,
-								systemPrompt,
-								toolNames,
-								providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
-								providerPromptCacheKey: parentPromptCacheKey,
-								modelRegistry,
-								authStorage: modelRegistry.authStorage,
-								settings,
-								hasUI: false,
-								enableMCP: false,
-								mcpTools: mcpManager ? createMCPProxyTools(mcpManager) : undefined,
-								enableLsp,
-								agentId: cloneId,
-								agentDisplayName: "tan",
-								parentTaskPrefix: cloneId,
-								parentAgentId: ownerId,
-								agentRegistry,
-								disableExtensionDiscovery: true,
-								// `[]` is truthy and would make the child pick bindPreparedExtensions([])
-								// over a populated path fallback, so collapse an empty list to undefined.
-								preloadedPreparedExtensions: parentPreparedExtensions?.length
-									? parentPreparedExtensions
-									: undefined,
-								preloadedExtensionPaths: parentExtensionPaths?.length ? [...parentExtensionPaths] : undefined,
-								extensionRoots: () => parentExtensionRoots,
-								localProtocolOptions,
-							});
-							clone = created.session;
-						} catch (error) {
-							mcpFollower?.dispose();
-							throw error;
-						}
-						mcpFollower?.bind(clone);
+						const created = await sdk.createAgentSession({
+							cwd,
+							sessionManager: cloneManager,
+							model,
+							thinkingLevel,
+							systemPrompt,
+							toolNames,
+							providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
+							providerPromptCacheKey: parentPromptCacheKey,
+							modelRegistry,
+							authStorage: modelRegistry.authStorage,
+							settings,
+							hasUI: false,
+							enableMCP: false,
+							customTools,
+							enableLsp,
+							agentId: cloneId,
+							agentDisplayName: "tan",
+							parentTaskPrefix: cloneId,
+							parentAgentId: ownerId,
+							agentRegistry,
+							disableExtensionDiscovery: true,
+							// `[]` is truthy and would make the child pick bindPreparedExtensions([])
+							// over a populated path fallback, so collapse an empty list to undefined.
+							preloadedPreparedExtensions: parentPreparedExtensions?.length
+								? parentPreparedExtensions
+								: undefined,
+							preloadedExtensionPaths: parentExtensionPaths?.length ? [...parentExtensionPaths] : undefined,
+							extensionRoots: () => parentExtensionRoots,
+							localProtocolOptions,
+						});
+						clone = created.session;
 						clone.sessionManager?.appendSessionInit?.({
-							systemPrompt: clone.systemPrompt ?? systemPrompt,
+							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
 							tools: clone.getEnabledToolNames(),
 						});

@@ -19,6 +19,10 @@ describe("standalone", () => {
 		expect(SchrodingersBox.json).toEqual(Expected.json);
 	});
 
+	it.todo("body completions");
+
+	it.todo("args completions");
+
 	it("binary", () => {
 		const either = type("<first, second>", "first|second");
 		const SchrodingersBox = either({ cat: { isAlive: "true" } }, { cat: { isAlive: "false" } });
@@ -356,6 +360,8 @@ describe("scoped", () => {
 	});
 });
 
+it.todo("args completions from type");
+
 describe("standalone", () => {
 	const _genericSetup = () =>
 		type.generic([
@@ -390,6 +396,10 @@ describe("standalone", () => {
 			}),
 		).toThrow();
 	});
+
+	it.todo("completions in instantiation");
+
+	it.todo("completions in contraint");
 
 	it("is available on type", () => {
 		const nonEmpty = type.generic(["s", "string"])("s > 0");

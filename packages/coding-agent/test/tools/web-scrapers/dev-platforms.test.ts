@@ -16,6 +16,11 @@ describe.skipIf(SKIP)("handleHackerNews", () => {
 		expect(result).toBeNull();
 	});
 
+	it("returns null for other domains", async () => {
+		const result = await handleHackerNews("https://lobste.rs/", 10000);
+		expect(result).toBeNull();
+	});
+
 	it("fetches front page", async () => {
 		const result = await handleHackerNews("https://news.ycombinator.com/", 20000);
 		expect(result).not.toBeNull();
@@ -70,6 +75,11 @@ describe.skipIf(SKIP)("handleLobsters", () => {
 		expect(result).toBeNull();
 	});
 
+	it("returns null for other domains", async () => {
+		const result = await handleLobsters("https://news.ycombinator.com/", 10000);
+		expect(result).toBeNull();
+	});
+
 	it("fetches front page", async () => {
 		const result = await handleLobsters("https://lobste.rs/", 20000);
 		expect(result).not.toBeNull();
@@ -99,6 +109,13 @@ describe.skipIf(SKIP)("handleLobsters", () => {
 		expect(result?.content).toContain("points");
 	});
 
+	it("handles tag with multiple path segments", async () => {
+		const result = await handleLobsters("https://lobste.rs/t/rust", 20000);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("lobsters");
+		expect(result?.content).toContain("Lobste.rs Tag: rust");
+	});
+
 	it("returns null for invalid paths", async () => {
 		const result = await handleLobsters("https://lobste.rs/invalid", 20000);
 		expect(result).toBeNull();
@@ -115,6 +132,11 @@ describe.skipIf(SKIP)("handleDevTo", () => {
 		expect(result).toBeNull();
 	});
 
+	it("returns null for other domains", async () => {
+		const result = await handleDevTo("https://medium.com/@test", 10000);
+		expect(result).toBeNull();
+	});
+
 	it("fetches tag page", async () => {
 		const result = await handleDevTo("https://dev.to/t/javascript", 20000);
 		expect(result).not.toBeNull();
@@ -124,12 +146,29 @@ describe.skipIf(SKIP)("handleDevTo", () => {
 		expect(result?.content).toContain("Recent Articles");
 	});
 
+	it("fetches another tag page", async () => {
+		const result = await handleDevTo("https://dev.to/t/rust", 20000);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("devto");
+		expect(result?.content).toContain("dev.to/t/rust");
+	});
+
 	it("fetches user profile", async () => {
 		const result = await handleDevTo("https://dev.to/ben", 20000);
 		expect(result).not.toBeNull();
 		expect(result?.method).toBe("devto");
 		expect(result?.content).toContain("dev.to/ben");
 		expect(result?.content).toContain("Recent Articles");
+	});
+
+	it("fetches individual article", async () => {
+		const result = await handleDevTo("https://dev.to/ben/test", 20000);
+		// May return null if article doesn't exist, but should not throw
+		if (result !== null) {
+			expect(result.method).toBe("devto");
+			expect(result.contentType).toBe("text/markdown");
+		}
+		expect(result).toBeDefined();
 	});
 
 	it("handles tag with extra segments", async () => {
@@ -150,6 +189,11 @@ describe.skipIf(SKIP)("handleGitLab", () => {
 		expect(result).toBeNull();
 	});
 
+	it("returns null for github.com", async () => {
+		const result = await handleGitLab("https://github.com/user/repo", 10000);
+		expect(result).toBeNull();
+	});
+
 	it("fetches repository root", async () => {
 		const result = await handleGitLab("https://gitlab.com/gitlab-org/gitlab", 20000);
 		expect(result).not.toBeNull();
@@ -157,6 +201,12 @@ describe.skipIf(SKIP)("handleGitLab", () => {
 		expect(result?.contentType).toBe("text/markdown");
 		expect(result?.content).toContain("Stars:");
 		expect(result?.content).toContain("Forks:");
+	});
+
+	it("fetches another repository", async () => {
+		const result = await handleGitLab("https://gitlab.com/gitlab-org/gitlab-runner", 20000);
+		expect(result).not.toBeNull();
+		expect(result?.method).toBe("gitlab-repo");
 	});
 
 	it("fetches file blob", async () => {
