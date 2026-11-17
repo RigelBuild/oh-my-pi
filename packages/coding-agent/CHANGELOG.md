@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.3-rigel.10] - 2026-11-17
+
 ### Fixed
 
 - A subagent's background bash and eval notice no longer promises an automatic wake. It says the result arrives only while the subagent is still running, and tells it to call `wait` before it ends its turn. The top-level notice is unchanged.
