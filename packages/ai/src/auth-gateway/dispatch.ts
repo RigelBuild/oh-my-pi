@@ -23,6 +23,7 @@ import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFai
 import {
 	calculateRateLimitBackoffMs,
 	isAnthropicCreditBalanceTooLow,
+	isBillingCapUsageLimit,
 	isUsageLimitOutcome,
 	observedLimitErrorStatus,
 } from "../error/rate-limit";
@@ -31,7 +32,7 @@ import { getProviderDefinition } from "../registry";
 import type { Api, AssistantMessage, FetchImpl, Model, StreamOptions, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
 import { parseAnthropicApiKeyRateLimitHeaders } from "../usage/anthropic-api";
-import { extractProviderRetryHint } from "../utils/retry-after";
+import { extractProviderRetryHint, getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import type { AuthGatewayClientScope } from "./clients";
 import {
 	logGatewayApiKeyQuota,
@@ -232,6 +233,31 @@ export function gatewayRequestLogFields(
 /** A credential setup failure, tagged so a caller can tell a missing credential from a broken store. */
 export interface GatewaySetupFailure extends GatewayErrorClassification {
 	readonly setupReason: "no_credential" | "store_error";
+}
+
+/**
+ * A usage-limit answer for a chat route: HTTP 429 `rate_limit_error`, with the
+ * retry delay when the provider's block end is known. Checked before
+ * {@link classifyGatewayError}, whose embedded-status parse would otherwise
+ * answer a usage cap that carries a 5xx as that 5xx. `undefined` for any other error.
+ */
+export function gatewayUsageLimitAnswer(
+	provider: string,
+	error: unknown,
+	/** The upstream HTTP status when the caller has it: an answered message's `errorStatus`. Wins over the error's own. */
+	status?: number,
+): { readonly failure: GatewayErrorClassification; readonly retryAfterMs?: number } | undefined {
+	const message = error instanceof Error ? error.message : String(error);
+	const httpStatus = status ?? extractHttpStatusFromError(error);
+	if (!(AIError.isUsageLimit(error) || isUsageLimitOutcome(httpStatus, message))) return undefined;
+	// A billing cap keeps its own status: topping up clears it, so a 429 would only invite a retry.
+	if (isBillingCapUsageLimit(httpStatus, message) || isAnthropicCreditBalanceTooLow(message)) return undefined;
+	const retryAfterMs =
+		getRetryAfterMsFromHeaders(getHeadersFromError(error)) ?? extractProviderRetryHint(provider, message);
+	return {
+		failure: { status: 429, type: "rate_limit_error", message },
+		...(retryAfterMs !== undefined && { retryAfterMs }),
+	};
 }
 
 /**

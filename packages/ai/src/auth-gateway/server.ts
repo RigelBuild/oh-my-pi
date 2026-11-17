@@ -64,6 +64,7 @@ import {
 	gatewayThinkingLoopRecorder,
 	observeAttemptLimitStatus,
 	gatewayUsageOutcome,
+	gatewayUsageLimitAnswer,
 	resolveGatewayModel,
 	gatewayRequestLogFields,
 	resolveGatewayAccount,
@@ -315,6 +316,18 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 
 function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
+}
+
+/** A usage-limit answer: 429, with `Retry-After` in whole seconds (rounded up) when the block end is known. */
+function usageLimitResponse(
+	formatError: (status: number, type: string, message: string) => Response,
+	usageLimit: { readonly failure: GatewayErrorClassification; readonly retryAfterMs?: number },
+): Response {
+	const response = formatError(usageLimit.failure.status, usageLimit.failure.type, usageLimit.failure.message);
+	if (usageLimit.retryAfterMs !== undefined && usageLimit.retryAfterMs >= 0) {
+		response.headers.set("Retry-After", String(Math.ceil(usageLimit.retryAfterMs / 1000)));
+	}
+	return response;
 }
 
 /** Route that serves each non-chat catalog kind the gateway advertises. */
@@ -578,6 +591,8 @@ interface FailedOutcome {
 	readonly failure: GatewayErrorClassification;
 	/** The upstream error message, replayed as-is once headers are sent. */
 	readonly error?: AssistantMessage;
+	/** Retry delay of a usage-limit answer; sets `Retry-After` when no body is open yet. */
+	readonly retryAfterMs?: number;
 }
 
 type FailoverOutcome =
@@ -612,8 +627,9 @@ function judgeAttempt(
 		};
 	}
 	if (message === undefined) {
-		const failure = classifyGatewayError(thrown);
-		const outcome: FailedOutcome = { kind: "failed", model, failure };
+		const usageLimit = gatewayUsageLimitAnswer(model.provider, thrown);
+		const failure = usageLimit?.failure ?? classifyGatewayError(thrown);
+		const outcome: FailedOutcome = { kind: "failed", model, failure, retryAfterMs: usageLimit?.retryAfterMs };
 		if (failure.status === 499) return { outcome };
 		return { outcome, upstream: classifyUpstreamFailure(model, thrown, undefined, undefined) };
 	}
@@ -625,9 +641,16 @@ function judgeAttempt(
 		};
 	}
 	const text = message.errorClassificationMessage ?? message.errorMessage;
-	const classified = classifyGatewayError(text ?? errorMessage);
+	const usageLimit = gatewayUsageLimitAnswer(model.provider, text ?? errorMessage, message.errorStatus);
+	const classified = usageLimit?.failure ?? classifyGatewayError(text ?? errorMessage);
 	return {
-		outcome: { kind: "failed", model, failure: { ...classified, message: errorMessage }, error: message },
+		outcome: {
+			kind: "failed",
+			model,
+			failure: { ...classified, message: errorMessage },
+			error: message,
+			retryAfterMs: usageLimit?.retryAfterMs,
+		},
 		upstream: classifyUpstreamFailure(model, undefined, message.errorStatus, text),
 	};
 }
@@ -695,7 +718,10 @@ function serveWithFailover(request: FailoverRequest, route: FailoverRoute): Prom
 				case "failed": {
 					if (!body) {
 						response.resolve(
-							route.formatError(outcome.failure.status, outcome.failure.type, outcome.failure.message),
+							usageLimitResponse(route.formatError, {
+								failure: outcome.failure,
+								retryAfterMs: outcome.retryAfterMs,
+							}),
 						);
 						return;
 					}
@@ -1238,6 +1264,16 @@ async function handleFormatEndpoint(
 				if (message.stopReason === "aborted") {
 					return route.module.formatError(499, "request_aborted", errorMessage);
 				}
+				const usageLimit = gatewayUsageLimitAnswer(
+					model.provider,
+					message.errorClassificationMessage ?? errorMessage,
+					message.errorStatus,
+				);
+				if (usageLimit)
+					return usageLimitResponse(route.module.formatError, {
+						...usageLimit,
+						failure: { ...usageLimit.failure, message: errorMessage },
+					});
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1248,11 +1284,13 @@ async function handleFormatEndpoint(
 			);
 		} catch (error) {
 			if (controller.signal.aborted) return clientClosedResponse(route);
-			const classified = classifyGatewayError(error);
+			const usageLimit = gatewayUsageLimitAnswer(model.provider, error);
+			const classified = usageLimit?.failure ?? classifyGatewayError(error);
 			logGatewayRequestFailure(
 				gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
 				classified.status,
 			);
+			if (usageLimit) return usageLimitResponse(route.module.formatError, usageLimit);
 			return route.module.formatError(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
@@ -1509,6 +1547,16 @@ async function handlePiNative(
 				if (message.stopReason === "aborted") {
 					return noStoreErrorResponse(499, "request_aborted", errorMessage);
 				}
+				const usageLimit = gatewayUsageLimitAnswer(
+					model.provider,
+					message.errorClassificationMessage ?? errorMessage,
+					message.errorStatus,
+				);
+				if (usageLimit)
+					return usageLimitResponse(noStoreErrorResponse, {
+						...usageLimit,
+						failure: { ...usageLimit.failure, message: errorMessage },
+					});
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return noStoreErrorResponse(classified.status, classified.type, errorMessage);
 			}
@@ -1519,11 +1567,13 @@ async function handlePiNative(
 			);
 		} catch (error) {
 			if (controller.signal.aborted) return aborted();
-			const classified = classifyGatewayError(error);
+			const usageLimit = gatewayUsageLimitAnswer(model.provider, error);
+			const classified = usageLimit?.failure ?? classifyGatewayError(error);
 			logGatewayRequestFailure(
 				gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
 				classified.status,
 			);
+			if (usageLimit) return usageLimitResponse(noStoreErrorResponse, usageLimit);
 			return noStoreErrorResponse(classified.status, classified.type, classified.message);
 		} finally {
 			// Every non-streaming outcome — answered, upstream error, thrown,
