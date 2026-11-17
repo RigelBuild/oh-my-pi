@@ -1,5 +1,3 @@
-import { isLoopbackHost } from "../utils/parse-bind";
-
 import { type, type FluentType } from "@oh-my-pi/omptype";
 
 export type GatewayInt64 = string | number;
@@ -32,55 +30,12 @@ export interface GatewayCredential {
 }
 
 export interface ListCredentialPoolRequest {
-	agentToken: string;
+	agentAccountId: string;
 	provider?: string;
 }
 
 export interface ListCredentialPoolResponse {
 	credentials?: GatewayCredential[];
-}
-export interface VerifyAgentTokenResponse {
-	agentAccountId: string;
-	ownerUserId: string;
-}
-
-/** Tokens ride every RPC, so plaintext is allowed only on loopback. */
-export function normalizeCompassBaseUrl(baseUrl: string): string {
-	if (!baseUrl.trim()) throw new Error("Compass baseUrl must not be empty");
-	let url: URL;
-	try {
-		url = new URL(baseUrl);
-	} catch {
-		throw new Error("Compass baseUrl must be an absolute URL");
-	}
-	if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
-		throw new Error("Compass baseUrl must use https unless it is a loopback address");
-	}
-	return baseUrl.replace(/\/+$/, "");
-}
-
-export async function fetchCompassRpcResponse(opts: {
-	baseUrl: string;
-	service: string;
-	method: string;
-	token: string;
-	fetch: typeof fetch;
-	body: unknown;
-	signal: AbortSignal;
-}): Promise<{ response: Response; text: string }> {
-	const response = await opts.fetch(`${opts.baseUrl}/compass.v1.${opts.service}/${opts.method}`, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			"Connect-Protocol-Version": "1",
-			Authorization: "Bearer " + opts.token,
-		},
-		body: JSON.stringify(opts.body),
-		// A redirect would replay the bearer and request body to another origin.
-		redirect: "error",
-		signal: opts.signal,
-	});
-	return { response, text: await response.text() };
 }
 
 export interface GatewayOAuthTokenRequest {
@@ -119,7 +74,7 @@ export interface UpdateCredentialOAuthRequest {
 	id: string;
 	token: GatewayOAuthTokenRequest;
 	expectedVersion: GatewayInt64;
-	agentToken: string;
+	agentAccountId: string;
 	clearFields: string[];
 }
 
@@ -131,7 +86,7 @@ export interface DisableCredentialRequest {
 	id: string;
 	cause: string;
 	expectedVersion: GatewayInt64;
-	agentToken: string;
+	agentAccountId: string;
 }
 
 export type DisableCredentialResponse = Record<string, never>;
@@ -190,11 +145,6 @@ export const gatewayCredentialSchema: FluentType<GatewayCredential> = type({
 export const listCredentialPoolResponseSchema: FluentType<ListCredentialPoolResponse> = type({
 	"+": "delete",
 	"credentials?": gatewayCredentialSchema.array(),
-});
-export const verifyAgentTokenResponseSchema: FluentType<VerifyAgentTokenResponse> = type({
-	"+": "delete",
-	agentAccountId: "string",
-	ownerUserId: "string",
 });
 
 export const updateCredentialOAuthResponseSchema: FluentType<UpdateCredentialOAuthResponse> = type({

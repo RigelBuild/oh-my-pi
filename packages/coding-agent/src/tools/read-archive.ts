@@ -49,7 +49,7 @@ interface CachedArchiveReader {
 	reader: ArchiveReader;
 	ino: number;
 	mtimeMs: number;
-	/** Change time: a write stamps it and nothing can set it back, but only at timestamp precision. */
+	/** Change time: moves on every write and permission change and cannot be set back, unlike mtime. */
 	ctimeMs: number;
 	size: number;
 	entryCount: number;
@@ -67,16 +67,7 @@ const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
 	sizeCalculation: cached => Math.max(1, cached.entryCount),
 });
 
-/**
- * Timestamps are coarse, so a rewrite soon after a stat can keep the same ctime.
- * Only an archive whose ctime is this much older than the local clock is cached;
- * like git's racy-index rule, this assumes the filesystem stamps ctime from a clock
- * within that margin of ours (true for local disks; a skewed network server is not).
- */
-const RACY_CTIME_MS = 2_000;
-
-export async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
-	const statAt = Date.now();
+async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
 	// A vanished or unreadable archive is reported by the opener, as it always has been.
 	const stat = await Bun.file(absolutePath)
 		.stat()
@@ -93,7 +84,7 @@ export async function openArchiveCached(absolutePath: string): Promise<ArchiveRe
 		return cached.reader;
 	}
 	const reader = await openArchive(absolutePath);
-	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format] || stat.ctimeMs > statAt - RACY_CTIME_MS) {
+	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format]) {
 		archiveReaderCache.delete(absolutePath);
 		return reader;
 	}

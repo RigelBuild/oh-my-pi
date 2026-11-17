@@ -9,7 +9,6 @@ import {
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
-	resolveGatewayAccount,
 	resolveGatewayApiKey,
 	resolveGatewayModel,
 } from "../dispatch";
@@ -83,7 +82,6 @@ async function handleImages(
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
-	let account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -105,15 +103,12 @@ async function handleImages(
 				controller.signal,
 				"images",
 				peer,
-				resolvedKey => {
-					account = resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey);
-				},
 			),
 			fetch: bootOpts.fetch,
 			signal: controller.signal,
 		});
 		if (result.usage.cost.total === 0) calculateCost(model, result.usage);
-		recordGatewayUsage(bootOpts, model, client, result.usage, { requestId, outcome: "ok", account });
+		recordGatewayUsage(bootOpts.storage, model, client, result.usage);
 		return json(
 			200,
 			imagesServer.encodeResponse(result, parsed.modelId),

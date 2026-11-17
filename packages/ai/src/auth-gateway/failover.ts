@@ -1,35 +1,27 @@
 import { randomUUID } from "node:crypto";
-import type { GatewayErrorClassification } from "../error/gateway";
 import { createProviderErrorMessage } from "../providers/error-message";
 import { resolveWithThinkingLoopRetries, streamSimple } from "../stream";
+import type { GatewayErrorClassification } from "../error/gateway";
 import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model, SimpleStreamOptions } from "../types";
-import { isMeaningfulCompletionEvent } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { isMeaningfulCompletionEvent } from "../utils/empty-completion-retry";
 
 export { isMeaningfulCompletionEvent, resolveWithThinkingLoopRetries };
 
 const MAX_PRECOMMIT_EVENTS = 256;
-
-/** A candidate's identity in `FailoverContext.tried`: one backend serving one model. */
-export function candidateKey(model: Model<Api>): string {
-	return `${model.provider}\u0000${model.id}\u0000${model.baseUrl}`;
-}
 
 export interface AttemptBudget {
 	/** Feed every event. A meaningful event lifts the budget; `done` or `error` disarms it. */
 	observe(event: AssistantMessageEvent): void;
 	/** Disarms the budget and clears its timer. Call when the attempt settles or throws. */
 	settle(): void;
-	/** Re-arms a lifted budget to its original `endsAt` before an internal redispatch, firing it at once if that has passed; no-op once settled or fired. */
-	rearm?(): void;
 	/** True only if the budget abort fired before any lift, terminal event, or `settle()`. */
 	timedOut(): boolean;
 }
 
 /** Armed by the loop immediately before `streamSimple`. Aborts `attempt` at `endsAt` unless lifted or disarmed first. `undefined` never fires. */
 export function armBudget(attempt: AbortController, endsAt: number | undefined): AttemptBudget {
-	let active = false;
-	let settled = false;
+	let active = endsAt !== undefined;
 	let timeoutFired = false;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const disarm = (): void => {
@@ -39,24 +31,20 @@ export function armBudget(attempt: AbortController, endsAt: number | undefined):
 			timer = undefined;
 		}
 	};
-	const fire = (): void => {
-		active = false;
-		if (attempt.signal.aborted) return;
-		timeoutFired = true;
-		attempt.abort(new Error("Gateway attempt budget expired"));
-	};
-	const arm = (): void => {
-		if (endsAt === undefined || active || settled || timeoutFired || attempt.signal.aborted) return;
-		active = true;
+
+	if (endsAt !== undefined) {
 		timer = setTimeout(
 			() => {
 				timer = undefined;
-				if (active) fire();
+				if (!active) return;
+				active = false;
+				if (attempt.signal.aborted) return;
+				timeoutFired = true;
+				attempt.abort(new Error("Gateway attempt budget expired"));
 			},
 			Math.max(0, endsAt - Date.now()),
 		);
-	};
-	arm();
+	}
 
 	return {
 		observe(event) {
@@ -66,15 +54,7 @@ export function armBudget(attempt: AbortController, endsAt: number | undefined):
 				disarm();
 			}
 		},
-		settle: () => {
-			settled = true;
-			disarm();
-		},
-		rearm: () => {
-			// A redispatch past the window would start unbudgeted; expire it before it begins.
-			if (endsAt !== undefined && endsAt <= Date.now() && !settled && !timeoutFired) fire();
-			else arm();
-		},
+		settle: disarm,
 		timedOut: () => timeoutFired,
 	};
 }
@@ -174,10 +154,7 @@ export function holdUntilCommit(events: AssistantMessageEventStream, budget: Att
 	return promise;
 }
 
-/**
- * Drain like `completeSimple`; retries reuse the session ID to preserve provider state.
- * The first dispatch runs eagerly so a synchronous `streamSimple` throw escapes as a setup failure.
- */
+/** Drain like `completeSimple`; retries reuse the session ID to preserve provider state. */
 export function completeAttempt(
 	model: Model<Api>,
 	context: Context,
@@ -185,7 +162,7 @@ export function completeAttempt(
 	budget: AttemptBudget,
 ): Promise<AssistantMessage> {
 	const sessionOptions = options.sessionId ? options : { ...options, sessionId: randomUUID() };
-	const dispatch = (): AssistantMessageEventStream => {
+	const result = resolveWithThinkingLoopRetries(sessionOptions.signal, () => {
 		const events = streamSimple(model, context, sessionOptions);
 		const relay = new AssistantMessageEventStream();
 		void (async () => {
@@ -201,19 +178,6 @@ export function completeAttempt(
 			}
 		})();
 		return relay;
-	};
-	let first: AssistantMessageEventStream | undefined = dispatch();
-	const result = resolveWithThinkingLoopRetries(sessionOptions.signal, () => {
-		if (first) {
-			const events = first;
-			first = undefined;
-			return events;
-		}
-		// Deltas before the loop error lifted the budget; a stalled redispatch must still reach the follower.
-		budget.rearm?.();
-		// A budget that expired during the retry wait aborted the attempt; starting the call would waste it.
-		sessionOptions.signal?.throwIfAborted();
-		return dispatch();
 	});
 	return result.finally(() => budget.settle());
 }

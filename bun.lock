@@ -10,7 +10,6 @@
         "sherpa-onnx-node": "1.13.2",
       },
       "devDependencies": {
-        "@actions/expressions": "catalog:",
         "@types/bun": "catalog:",
         "@typescript/native-preview": "catalog:",
         "lint-staged": "catalog:",
@@ -131,16 +130,6 @@
         "@types/bun": "catalog:",
         "@types/react": "catalog:",
         "@types/react-dom": "catalog:",
-      },
-    },
-    "packages/compass-gateway": {
-      "name": "@oh-my-pi/compass-gateway",
-      "version": "0.1.0",
-      "dependencies": {
-        "@oh-my-pi/pi-ai": "catalog:",
-      },
-      "devDependencies": {
-        "@types/bun": "catalog:",
       },
     },
     "packages/metaharness": {
@@ -346,7 +335,6 @@
     "@ark/schema": "0.56.2",
   },
   "catalog": {
-    "@actions/expressions": "^0.3.61",
     "@babel/generator": "^7.29.7",
     "@babel/parser": "^7.29.7",
     "@babel/traverse": "^7.29.7",
@@ -405,8 +393,6 @@
     "vite-plugin-solid": "^2.11.12",
   },
   "packages": {
-    "@actions/expressions": ["@actions/expressions@0.3.61", "", {}, "sha512-Ig+tXELvTjlqxQAWBQnLNn2dPpNraLMdSnT+vDzDPmJtbNUhIAH/Z9kVT8pZ8UtJi9vUGs8hwHE8JFJmbOnLEA=="],
-
     "@anush008/tokenizers": ["@anush008/tokenizers@0.0.0", "", { "optionalDependencies": { "@anush008/tokenizers-darwin-universal": "0.0.0", "@anush008/tokenizers-linux-x64-gnu": "0.0.0", "@anush008/tokenizers-win32-x64-msvc": "0.0.0" } }, "sha512-IQD9wkVReKAhsEAbDjh/0KrBGTEXelqZLpOBRDaIRvlzZ9sjmUP+gKbpvzyJnei2JHQiE8JAgj7YcNloINbGBw=="],
 
     "@anush008/tokenizers-darwin-universal": ["@anush008/tokenizers-darwin-universal@0.0.0", "", { "os": "darwin" }, "sha512-SACpWEooTjFX89dFKRVUhivMxxcZRtA3nJGVepdLyrwTkQ1TZQ8581B5JoXp0TcTMHfgnDaagifvVoBiFEdNCQ=="],
@@ -714,8 +700,6 @@
     "@oh-my-pi/browser-relay": ["@oh-my-pi/browser-relay@workspace:packages/browser-relay"],
 
     "@oh-my-pi/collab-web": ["@oh-my-pi/collab-web@workspace:packages/collab-web"],
-
-    "@oh-my-pi/compass-gateway": ["@oh-my-pi/compass-gateway@workspace:packages/compass-gateway"],
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@workspace:packages/stats"],
 
