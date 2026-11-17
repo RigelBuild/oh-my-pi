@@ -808,7 +808,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (extraNotice) {
 			lines.push(extraNotice, "");
 		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, { subagent: (this.session?.taskDepth ?? 0) > 0 }));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 

@@ -50,13 +50,25 @@ export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
  * deadline (`timeoutSec`, `undefined` when disabled) so the model knows the job will die at it before
  * it waits on the result. The deadline counts the job's whole run time, not time left from now: an
  * auto-backgrounded call has already spent its foreground wait.
+ *
+ * A subagent (`options.subagent`) gets no wake promise. Its run can end before the job does, and the
+ * job is then reaped, so the result reaches it only while it still runs: it must call `wait`.
  */
-export function formatBackgroundNotice(jobId: string, timeoutSec: number | undefined): string {
+export function formatBackgroundNotice(
+	jobId: string,
+	timeoutSec: number | undefined,
+	options: { subagent?: boolean } = {},
+): string {
 	const deadline =
 		timeoutSec === undefined
 			? " (no deadline)"
 			: ` (killed once it has run ${timeoutSec}s in total; \`timeout: 0\` disables the deadline)`;
-	return `Backgrounded as job ${jobId}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
+	const pollWarning =
+		"Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn.";
+	if (options.subagent) {
+		return `Backgrounded as job ${jobId}${deadline}; its result arrives only while this run is still live. ${pollWarning} Do other work, then call \`wait\` for it before you end your turn.`;
+	}
+	return `Backgrounded as job ${jobId}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. ${pollWarning} Do other work, or end your reply and wait to be woken.`;
 }
 
 /**
