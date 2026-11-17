@@ -22,6 +22,7 @@ import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification, type UpstreamFailure } from "../error/gateway";
 import {
 	calculateRateLimitBackoffMs,
+	isAnthropicCreditBalanceTooLow,
 	isBillingCapAnswer,
 	isUsageLimitOutcome,
 	observedLimitErrorStatus,
