@@ -504,7 +504,7 @@ jobs:
            id: cache
            uses: ./.github/actions/bazel-cache
            with:
-              scope: natives-cross
+              scope: natives-cross-${{ matrix.target }}
          - name: Build cross-target native addon
            id: build-cross
            timeout-minutes: 150
@@ -515,11 +515,16 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               : > "$RUNNER_TEMP/bazel-build.log"
               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$TARGET" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+         - name: Report bazel cache stats
+           shell: bash
+           run: |
+              summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
+              echo "::notice title=Bazel build summary::${summary:-no process summary found}"
          - name: Upload cross-target native addon artifact
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
               name: native-addons-${{ matrix.target }}
-              path: bazel-bin/${{ matrix.target }}/*.node
+              path: bazel-bin/natives-*/*.node
               if-no-files-found: error
               retention-days: 1
          # The two jobs' target lists must together cover //:natives-all
@@ -527,7 +532,10 @@ jobs:
          # otherwise silently never build or ship. cquery, not query: the rc's
          # --config=ci is defined for build only, which cquery inherits and
          # query rejects; this also reuses the warm server.
+         # Runs once (darwin-arm64 entry): the matrix equals the cross target list,
+         # and the union of both lists equals //:natives-all srcs.
          - name: Check addon target lists cover natives-all
+           if: matrix.target == 'natives-darwin-arm64'
            run: |
               set -euo pipefail
               read -r -a listed <<< "$NATIVES_X64_TARGETS $NATIVES_CROSS_TARGETS"
@@ -539,6 +547,12 @@ jobs:
               if [ "$expected" != "$actual" ]; then
                 echo "::error title=Native addon target lists::NATIVES_X64_TARGETS + NATIVES_CROSS_TARGETS must equal //:natives-all srcs"
                 diff <(echo "$expected") <(echo "$actual") || true
+                exit 1
+              fi
+              # The matrix literal above must equal NATIVES_CROSS_TARGETS exactly.
+              matrix_list="natives-darwin-arm64 natives-darwin-x64-baseline natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-arm64 natives-win32-x64-baseline"
+              if [ "$(printf '%s\n' $matrix_list | sort)" != "$(printf '%s\n' $NATIVES_CROSS_TARGETS | sort)" ]; then
+                echo "::error title=Cross matrix::native_addons_cross matrix must equal NATIVES_CROSS_TARGETS"
                 exit 1
               fi
          - name: Verify Apple Foundation Models bridge
