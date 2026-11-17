@@ -210,8 +210,8 @@ export class HttpTransport implements MCPTransport {
 	 * `connect()` (upstream #1460). When the budget expires the GET is NOT aborted: it
 	 * stays tracked on the connection, so `close()` aborts it, and when its headers
 	 * arrive they are attached if the connection is still current. Aborting it instead
-	 * would drop every server push that arrives after the budget. The connect deadline
-	 * in `connectToServer` is the only outer bound on this GET; nothing else times it out.
+	 * would drop every server push that arrives after the budget. After the budget
+	 * nothing times the GET out: it lives until `close()` or a reconnect replaces the transport.
 	 */
 	async startSSEListener(): Promise<void> {
 		if (!this.#connected) return;
