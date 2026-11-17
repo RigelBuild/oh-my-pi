@@ -641,7 +641,7 @@ function judgeAttempt(
 		};
 	}
 	const text = message.errorClassificationMessage ?? message.errorMessage;
-	const usageLimit = gatewayUsageLimitAnswer(model.provider, text ?? errorMessage);
+	const usageLimit = gatewayUsageLimitAnswer(model.provider, text ?? errorMessage, message.errorStatus);
 	const classified = usageLimit?.failure ?? classifyGatewayError(text ?? errorMessage);
 	return {
 		outcome: {
@@ -717,15 +717,12 @@ function serveWithFailover(request: FailoverRequest, route: FailoverRoute): Prom
 					return;
 				case "failed": {
 					if (!body) {
-						const failed = route.formatError(
-							outcome.failure.status,
-							outcome.failure.type,
-							outcome.failure.message,
+						response.resolve(
+							usageLimitResponse(route.formatError, {
+								failure: outcome.failure,
+								retryAfterMs: outcome.retryAfterMs,
+							}),
 						);
-						if (outcome.retryAfterMs !== undefined && outcome.retryAfterMs >= 0) {
-							failed.headers.set("Retry-After", String(Math.ceil(outcome.retryAfterMs / 1000)));
-						}
-						response.resolve(failed);
 						return;
 					}
 					const relay = new AssistantMessageEventStream();
@@ -1270,6 +1267,7 @@ async function handleFormatEndpoint(
 				const usageLimit = gatewayUsageLimitAnswer(
 					model.provider,
 					message.errorClassificationMessage ?? errorMessage,
+					message.errorStatus,
 				);
 				if (usageLimit)
 					return usageLimitResponse(route.module.formatError, {
@@ -1552,6 +1550,7 @@ async function handlePiNative(
 				const usageLimit = gatewayUsageLimitAnswer(
 					model.provider,
 					message.errorClassificationMessage ?? errorMessage,
+					message.errorStatus,
 				);
 				if (usageLimit)
 					return usageLimitResponse(noStoreErrorResponse, {

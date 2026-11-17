@@ -48,6 +48,8 @@ interface GatewayOptions {
 	readonly candidateFailover?: CandidateFailoverOptions;
 	/** Answers the upstream call with a response instead of throwing; the answered branch. */
 	readonly respond?: () => Response;
+	/** Throws this error from the upstream call instead of a message-only `Error`, so its headers reach the gateway. */
+	readonly throwError?: Error;
 	/** Routes every request to this model instead of the Codex model. */
 	readonly model?: Model<Api>;
 }
@@ -69,6 +71,7 @@ async function startGateway(upstreamMessage: string, options: GatewayOptions = {
 	]);
 	const fetchUpstream: FetchImpl = async () => {
 		if (options.respond) return options.respond();
+		if (options.throwError) throw options.throwError;
 		throw new Error(upstreamMessage);
 	};
 	const routed = options.model ?? MODEL;
@@ -302,7 +305,61 @@ describe("auth-gateway: a usage cap answers 429 (RIG-10540)", () => {
 			const body = await response.text();
 
 			expect(response.status).toBe(429);
+			expect(response.headers.get("retry-after")).toBe("90");
 			expect(body).toContain("You have hit your ChatGPT usage limit");
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("keeps a 402 out-of-credit answer at 402, not 429", async () => {
+		// A billing cap is cleared by topping up, so waiting never helps: it must not become a retry-able 429.
+		// A real 402 is a non-2xx response, which the provider turns into a status-carrying error.
+		const gateway = await startGateway("", {
+			respond: () =>
+				new Response(JSON.stringify({ error: { type: "insufficient_quota", message: "out of credit" } }), {
+					status: 402,
+					headers: { "content-type": "application/json" },
+				}),
+		});
+		try {
+			const response = await sendChat(gateway.url);
+
+			expect(response.status).toBe(402);
+			expect(response.headers.get("retry-after")).toBeNull();
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("keeps Anthropic's 'credit balance is too low' 400 at 400, not 429", async () => {
+		const gateway = await startGateway("", {
+			respond: () =>
+				new Response(JSON.stringify({ error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } }), {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+		});
+		try {
+			const response = await sendChat(gateway.url);
+
+			expect(response.status).toBe(400);
+			expect(response.headers.get("retry-after")).toBeNull();
+		} finally {
+			await gateway.close();
+		}
+	});
+
+	it("reads Retry-After from a thrown error's headers when the message carries no hint", async () => {
+		// The message has no retry-after-ms text; the only hint is the upstream header on the thrown error.
+		const headers = new Headers({ "retry-after-ms": "45000" });
+		const error = Object.assign(new Error("The usage limit has been reached"), { status: 500, headers });
+		const gateway = await startGateway("", { throwError: error });
+		try {
+			const response = await sendChat(gateway.url);
+
+			expect(response.status).toBe(429);
+			expect(response.headers.get("retry-after")).toBe("45");
 		} finally {
 			await gateway.close();
 		}
