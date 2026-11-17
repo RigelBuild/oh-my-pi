@@ -245,6 +245,29 @@ describe("central logger file level and batching", () => {
 		]);
 	});
 
+	test("OMP_LOG_LEVEL=info keeps debug records off the console", async () => {
+		const result = await runScenario("console-levels", { logLevel: "info" });
+		expect(result.stdout).toBe(expectedLine(result.pid, "info", "console-info", { ordinal: 2 }));
+		expect(result.stderr).toBe("");
+	});
+
+	test("an unset OMP_LOG_LEVEL keeps debug records on the console", async () => {
+		const result = await runScenario("console-levels");
+		expect(result.stdout).toBe(
+			expectedLine(result.pid, "debug", "console-debug", { ordinal: 1 }) +
+				expectedLine(result.pid, "info", "console-info", { ordinal: 2 }),
+		);
+		expect(result.stderr).toBe("");
+	});
+
+	test("an invalid OMP_LOG_LEVEL falls back to debug for the console too", async () => {
+		const result = await runScenario("console-levels", { logLevel: "verbose" });
+		expect(result.stdout).toBe(
+			expectedLine(result.pid, "debug", "console-debug", { ordinal: 1 }) +
+				expectedLine(result.pid, "info", "console-info", { ordinal: 2 }),
+		);
+	});
+
 	test("the fatal record lands after the buffered records that preceded it", async () => {
 		const result = await runScenario("uncaught", { probe: fatalProbePath, exitCode: 1 });
 		expect((await readLogEntries(result.primaryDir)).map(entry => [entry.level, entry.message])).toEqual([

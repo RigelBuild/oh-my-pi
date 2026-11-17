@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `OMP_LOG_LEVEL` now also limits console output, so a process that enables the console transport (such as the auth broker) can drop debug records from stdout. Default behaviour is unchanged: all levels are written when the variable is unset or invalid.
+
 ## [18.18.3-rigel.5] - 2026-11-16
 
 ### Added
