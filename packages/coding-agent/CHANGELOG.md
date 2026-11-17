@@ -2,30 +2,17 @@
 
 ## [Unreleased]
 
-## [18.9.2-rigel.1] - 2026-10-15
-
 ### Added
 
-- Rigel builds follow the `@rigelbuild/omp-*` packages and `rigel` npm dist-tag when checking for updates.
 - Added hiding a pending `ask` question without answering it: `Alt+H` (`app.ask.hide`) or the Hide button in Tern collapses the dialog to one line; the same key, `Enter`, or Show brings it back ([#15400](https://github.com/can1357/oh-my-pi/pull/15400) by [@H4vC](https://github.com/H4vC))
 - Added broker `token --metrics` and `serve --enable-metrics` options for scrape-only usage reporting.
 - Added a container-ready auth-gateway boot entrypoint that reads a mounted bearer token and drains requests on SIGTERM; `auth-gateway serve` now shuts down through postmortem cleanup and exits `143` on SIGTERM, after the drain when one is configured (the boot entrypoint defaults to 20 seconds).
 - Added `--reapply-config`: on CLI startup resume or fork (`--resume`/`--continue`/`--fork`) it uses the config-selected model, thinking level, and service tiers instead of the session's saved ones, per setting and per tier family, keeping anything the config leaves unset; an explicit `--model` still pins model and thinking, and `--thinking` still wins for thinking.
 - Added `--session-id <id>` to open a local session by exact ID or create one with that ID; a launch fails if another live omp process holds the ID.
-- Added the `web/litellm` search engine, which uses a LiteLLM API key and configured search tools instead of separate search-provider credentials.
-
-### Changed
-
-- Settings saves now preserve comments and key order in `config.yml`, and the values and styles of untouched nodes. Whitespace can normalize when another value changes. A config `yaml` cannot edit safely (duplicate keys, anchors) rejects the save with an actionable error instead of being rewritten.
 
 ### Fixed
 
-- Fixed releasing a headless browser tab reporting its page closed while Chromium still listed it: closing a page target now waits until Chromium has removed it, and a page still listed after 2 seconds counts as not closed, so the shared-browser cleanup retries it.
-- Fixed browser downloads landing in another tab's downloads folder, or not being found, when tabs of one browser OMP launched set different folders: every tab of that browser now stages downloads in one private folder and moves each into its own requested folder (under the download's ID when its name is unusable or taken by a folder). A download that cannot be moved now fails with an error that says where the file was left. Connected and relay browsers are unchanged.
-- Fixed a cancelled or timed-out `browser` open killing the shared headless browser after it had launched, which made later tabs fail with `Failed to connect` or `Connection ended`.
 - Fixed `RpcClient.stop()` occasionally waiting forever because the agent process was never signaled.
-- Fixed `read` re-listing an archive rewritten in place with the same size and mtime within the same instant.
-- Browser attach reuses Chromium through a Linux launcher with literal absolute or relative `exec` targets, including NixOS wrappers, without crossing browser profiles ([RIG-4653](https://linear.app/rigelbuild/issue/RIG-4653)).
 
 ## [18.9.2] - 2026-10-11
 
@@ -451,6 +438,7 @@
 - Added `computer.zoom()` and window-local `zoom()` in JavaScript and Python Eval, with native-detail region captures that preserve full-screenshot click coordinates.
 - Added window menus, combined `observe()`, native application discovery/launch, live display handles, bounded input holds, human-approved task control, and macOS Space helpers in both Eval languages.
 - RPC `open_session` and `switch_session` accept an optional `provider`/`modelId` pair that binds the session to that model instead of its saved one, as `--model` does at startup; `RpcClient.openSession()`/`switchSession()` and the Python client's `open_session()`/`switch_session()` take it too ([#13689](https://github.com/can1357/oh-my-pi/pull/13689) by [@alphastorm](https://github.com/alphastorm))
+- Added the `web/litellm` search engine, which uses a LiteLLM API key and configured search tools instead of separate search-provider credentials.
 - Added `compat.statefulResponses` to `models.yml`, so a provider or model can opt into or out of stored Responses chaining without the process-wide `PI_OPENAI_STATEFUL` ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
 - Added the `app.stt.pushToTalk` keybinding, defaulting to `Space`, so push-to-talk can be remapped or disabled independently from speech-to-text and `app.stt.toggle` ([#6592](https://github.com/can1357/oh-my-pi/pull/6592) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added an `expandThinkingBlocks` setting that keeps finished thinking blocks expanded in Tern instead of collapsing them at turn end ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))

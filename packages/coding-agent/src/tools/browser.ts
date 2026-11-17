@@ -444,7 +444,6 @@ async function openOnKind(
 						}
 					: undefined,
 				signal: openSignal,
-				timeoutMs: Math.max(1, timeoutMs - (performance.now() - deadlineStart)),
 			}),
 		);
 

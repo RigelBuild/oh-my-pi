@@ -42,7 +42,7 @@ import {
 
 import { cfgUpdateChannel } from "../modes/settings";
 
-const UPSTREAM_PACKAGE = "@oh-my-pi/pi-coding-agent";
+const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
 const NIX_STORE_DIR = "/nix/store";
@@ -50,25 +50,12 @@ const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
- * Core native addon package. Bumped in lock-step with the agent package so the
+ * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
  * version sentinel the loader looks up at runtime matches the `.node` on
  * disk; see {@link buildBunInstallArgs} for why this must be installed
  * explicitly rather than inherited as a transitive dependency.
  */
-const UPSTREAM_NATIVES_PACKAGE = "@oh-my-pi/pi-natives";
-
-const RIGEL_PACKAGES: ReleasePackages = {
-	pkg: "@rigelbuild/omp-coding-agent",
-	natives: "@rigelbuild/omp-natives",
-};
-
-export function isRigelBuildVersion(version: string): boolean {
-	return /^\d+\.\d+\.\d+-rigel\.[1-9]\d*$/.test(version);
-}
-
-function packagesForVersion(version: string): ReleasePackages {
-	return isRigelBuildVersion(version) ? RIGEL_PACKAGES : { pkg: UPSTREAM_PACKAGE, natives: UPSTREAM_NATIVES_PACKAGE };
-}
+const NATIVES_PACKAGE = "@oh-my-pi/pi-natives";
 
 /**
  * Platform tags the release pipeline publishes as
@@ -104,6 +91,8 @@ export interface ReleaseRename {
 	pkg: string;
 	natives?: string;
 }
+
+const CURRENT_PACKAGES: ReleasePackages = { pkg: PACKAGE, natives: NATIVES_PACKAGE };
 
 export interface ReleaseInfo {
 	tag: string;
@@ -714,9 +703,8 @@ async function fetchLatestManifest(
 	registry: NpmRegistry,
 	timeoutMs: number,
 	channel: UpdateChannel,
-	currentVersion: string,
 ): Promise<{ version: string; manifest: Record<string, unknown> }> {
-	const tag = channel === "canary" ? "canary" : isRigelBuildVersion(currentVersion) ? "rigel" : "latest";
+	const tag = channel === "canary" ? "canary" : "latest";
 	const headers: Record<string, string> = { accept: "application/json" };
 	if (registry.authorization) headers.authorization = registry.authorization;
 	const origin = registry.url === DEFAULT_NPM_REGISTRY ? "" : ` from ${registry.url} (${registry.source})`;
@@ -808,18 +796,14 @@ async function fetchLatestManifest(
  */
 export async function getLatestRelease(
 	options: { timeoutMs?: number; channel?: UpdateChannel; registries?: NpmRegistryResolver } = {},
-	currentVersion: string = VERSION,
 ): Promise<ReleaseInfo> {
 	const timeoutMs = options.timeoutMs ?? RELEASE_METADATA_TIMEOUT_MS;
 	const channel = options.channel ?? "stable";
-	if (isRigelBuildVersion(currentVersion) && channel === "canary") {
-		throw new Error("Canary updates are not available for Rigel builds.");
-	}
 	const registries = options.registries ?? (await loadNpmRegistryResolver());
-	const packages: ReleasePackages = { ...packagesForVersion(currentVersion) };
+	const packages: ReleasePackages = { ...CURRENT_PACKAGES };
 	const visited = new Set([packages.pkg]);
 	let registry = registries(packages.pkg);
-	let latest = await fetchLatestManifest(packages.pkg, registry, timeoutMs, channel, currentVersion);
+	let latest = await fetchLatestManifest(packages.pkg, registry, timeoutMs, channel);
 	for (let hop = 0; hop < MAX_RENAME_HOPS; hop++) {
 		const rename = resolveReleaseRename(latest.manifest);
 		if (!rename || visited.has(rename.pkg)) break;
@@ -827,7 +811,7 @@ export async function getLatestRelease(
 		packages.pkg = rename.pkg;
 		if (rename.natives) packages.natives = rename.natives;
 		registry = registries(packages.pkg);
-		latest = await fetchLatestManifest(packages.pkg, registry, timeoutMs, channel, currentVersion);
+		latest = await fetchLatestManifest(packages.pkg, registry, timeoutMs, channel);
 	}
 
 	return {
@@ -1121,11 +1105,11 @@ async function isNativeExecutable(filePath: string): Promise<boolean> {
  * build's. A patch is applied only to a file whose SHA-256 is the patch's
  * base, so a wrong guess costs a whole-file download, never a broken install.
  */
-async function installedBuildVersion(targetPath: string, currentVersion: string = VERSION): Promise<string> {
+async function installedBuildVersion(targetPath: string): Promise<string> {
 	const real = tryRealpath(targetPath);
-	if (isCompiledBinary() && real !== undefined && real === tryRealpath(process.execPath)) return currentVersion;
-	if (!(await isNativeExecutable(targetPath))) return currentVersion;
-	return (await reportedVersionAtPath(targetPath)) ?? currentVersion;
+	if (isCompiledBinary() && real !== undefined && real === tryRealpath(process.execPath)) return VERSION;
+	if (!(await isNativeExecutable(targetPath))) return VERSION;
+	return (await reportedVersionAtPath(targetPath)) ?? VERSION;
 }
 
 /**
@@ -1377,11 +1361,12 @@ function buildVersionedPackageInstallArgs(
  * Together these two flags make `omp update` produce exactly the registry
  * lookup the version check just performed. See #1686.
  *
- * Also pins the native package and its platform-specific leaf to `expectedVersion`.
- * `bun install -g` does not reliably refresh transitive `optionalDependencies` when
- * the top-level package is the only one bumped, so the native addon and its
+ * Also pins {@link NATIVES_PACKAGE} and the platform-specific
+ * `@oh-my-pi/pi-natives-<tag>` leaf to `expectedVersion`. `bun install -g`
+ * does not reliably refresh transitive `optionalDependencies` when the
+ * top-level package is the only one bumped, so the native addon and its
  * version sentinel can drift out of sync with the freshly installed
- * agent package and the loader aborts at
+ * `@oh-my-pi/pi-coding-agent` and the loader aborts at
  * `validateLoadedBindings` on the next launch
  * (`The .node file on disk is from a different release than this loader`).
  * Listing the natives explicitly forces bun to replace them in lock-step.
@@ -1393,16 +1378,15 @@ function buildVersionedPackageInstallArgs(
 export function buildBunInstallArgs(
 	expectedVersion: string,
 	nativeTag: string = currentNativeTag(),
-	packages?: ReleasePackages,
+	packages: ReleasePackages = CURRENT_PACKAGES,
 	options: { registry?: string } = {},
-	currentVersion: string = VERSION,
 ): string[] {
 	return [
 		"install",
 		"-g",
 		"--no-cache",
 		`--registry=${options.registry ?? DEFAULT_NPM_REGISTRY}`,
-		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages ?? packagesForVersion(currentVersion)),
+		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
 }
 
@@ -1419,16 +1403,15 @@ export function buildBunInstallArgs(
 export function buildNpmInstallArgs(
 	expectedVersion: string,
 	nativeTag: string = currentNativeTag(),
-	packages?: ReleasePackages,
+	packages: ReleasePackages = CURRENT_PACKAGES,
 	flags: { force?: boolean; registry?: string } = {},
-	currentVersion: string = VERSION,
 ): string[] {
 	return [
 		"install",
 		"-g",
 		...(flags.force ? ["--force"] : []),
 		`--registry=${flags.registry ?? DEFAULT_NPM_REGISTRY}`,
-		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages ?? packagesForVersion(currentVersion)),
+		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
 }
 
@@ -1472,12 +1455,10 @@ export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
 export function buildRenameCleanupPackages(
 	packages: ReleasePackages,
 	nativeTag: string = currentNativeTag(),
-	currentVersion: string = VERSION,
 ): string[] {
-	const oldPackages = packagesForVersion(currentVersion);
-	const old = [oldPackages.pkg, oldPackages.natives];
+	const old = [PACKAGE, NATIVES_PACKAGE];
 	if (SUPPORTED_NATIVE_TAGS.has(nativeTag)) {
-		old.push(`${oldPackages.natives}-${nativeTag}`);
+		old.push(`${NATIVES_PACKAGE}-${nativeTag}`);
 	}
 	const newLeaf = `${packages.natives}-${nativeTag}`;
 	return old.filter(name => name !== packages.pkg && name !== packages.natives && name !== newLeaf);
@@ -1494,36 +1475,20 @@ export interface RenameMigrationSteps {
 }
 
 /** Production {@link RenameMigrationSteps}: bun/npm global installs plus PATH verification. */
-function packageManagerMigrationSteps(
-	manager: "bun" | "npm",
-	release: ReleaseInfo,
-	currentVersion: string = VERSION,
-): RenameMigrationSteps {
+function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseInfo): RenameMigrationSteps {
 	const nativeTag = currentNativeTag();
 	return {
 		async install() {
 			if (manager === "bun") {
-				const args = buildBunInstallArgs(
-					release.version,
-					nativeTag,
-					release.packages,
-					{
-						registry: release.registry,
-					},
-					currentVersion,
-				);
+				const args = buildBunInstallArgs(release.version, nativeTag, release.packages, {
+					registry: release.registry,
+				});
 				return (await $`bun ${args}`.nothrow()).exitCode;
 			}
-			const args = buildNpmInstallArgs(
-				release.version,
-				nativeTag,
-				release.packages,
-				{
-					force: true,
-					registry: release.registry,
-				},
-				currentVersion,
-			);
+			const args = buildNpmInstallArgs(release.version, nativeTag, release.packages, {
+				force: true,
+				registry: release.registry,
+			});
 			return (await $`npm ${args}`.nothrow()).exitCode;
 		},
 		async removeOld() {
@@ -1531,12 +1496,12 @@ function packageManagerMigrationSteps(
 			// when any name is absent (e.g. the platform leaf on an old install),
 			// which would skip the agent package that actually owns the bin.
 			let agentExit = 0;
-			for (const pkg of buildRenameCleanupPackages(release.packages, nativeTag, currentVersion)) {
+			for (const pkg of buildRenameCleanupPackages(release.packages, nativeTag)) {
 				const result =
 					manager === "bun"
 						? await $`bun remove -g ${pkg}`.quiet().nothrow()
 						: await $`npm uninstall -g ${pkg}`.quiet().nothrow();
-				if (pkg === packagesForVersion(currentVersion).pkg) agentExit = result.exitCode;
+				if (pkg === PACKAGE) agentExit = result.exitCode;
 			}
 			return agentExit;
 		},
@@ -1567,11 +1532,7 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
 
 	const removeExit = await steps.removeOld();
 	if (removeExit !== 0) {
-		console.log(
-			chalk.yellow(
-				`Warning: could not remove the old ${packagesForVersion(VERSION).pkg} package; remove it manually later.`,
-			),
-		);
+		console.log(chalk.yellow(`Warning: could not remove the old ${PACKAGE} package; remove it manually later.`));
 	}
 
 	let verification = await steps.verify();
@@ -1597,24 +1558,15 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
  * the manager left unusable, or `undefined` when a rename migration already
  * verified and reported its own result.
  */
-async function updateViaBun(
-	release: ReleaseInfo,
-	currentVersion: string = VERSION,
-): Promise<InstalledVersionVerification | undefined> {
+async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerification | undefined> {
 	console.log(chalk.dim("Updating via bun..."));
 	let verification: InstalledVersionVerification | undefined;
-	if (release.packages.pkg !== packagesForVersion(currentVersion).pkg) {
-		await migrateRenamedInstall(release, packageManagerMigrationSteps("bun", release, currentVersion));
+	if (release.packages.pkg !== PACKAGE) {
+		await migrateRenamedInstall(release, packageManagerMigrationSteps("bun", release));
 	} else {
-		const args = buildBunInstallArgs(
-			release.version,
-			currentNativeTag(),
-			release.packages,
-			{
-				registry: release.registry,
-			},
-			currentVersion,
-		);
+		const args = buildBunInstallArgs(release.version, currentNativeTag(), release.packages, {
+			registry: release.registry,
+		});
 		const result = await $`bun ${args}`.nothrow();
 		if (result.exitCode !== 0) {
 			throw new Error(`bun install failed with exit code ${result.exitCode}`);
@@ -1632,24 +1584,15 @@ async function updateViaBun(
 	return verification;
 }
 
-async function updateViaNpm(
-	release: ReleaseInfo,
-	currentVersion: string = VERSION,
-): Promise<InstalledVersionVerification | undefined> {
+async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerification | undefined> {
 	console.log(chalk.dim("Updating via npm..."));
-	if (release.packages.pkg !== packagesForVersion(currentVersion).pkg) {
-		await migrateRenamedInstall(release, packageManagerMigrationSteps("npm", release, currentVersion));
+	if (release.packages.pkg !== PACKAGE) {
+		await migrateRenamedInstall(release, packageManagerMigrationSteps("npm", release));
 		return undefined;
 	}
-	const args = buildNpmInstallArgs(
-		release.version,
-		currentNativeTag(),
-		release.packages,
-		{
-			registry: release.registry,
-		},
-		currentVersion,
-	);
+	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
+		registry: release.registry,
+	});
 	const result = await $`npm ${args}`.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`npm install failed with exit code ${result.exitCode}`);
@@ -1677,15 +1620,10 @@ export interface ManagerUpdateSteps {
  * Production {@link ManagerUpdateSteps}: a bun/npm global install plus an
  * in-place takeover with the build service's build of the same version.
  */
-function packageManagerUpdateSteps(
-	manager: "bun" | "npm",
-	release: ReleaseInfo,
-	currentVersion: string = VERSION,
-): ManagerUpdateSteps {
+function packageManagerUpdateSteps(manager: "bun" | "npm", release: ReleaseInfo): ManagerUpdateSteps {
 	return {
 		manager,
-		install: () =>
-			manager === "bun" ? updateViaBun(release, currentVersion) : updateViaNpm(release, currentVersion),
+		install: () => (manager === "bun" ? updateViaBun(release) : updateViaNpm(release)),
 		verify: () => verifyInstalledVersion(release.version),
 		repair: async launcherPath => {
 			// The launcher is a manager's script or shim, never a build a patch
@@ -2134,8 +2072,8 @@ interface UpdateRequest {
  * when there is nothing to install: not newer, and neither `--force` nor a
  * channel switch asks for it.
  */
-function announceOffer(version: string, request: UpdateRequest, currentVersion: string = VERSION): boolean {
-	const comparison = compareVersions(version, currentVersion);
+function announceOffer(version: string, request: UpdateRequest): boolean {
+	const comparison = compareVersions(version, VERSION);
 	if (comparison <= 0 && !request.force && !request.isChannelSwitch) {
 		const icon = theme?.status?.success ?? "✔";
 		console.log(chalk.green(`${icon} Already up to date`));
@@ -2144,7 +2082,7 @@ function announceOffer(version: string, request: UpdateRequest, currentVersion: 
 	if (request.isChannelSwitch) {
 		console.log(
 			chalk.yellow(
-				`Switching to ${request.channel} ${version}${comparison < 0 ? ` (downgrade from ${currentVersion})` : ""}`,
+				`Switching to ${request.channel} ${version}${comparison < 0 ? ` (downgrade from ${VERSION})` : ""}`,
 			),
 		);
 	} else if (comparison > 0) {
@@ -2164,25 +2102,16 @@ async function runBinaryUpdate(
 	target: BinaryUpdateTarget | undefined,
 	targetError: unknown,
 	request: UpdateRequest,
-	currentVersion: string = VERSION,
 ): Promise<void> {
-	if (isRigelBuildVersion(currentVersion)) {
-		console.error(
-			chalk.red(
-				"Rigel binary updates from the GitHub releases of RigelBuild/oh-my-pi; reinstall from there to update.",
-			),
-		);
-		process.exit(1);
-	}
 	let build: BuildAnswer;
 	try {
-		const fromVersion = target ? await installedBuildVersion(target.path, currentVersion) : currentVersion;
+		const fromVersion = target ? await installedBuildVersion(target.path) : VERSION;
 		build = await fetchBuild({ channel: request.channel }, { fromVersion });
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
 	}
-	if (!announceOffer(build.version, request, currentVersion) || request.check) return;
+	if (!announceOffer(build.version, request) || request.check) return;
 
 	try {
 		if (!target) throw targetError;
@@ -2209,18 +2138,11 @@ async function updateToStandaloneBinary(
 	manager: "bun" | "npm",
 	release: ReleaseInfo,
 	channel: UpdateChannel,
-	currentVersion: string = VERSION,
 ): Promise<void> {
-	if (isRigelBuildVersion(currentVersion)) {
-		throw new Error(
-			"Rigel binary updates from the GitHub releases of RigelBuild/oh-my-pi; reinstall from there to update.",
-		);
-	}
 	const target = await resolveUpdateTarget({ allowPackageManagers: false });
-	const fromVersion =
-		target.method === "binary" ? await installedBuildVersion(target.path, currentVersion) : currentVersion;
+	const fromVersion = target.method === "binary" ? await installedBuildVersion(target.path) : VERSION;
 	const build = await fetchBuild({ channel }, { fromVersion });
-	if (compareVersions(build.version, release.version) < 0 && compareVersions(build.version, currentVersion) <= 0) {
+	if (compareVersions(build.version, release.version) < 0 && compareVersions(build.version, VERSION) <= 0) {
 		throw new Error(
 			`${release.version} ships as a standalone binary, but the newest ${channel} build of it published for this platform is ${build.version}; retry in a few minutes once it finishes uploading, or reinstall with: ${installerHint()}`,
 		);
@@ -2253,17 +2175,16 @@ async function runManagedUpdate(
 	target: ManagedUpdateTarget | undefined,
 	targetError: unknown,
 	request: UpdateRequest,
-	currentVersion: string = VERSION,
 ): Promise<void> {
 	let release: ReleaseInfo;
 	try {
-		release = await getLatestRelease({ channel: request.channel }, currentVersion);
+		release = await getLatestRelease({ channel: request.channel });
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
 	}
-	if (!announceOffer(release.version, request, currentVersion)) return;
-	if (release.packages.pkg !== packagesForVersion(currentVersion).pkg) {
+	if (!announceOffer(release.version, request)) return;
+	if (release.packages.pkg !== PACKAGE) {
 		console.log(chalk.cyan(`The npm package moved to ${release.packages.pkg}; updating migrates this install.`));
 	}
 	if (request.check) return;
@@ -2286,14 +2207,10 @@ async function runManagedUpdate(
 			await updateViaHomebrew(release.version, request.force);
 		} else if (target.method === "mise") {
 			await updateViaMise(release.version, request.force);
-		} else if (shouldForceBinaryUpdate(release, currentVersion)) {
-			await updateToStandaloneBinary(target.method, release, request.channel, currentVersion);
+		} else if (shouldForceBinaryUpdate(release)) {
+			await updateToStandaloneBinary(target.method, release, request.channel);
 		} else {
-			await updateViaManager(
-				release,
-				target.path,
-				packageManagerUpdateSteps(target.method, release, currentVersion),
-			);
+			await updateViaManager(release, target.path, packageManagerUpdateSteps(target.method, release));
 		}
 		if (request.persistChannel) persistChannel(request.channel);
 	} catch (err) {
@@ -2310,14 +2227,11 @@ async function runManagedUpdate(
  * asks npm. When no target resolves, the running build's kind decides, so
  * `--check` still answers; installing then fails on the unresolved target.
  */
-export async function runUpdateCommand(
-	opts: { force: boolean; check: boolean; channel?: UpdateChannel },
-	currentVersion: string = VERSION,
-): Promise<void> {
-	if (isRigelBuildVersion(currentVersion) && opts.channel === "canary") {
-		console.error(chalk.red("Canary updates are not available for Rigel builds."));
-		process.exit(1);
-	}
+export async function runUpdateCommand(opts: {
+	force: boolean;
+	check: boolean;
+	channel?: UpdateChannel;
+}): Promise<void> {
 	const ompPath = resolveOmpPath();
 	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
 	if (manager) {
@@ -2328,7 +2242,7 @@ export async function runUpdateCommand(
 	}
 	// `update.channel` picks the channel; --canary/--stable switch and persist it.
 	await Settings.init({ cwd: getProjectDir() });
-	console.log(chalk.dim(`Current version: ${currentVersion}`));
+	console.log(chalk.dim(`Current version: ${VERSION}`));
 	const persistedChannel = readPersistedChannel() ?? "stable";
 	const channel = opts.channel ?? persistedChannel;
 	if (channel === "canary") console.log(chalk.dim("Current channel: canary"));
@@ -2348,11 +2262,11 @@ export async function runUpdateCommand(
 		targetError = err;
 	}
 	if (target?.method === "binary") {
-		await runBinaryUpdate(target, targetError, request, currentVersion);
+		await runBinaryUpdate(target, targetError, request);
 	} else if (!target && isCompiledBinary()) {
-		await runBinaryUpdate(undefined, targetError, request, currentVersion);
+		await runBinaryUpdate(undefined, targetError, request);
 	} else {
-		await runManagedUpdate(target, targetError, request, currentVersion);
+		await runManagedUpdate(target, targetError, request);
 	}
 }
 

@@ -5,6 +5,7 @@ import type { AuthCredentialStore } from "../auth/store";
 import type { AuthCredential, OAuthCredential, StoredAuthCredential } from "../auth/types";
 import { serializeCredential } from "../auth/sqlite-credential-store";
 import type { OAuthCredentials } from "../registry/oauth/types";
+import { isLoopbackHost } from "../utils/parse-bind";
 import type {
 	DisableCredentialRequest,
 	GatewayCredential,
@@ -14,27 +15,20 @@ import type {
 	ListCredentialPoolRequest,
 	UpdateCredentialOAuthRequest,
 } from "./wire";
-import { currentAgentToken } from "./agent-token-scope";
 import {
 	CompassRpcError,
 	compassRpcErrorFromResponse,
 	decodeCompassJson,
 	disableCredentialResponseSchema,
-	fetchCompassRpcResponse,
 	listCredentialPoolResponseSchema,
-	normalizeCompassBaseUrl,
 	updateCredentialOAuthResponseSchema,
 	CLEARABLE_OAUTH_FIELDS,
 } from "./wire";
-type GatewayRequestBody =
-	| Omit<ListCredentialPoolRequest, "agentToken">
-	| Omit<UpdateCredentialOAuthRequest, "agentToken">
-	| Omit<DisableCredentialRequest, "agentToken">;
 
 export interface CompassAuthCredentialStoreOptions {
 	baseUrl: string;
-	/** The `llm-gateway` service bearer. */
 	token: string;
+	agentAccountId: string;
 	fetch?: typeof fetch;
 	timeoutMs?: number;
 	/** Minimum gap between background pool reloads started by polling. Default 5s. */
@@ -59,6 +53,19 @@ const EMPTY_CREDENTIALS_ERROR = "Credentials are enrolled through Compass";
 const CONFLICT_CODES: ReadonlySet<string> = new Set(["aborted", "not_found"]);
 // The write may or may not have landed; resending the same CAS settles it either way.
 const TRANSIENT_CODES: ReadonlySet<string> = new Set(["unavailable", "deadline_exceeded", "unknown", "internal"]);
+
+/** The bearer and OAuth tokens ride every request, so plaintext is allowed only on loopback. */
+function assertSecureBaseUrl(baseUrl: string): void {
+	let url: URL;
+	try {
+		url = new URL(baseUrl);
+	} catch {
+		throw new Error("Compass baseUrl must be an absolute URL");
+	}
+	if (url.protocol === "https:") return;
+	if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return;
+	throw new Error("Compass baseUrl must use https unless it is a loopback address");
+}
 
 function int64String(value: GatewayInt64): string {
 	return typeof value === "string" ? value : String(value);
@@ -154,9 +161,7 @@ function credentialFromGateway(row: GatewayCredential): AuthCredential | undefin
  * An OAuth resend always sends the row's current credential, never a stored copy.
  * `unconditional` marks a user delete, which outlasts a peer's version bump.
  */
-type Unsynced =
-	| { kind: "oauth"; seq: number }
-	| { kind: "disable"; row: CredentialRow; cause: string; unconditional: boolean };
+type Unsynced = { kind: "oauth" } | { kind: "disable"; row: CredentialRow; cause: string; unconditional: boolean };
 
 /** Writes are queued per row so each RPC carries the version of the state its caller checked. */
 interface RowState {
@@ -164,25 +169,23 @@ interface RowState {
 	/** Bumped on a conflict; jobs accepted under an older epoch drop instead of writing. */
 	epoch: number;
 	pending: number;
-	/** A fire-and-forget write parked without scope or after a transient or revoked-token failure. */
+	/** A fire-and-forget write that failed transiently; resent before the next reload. */
 	unsynced?: Unsynced;
-	/** After a kept failure, the next resend waits one refresh interval; a new park clears it. */
-	resendAfterMs?: number;
 	/** OAuth writes that failed transiently and may have committed anyway. */
 	unknownOutcomes?: GatewayOAuthTokenRequest[];
 }
 
 /**
- * Compass-backed credential pool. Every door call carries the agent token of the
- * request that caused it. AuthPool polls on every credential selection.
+ * Compass-backed credential pool for one agent account. AuthPool polls on every
+ * credential selection, and those polls drive background refreshes.
  */
 export class CompassAuthCredentialStore implements AuthCredentialStore {
 	readonly #baseUrl: string;
 	readonly #token: string;
+	readonly #agentAccountId: string;
 	readonly #fetch: typeof fetch;
 	readonly #timeoutMs: number;
 	readonly #refreshIntervalMs: number;
-	#oauthSeq = 0;
 	readonly #closeController = new AbortController();
 	readonly #localIdByServerId = new Map<string, number>();
 	readonly #state = new Map<string, RowState>();
@@ -203,33 +206,30 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	#listedServerIds: ReadonlySet<string> | undefined;
 
 	constructor(opts: CompassAuthCredentialStoreOptions) {
-		this.#baseUrl = normalizeCompassBaseUrl(opts.baseUrl);
+		if (!opts.baseUrl.trim()) throw new Error("Compass baseUrl must not be empty");
+		assertSecureBaseUrl(opts.baseUrl);
 		if (!opts.token.trim()) throw new Error("Compass token must not be empty");
+		if (!opts.agentAccountId.trim()) throw new Error("Compass agentAccountId must not be empty");
+		this.#baseUrl = opts.baseUrl.replace(/\/+$/, "");
 		this.#token = opts.token;
+		this.#agentAccountId = opts.agentAccountId;
 		this.#fetch = opts.fetch ?? fetch;
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.#refreshIntervalMs = opts.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS;
 	}
 
 	static async open(opts: CompassAuthCredentialStoreOptions): Promise<CompassAuthCredentialStore> {
-		const agentToken = currentAgentToken();
-		if (!agentToken) throw new Error("Compass agent token required");
 		const store = new CompassAuthCredentialStore(opts);
-		await store.#refreshSnapshot(agentToken);
+		await store.refreshSnapshot();
 		store.#acknowledgedRevision = store.#revision;
 		return store;
 	}
 
 	async refreshSnapshot(): Promise<StoredAuthCredential[]> {
-		const agentToken = currentAgentToken();
-		if (!agentToken) throw new Error("Compass agent token required");
-		return this.#refreshSnapshot(agentToken);
-	}
-
-	async #refreshSnapshot(agentToken: string): Promise<StoredAuthCredential[]> {
 		this.#lastRefreshStartMs = Date.now();
 		const sequence = ++this.#refreshStarted;
-		const response = await this.#request("ListCredentialPool", {}, agentToken, listCredentialPoolResponseSchema);
+		const request: ListCredentialPoolRequest = { agentAccountId: this.#agentAccountId };
+		const response = await this.#request("ListCredentialPool", request, listCredentialPoolResponseSchema);
 		// Overlapping lists can land out of order; an older one must not undo a newer one.
 		if (sequence < this.#refreshApplied) return this.listAuthCredentials();
 		this.#refreshApplied = sequence;
@@ -316,31 +316,19 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	async deleteAuthCredential(id: number, cause: string): Promise<boolean> {
 		const row = this.#rows.get(id);
 		if (!row || this.#closed) return false;
-		const intent = { kind: "disable", row, cause, unconditional: true } as const;
-		const agentToken = currentAgentToken();
-		if (!agentToken) {
-			this.#parkDelete(intent);
-			return true;
-		}
-		return this.#deleteRow(intent, 2, agentToken);
+		return this.#deleteRow({ kind: "disable", row, cause, unconditional: true }, 2);
 	}
 
-	async #deleteRow(
-		intent: Extract<Unsynced, { kind: "disable" }>,
-		attempts: number,
-		agentToken: string,
-	): Promise<boolean> {
+	async #deleteRow(intent: Extract<Unsynced, { kind: "disable" }>, attempts: number): Promise<boolean> {
 		const { row, cause } = intent;
 		for (let attempt = 0; attempt < attempts; attempt++) {
 			if (this.#closed) return false;
 			const epoch = this.#accept(row.serverId);
 			let disabled: boolean;
 			try {
-				disabled = await this.#runWrite(row, epoch, intent, agentToken, () =>
-					this.#disable(row, cause, agentToken),
-				);
+				disabled = await this.#runWrite(row, epoch, intent, () => this.#disable(row, cause));
 			} catch (error) {
-				// A transient or revoked-token failure keeps the disable queued for a resend, so the delete stands.
+				// A transient failure keeps the disable queued for a resend, so the delete stands.
 				if (this.#stateFor(row.serverId).unsynced !== intent) throw error;
 				this.#removeLocalRow(row.id);
 				return true;
@@ -360,9 +348,7 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	/** Hides the row and keeps the delete for the next poll's resend. */
 	#parkDelete(intent: Extract<Unsynced, { kind: "disable" }>): void {
 		this.#removeLocalRow(intent.row.id);
-		const state = this.#stateFor(intent.row.serverId);
-		state.unsynced = intent;
-		state.resendAfterMs = undefined;
+		this.#stateFor(intent.row.serverId).unsynced = intent;
 	}
 
 	upsertAuthCredential(_provider: string, _credential: AuthCredential): Promise<StoredAuthCredential[]> {
@@ -403,14 +389,6 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		for (const [key, entry] of this.#cache) {
 			if (entry.expiresAtSec <= nowSec) this.#cache.delete(key);
 		}
-	}
-
-	/** True while a write is queued, in flight, or parked for a resend. */
-	hasPendingWrites(): boolean {
-		for (const state of this.#state.values()) {
-			if (state.pending > 0 || state.unsynced !== undefined) return true;
-		}
-		return this.#writeChains.size > 0;
 	}
 
 	/** Resolves once every queued write and background refresh has settled. */
@@ -457,24 +435,18 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		this.#queueOAuthUpdate(row, credential);
 	}
 
-	#queueOAuthUpdate(row: CredentialRow, credential: OAuthCredential, queuedToken = currentAgentToken()): void {
-		const state = this.#stateFor(row.serverId);
-		const intent: Unsynced = { kind: "oauth", seq: ++this.#oauthSeq };
-		if (!queuedToken) {
-			state.unsynced = intent;
-			state.resendAfterMs = undefined;
-			return;
-		}
+	#queueOAuthUpdate(row: CredentialRow, credential: OAuthCredential): void {
 		const epoch = this.#accept(row.serverId);
-		void this.#runWrite(row, epoch, intent, queuedToken, async () => {
-			const response = await this.#sendOAuthUpdate(row, credential, state, queuedToken);
+		void this.#runWrite(row, epoch, { kind: "oauth" }, async () => {
+			const state = this.#stateFor(row.serverId);
+			const response = await this.#sendOAuthUpdate(row, credential, state);
 			state.version = int64String(response.version);
-			// An OAuth intent parked after this write was queued holds a newer credential.
-			if (state.unsynced?.kind === "oauth" && state.unsynced.seq <= intent.seq) state.unsynced = undefined;
+			// The chain is FIFO, so this write supersedes any earlier failed one.
+			if (state.unsynced?.kind === "oauth") state.unsynced = undefined;
 		}).catch(error => this.#logWriteFailure("Compass OAuth update failed", row, this.#errorCode(error)));
 	}
 
-	async #sendOAuthUpdate(row: CredentialRow, credential: OAuthCredential, state: RowState, agentToken: string) {
+	async #sendOAuthUpdate(row: CredentialRow, credential: OAuthCredential, state: RowState) {
 		const token = oauthToGateway(credential);
 		const clearFields = clearedFields(token);
 		// Each pass either returns, throws, or adopts a commit and clears the outcomes, so it ends.
@@ -482,8 +454,13 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			try {
 				const response = await this.#request(
 					"UpdateCredentialOAuth",
-					{ id: row.serverId, token, expectedVersion: state.version, clearFields },
-					agentToken,
+					{
+						id: row.serverId,
+						token,
+						expectedVersion: state.version,
+						agentAccountId: this.#agentAccountId,
+						clearFields,
+					} satisfies UpdateCredentialOAuthRequest,
 					updateCredentialOAuthResponseSchema,
 				);
 				state.unknownOutcomes = undefined;
@@ -495,15 +472,18 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 					throw error;
 				}
 				// A conflict with our own lost commit is not a peer write: adopt its version and resend.
-				if (code !== "aborted" || !state.unknownOutcomes || !(await this.#adoptOwnCommit(row, state, agentToken)))
-					throw error;
+				if (code !== "aborted" || !state.unknownOutcomes || !(await this.#adoptOwnCommit(row, state))) throw error;
 			}
 		}
 	}
 
 	/** True when the listed row is exactly one of our unconfirmed writes merged over its stored fields. */
-	async #adoptOwnCommit(row: CredentialRow, state: RowState, agentToken: string): Promise<boolean> {
-		const pool = await this.#request("ListCredentialPool", {}, agentToken, listCredentialPoolResponseSchema);
+	async #adoptOwnCommit(row: CredentialRow, state: RowState): Promise<boolean> {
+		const pool = await this.#request(
+			"ListCredentialPool",
+			{ agentAccountId: this.#agentAccountId } satisfies ListCredentialPoolRequest,
+			listCredentialPoolResponseSchema,
+		);
 		const wire = pool.credentials?.find(candidate => candidate.id === row.serverId);
 		const listed = wire?.oauth;
 		const ours = listed && state.unknownOutcomes?.some(sent => matchesSentToken(listed, sent));
@@ -513,45 +493,43 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 		return true;
 	}
 
-	#queueDisable(row: CredentialRow, cause: string, queuedToken = currentAgentToken()): void {
-		const state = this.#stateFor(row.serverId);
-		const unsynced = { kind: "disable", row, cause, unconditional: false } as const;
-		if (!queuedToken) {
-			state.unsynced = unsynced;
-			state.resendAfterMs = undefined;
-			return;
-		}
+	#queueDisable(row: CredentialRow, cause: string): void {
 		const epoch = this.#accept(row.serverId);
-		void this.#runWrite(row, epoch, unsynced, queuedToken, () => this.#disable(row, cause, queuedToken)).catch(
-			error => this.#logWriteFailure("Compass credential disable failed", row, this.#errorCode(error)),
-		);
+		void this.#runWrite(row, epoch, { kind: "disable", row, cause, unconditional: false }, () =>
+			this.#disable(row, cause),
+		).catch(error => this.#logWriteFailure("Compass credential disable failed", row, this.#errorCode(error)));
 	}
 
-	#resendUnsynced(agentToken: string): void {
+	#resendUnsynced(): void {
 		for (const [serverId, state] of this.#state) {
 			const unsynced = state.unsynced;
-			if (!unsynced || state.pending > 0 || (state.resendAfterMs ?? 0) > Date.now()) continue;
+			if (!unsynced || state.pending > 0) continue;
 			const id = this.#localIdByServerId.get(serverId);
 			if (id === undefined) continue;
 			if (unsynced.kind === "oauth") {
 				const row = this.#rows.get(id);
-				if (row?.credential.type === "oauth") this.#queueOAuthUpdate(row, row.credential, agentToken);
+				if (row?.credential.type === "oauth") this.#queueOAuthUpdate(row, row.credential);
 				else state.unsynced = undefined;
 			} else if (unsynced.unconditional) {
-				void this.#deleteRow(unsynced, 2, agentToken).catch(error =>
+				void this.#deleteRow(unsynced, 2).catch(error =>
 					this.#logWriteFailure("Compass credential disable failed", unsynced.row, this.#errorCode(error)),
 				);
 			} else {
-				this.#queueDisable(unsynced.row, unsynced.cause, agentToken);
+				this.#queueDisable(unsynced.row, unsynced.cause);
 			}
 		}
 	}
 
-	async #disable(row: CredentialRow, cause: string, agentToken: string): Promise<boolean> {
+	async #disable(row: CredentialRow, cause: string): Promise<boolean> {
 		const state = this.#stateFor(row.serverId);
-		const request = { id: row.serverId, cause, expectedVersion: state.version };
+		const request: DisableCredentialRequest = {
+			id: row.serverId,
+			cause,
+			expectedVersion: state.version,
+			agentAccountId: this.#agentAccountId,
+		};
 		try {
-			await this.#request("DisableCredential", request, agentToken, disableCredentialResponseSchema);
+			await this.#request("DisableCredential", request, disableCredentialResponseSchema);
 		} catch (error) {
 			if (this.#errorCode(error) !== "not_found") throw error;
 			this.#tombstone(row);
@@ -569,13 +547,12 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	/**
 	 * Runs one write on the row's chain. A conflict bumps the epoch so every job accepted
-	 * before it drops, then reloads the pool. A transient or revoked-token failure keeps `unsynced` for a resend.
+	 * before it drops, then reloads the pool. A transient failure keeps `unsynced` for a resend.
 	 */
 	#runWrite<T>(
 		row: CredentialRow,
 		epoch: number,
 		unsynced: Unsynced | undefined,
-		agentToken: string,
 		work: () => Promise<T>,
 	): Promise<T | false> {
 		const job = async (): Promise<T | false> => {
@@ -586,28 +563,21 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 			} catch (error) {
 				const code = this.#errorCode(error);
 				if (!CONFLICT_CODES.has(code)) {
-					// A transient or revoked-token failure keeps the write for a resend; a definitive one releases it.
+					// A transient failure keeps the write for a resend; a definitive one releases the row to the next list.
 					// A pending delete outranks a later OAuth write to the same row.
 					const deleting = unsynced?.kind === "oauth" && state.unsynced?.kind === "disable";
-					// A newer OAuth intent parked while this one ran already carries the latest credential.
-					const newer =
-						unsynced?.kind === "oauth" && state.unsynced?.kind === "oauth" && state.unsynced.seq > unsynced.seq;
-					if (unsynced && !deleting && !newer && !this.#closed) {
-						const keep = TRANSIENT_CODES.has(code) || code === "unauthenticated";
-						state.unsynced = keep ? unsynced : undefined;
-						if (keep) state.resendAfterMs = Date.now() + this.#refreshIntervalMs;
-					}
+					if (unsynced && !deleting && !this.#closed)
+						state.unsynced = TRANSIENT_CODES.has(code) ? unsynced : undefined;
 					throw error;
 				}
 				const parked = state.unsynced;
-				// A parked OAuth write was made against the same stale version, so the peer wins it too.
 				const keep = parked?.kind === "disable" && parked.unconditional && parked !== unsynced ? parked : undefined;
 				state.epoch += 1;
 				state.pending = 0;
 				state.unsynced = keep;
 				this.#logWriteFailure("Compass credential write conflicted; reloading pool", row, code);
 				this.#listedServerIds = undefined;
-				await this.#refreshQuietly(agentToken);
+				await this.#refreshQuietly();
 				if (keep && this.#goneFromServer(row.serverId)) state.unsynced = undefined;
 				return false;
 			} finally {
@@ -628,19 +598,17 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#maybeBackgroundRefresh(): void {
-		// No request behind the poll means no door call; a parked write resends on the next scoped poll past its backoff.
-		const agentToken = currentAgentToken();
-		if (this.#closed || !agentToken) return;
-		this.#resendUnsynced(agentToken);
-		if (this.#refreshInFlight || Date.now() - this.#lastRefreshStartMs < this.#refreshIntervalMs) return;
-		this.#refreshInFlight = this.#refreshQuietly(agentToken).finally(() => {
+		if (this.#closed || this.#refreshInFlight) return;
+		if (Date.now() - this.#lastRefreshStartMs < this.#refreshIntervalMs) return;
+		this.#resendUnsynced();
+		this.#refreshInFlight = this.#refreshQuietly().finally(() => {
 			this.#refreshInFlight = undefined;
 		});
 	}
 
-	async #refreshQuietly(agentToken: string): Promise<void> {
+	async #refreshQuietly(): Promise<void> {
 		try {
-			await this.#refreshSnapshot(agentToken);
+			await this.refreshSnapshot();
 		} catch (error) {
 			if (this.#closed) return;
 			logger.warn("Compass credential pool reload failed", { code: this.#errorCode(error) });
@@ -674,28 +642,32 @@ export class CompassAuthCredentialStore implements AuthCredentialStore {
 
 	async #request<T>(
 		method: "ListCredentialPool" | "UpdateCredentialOAuth" | "DisableCredential",
-		body: GatewayRequestBody,
-		agentToken: string,
+		body: ListCredentialPoolRequest | UpdateCredentialOAuthRequest | DisableCredentialRequest,
 		schema: FluentType<T>,
 	): Promise<T> {
 		if (this.#closed) throw new CompassRpcError("closed", "Compass credential store is closed");
 		const signal = AbortSignal.any([this.#closeController.signal, AbortSignal.timeout(this.#timeoutMs)]);
-		let result: { response: Response; text: string };
+		let response: Response;
+		let text: string;
 		try {
-			result = await fetchCompassRpcResponse({
-				baseUrl: this.#baseUrl,
-				service: "GatewayCredentials",
-				method,
-				token: this.#token,
-				fetch: this.#fetch,
-				body: { ...body, agentToken },
+			response = await this.#fetch(this.#baseUrl + "/compass.v1.GatewayCredentials/" + method, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Connect-Protocol-Version": "1",
+					Authorization: "Bearer " + this.#token,
+				},
+				body: JSON.stringify(body),
+				// A redirect would replay the bearer and OAuth tokens to another origin.
+				redirect: "error",
 				signal,
 			});
+			text = await response.text();
 		} catch (cause) {
 			throw this.#transportError(cause);
 		}
-		if (!result.response.ok) throw compassRpcErrorFromResponse(result.response.status, result.text);
-		return decodeCompassJson(result.text, schema);
+		if (!response.ok) throw compassRpcErrorFromResponse(response.status, text);
+		return decodeCompassJson(text, schema);
 	}
 
 	#transportError(cause: unknown): CompassRpcError {

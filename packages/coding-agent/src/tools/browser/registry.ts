@@ -1,14 +1,5 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-	getLogsDir,
-	getPuppeteerDir,
-	isCompiledBinary,
-	logger,
-	untilAborted,
-	withTimeout,
-	workerHostEntry,
-} from "@oh-my-pi/pi-utils";
+import { getLogsDir, isCompiledBinary, logger, untilAborted, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
@@ -29,12 +20,7 @@ import { reapOrphanSharedTargets } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
-import {
-	browserInstanceId,
-	DOWNLOAD_STAGING_DIRNAME,
-	ensureSharedBrowser,
-	sharedBrowserProfileDir,
-} from "./shared-daemon";
+import { ensureSharedBrowser } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
 
@@ -131,7 +117,6 @@ export interface AcquireBrowserOptions {
 	cwd: string;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	signal?: AbortSignal;
-	timeoutMs?: number;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
@@ -184,9 +169,9 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 			clearEntry();
 			throw error;
 		}
-		// The launch may resolve AFTER the caller has already aborted: the outer
+		// The launch may resolve AFTER the caller has already aborted (the outer
 		// `untilAborted` rejects immediately on abort but does not cancel the
-		// inner promise, which can settle in the same tick the signal fires.
+		// inner promise, and `launchHeadlessBrowser` does not accept a signal).
 		// Without this branch the completed handle sits in `browsers` at
 		// refCount:0 forever — no tab ever takes a hold, `releaseBrowser` never
 		// fires, and `releaseAllTabs` walks `tabs`, not `browsers`, so the
@@ -248,10 +233,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			viewport: opts.viewport,
 			ignoreHttpsErrors: kind.ignoreHttpsErrors,
 			allowFileAccess: kind.allowFileAccess,
-			signal: opts.signal,
-			timeoutMs: opts.timeoutMs,
 		});
-
 		return {
 			key: browserKey(kind),
 			kind,
@@ -448,9 +430,6 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			}
 			return;
 		}
-		// Read before close: a launch with the caller's own --user-data-dir stages under the browser's id. A disconnected
-		// browser still names its endpoint, so its staging goes too.
-		const staging = handle.userDataDir ? undefined : stagingDirectoryToRemove(handle);
 		if (handle.browser.connected) {
 			// Puppeteer's `browser.close()` resolves only once the Chromium
 			// process fully exits. A wedged Chromium (a known Windows failure
@@ -465,7 +444,6 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 				if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
 			}
 		}
-		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
 		// exited. Tolerant of the Windows lock-held window (issue #7058).
@@ -483,8 +461,6 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		}
 		return;
 	}
-	// Read before disconnecting; only a browser OMP launched and now kills loses its staging folder.
-	const staging = opts.kill && handle.subprocess ? stagingDirectoryToRemove(handle) : undefined;
 	if (handle.browser.connected) {
 		try {
 			handle.browser.disconnect();
@@ -493,38 +469,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		}
 	}
 	// A discovered CDP PID is borrowed, not ours to kill on close or abort.
-	if (opts.kill && handle.subprocess) {
-		if (handle.subprocess.exitCode === null) await gracefulKillTreeOnce(handle.subprocess.pid);
-		// The owned process is gone either way, so nothing still writes to its staging folder.
-		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+	if (opts.kill && handle.subprocess && handle.subprocess.exitCode === null) {
+		await gracefulKillTreeOnce(handle.subprocess.pid);
 	}
-}
-
-/** A staging lookup failure must not abort the rest of a dispose. */
-function stagingDirectoryToRemove(handle: PuppeteerBrowserHandle): string | undefined {
-	try {
-		return downloadStagingDirectory(handle);
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * The one download folder every tab of `handle`'s browser points Chromium at, or undefined for a browser the user
- * drives. An OMP-owned profile (temp launch, shared daemon) holds it and it goes with that profile; any other browser
- * stages under the puppeteer dir, keyed by the running browser, and that folder is removed only when OMP kills it.
- */
-export function downloadStagingDirectory(handle: PuppeteerBrowserHandle): string | undefined {
-	if (handle.kind.kind === "connected" || handle.kind.kind === "relay") return undefined;
-	if (handle.userDataDir) return path.join(handle.userDataDir, DOWNLOAD_STAGING_DIRNAME);
-	if (handle.sharedDaemon) {
-		// The daemon's profile outlives each Chrome, so key by the Chrome; the profile lock makes every sibling dead.
-		const profile = sharedBrowserProfileDir(handle.sharedDaemon.projectDir, handle.sharedDaemon.name);
-		return path.join(profile, DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle.browser.wsEndpoint()));
-	}
-	// Spawned apps and launches with the caller's own profile: that profile may be the user's, so stage outside it.
-	// Still leaked: a reused or kill:false spawned app's folder, and any folder whose browser outlived an OMP crash.
-	return path.join(getPuppeteerDir(), DOWNLOAD_STAGING_DIRNAME, browserInstanceId(handle.browser.wsEndpoint()));
 }
 
 /**
