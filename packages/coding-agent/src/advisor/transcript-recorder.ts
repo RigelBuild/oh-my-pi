@@ -257,7 +257,7 @@ export class AdvisorTranscriptRecorder {
 						this.#replayCursor++;
 						return;
 					}
-					// Divergent retry (e.g. reasoning stripped after a refusal): the
+					// Divergent retry (e.g. thinking blocks stripped after a refusal): the
 					// window no longer matches, so drop its stale tail and record anew.
 					this.#replayWindow.length = this.#replayCursor;
 				}

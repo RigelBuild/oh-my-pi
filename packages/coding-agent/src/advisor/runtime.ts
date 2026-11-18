@@ -326,7 +326,7 @@ export class AdvisorRuntime {
 	 */
 	readonly #refusalModelsTried = new Set<string>();
 	readonly #configuredIncludeThinking: boolean;
-	/** Whether primary reasoning is included in advisor deltas for the current model. */
+	/** Whether primary thinking blocks are included in advisor deltas for the current model. */
 	#includeThinking: boolean;
 	#modelIdentity: string | undefined;
 	/** Completed 3-failure backlog-drop cycles since the last success/reset. */
@@ -1525,7 +1525,7 @@ export class AdvisorRuntime {
 					logger.debug("advisor turn failed", { err: String(err) });
 					if (classifierRefusal) {
 						// Stripping only recovers when it changes what was sent: a batch
-						// without primary reasoning would be resent byte-for-byte and
+						// without primary thinking blocks would be resent byte-for-byte and
 						// refused again, so it goes straight to the model fallback.
 						const strippingChangesBatch =
 							this.#includeThinking && this.#renderPreparedDelta(preparedMessages, wip, false) !== renderBatch();
@@ -1545,7 +1545,7 @@ export class AdvisorRuntime {
 									wip,
 									overflowRecovery: recoveringOverflow || undefined,
 								});
-								logger.debug("advisor refusal recovered by stripping primary reasoning");
+								logger.debug("advisor refusal recovered by stripping primary thinking blocks");
 								continue;
 							}
 						}
@@ -1794,7 +1794,7 @@ export function isClassifierRefusal(message: AssistantMessage): boolean {
 /**
  * The only malformed advisor turn shape: the prompt resolved but produced no
  * assistant response at all. Everything an assistant message carries — advice,
- * reasoning, or deliberate silence (empty `stop`) — is a completed review.
+ * thinking blocks, or deliberate silence (empty `stop`) — is a completed review.
  */
 function getAdvisorTurnError(messages: readonly AgentMessage[]): Error | undefined {
 	if (messages.length === 0) return undefined;
