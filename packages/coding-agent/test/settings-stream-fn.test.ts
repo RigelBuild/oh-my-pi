@@ -11,7 +11,7 @@ import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
-import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
@@ -560,6 +560,96 @@ describe("createSettingsAwareStreamFn", () => {
 				release();
 				configureProviderStoreResponses(undefined);
 			}
+		});
+	});
+
+	describe("foreignThinkingReplay on the Claude wire (RIG-10349)", () => {
+		const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!claude) throw new Error("Expected bundled anthropic/claude-sonnet-4-5");
+		const SENTINEL = "FOREIGN-GPT-REASONING-SENTINEL";
+		const VISIBLE = "VISIBLE-ANSWER-TEXT";
+		// A GPT turn: reasoning Claude cannot verify, then visible text.
+		const gptTurn: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: SENTINEL, thinkingSignature: "rs_gpt_opaque_signature" },
+				{ type: "text", text: VISIBLE },
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "continue", timestamp: 0 },
+				gptTurn,
+				{ role: "user", content: "next", timestamp: 1 },
+			],
+		};
+		/** A complete minimal Anthropic message stream, so the SDK resolves instead of retrying. */
+		const messageStream = [
+			{
+				type: "message_start",
+				message: {
+					id: "m1",
+					type: "message",
+					role: "assistant",
+					model: "claude-sonnet-4-5",
+					content: [],
+					stop_reason: null,
+					stop_sequence: null,
+					usage: { input_tokens: 1, output_tokens: 0 },
+				},
+			},
+			{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+			{ type: "content_block_stop", index: 0 },
+			{
+				type: "message_delta",
+				delta: { stop_reason: "end_turn", stop_sequence: null },
+				usage: { output_tokens: 1 },
+			},
+			{ type: "message_stop" },
+		]
+			.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+			.join("");
+
+		/** Send one real Claude request through the settings-aware stream; return its URL and wire body. */
+		async function claudeWire(settings: Settings): Promise<{ url: string; body: string }> {
+			const requests: Array<{ url: string; body: unknown }> = [];
+			const fetch = (async (url: unknown, init?: RequestInit) => {
+				requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+				return new Response(messageStream, { headers: { "content-type": "text/event-stream" } });
+			}) as FetchImpl;
+			const stream = await createSettingsAwareStreamFn(settings)(claude, context, { apiKey: "k", fetch });
+			await stream.result();
+			const request = requests[0];
+			if (!request) throw new Error("Expected one Claude request");
+			return { url: request.url, body: JSON.stringify(request.body) };
+		}
+
+		it("drops foreign thinking from the Claude request when thinking.foreignReplay is drop", async () => {
+			const { url, body } = await claudeWire(Settings.isolated({ "thinking.foreignReplay": "drop" }));
+			expect(url).toContain("/messages");
+			expect(body).not.toContain(SENTINEL);
+			expect(body).toContain(VISIBLE);
+		});
+
+		it("keeps foreign thinking as visible text when the setting is unset (control)", async () => {
+			const { url, body } = await claudeWire(Settings.isolated({}));
+			expect(url).toContain("/messages");
+			expect(body).toContain(SENTINEL);
+			expect(body).toContain(VISIBLE);
 		});
 	});
 
