@@ -119,7 +119,7 @@ omp.on("tool_result", async (event, ctx) => {
 		});
 		return {
 			content: redacted,
-			additionalContext: "Use the redacted result for subsequent reasoning.",
+			additionalContext: "Use the redacted result in later steps.",
 		};
 	}
 });

@@ -1,4 +1,4 @@
-You were interrupted mid-task. Prior reasoning, tool calls, and todos are intact — review your TodoList and the last assistant turn, then continue.
+You were interrupted mid-task. Earlier turns, tool calls, and todos are intact. Review your TodoList and the last assistant turn, then continue.
 
 - Branch: `{{workspace.branch}}`
 - Issue: {{repo.full_name}}#{{issue.number}} — {{issue.title}}
