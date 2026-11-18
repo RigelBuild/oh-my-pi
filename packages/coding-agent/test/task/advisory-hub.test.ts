@@ -485,3 +485,127 @@ for (const failureAt of [290_000, 300_000]) {
 		}
 	});
 }
+
+it("pauses matching reminder watches on an ID-less voluntary report", async () => {
+	vi.useFakeTimers();
+	const clock = spyOn(performance, "now").mockReturnValue(0);
+	const session = { deliverIrcMessage: async () => "injected" } as unknown as AgentSession;
+	AgentRegistry.global().register({ id: "Parent", displayName: "Parent", kind: "sub", session });
+	AgentRegistry.global().register({ id: "Child", displayName: "Child", kind: "sub", session });
+	const { hub, ref } = fixture();
+	const bus = IrcBus.global();
+	if (!(bus instanceof IrcBus)) throw new Error("Expected main IRC bus");
+	const delivery = spyOn(bus, "deliverBound");
+	try {
+		expect(
+			(await hub.remind({ parentSessionId: "parent", ref, requestId: "paused", content: "status" })).outcome,
+		).toBe("injected");
+		expect(delivery).toHaveBeenCalledTimes(1);
+		const report = JSON.stringify({
+			state: "progressing",
+			progress: "worked",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+		});
+		expect(
+			(
+				await hub.sendBound({
+					childSessionId: "child",
+					fromAgentId: "Child",
+					toAgentId: "Parent",
+					assignmentId: ref.assignmentId,
+					body: report,
+				})
+			).outcome,
+		).toBe("injected");
+		expect(delivery).toHaveBeenCalledTimes(2);
+		expect(vi.getTimerCount()).toBe(0);
+		clock.mockReturnValue(300_000);
+		vi.advanceTimersByTime(600_000);
+		expect(delivery).toHaveBeenCalledTimes(2);
+		const paused = JSON.stringify({
+			state: "progressing",
+			progress: "worked",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+			requestId: "paused",
+		});
+		expect(
+			(
+				await hub.sendBound({
+					childSessionId: "child",
+					fromAgentId: "Child",
+					toAgentId: "Parent",
+					assignmentId: ref.assignmentId,
+					checkId: "paused",
+					body: paused,
+				})
+			).outcome,
+		).toBe("injected");
+		expect(
+			(
+				await hub.sendBound({
+					childSessionId: "child",
+					fromAgentId: "Child",
+					toAgentId: "Parent",
+					assignmentId: ref.assignmentId,
+					checkId: "paused",
+					body: paused,
+				})
+			).outcome,
+		).toBe("duplicate");
+	} finally {
+		hub.disposeHome("w1");
+		clock.mockRestore();
+		delivery.mockRestore();
+	}
+});
+
+it("keeps a delivered report admitted when a reply listener throws", async () => {
+	vi.useFakeTimers();
+	const session = { deliverIrcMessage: async () => "injected" } as unknown as AgentSession;
+	AgentRegistry.global().register({ id: "Parent", displayName: "Parent", kind: "sub", session });
+	AgentRegistry.global().register({ id: "Child", displayName: "Child", kind: "sub", session });
+	const { hub, ref } = fixture();
+	try {
+		expect(
+			(await hub.remind({ parentSessionId: "parent", ref, requestId: "delivered", content: "status" })).outcome,
+		).toBe("injected");
+		hub.subscribe("parent", event => {
+			if (event.type === "reply") throw new Error("listener failure");
+		});
+		const reply = {
+			childSessionId: "child",
+			fromAgentId: "Child",
+			toAgentId: "Parent",
+			assignmentId: ref.assignmentId,
+			checkId: "delivered",
+			body: JSON.stringify({
+				state: "progressing",
+				progress: "worked",
+				tried: [],
+				blocker: "",
+				nextAction: "continue",
+			}),
+		};
+		await expect(hub.sendBound(reply)).rejects.toThrow("listener failure");
+		expect((await hub.sendBound(reply)).outcome).toBe("duplicate");
+	} finally {
+		hub.disposeHome("w1");
+	}
+});
+
+it("rejects a bound advisory admitted for a session that is not the parent", () => {
+	const { hub, ref } = fixture();
+	hub.attach({ sessionId: "sibling", instanceId: "s", agentId: "Sibling" });
+	try {
+		const binding = { ref, branchId: ref.parentBranchId, senderInstanceId: "c", recipientInstanceId: "p" };
+		expect(hub.validate([{ fromAgentId: "Child", toAgentId: "Parent", binding }])).toEqual([true]);
+		expect(hub.validate([{ fromAgentId: "Child", toAgentId: "Sibling", binding }])).toEqual([false]);
+	} finally {
+		hub.detach("sibling", "s");
+		hub.disposeHome("w1");
+	}
+});
