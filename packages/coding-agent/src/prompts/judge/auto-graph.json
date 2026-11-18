@@ -17,7 +17,7 @@
 			"change": "Factors of change: for each {{axis}}, how many times larger or smaller {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}} {{#if second}}are{{else}}is{{/if}} than \"{{baseline}}\", as bars to either side of 1×.",
 			"progress": "Progress bars: one track per {{axis}} for {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}, each filled toward 100%.",
 			"timeline": "Timeline: the \"{{first}}\" of each {{axis}} laid end to end on one axis, in table order.",
-			"waterfall": "Waterfall: the \"{{first}}\" of each {{axis}} added step by step, in table order, up to their total.",
+			"waterfall": "Waterfall: the \"{{first}}\" of each {{axis}} added in sequence, in table order, up to their total.",
 			"dots": "Dot plot: for each {{axis}}, one dot for each of {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}}{{#if moreSeries}} and {{moreSeries}} more{{/if}} on one shared axis (logarithmic where the values span orders of magnitude){{#if baseline}}, as factors of \"{{baseline}}\"{{/if}}.",
 			"range": "Range chart: for each {{axis}}, the low–high interval of {{#list series prefix='\"' suffix='\"' join=', '}}{{this}}{{/list}} as a floating bar.",
 			"bullet": "Bullet chart: for each {{axis}}, its \"{{first}}\" as a bar against its own {{target}} mark.",

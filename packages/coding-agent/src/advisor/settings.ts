@@ -140,7 +140,7 @@ export const cfgAdvisorMaxNotesPerUpdate = register({
 			{ value: "1", label: "1 note", description: "Anti-flood (strict)." },
 			{ value: "2", label: "2 notes" },
 			{ value: "3", label: "3 notes" },
-			{ value: "4", label: "4 notes", description: "Frontier reasoning models. Default." },
+			{ value: "4", label: "4 notes", description: "Frontier models. Default." },
 			{ value: "5", label: "5 notes" },
 		],
 		condition: "advisorEnabled",

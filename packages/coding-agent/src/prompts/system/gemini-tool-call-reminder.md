@@ -1,4 +1,4 @@
-<system-interrupt reason="reasoning_without_tool_calls">
+<system-interrupt reason="planning_without_tool_call">
 {{count}} consecutive planning headers with no tool call. No tool ran.
 
 Act now, not further planning:
