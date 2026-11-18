@@ -1,14 +1,14 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omptype",
-  "version": "18.18.3-rigel.11",
+  "version": "18.22.2",
   "description": "ArkType-compatible runtime schema validation with lazy JIT compilation",
   "homepage": "https://omp.sh",
   "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RigelBuild/oh-my-pi.git",
+    "url": "git+https://github.com/can1357/oh-my-pi.git",
     "directory": "packages/omptype"
   },
   "bugs": {

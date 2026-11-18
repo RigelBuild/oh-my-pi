@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { AuthStorage, type AuthStorageOptions, SqliteAuthCredentialStore } from "../src/auth-storage";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
@@ -278,6 +279,8 @@ describe("Antigravity OAuth project discovery", () => {
 });
 
 describe("Antigravity compiled OAuth refresh rule", () => {
+	// Antigravity is paused in its auth rules; these tests exercise its refresh rule, so the pause is lifted here.
+	beforeEach(() => vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined));
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
@@ -356,6 +359,11 @@ describe("Antigravity compiled OAuth refresh rule", () => {
 });
 
 describe("Antigravity AuthStorage refresh persistence", () => {
+	// Antigravity is paused in its auth rules; these tests exercise its refresh persistence, so the pause is lifted here.
+	beforeEach(() => vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined));
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
 	async function makeStorage(
 		refreshOAuthCredential: NonNullable<AuthStorageOptions["refreshOAuthCredential"]>,
 	): Promise<AuthStorage> {

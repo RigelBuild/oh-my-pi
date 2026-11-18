@@ -40,7 +40,7 @@ import {
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { agentPauseGate } from "./pause";
-import { isProviderRefusalMessage } from "./replay-policy";
+import { filterProviderReplayMessages } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
 import { Tokenizer } from "./tokenizer";
 import {
@@ -75,10 +75,12 @@ import { isSoftToolRequirement } from "./types";
  * Default convertToLlm: Keep only LLM-compatible replay messages.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter((m): m is Message => {
-		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "developer" || m.role === "toolResult";
-	});
+	return filterProviderReplayMessages(
+		messages.filter(
+			(m): m is Message =>
+				m.role === "assistant" || m.role === "user" || m.role === "developer" || m.role === "toolResult",
+		),
+	);
 }
 
 function refreshToolChoiceForActiveTools(
@@ -1985,7 +1987,11 @@ export class Agent {
 					try {
 						const updated = await transform(message);
 						if (updated) entry.toolResult = updated;
-					} catch {}
+					} catch (error) {
+						logger.warn("agent: cursor tool result transform failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 				})();
 				entry.pending = pending;
 				await pending;

@@ -472,6 +472,24 @@ mod unix {
 		}
 	}
 
+	fn redrive_pty_open(mut open: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+		#[cfg(target_os = "macos")]
+		{
+			// XNU bsd/sys/errno.h defines EREDRIVEOPEN as -6. In tty_ptmx.c
+			// concurrent ptmx clones can select the same minor; tty_dev.c asks
+			// the kernel to redrive the open, but the sentinel can leak to
+			// userspace. Redrive only that condition, with a finite bound.
+			const EREDRIVEOPEN: i32 = -6;
+			for _ in 0..7 {
+				match open() {
+					Err(e) if e.raw_os_error() == Some(EREDRIVEOPEN) => {},
+					result => return result,
+				}
+			}
+		}
+		open()
+	}
+
 	/// A new pty pair, close-on-exec, with window size `size` if given:
 	/// `(master, slave, slave name)`.
 	pub fn open_pty(size: Option<TtyInfo>) -> io::Result<(OwnedFd, OwnedFd, BString)> {
@@ -485,11 +503,14 @@ mod unix {
 		let wsp = ws
 			.as_ref()
 			.map_or(ptr::null_mut(), |w| ptr::from_ref(w).cast_mut());
-		// SAFETY: both out pointers are valid; a null name and termios are
-		// allowed; `wsp` is null or points at a live winsize.
-		check(unsafe {
-			libc::openpty(&raw mut m, &raw mut s, ptr::null_mut(), ptr::null_mut(), wsp.cast())
-		})?;
+		let open = || {
+			// SAFETY: both out pointers are valid; a null name and termios are
+			// allowed; `wsp` is null or points at a live winsize.
+			check(unsafe {
+				libc::openpty(&raw mut m, &raw mut s, ptr::null_mut(), ptr::null_mut(), wsp.cast())
+			})
+		};
+		redrive_pty_open(open)?;
 		// SAFETY: openpty created both descriptors; nothing else owns them.
 		let (m, s) = unsafe { (OwnedFd::from_raw_fd(m), OwnedFd::from_raw_fd(s)) };
 		for fd in [m.as_raw_fd(), s.as_raw_fd()] {
@@ -590,6 +611,53 @@ mod unix {
 
 		use super::*;
 
+		#[cfg(target_os = "macos")]
+		#[test]
+		fn pty_open_redrives_only_the_kernel_clone_race() {
+			let mut attempts = 0;
+			redrive_pty_open(|| {
+				attempts += 1;
+				if attempts < 3 {
+					Err(io::Error::from_raw_os_error(-6))
+				} else {
+					Ok(())
+				}
+			})
+			.unwrap();
+			assert_eq!(attempts, 3);
+
+			let mut attempts = 0;
+			let err = redrive_pty_open(|| {
+				attempts += 1;
+				Err(io::Error::from_raw_os_error(-6))
+			})
+			.unwrap_err();
+			assert_eq!(attempts, 8);
+			assert_eq!(err.raw_os_error(), Some(-6));
+
+			let mut attempts = 0;
+			let err = redrive_pty_open(|| {
+				attempts += 1;
+				Err(io::Error::from_raw_os_error(libc::ENOENT))
+			})
+			.unwrap_err();
+			assert_eq!(attempts, 1);
+			assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+		}
+
+		#[cfg(not(target_os = "macos"))]
+		#[test]
+		fn pty_open_does_not_redrive_errors_on_other_platforms() {
+			let mut attempts = 0;
+			let err = redrive_pty_open(|| {
+				attempts += 1;
+				Err(io::Error::from_raw_os_error(-6))
+			})
+			.unwrap_err();
+			assert_eq!(attempts, 1);
+			assert_eq!(err.raw_os_error(), Some(-6));
+		}
+
 		#[test]
 		fn termios_round_trips_through_a_pty() {
 			let (m, s, name) = open_pty(Some(TtyInfo { rows: 30, cols: 100 })).unwrap();
@@ -633,7 +701,9 @@ mod unix {
 /// them, so an embedding process gets its terminal back as it was; it
 /// always does when dropped during a panic. Ptys the shell opened itself
 /// (`zpty`) are never held or restored: their master must see the hang-up
-/// when their program ends.
+/// when their program ends. Nor are they drained before a mode change:
+/// the engine reads their masters itself, so `TCSADRAIN` would wait on
+/// the read it blocks.
 #[derive(Default)]
 pub struct NativeTerminal {
 	#[cfg(unix)]
@@ -641,6 +711,9 @@ pub struct NativeTerminal {
 	/// The device of the terminal [`Terminal::open_controlling`] opened.
 	#[cfg(unix)]
 	shtty:   Option<libc::dev_t>,
+	/// The devices of the ptys [`Terminal::open_pty`] opened.
+	#[cfg(unix)]
+	ptys:    Vec<libc::dev_t>,
 	/// The console (whose modes always go back: it is shared with the
 	/// shell that started this one).
 	#[cfg(windows)]
@@ -659,6 +732,8 @@ impl NativeTerminal {
 			guards: Vec::new(),
 			#[cfg(unix)]
 			shtty: None,
+			#[cfg(unix)]
+			ptys: Vec::new(),
 			#[cfg(windows)]
 			console: crate::sys::console::WindowsConsole::new(),
 			restore,
@@ -718,6 +793,15 @@ impl Terminal for NativeTerminal {
 			let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 			self.guards.push(TermiosGuard::save(borrowed)?);
 		}
+		// A pty processes output as it is written: changing its modes at
+		// once leaves what is queued as draining first would.
+		let when = if when == SetWhen::Drain
+			&& unix::device(fd).is_some_and(|dev| self.ptys.contains(&dev))
+		{
+			SetWhen::Now
+		} else {
+			when
+		};
 		set_attrs(fd, attrs, when)
 	}
 
@@ -768,7 +852,14 @@ impl Terminal for NativeTerminal {
 	}
 
 	fn open_pty(&mut self, size: Option<TtyInfo>) -> io::Result<Pty> {
+		use std::os::fd::AsRawFd;
 		let (master, slave, name) = open_pty(size)?;
+		// Device numbers come back as ptys are reused: one entry each.
+		if let Some(dev) = unix::device(slave.as_raw_fd())
+			&& !self.ptys.contains(&dev)
+		{
+			self.ptys.push(dev);
+		}
 		Ok(Pty { master: file(master), slave: file(slave), name })
 	}
 }

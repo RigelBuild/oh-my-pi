@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-utils",
-	"version": "18.18.3-rigel.11",
+	"version": "18.22.2",
 	"description": "Shared utilities for pi packages",
 	"keywords": [
 		"cli",
@@ -16,7 +16,7 @@
 	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/RigelBuild/oh-my-pi.git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
 		"directory": "packages/utils"
 	},
 	"files": [
@@ -52,8 +52,7 @@
 	},
 	"dependencies": {
 		"@oh-my-pi/omptype": "catalog:",
-		"@oh-my-pi/pi-natives": "catalog:",
-		"yaml": "catalog:"
+		"@oh-my-pi/pi-natives": "catalog:"
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:"

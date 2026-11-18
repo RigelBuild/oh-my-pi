@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.18.3-rigel.11",
+	"version": "18.22.2",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -21,7 +21,7 @@
 	],
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/RigelBuild/oh-my-pi.git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
 		"directory": "packages/coding-agent"
 	},
 	"bin": {
@@ -51,10 +51,6 @@
 		".": {
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
-		},
-		"./build": {
-			"types": "./src/build/legacy-pi-virtual-module.ts",
-			"import": "./src/build/legacy-pi-virtual-module.ts"
 		},
 		"./*": {
 			"types": "./src/*.ts",
@@ -283,6 +279,22 @@
 		"./extensibility/plugins/marketplace/*": {
 			"types": "./src/extensibility/plugins/marketplace/*.ts",
 			"import": "./src/extensibility/plugins/marketplace/*.ts"
+		},
+		"./disasm": {
+			"types": "./src/disasm/index.ts",
+			"import": "./src/disasm/index.ts"
+		},
+		"./disasm/*": {
+			"types": "./src/disasm/*.ts",
+			"import": "./src/disasm/*.ts"
+		},
+		"./ghidra": {
+			"types": "./src/ghidra/index.ts",
+			"import": "./src/ghidra/index.ts"
+		},
+		"./ghidra/*": {
+			"types": "./src/ghidra/*.ts",
+			"import": "./src/ghidra/*.ts"
 		},
 		"./ida": {
 			"types": "./src/ida/index.ts",

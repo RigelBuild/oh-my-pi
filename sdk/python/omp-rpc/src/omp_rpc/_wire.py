@@ -93,8 +93,8 @@ _MESSAGE_UPDATES_VALUES: Final[frozenset[str]] = frozenset({"full", "delta"})
 _decode_message_updates = cast("Decoder[MessageUpdates]", literal(_MESSAGE_UPDATES_VALUES))
 
 
-TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned", "blocked"]
-_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned", "blocked"})
+TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
+_TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "abandoned"})
 _decode_todo_status = cast("Decoder[TodoStatus]", literal(_TODO_STATUS_VALUES))
 
 
@@ -557,8 +557,6 @@ class ModelInfo:
 class TodoItem:
     content: str
     status: TodoStatus
-    blocker: str | None = None
-    """What a `blocked` task is waiting on."""
     details: str | None = None
     notes: tuple[str, ...] | None = None
 
@@ -669,7 +667,7 @@ class SessionState:
     message_count: int = 0
     queued_message_count: int = 0
     has_pending_async_work: bool = False
-    """Background jobs or deliveries can still inject a follow-up and wake the session."""
+    """Background jobs, their deliveries, child agents or queued peer messages can still wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
     queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))
@@ -713,6 +711,16 @@ class BashResult:
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
+    fork: ShellForkOutcome | None = None
+    """Set when the command overlapped another one on the session's persistent shell and ran in a fork of it."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ShellForkOutcome:
+    carried: bool
+    """What the command set carried back into the session's shell; `false`: it stayed in the fork."""
+    jobs: bool
+    """It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1506,6 +1514,14 @@ class SelectUiRequest:
     title: str
     options: tuple[str, ...]
     option_details: tuple[SelectOptionDetail, ...] | None = None
+    initial_index: int | None = None
+    """Index into `options` to focus first."""
+    selection_marker: Literal["radio", "checkbox"] | None = None
+    """Marker style for the first `markableCount` options."""
+    checked_indices: tuple[int, ...] | None = None
+    """For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."""
+    markable_count: int | None = None
+    """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
 
 
@@ -1542,7 +1558,7 @@ class EditorUiRequest:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskUiRequest:
-    """Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it."""
+    """Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."""
     type: Literal["extension_ui_request"] = "extension_ui_request"
     id: str
     method: Literal["ask"] = "ask"
@@ -1623,6 +1639,14 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
     title: str | None = None
     options: tuple[str, ...] | None = None
     option_details: tuple[SelectOptionDetail, ...] | None = None
+    initial_index: int | None = None
+    """Index into `options` to focus first."""
+    selection_marker: Literal["radio", "checkbox"] | None = None
+    """Marker style for the first `markableCount` options."""
+    checked_indices: tuple[int, ...] | None = None
+    """For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option."""
+    markable_count: int | None = None
+    """Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set."""
     timeout: int | None = None
     message: str | None = None
     placeholder: str | None = None
@@ -1646,7 +1670,7 @@ class ExtensionUiRequest(ExtensionUiRequestMixin):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class AskAnswer:
-    """Answer to one `ask` question: exact option labels, plus optional free text."""
+    """Answer to one `ui.askDialog` question: exact option labels, plus optional free text."""
     id: str
     selected_options: tuple[str, ...]
     custom_input: str | None = None
@@ -1937,7 +1961,6 @@ def parse_todo_item(value: object, path: str = "TodoItem") -> TodoItem:
     return TodoItem(
         content=required(payload, "content", decode_str, path),
         status=required(payload, "status", _decode_todo_status, path),
-        blocker=optional(payload, "blocker", decode_str, path),
         details=optional(payload, "details", decode_str, path),
         notes=optional(payload, "notes", array(decode_str), path),
     )
@@ -2088,6 +2111,15 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
+        fork=optional(payload, "fork", parse_shell_fork_outcome, path),
+    )
+
+
+def parse_shell_fork_outcome(value: object, path: str = "ShellForkOutcome") -> ShellForkOutcome:
+    payload = expect_object(value, path)
+    return ShellForkOutcome(
+        carried=required(payload, "carried", decode_bool, path),
+        jobs=required(payload, "jobs", decode_bool, path),
     )
 
 
@@ -2986,6 +3018,10 @@ def parse_select_ui_request(value: object, path: str = "SelectUiRequest") -> Sel
         title=required(payload, "title", decode_str, path),
         options=required(payload, "options", array(decode_str), path),
         option_details=optional(payload, "optionDetails", array(parse_select_option_detail), path),
+        initial_index=optional(payload, "initialIndex", decode_int, path),
+        selection_marker=optional(payload, "selectionMarker", cast('Decoder[Literal["radio", "checkbox"]]', literal(frozenset({"radio", "checkbox"}))), path),
+        checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
+        markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
     )
 
@@ -3123,6 +3159,10 @@ def parse_extension_ui_request(value: object, path: str = "ExtensionUiRequest") 
         title=optional(payload, "title", decode_str, path),
         options=optional(payload, "options", array(decode_str), path),
         option_details=optional(payload, "optionDetails", array(parse_select_option_detail), path),
+        initial_index=optional(payload, "initialIndex", decode_int, path),
+        selection_marker=optional(payload, "selectionMarker", cast('Decoder[Literal["radio", "checkbox"]]', literal(frozenset({"radio", "checkbox"}))), path),
+        checked_indices=optional(payload, "checkedIndices", array(decode_int), path),
+        markable_count=optional(payload, "markableCount", decode_int, path),
         timeout=optional(payload, "timeout", decode_int, path),
         message=optional(payload, "message", decode_str, path),
         placeholder=optional(payload, "placeholder", decode_str, path),
@@ -4154,6 +4194,7 @@ __all__ = [
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
+    "ShellForkOutcome",
     "SlashCommandInput",
     "SlashCommandSource",
     "SlashSubcommand",
@@ -4334,6 +4375,7 @@ __all__ = [
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
+    "parse_shell_fork_outcome",
     "parse_slash_command_input",
     "parse_slash_subcommand",
     "parse_subagent_event",

@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "18.18.3-rigel.11",
+  "version": "18.22.2",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
@@ -8,7 +8,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RigelBuild/oh-my-pi.git",
+    "url": "git+https://github.com/can1357/oh-my-pi.git",
     "directory": "packages/natives"
   },
   "bugs": {

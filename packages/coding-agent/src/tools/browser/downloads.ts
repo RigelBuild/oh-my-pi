@@ -274,26 +274,19 @@ export class DownloadManager {
 				source = await this.#savedPath(pending.guid);
 			} catch (error) {
 				// A relay tab tracks downloads from the moment it opens, so this can fail before any wait: keep it for the next.
-				const failure = new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`);
-				const waiter = this.#waiters.shift();
-				if (!waiter) {
-					this.#unclaimed.push({ error: failure });
-					return;
-				}
-				if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-				waiter.reject(failure);
+				this.#settleFailure(new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`));
 				return;
 			}
 		}
-		let sourceFound = false;
-		for (let attempt = 0; attempt < 100; attempt++) {
-			try {
-				await fs.stat(source);
-				sourceFound = true;
-				break;
-			} catch {
-				await Bun.sleep(10);
-			}
+		// Chromium saves on its own machine: a browser reached through an `app` CDP URL may run on another one.
+		const sourceFound = await savedFileAppears(source);
+		if (!sourceFound) {
+			this.#settleFailure(
+				new ToolError(
+					`Download failed: ${pending.url}: the browser finished it, but no file is at ${source} on this machine`,
+				),
+			);
+			return;
 		}
 		const report = (downloadPath: string) =>
 			this.#deliver({
@@ -352,10 +345,31 @@ export class DownloadManager {
 		else waiter.resolve({ ...outcome.download });
 	}
 
+	/** Fail the next wait with `failure`, or keep it for the next wait when none is waiting yet. */
+	#settleFailure(failure: ToolError): void {
+		this.#deliver({ error: failure });
+	}
+
 	#removeWaiter(waiter: DownloadWaiter): void {
 		const index = this.#waiters.indexOf(waiter);
 		if (index >= 0) this.#waiters.splice(index, 1);
 	}
+}
+
+/**
+ * Whether a regular file shows at `file` within about a second, the time Chromium's rename into place can take.
+ * Anything else already there, such as a directory, is no download.
+ */
+async function savedFileAppears(file: string): Promise<boolean> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			return (await fs.stat(file)).isFile();
+		} catch (error) {
+			if (!isEnoent(error)) return false;
+		}
+		await Bun.sleep(10);
+	}
+	return false;
 }
 
 /** Whether `source` is a regular file, not a symlink or directory, saved under a UUID-shaped download GUID. */

@@ -1,6 +1,7 @@
 mod screen_capture_kit;
 
 use std::{
+	collections::HashMap,
 	ffi::c_void,
 	mem,
 	ptr::{self, NonNull},
@@ -361,7 +362,7 @@ pub(super) fn window_by_id(id: &str) -> CoreResult<DesktopWindow> {
 		.ok_or_else(missing)
 }
 
-type WindowDictionary = CFDictionary<CFString, CFType>;
+pub(super) type WindowDictionary = CFDictionary<CFString, CFType>;
 
 /// Reads each window from one immutable Quartz snapshot; individual xcap
 /// property getters would re-enumerate the whole desktop for every field.
@@ -387,9 +388,7 @@ fn window_snapshot(target: Option<u32>, owner: Option<u32>) -> CoreResult<Vec<De
 	let mut active = Vec::new();
 	// SAFETY: This copy-rule snapshot remains alive and is never mutated.
 	for dictionary in unsafe { snapshot.iter_unchecked() } {
-		// SAFETY: The CoreGraphics key constant is process-lived.
-		let sharing = window_number(dictionary, unsafe { kCGWindowSharingState });
-		if capture_granted && matches!(sharing, None | Some(0)) {
+		if !shared(dictionary, capture_granted) {
 			continue;
 		}
 		let Some((id, window)) = window_metadata(dictionary) else {
@@ -450,21 +449,41 @@ pub(in crate::desktop) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> 
 /// minimized ones and ones the application keeps ordered out. `None` when the
 /// list cannot be read.
 pub(in crate::desktop) fn normal_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
+	normal_windows(Some(pid), |id, _| id)
+}
+
+/// Titles of normal-layer windows across all Spaces, including hidden and
+/// minimized windows, so becoming visible is not mistaken for creation.
+pub(in crate::desktop) fn window_titles() -> Option<HashMap<String, String>> {
+	normal_windows(None, |id, dictionary| {
+		// SAFETY: The CoreGraphics key constant is process-lived.
+		(id.to_string(), window_string(dictionary, unsafe { kCGWindowName }))
+	})
+}
+
+/// Reads the normal-layer snapshot once, optionally restricted to an owner.
+/// Both the identity and title views share the same filtering and checked ids.
+fn normal_windows<T, C: FromIterator<T>>(
+	owner: Option<libc::pid_t>,
+	mut read: impl FnMut(u32, &WindowDictionary) -> T,
+) -> Option<C> {
 	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0)?;
 	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
 	// documented window keys are CFStrings and whose values are CFTypes.
 	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
-	let pid = i64::from(pid);
-	// SAFETY: This copy-rule snapshot remains alive and is never mutated; the
-	// CoreGraphics key constants are process-lived.
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated;
+	// the CoreGraphics key constants are process-lived.
 	Some(
 		unsafe { snapshot.iter_unchecked() }
 			.filter_map(|dictionary| unsafe {
-				(window_number(dictionary, kCGWindowOwnerPID) == Some(pid)
-					&& window_number(dictionary, kCGWindowLayer) == Some(0))
-				.then(|| window_number(dictionary, kCGWindowNumber))
-				.flatten()
-				.and_then(|id| u32::try_from(id).ok())
+				if window_number(dictionary, kCGWindowLayer) != Some(0)
+					|| owner.is_some_and(|pid| {
+						window_number(dictionary, kCGWindowOwnerPID) != Some(i64::from(pid))
+					}) {
+					return None;
+				}
+				let id = u32::try_from(window_number(dictionary, kCGWindowNumber)?).ok()?;
+				Some(read(id, dictionary))
 			})
 			.collect(),
 	)
@@ -524,27 +543,29 @@ pub(super) fn window_frame(id: u32) -> Option<CGRect> {
 	}
 }
 
-fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<&'a CFType> {
-	// SAFETY: All callers borrow an immutable copy-rule Quartz snapshot.
-	unsafe { dictionary.get_unchecked(key) }
+/// Whether capture sees the record. Without Screen Recording permission,
+/// macOS reports every window's sharing state as none, so the state leaves
+/// windows out only once capture is granted.
+fn shared(dictionary: &WindowDictionary, capture_granted: bool) -> bool {
+	// SAFETY: The CoreGraphics key constant is process-lived.
+	let sharing = window_number(dictionary, unsafe { kCGWindowSharingState });
+	!(capture_granted && matches!(sharing, None | Some(0)))
 }
 
-fn window_number(dictionary: &WindowDictionary, key: &CFString) -> Option<i64> {
-	let number = window_value(dictionary, key)?.downcast_ref::<CFNumber>()?;
-	let mut value = 0i64;
-	// SAFETY: The output is writable storage for the requested signed 64-bit
-	// type.
-	unsafe { number.value(CFNumberType::SInt64Type, ptr::from_mut(&mut value).cast()) }
-		.then_some(value)
+/// Whether `listWindows` reports the record, whose `title` and `app` the
+/// caller has read already: the window roster marks its rows with this.
+pub(super) fn listed(
+	dictionary: &WindowDictionary,
+	capture_granted: bool,
+	title: &str,
+	app: &str,
+) -> bool {
+	shared(dictionary, capture_granted) && listable(dictionary).is_some() && named(title, app)
 }
 
-fn window_string(dictionary: &WindowDictionary, key: &CFString) -> String {
-	window_value(dictionary, key)
-		.and_then(CFType::downcast_ref::<CFString>)
-		.map_or_default(ToString::to_string)
-}
-
-fn window_metadata(dictionary: &WindowDictionary) -> Option<(u32, DesktopWindow)> {
+/// The id and logical bounds of an on-screen record at least
+/// [`MIN_WINDOW_EDGE`] on each side.
+fn listable(dictionary: &WindowDictionary) -> Option<(u32, (i32, i32, u32, u32))> {
 	// SAFETY: The CoreGraphics key constants are process-lived. Typed
 	// downcasts below reject absent or malformed window metadata.
 	unsafe {
@@ -560,31 +581,64 @@ fn window_metadata(dictionary: &WindowDictionary) -> Option<(u32, DesktopWindow)
 		if !CGRectMakeWithDictionaryRepresentation(Some(bounds), &mut rect) {
 			return None;
 		}
-		let (x, y, width, height) = logical_bounds(rect).ok()?;
-		if width < MIN_WINDOW_EDGE || height < MIN_WINDOW_EDGE {
-			return None;
-		}
-		let title = window_string(dictionary, kCGWindowName);
-		let app = window_string(dictionary, kCGWindowOwnerName);
-		if (title.is_empty() && app.is_empty())
-			|| (title == "StatusIndicator" && app == "Window Server")
-		{
-			return None;
-		}
-		let pid =
-			window_number(dictionary, kCGWindowOwnerPID).and_then(|pid| u32::try_from(pid).ok());
-		Some((id, DesktopWindow {
-			id: id.to_string(),
-			title,
-			app,
-			pid,
-			x,
-			y,
-			width,
-			height,
-			focused: false,
-		}))
+		let logical = logical_bounds(rect).ok()?;
+		(logical.2 >= MIN_WINDOW_EDGE && logical.3 >= MIN_WINDOW_EDGE).then_some((id, logical))
 	}
+}
+
+/// Whether the record has a name to list it by, other than the window
+/// server's status indicator.
+fn named(title: &str, app: &str) -> bool {
+	!((title.is_empty() && app.is_empty()) || (title == "StatusIndicator" && app == "Window Server"))
+}
+
+pub(super) fn window_value<'a>(
+	dictionary: &'a WindowDictionary,
+	key: &CFString,
+) -> Option<&'a CFType> {
+	// SAFETY: All callers borrow an immutable copy-rule Quartz snapshot.
+	unsafe { dictionary.get_unchecked(key) }
+}
+
+pub(super) fn window_number(dictionary: &WindowDictionary, key: &CFString) -> Option<i64> {
+	let number = window_value(dictionary, key)?.downcast_ref::<CFNumber>()?;
+	let mut value = 0i64;
+	// SAFETY: The output is writable storage for the requested signed 64-bit
+	// type.
+	unsafe { number.value(CFNumberType::SInt64Type, ptr::from_mut(&mut value).cast()) }
+		.then_some(value)
+}
+
+pub(super) fn window_string(dictionary: &WindowDictionary, key: &CFString) -> String {
+	window_value(dictionary, key)
+		.and_then(CFType::downcast_ref::<CFString>)
+		.map_or_default(ToString::to_string)
+}
+
+fn window_metadata(dictionary: &WindowDictionary) -> Option<(u32, DesktopWindow)> {
+	let (id, (x, y, width, height)) = listable(dictionary)?;
+	// SAFETY: The CoreGraphics key constants are process-lived.
+	let (title, app, pid) = unsafe {
+		(
+			window_string(dictionary, kCGWindowName),
+			window_string(dictionary, kCGWindowOwnerName),
+			window_number(dictionary, kCGWindowOwnerPID),
+		)
+	};
+	if !named(&title, &app) {
+		return None;
+	}
+	Some((id, DesktopWindow {
+		id: id.to_string(),
+		title,
+		app,
+		pid: pid.and_then(|pid| u32::try_from(pid).ok()),
+		x,
+		y,
+		width,
+		height,
+		focused: false,
+	}))
 }
 
 fn scaled_edge(value: u32, scale: f64) -> u32 {
@@ -636,7 +690,100 @@ fn logical_bounds(bounds: CGRect) -> CoreResult<(i32, i32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-	use super::key_window;
+	use objc2_core_foundation::{
+		CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+	};
+	use objc2_core_graphics::{
+		CGRectCreateDictionaryRepresentation, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowName,
+		kCGWindowNumber, kCGWindowOwnerName, kCGWindowSharingState,
+	};
+
+	use super::{WindowDictionary, key_window, listed, shared, window_metadata};
+
+	struct Record {
+		onscreen: bool,
+		size:     f64,
+		sharing:  Option<i64>,
+		title:    &'static str,
+		app:      &'static str,
+	}
+
+	const ORDINARY: Record = Record {
+		onscreen: true,
+		size:     200.0,
+		sharing:  Some(1),
+		title:    "Notes",
+		app:      "TextEdit",
+	};
+
+	fn dictionary(record: &Record) -> CFRetained<WindowDictionary> {
+		let bounds = CGRectCreateDictionaryRepresentation(CGRect::new(
+			CGPoint::new(10.0, 20.0),
+			CGSize::new(record.size, record.size),
+		));
+		let number = CFNumber::new_i64(41);
+		let sharing = record.sharing.map(CFNumber::new_i64);
+		let title = CFString::from_str(record.title);
+		let app = CFString::from_str(record.app);
+		// SAFETY: The CoreGraphics key constants are process-lived.
+		let mut keys: Vec<&CFString> = unsafe {
+			vec![
+				kCGWindowIsOnscreen,
+				kCGWindowNumber,
+				kCGWindowBounds,
+				kCGWindowName,
+				kCGWindowOwnerName,
+			]
+		};
+		let mut values: Vec<&CFType> =
+			vec![CFBoolean::new(record.onscreen), &number, &bounds, &title, &app];
+		if let Some(sharing) = &sharing {
+			// SAFETY: As above.
+			keys.push(unsafe { kCGWindowSharingState });
+			values.push(sharing);
+		}
+		CFDictionary::from_slices(&keys, &values)
+	}
+
+	/// The roster's `listed` must be exactly the capture snapshot's own rule, so
+	/// `listWindows` and `computer.window(id)` find every window the roster
+	/// marks listed and no other.
+	#[test]
+	fn listed_is_the_capture_snapshot_rule() {
+		let records = [
+			ORDINARY,
+			Record { sharing: Some(0), ..ORDINARY },
+			Record { sharing: None, ..ORDINARY },
+			Record { onscreen: false, ..ORDINARY },
+			Record { size: 10.0, ..ORDINARY },
+			Record { title: "", app: "", ..ORDINARY },
+			Record { title: "StatusIndicator", app: "Window Server", ..ORDINARY },
+		];
+		let expected = [
+			// capture granted, not granted
+			(true, true),
+			(false, true),
+			(false, true),
+			(false, false),
+			(false, false),
+			(false, false),
+			(false, false),
+		];
+		for (record, (granted, ungranted)) in records.iter().zip(expected) {
+			let dictionary = dictionary(record);
+			for (capture_granted, want) in [(true, granted), (false, ungranted)] {
+				let captured =
+					shared(&dictionary, capture_granted) && window_metadata(&dictionary).is_some();
+				assert_eq!(captured, want, "capture rule, granted={capture_granted}, {}", record.title);
+				assert_eq!(
+					listed(&dictionary, capture_granted, record.title, record.app),
+					captured,
+					"roster rule, granted={capture_granted}, {}",
+					record.title,
+				);
+			}
+		}
+	}
 
 	#[test]
 	fn key_window_is_the_accessibility_focused_window_not_the_frontmost() {

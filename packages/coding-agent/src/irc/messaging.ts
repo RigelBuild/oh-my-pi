@@ -1,11 +1,8 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
-import { advisoryMessage } from "./advisory";
 import { AdvisoryHub } from "../task/advisory-hub";
 import { parseReportInput } from "../task/advisory-report";
-import { escapeHarnessTags } from "../session/harness-tags";
 import { IrcBus } from "./bus";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -22,37 +19,6 @@ export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	if (taskDepth > 0) return true;
 	const maxDepth = cfgTaskMaxRecursionDepth.get(settings);
 	return canSpawnAtDepth(maxDepth, taskDepth);
-}
-
-export function formatIncoming(msg: IrcMessage): string {
-	const replyTag = msg.replyTo ? ` (reply to ${msg.replyTo})` : "";
-	const progressTag = msg.progress ? " (progress; reply follows)" : "";
-	return `[${msg.id}] ${msg.from}${replyTag}${progressTag}: ${escapeHarnessTags(msg.body)}`;
-}
-
-/** Takes every message buffered in `senderId`'s session inbox before automatic injection; with `ifAny`, none unless one satisfies it. */
-export function drainPendingInbox(
-	registry: AgentRegistryApi,
-	senderId: string,
-	ifAny?: (msg: IrcMessage) => boolean,
-): IrcMessage[] {
-	const session = registry.get(senderId)?.session;
-	return typeof session?.drainPendingIrcInboxMessages === "function"
-		? session.drainPendingIrcInboxMessages(senderId, ifAny ? { ifAny } : undefined)
-		: [];
-}
-
-/** `wait` result carrying the consumed messages, oldest first. */
-export function messageResult(senderId: string, waited: IrcMessage[]): AgentToolResult<CoordinationDetails> {
-	return {
-		content: [{ type: "text", text: waited.map(formatIncoming).join("\n\n") }],
-		details: {
-			op: "wait",
-			from: senderId,
-			waited,
-			...(waited.some(message => message.advisoryBinding) ? { advisory: true, [advisoryMessage]: waited } : {}),
-		},
-	};
 }
 
 /** Send a direct message or, from a top-level agent only, a broadcast; delivery never waits for a reply. */

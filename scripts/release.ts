@@ -305,7 +305,7 @@ export function parseVersion(v: string): [number, number, number] {
 	return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
 }
 
-export function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
+function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
 	const [major, minor, patch] = parseVersion(current);
 	if (bump === "patch" && /-canary\.\d+$/.test(current)) {
 		return `${major}.${minor}.${patch}`;
@@ -320,7 +320,7 @@ export function bumpVersion(current: string, bump: "major" | "minor" | "patch"):
 	}
 }
 
-export function bumpCanaryVersion(current: string): string {
+function bumpCanaryVersion(current: string): string {
 	const [major, minor, patch] = parseVersion(current);
 	const canaryMatch = current.match(/-canary\.(\d+)$/);
 	if (canaryMatch) {

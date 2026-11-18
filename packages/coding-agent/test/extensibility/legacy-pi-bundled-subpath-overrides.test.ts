@@ -2,11 +2,11 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
-import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
+import { createLegacyPiVirtualModulePlugin } from "../../scripts/legacy-pi-virtual-module";
 import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "@oh-my-pi/pi-coding-agent/build";
-import type { BundledPiEntry } from "@oh-my-pi/pi-coding-agent/build";
+import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
+import type { BundledPiEntry } from "../../scripts/legacy-pi-virtual-module";
 
 const bundledEntries = await collectBundledPiEntries();
 const bundledModuleKeys = new Set(bundledEntries.map(entry => entry.key));
@@ -428,7 +428,7 @@ export const observed = { role: actionBar([actionButton("Go", "go")]).p.role, li
 			await Bun.write(path.join(packageRoot, "probe.ts"), `export const probe = ${JSON.stringify(packageName)};`);
 		}
 
-		const entries = await collectBundledPiEntries(fakePackageDir);
+		const entries = await collectBundledPiEntries({ packageDir: fakePackageDir, repoRoot: tempDir.path() });
 		const entryByKey = new Map(entries.map(entry => [entry.key, entry]));
 		expect(entries.every(entry => entry.key === "typebox" || entry.key.startsWith("@oh-my-pi/pi-"))).toBe(true);
 		expect(entryByKey.get("@oh-my-pi/pi-agent-core")?.importSpecifier).toBe("@rigelbuild/omp-agent-core");

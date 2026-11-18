@@ -148,45 +148,6 @@ describe("foreignThinkingReplay drop: Bedrock Claude (review r288-1 #3)", () => 
 	});
 });
 
-describe("foreignThinkingReplay drop: documented alias limit (docs/settings.md)", () => {
-	it("keeps demotion for an opaque Bedrock ARN, whose id hides the Claude class", async () => {
-		const arnModel = buildModel({
-			id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/company-claude",
-			name: "Opaque profile",
-			api: "bedrock-converse-stream",
-			provider: "amazon-bedrock",
-			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 8_192,
-		} as ModelSpec<"bedrock-converse-stream">);
-		const context: Context = {
-			messages: [
-				userTurn,
-				gptTurn([
-					{ type: "thinking", thinking: FOREIGN, thinkingSignature: "" },
-					{ type: "text", text: VISIBLE },
-				]),
-				nextUser,
-			],
-		};
-		const controller = new AbortController();
-		controller.abort();
-		const { promise, resolve } = Promise.withResolvers<unknown>();
-		void streamBedrock(arnModel, context, {
-			bearerToken: "test-token",
-			signal: controller.signal,
-			maxTokens: 16,
-			foreignThinkingReplay: "drop",
-			onPayload: payload => resolve(payload),
-		});
-		const wire = JSON.stringify(await promise);
-		expect(wire).toContain(FOREIGN);
-	});
-});
-
 describe("foreignThinkingReplay drop: Anthropic-compatible source turn (review r288-1 #5)", () => {
 	it("drops unsigned thinking from a non-Claude anthropic-messages source for a Claude target", async () => {
 		const bodies: unknown[] = [];
@@ -288,6 +249,36 @@ describe("foreignThinkingReplay drop: native replay on a non-signing Claude host
 		const wire = JSON.stringify(bodies[0]);
 		expect(wire).toContain(SIGNED);
 		expect(wire).toContain("sig_same_model");
+	});
+
+	// A whitespace signature is truthy, so transform keeps the block under drop; the encoder's trim() check then sees it as unsigned beside the signed block.
+	it("drops unsigned thinking that sits beside signed thinking on a same-model turn under drop", async () => {
+		const SIGNED = "SAME-MODEL-SIGNED-REASONING";
+		const UNSIGNED = "UNSIGNED-BESIDE-SIGNED";
+		const sameModelTurn: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: SIGNED, thinkingSignature: "sig_same_model" },
+				{ type: "thinking", thinking: UNSIGNED, thinkingSignature: "   " },
+				{ type: "text", text: VISIBLE },
+			],
+			api: "anthropic-messages",
+			provider: "litellm",
+			model: "claude-sonnet-4-5",
+			usage: usage(),
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const bodies: unknown[] = [];
+		await streamSimple(
+			claudeNonSigningHost(),
+			{ messages: [userTurn, sameModelTurn, nextUser] },
+			{ apiKey: "k", fetch: captureFetch(bodies), foreignThinkingReplay: "drop" },
+		).result();
+		const wire = JSON.stringify(bodies[0]);
+		expect(wire).toContain(SIGNED);
+		expect(wire).not.toContain(UNSIGNED);
+		expect(wire).toContain(VISIBLE);
 	});
 });
 
