@@ -251,7 +251,6 @@ describe("worker init payload staging folder", () => {
 				browser,
 				targetId: TARGET_ID,
 				kindTag: browser.kind.kind,
-				activateForScreenshot: true,
 			} as unknown as WorkerTabSession);
 		const headless = handle({ kind: "headless", headless: true }, endpoint(), {
 			sharedDaemon: { name: "omp.browser.headless", projectDir: "/tmp/omp-project" },

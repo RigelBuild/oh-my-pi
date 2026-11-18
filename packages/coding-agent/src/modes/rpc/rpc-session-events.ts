@@ -4,6 +4,7 @@
  */
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import type { AgentSessionEvent } from "../../session/agent-session";
+import { toWireEvent, type WireSessionEvent } from "../../session/loop-end-wire";
 import type {
 	RpcAgentSessionEventFrame,
 	RpcDeltaAssistantMessageEvent,
@@ -100,7 +101,7 @@ export class RpcSessionEventForwarder {
 
 	forward(event: AgentSessionEvent): void {
 		if (event.type === "message_persisted") return;
-		const frame = this.#stamp(event);
+		const frame = this.#stamp(toWireEvent(event));
 		if (this.#filter && !this.#filter.has(frame.type)) return;
 		if (frame.type === "message_update" && this.#messageUpdates === "delta") {
 			this.#output({
@@ -113,7 +114,7 @@ export class RpcSessionEventForwarder {
 		this.#output(frame);
 	}
 
-	#stamp(event: Exclude<AgentSessionEvent, { type: "message_persisted" }>): RpcAgentSessionEventFrame {
+	#stamp(event: WireSessionEvent): RpcAgentSessionEventFrame {
 		switch (event.type) {
 			case "message_start": {
 				const messageId = this.#mintMessageId();

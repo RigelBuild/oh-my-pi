@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-ai",
-	"version": "18.18.3-rigel.11",
+	"version": "18.22.2",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"keywords": [
 		"ai",
@@ -85,7 +85,6 @@
 			"types": "./src/compass/index.ts",
 			"import": "./src/compass/index.ts"
 		},
-
 		"./auth-broker/*": {
 			"types": "./src/auth-broker/*.ts",
 			"import": "./src/auth-broker/*.ts"

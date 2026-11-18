@@ -50,6 +50,7 @@ import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { isLoopbackHost, parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
+import { applyCallerTrust } from "./caller-options";
 import { type AuthGatewayClientScope, AuthGatewayClientTable } from "./clients";
 import {
 	type AuthGatewayBootOptions,
@@ -85,7 +86,6 @@ import {
 } from "./failover";
 import {
 	callerSessionId,
-	captureRequestHeaders,
 	corsHeaders,
 	gatewayResponseHeaders,
 	hasMisplacedBearer,
@@ -376,6 +376,7 @@ function incompatibleAttempt(message: string): AttemptStart {
 async function prepareFormatAttempt(
 	route: { module: FormatModule; label: string },
 	bootOpts: AuthGatewayRouteOptions,
+	req: Request,
 	parsed: ParsedFormatRequest,
 	model: Model<Api>,
 	sessionId: string,
@@ -420,6 +421,9 @@ async function prepareFormatAttempt(
 	if ("status" in apiKey) return { ok: false, reason: apiKey.setupReason, failure: apiKey };
 
 	const streamOpts = buildStreamOptions(parsed, model, signal);
+	// Only the upstream-bound options: `encodeStream` reads the caller's parsed
+	// request, and the Anthropic encoder answers its `anthropic-beta`.
+	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	const logContext = gatewayLogContext(requestId, caller, route.label, model.provider, model.id);
 	const limitObserver = gatewayApiKeyLimitObserver(bootOpts, model, logContext);
@@ -544,8 +548,7 @@ async function preparePiNativeAttempt(
 		delete streamOpts.frequencyPenalty;
 		delete streamOpts.repetitionPenalty;
 	}
-	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...streamOpts.headers };
+	applyCallerTrust(streamOpts, req, bootOpts.client !== undefined);
 	streamOpts.sessionId = sessionId;
 	return { ok: true, streamOpts, lease, account: () => account, resolvedKey: apiKey };
 }
@@ -1133,14 +1136,6 @@ async function handleFormatEndpoint(
 			message.provider = model.provider;
 		}
 	}
-	// Merge gateway-captured passthrough headers under the parser's own
-	// captures. Parsers that set `options.headers` themselves win (they may
-	// have stripped or normalized values); the gateway's allow-list fills in
-	// anything they didn't touch.
-	{
-		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...parsed.options.headers };
-	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
@@ -1178,6 +1173,7 @@ async function handleFormatEndpoint(
 					prepareFormatAttempt(
 						route,
 						bootOpts,
+						req,
 						parsed,
 						candidate,
 						sessionId,
@@ -1198,6 +1194,7 @@ async function handleFormatEndpoint(
 		start = await prepareFormatAttempt(
 			route,
 			bootOpts,
+			req,
 			parsed,
 			model,
 			sessionId,

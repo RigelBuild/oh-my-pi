@@ -114,7 +114,7 @@ interface Edit {
 	text: string;
 }
 
-export interface Options {
+interface Options {
 	maxStatements: number;
 	nameFilter: RegExp | undefined;
 	verbose: boolean;

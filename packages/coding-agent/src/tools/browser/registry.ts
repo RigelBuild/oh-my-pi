@@ -26,7 +26,7 @@ import {
 	removeUserDataDir,
 	type UserAgentOverride,
 } from "./launch";
-import { reapOrphanSharedTargets } from "./orphan-registry";
+import { reapOrphanSharedTargets, type SharedTargetScope } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
@@ -38,21 +38,21 @@ import {
 } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
 import { TernSocketClient } from "./tern/wire";
+import { WebKitHost } from "./webkit/host";
+import type { WebKitKind } from "./webkit/kind";
 
 export type PuppeteerBrowserKind =
 	| {
 			kind: "headless";
 			headless: boolean;
 			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
-			ignoreHttpsErrors?: boolean;
-			/** Process-local file access launch flag, unsupported by an already-running shared browser. */
-			allowFileAccess?: boolean;
+			insecure?: boolean;
 	  }
 	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
 
-export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind;
+export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind | WebKitKind;
 
 export type BrowserKindTag = BrowserKind["kind"];
 
@@ -68,6 +68,7 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	/** Browser-level WebSocket endpoint tab workers attach through. */
 	wsEndpoint: string;
 	cdpUrl?: string;
+	/** The browser's main process, which owns its windows on screen; unknown for connected endpoints and the relay. */
 	pid?: number;
 	/** OMP-owned temp Chromium profile directory removed on dispose (process-local headless launches). */
 	userDataDir?: string;
@@ -90,7 +91,25 @@ export interface TernBrowserHandle extends BrowserHandleCommon {
 	tern: TernSocketClient;
 }
 
-export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle;
+/** omp's own WebKit host process, whose headless web views (one block each) are this handle's tabs. */
+export interface WebKitBrowserHandle extends BrowserHandleCommon {
+	kind: WebKitKind;
+	/** The host process omp started and stops with the handle. */
+	webkit: WebKitHost;
+}
+
+export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle | WebKitBrowserHandle;
+
+/**
+ * Durable-ownership scope for a browser handle, or undefined when the handle is
+ * not the project-shared broker-owned Chromium (the only browser whose targets
+ * outlive their creating process and thus need cross-process orphan reaping).
+ */
+export function sharedTargetScopeOf(handle: BrowserHandle): SharedTargetScope | undefined {
+	if (!("browser" in handle)) return undefined;
+	if (handle.kind.kind !== "headless" || !handle.sharedDaemon) return undefined;
+	return { projectDir: handle.sharedDaemon.projectDir, daemonName: handle.sharedDaemon.name };
+}
 
 /** Controls bounded browser-handle teardown and identifies the owning resource in timeout diagnostics. */
 export interface ReleaseBrowserOptions {
@@ -109,7 +128,7 @@ const pendingOpens = new Map<string, { settled: Promise<void> }>();
 export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
-			return `headless:${kind.headless ? "1" : "0"}:${kind.ignoreHttpsErrors ? "tls" : ""}:${kind.allowFileAccess ? "file" : ""}`;
+			return `headless:${kind.headless ? "1" : "0"}:${kind.insecure ? "tls" : ""}`;
 		case "spawned":
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
@@ -120,6 +139,8 @@ export function browserKey(kind: BrowserKind): string {
 			return `cmux:${kind.socketPath}`;
 		case "tern":
 			return `tern:${kind.socketPath}:${kind.pane}`;
+		case "webkit":
+			return `webkit:${kind.path}`;
 	}
 }
 
@@ -140,7 +161,15 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 		const existing = browsers.get(key);
 		if (existing) {
 			if ("client" in existing) return existing;
-			if ("tern" in existing ? existing.tern.connected : existing.browser.connected) return existing;
+			if (
+				"tern" in existing
+					? existing.tern.connected
+					: "webkit" in existing
+						? existing.webkit.client.connected
+						: existing.browser.connected
+			) {
+				return existing;
+			}
 			browsers.delete(key);
 			await disposeBrowserHandle(existing, { kill: false });
 			continue;
@@ -210,7 +239,7 @@ export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
 	const cdpUrl = rawCdpUrl.replace(/\/+$/, "");
 	if (/^wss?:\/\//i.test(cdpUrl)) {
 		throw new ToolError(
-			"browser app.cdp_url must be the HTTP CDP discovery endpoint (for example http://127.0.0.1:9222), not a ws:// browser websocket URL.",
+			"browser app CDP URL must be the HTTP CDP discovery endpoint (for example http://127.0.0.1:9222), not a ws:// browser websocket URL.",
 		);
 	}
 	return cdpUrl;
@@ -233,6 +262,14 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		await tern.connect();
 		return { key: browserKey(kind), kind, tern, refCount: 0 };
 	}
+	if (kind.kind === "webkit") {
+		return {
+			key: browserKey(kind),
+			kind,
+			webkit: await WebKitHost.launch(kind.path, kind.viewer, opts.signal),
+			refCount: 0,
+		};
+	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI
 		// worker host) MUST go through the project-shared broker-owned Chromium:
@@ -245,10 +282,9 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
-			ignoreHttpsErrors: kind.ignoreHttpsErrors,
-			allowFileAccess: kind.allowFileAccess,
 			signal: opts.signal,
 			timeoutMs: opts.timeoutMs,
+			insecure: kind.insecure,
 		});
 
 		return {
@@ -256,6 +292,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			kind,
 			browser,
 			wsEndpoint,
+			pid: browser.process()?.pid,
 			userDataDir,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
@@ -348,7 +385,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 	const exe = kind.path;
 	if (!path.isAbsolute(exe)) {
 		throw new ToolError(
-			`app.path must be absolute (got ${JSON.stringify(exe)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
+			`app must be an absolute executable path (got ${JSON.stringify(exe)}). Pass the binary inside Foo.app/Contents/MacOS/, not the .app bundle.`,
 		);
 	}
 	const appArgs = kind.args ?? [];
@@ -432,6 +469,11 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		handle.tern.close();
 		return;
 	}
+	if ("webkit" in handle) {
+		// The host is omp's own process whoever asked: it stops with its last tab, `kill` or not.
+		await handle.webkit.close();
+		return;
+	}
 	if (handle.kind.kind === "headless") {
 		if (handle.sharedDaemon) {
 			// The broker owns the Chromium; this process only drops its CDP
@@ -453,8 +495,13 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		// Temp-profile staging is part of the profile cleanup. A process-local
 		// browser without an owned profile stages outside it and needs separate cleanup.
 		const staging = handle.userDataDir ? undefined : stagingDirectoryToRemove(handle);
-		if (handle.browser.connected) await closeLaunchedBrowser(handle.browser);
+		if (handle.browser.connected) {
+			await closeLaunchedBrowser({ browser: handle.browser, userDataDir: handle.userDataDir });
+		}
 		if (staging) await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
+		// our explicit --user-data-dir), so remove it now the process tree has
+		// exited. Tolerant of the Windows lock-held window (issue #7058).
 		if (handle.userDataDir) await removeUserDataDir(handle.userDataDir);
 		return;
 	}
@@ -523,11 +570,6 @@ async function openSharedHeadlessHandle(
 	kind: Extract<PuppeteerBrowserKind, { kind: "headless" }>,
 	opts: AcquireBrowserOptions,
 ): Promise<PuppeteerBrowserHandle> {
-	if (kind.allowFileAccess) {
-		throw new ToolError(
-			"browser.open({ allow_file_access:true }) requires a process-local Chromium launch and cannot be applied to the project-shared browser. Use app.path to launch a dedicated browser.",
-		);
-	}
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	try {
 		const shared = await ensureSharedBrowser({
@@ -563,6 +605,7 @@ async function openSharedHeadlessHandle(
 			kind,
 			browser,
 			wsEndpoint: shared.wsEndpoint,
+			pid: shared.pid,
 			sharedDaemon: { name: shared.daemonName, projectDir: shared.projectDir },
 			refCount: 0,
 			stealth: { browserSession: null, override: null },

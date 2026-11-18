@@ -36,8 +36,7 @@ describe("/changelog", () => {
 				.map(
 					entry =>
 						`## [${entry.major}.${entry.minor}.${entry.patch}${entry.prerelease ? `-${entry.prerelease}` : ""}]`,
-				)
-				.reverse(),
+				),
 		);
 
 		const last = acpRuntime();
@@ -54,13 +53,15 @@ describe("/changelog", () => {
 				.map(
 					entry =>
 						`## [${entry.major}.${entry.minor}.${entry.patch}${entry.prerelease ? `-${entry.prerelease}` : ""}]`,
-				)
-				.reverse(),
+				),
 		);
 
 		const full = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog full", full.runtime);
-		expect(versionHeadings(full.chunks.join("\n")).length).toBe(all.length);
+		const headings = all.map(
+			entry => `## [${entry.major}.${entry.minor}.${entry.patch}${entry.prerelease ? `-${entry.prerelease}` : ""}]`,
+		);
+		expect(versionHeadings(full.chunks.join("\n"))).toEqual(headings);
 	});
 
 	it("rejects a zero count and unknown subcommands", async () => {

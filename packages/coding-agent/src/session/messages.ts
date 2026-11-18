@@ -4,7 +4,7 @@
  * Extends the base AgentMessage type with coding-agent specific message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
-import { type AgentMessage, isProviderRefusalMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, toProviderReplayMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	isCustomMessageContent,
 	type BashExecutionMessage,
@@ -46,6 +46,7 @@ export {
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
+import { calculateContextTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
@@ -605,6 +606,42 @@ export function assistantTurnDelivered(message: Pick<AssistantMessage, "content"
 	return message.content.some(isDeliverableContent);
 }
 
+/**
+ * Occupied context tokens carried by a usage record, using the same accounting
+ * as session compaction ({@link calculateContextTokens}): a provider-reported
+ * `contextTokens` wins; otherwise the billable `totalTokens` (or the bucket
+ * sum when no total is reported) minus provider-side orchestration tokens.
+ * Live `message.usage` payloads and persisted transcript records are loosely
+ * typed, so numeric fields are validated here. Returns 0 when the record
+ * carries no usage signal.
+ */
+export function usageContextTokens(raw: unknown): number {
+	if (!isRecord(raw)) return 0;
+	const field = (record: Record<string, unknown>, key: string): number => {
+		const value = record[key];
+		return typeof value === "number" && Number.isFinite(value) ? value : 0;
+	};
+	const contextTokens = raw.contextTokens;
+	const orchestration = isRecord(raw.orchestration) ? raw.orchestration : undefined;
+	return calculateContextTokens({
+		input: field(raw, "input"),
+		output: field(raw, "output"),
+		cacheRead: field(raw, "cacheRead"),
+		cacheWrite: field(raw, "cacheWrite"),
+		totalTokens: field(raw, "totalTokens"),
+		...(typeof contextTokens === "number" && Number.isFinite(contextTokens) ? { contextTokens } : {}),
+		...(orchestration
+			? {
+					orchestration: {
+						input: field(orchestration, "input"),
+						cacheRead: field(orchestration, "cacheRead"),
+						output: field(orchestration, "output"),
+					},
+				}
+			: {}),
+	});
+}
+
 /** Extract the optional `__queueChipText` field from a CustomMessage's
  *  `details` blob. Safe over `unknown`; returns undefined when the field is
  *  absent or non-string. */
@@ -1124,12 +1161,15 @@ function convertOne(m: AgentMessage, interrupted = false): Message[] {
 				const converted = convertMessageToLlm(wrapSteeringUserMessage(m));
 				return converted ? [converted] : [];
 			}
-			if (isUserInvokedSkillPrompt(m)) {
+			// A user-invoked skill is the user's own turn. An agent message is a user turn
+			// authored by that agent: never tool output, never developer or system authority.
+			const ircIncoming = m.customType === "irc:incoming";
+			if (ircIncoming || isUserInvokedSkillPrompt(m)) {
 				return [
 					{
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
-						attribution: "user",
+						attribution: ircIncoming ? "agent" : "user",
 						timestamp: m.timestamp,
 					},
 				];
@@ -1177,6 +1217,33 @@ function convertOne(m: AgentMessage, interrupted = false): Message[] {
 	}
 }
 
+/**
+ * True when the assistant turn at `messages[index]` is immediately followed by
+ * its hidden `interrupted-thinking` continuity message — the marker that a
+ * trailing thinking run was demoted on user interrupt. The run stays on the
+ * persisted/displayed assistant message; this flag tells the LLM path to drop it.
+ */
+function followedByInterruptedThinking(messages: AgentMessage[], index: number): boolean {
+	const next = messages[index + 1];
+	return next !== undefined && next.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE;
+}
+
+/**
+ * Converts `messages[index]` with its neighbor-sensitive state.
+ * {@link convertToLlm} and {@link convertMessagesForContextView} both go
+ * through here so the viewer cannot drift from the per-message conversion that
+ * gets sent; a filter or reorder added outside this helper must be mirrored in
+ * both.
+ */
+function convertMessageAt(
+	messages: AgentMessage[],
+	index: number,
+	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
+): Message[] {
+	const m = messages[index];
+	return convert(m, m.role === "assistant" && followedByInterruptedThinking(messages, index));
+}
+
 /** A converted viewer message and its position in the source and converted histories. */
 export interface ContextViewMessage {
 	message: Message;
@@ -1189,9 +1256,9 @@ export interface ContextViewMessage {
  * and array conversion caches. Steering messages show the envelope
  * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
  * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
- * through the same conversion path, then drops API-level provider refusals
- * like the send path's `filterProviderReplayMessages`, since they are never
- * replayed.
+ * through {@link convertMessageAt}, then applies the send path's replay policy
+ * (`toProviderReplayMessage`): provider refusals are dropped and provider-error
+ * tool placeholders lose the provider's error text.
  *
  * Kept separate from `convertToLlm` because the viewer needs source indices:
  * reporting them from `convertToLlm` would add a per-message callback and
@@ -1202,13 +1269,9 @@ export function convertMessagesForContextView(messages: AgentMessage[]): Context
 	const modelMessages = wrapSteeringForModel(messages);
 	const result: ContextViewMessage[] = [];
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
-		const next = modelMessages[sourceIndex + 1];
-		for (const message of convertOne(
-			modelMessages[sourceIndex],
-			next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE,
-		)) {
-			if (message.role === "assistant" && isProviderRefusalMessage(message)) continue;
-			result.push({ message, sourceIndex, convertedIndex: result.length });
+		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
+			const replay = toProviderReplayMessage(message);
+			if (replay) result.push({ message: replay, sourceIndex, convertedIndex: result.length });
 		}
 	}
 	return result;
@@ -1249,7 +1312,7 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
 function isAdvisoryBearing(message: AgentMessage): boolean {
 	return (
 		advisoryMessage in message ||
-		((message.role === "custom" || message.role === "toolResult") &&
+		(message.role === "custom" &&
 			isRecord(message.details) &&
 			(message.details.advisory === true || advisoryMessage in message.details))
 	);
@@ -1278,13 +1341,8 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		const metadata = new Map<AgentMessage, IrcMessage | IrcMessage[] | undefined>();
 		const bound: IrcMessage[] = [];
 		for (const message of marked) {
-			const value =
-				advisoryMessage in message
-					? message[advisoryMessage]
-					: message.role === "toolResult" && isRecord(message.details) && advisoryMessage in message.details
-						? message.details[advisoryMessage]
-						: undefined;
-			// SAFETY: only the IRC bridge and wait result attach this symbol.
+			const value = advisoryMessage in message ? message[advisoryMessage] : undefined;
+			// SAFETY: only the IRC bridge attaches this symbol, on its custom irc:incoming record.
 			const entry = value as IrcMessage | IrcMessage[] | undefined;
 			metadata.set(message, entry);
 			if (entry) bound.push(...(Array.isArray(entry) ? entry : [entry]));
@@ -1298,25 +1356,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 				continue;
 			}
 			const entry = metadata.get(message);
-			if (Array.isArray(entry) && message.role === "toolResult") {
-				const current = entry.filter(() => valid[cursor++] === true);
-				safe.push({
-					...message,
-					content: [
-						{
-							type: "text",
-							text: current
-								.map(
-									item =>
-										`[${item.id}] ${item.from}${item.replyTo ? ` (reply to ${item.replyTo})` : ""}${item.progress ? " (progress; reply follows)" : ""}: ${escapeHarnessTags(item.body)}`,
-								)
-								.join("\n\n"),
-						},
-					],
-				});
-			} else if (entry && !Array.isArray(entry) && valid[cursor++]) safe.push(message);
-			else if (message.role === "toolResult")
-				safe.push({ ...message, content: [{ type: "text", text: "" }], details: undefined });
+			if (entry && !Array.isArray(entry) && valid[cursor++]) safe.push(message);
 		}
 		return safe.flatMap((message, index) => {
 			const next = safe[index + 1];

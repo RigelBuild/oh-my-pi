@@ -44,11 +44,9 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
-# Each run gets its own never-cancelled group so a later run cannot cancel a
-# package build mid-way.
 concurrency:
-  group: "${{ github.workflow }}-${{ github.run_id }}"
-  cancel-in-progress: false
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
 
 permissions:
   contents: read

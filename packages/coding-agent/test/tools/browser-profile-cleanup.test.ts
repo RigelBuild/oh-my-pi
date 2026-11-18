@@ -33,6 +33,8 @@ async function makeProfileDir(): Promise<string> {
 	return dir;
 }
 
+const BROKER_CHROME_PID = 4242;
+
 /**
  * Route `ensureSharedBrowser` to one fake daemon broker shared by every client
  * in a test. Like the real broker, `describe` and `list` answer from its state
@@ -61,6 +63,8 @@ function fakeSharedBroker(
 			name,
 			id: "fake",
 			state: "ready",
+			// The broker spawns Chrome itself, so the daemon's process is Chrome's.
+			pid: BROKER_CHROME_PID,
 			createdAt: now,
 			startedAt: now,
 			readyAt: now,
@@ -154,8 +158,11 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 		}
 	});
 
-	it("removes the handle's profile directory when the headless browser is disposed", async () => {
+	it("kills an owned-profile browser without a graceful close and removes its profile on dispose", async () => {
 		const dir = await makeProfileDir();
+		// Stands in for a Chromium whose graceful shutdown never finishes.
+		const chromium = Bun.spawn([process.execPath, "-e", "await Bun.sleep(60_000)"]);
+		let closeCalls = 0;
 		const handle = {
 			key: "headless:1",
 			kind: { kind: "headless", headless: true },
@@ -163,22 +170,31 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 			userDataDir: dir,
 			browser: {
 				connected: true,
-				process: () => ({ pid: 4242 }),
-				close: () => Promise.resolve(),
+				process: () => ({ pid: chromium.pid }),
+				close: () => {
+					closeCalls++;
+					return Promise.withResolvers<void>().promise;
+				},
 			},
 			stealth: { browserSession: null, override: null },
 		} as unknown as BrowserHandle;
 
-		await releaseBrowser(handle, { kill: false });
-
-		expect(fs.existsSync(dir)).toBe(false);
+		try {
+			await releaseBrowser(handle, { kill: false });
+			await chromium.exited;
+			expect(closeCalls).toBe(0);
+			expect(fs.existsSync(dir)).toBe(false);
+		} finally {
+			chromium.kill("SIGKILL");
+		}
 	});
 });
 
 describe("owned Chromium profile preferences", () => {
-	it("disables password leak detection while keeping a reused profile's other preferences", async () => {
+	it("disables password leak detection and printing while keeping a reused profile's other preferences", async () => {
 		const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-test-"));
 		const file = path.join(dir, "Default", "Preferences");
+		const seeded = { password_manager_leak_detection: false };
 		try {
 			await Bun.write(
 				file,
@@ -187,14 +203,21 @@ describe("owned Chromium profile preferences", () => {
 			await seedOwnedProfilePreferences(dir);
 			expect(JSON.parse(await Bun.file(file).text())).toEqual({
 				intl: { accept_languages: "en-US" },
-				profile: { exit_type: "Normal", password_manager_leak_detection: false },
+				profile: { exit_type: "Normal", ...seeded },
+				printing: { enabled: false },
+			});
+
+			// A profile seeded before printing was turned off already has leak detection off.
+			await Bun.write(file, JSON.stringify({ profile: seeded, printing: { print_preview_sticky_settings: "{}" } }));
+			await seedOwnedProfilePreferences(dir);
+			expect(JSON.parse(await Bun.file(file).text())).toEqual({
+				profile: seeded,
+				printing: { print_preview_sticky_settings: "{}", enabled: false },
 			});
 
 			await fs.promises.rm(path.join(dir, "Default"), { recursive: true });
 			await seedOwnedProfilePreferences(dir);
-			expect(JSON.parse(await Bun.file(file).text())).toEqual({
-				profile: { password_manager_leak_detection: false },
-			});
+			expect(JSON.parse(await Bun.file(file).text())).toEqual({ profile: seeded, printing: { enabled: false } });
 		} finally {
 			await fs.promises.rm(dir, { recursive: true, force: true });
 		}
@@ -255,7 +278,10 @@ describe("owned Chromium profile preferences", () => {
 			expect(winner?.wsEndpoint).toBe(wsEndpoint);
 			expect(loser?.wsEndpoint).toBe(wsEndpoint);
 			expect(broker.starts).toBe(1);
-			expect(launchPrefs).toEqual({ profile: { password_manager_leak_detection: false } });
+			expect(launchPrefs).toEqual({
+				profile: { password_manager_leak_detection: false },
+				printing: { enabled: false },
+			});
 			// One seed, by the client that launched Chrome, before the launch. A
 			// seed after the launch can rename a snapshot it read before Chrome
 			// started over the live profile's Preferences.
@@ -399,6 +425,26 @@ describe("shared Chromium session-restore state", () => {
 			await expect(restartSharedBrowser(broker.client, name)).rejects.toThrow("still stopping");
 			expect(await fs.promises.readdir(sessionsDir)).toEqual(["Session_13436325114290429"]);
 			expect(broker.starts).toBe(2);
+		} finally {
+			broker.restore();
+			await fs.promises.rm(daemonRuntimeDir(projectDir), { recursive: true, force: true });
+			await fs.promises.rm(projectDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("shared Chrome process", () => {
+	it("hands out the broker's Chrome process with its endpoint, started or adopted", async () => {
+		const projectDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-shared-profile-pid-"));
+		const wsEndpoint = "ws://127.0.0.1:9222/devtools/browser/pid";
+		const broker = fakeSharedBroker(projectDir, wsEndpoint);
+		try {
+			expect(await ensureSharedBrowser({ projectDir, headless: false })).toMatchObject({
+				wsEndpoint,
+				pid: BROKER_CHROME_PID,
+			});
+			expect((await ensureSharedBrowser({ projectDir, headless: false }))?.pid).toBe(BROKER_CHROME_PID);
+			expect(broker.starts).toBe(1);
 		} finally {
 			broker.restore();
 			await fs.promises.rm(daemonRuntimeDir(projectDir), { recursive: true, force: true });

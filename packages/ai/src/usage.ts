@@ -493,6 +493,8 @@ export interface UsageCredential {
 	activeOrganizationId?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
+	/** Kiro profile ARN the login routes by (see OAuthCredentials.kiroProfileArn). */
+	kiroProfileArn?: string;
 }
 
 /** Parameters provided to a usage fetcher. */
@@ -537,6 +539,11 @@ export interface UsageProvider {
 	retainLastGoodOnFailure?: boolean;
 	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
 	failureBackoffMs?: number;
+	/**
+	 * Aggregate collection probes only the API key inference would send (the
+	 * auth cascade) instead of every stored credential.
+	 */
+	usesRequestKey?: boolean;
 }
 
 /** Request context used when ranking usage for a specific model. */
@@ -609,7 +616,13 @@ export interface CredentialRankingStrategy {
 	 * false never heals; true heals even with empty limits; absent requires
 	 * non-empty limits with none exhausted.
 	 */
-	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[]; healthy?: boolean }[];
+	healableBlockScopes?(report: UsageReport): {
+		blockScope: string;
+		limits: UsageLimit[];
+		healthy?: boolean;
+		/** Allow an incomplete report only when a shared (`scope.shared`) limit reset matches the stored block deadline. */
+		resetMatchRequired?: boolean;
+	}[];
 	/** Whether fresh reports can heal legacy account-wide quota backoffs. */
 	healsGlobalBlocks?: boolean;
 	/** Fallback window durations (ms) when limits don't specify durationMs. */

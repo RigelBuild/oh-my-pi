@@ -640,14 +640,19 @@ describe("--reapply-config saved suffix against extension providers", () => {
 	});
 
 	test("refreshes a cold credential-scoped built-in to keep a literal suffixed id", async () => {
+		// Cold by construction, not by a bundled count: `singularityapi-dev` is a
+		// credential-scoped built-in with zero bundled models. `opencode-go` ships a
+		// bundled roster, so its catalog is never cold and the refresh gate stays shut.
+		// Built-in, not config-declared: the cold gate only admits ids in the
+		// credential-scoped cache table, so a custom id would not exercise this path.
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.keys.setRuntime("opencode-go", "go-test-key");
+		authStorage.keys.setRuntime("singularityapi-dev", "sa-test-key");
 		const listed: string[] = [];
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), {
 			fetch: async input => {
 				const url = String(input);
-				if (url !== "https://opencode.ai/inference/go/v1/models") return new Response("", { status: 404 });
+				if (url !== "https://api.singularityapi.dev/v1/models") return new Response("", { status: 404 });
 				listed.push(url);
 				return Response.json({ data: [{ id: "router:low" }, { id: "deepseek-v4-flash" }] });
 			},
@@ -656,13 +661,13 @@ describe("--reapply-config saved suffix against extension providers", () => {
 		const session = await reapplyOverSaved(
 			modelRegistry,
 			authStorage,
-			"opencode-go/deepseek-v4-flash",
-			"opencode-go/router:low",
+			"singularityapi-dev/deepseek-v4-flash",
+			"singularityapi-dev/router:low",
 		);
 		try {
 			// Hydration found no cached ids, so only the suffix refresh can list the catalog.
 			expect(listed.length).toBeGreaterThan(0);
-			expect(modelRegistry.hasModelId("opencode-go", "router:low")).toBe(true);
+			expect(modelRegistry.hasModelId("singularityapi-dev", "router:low")).toBe(true);
 			expect(session.model?.id).toBe("deepseek-v4-flash");
 			expect(session.configuredThinkingLevel()).not.toBe(ThinkingLevel.Low);
 		} finally {

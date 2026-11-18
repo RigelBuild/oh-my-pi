@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as managedInstall from "../src/cli/managed-install";
 import * as updateCli from "../src/cli/update-cli";
 import { checkForNewVersion } from "../src/main";
 import { cfgStartupCheckUpdate, cfgUpdateChannel } from "../src/modes/settings";
@@ -16,7 +17,7 @@ function stubUpdateSources(): string[] {
 	vi.spyOn(cfgStartupCheckUpdate, "get").mockReturnValue(true);
 	vi.spyOn(cfgUpdateChannel, "get").mockReturnValue("stable");
 	vi.spyOn(updateCli, "isSourceCheckout").mockReturnValue(false);
-	vi.spyOn(updateCli, "managedInstallName").mockResolvedValue(undefined);
+	vi.spyOn(managedInstall, "managedInstallName").mockResolvedValue(undefined);
 	vi.spyOn(globalThis, "fetch").mockImplementation(
 		Object.assign(
 			async (input: string | URL | Request) => {

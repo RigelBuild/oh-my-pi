@@ -10,11 +10,11 @@
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import {
-	markAfterSiblingWait,
 	type ApiKeyResolver,
 	createOAuthProvenance,
 	NO_AUTH_SENTINEL,
 	type ResolvedApiKey,
+	resolveAfterRotation,
 } from "../auth-retry";
 import { OBSERVED_MODEL_CLASS_PATTERN } from "../auth-broker/types";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
@@ -303,26 +303,13 @@ export async function resolveGatewayApiKey(
 }
 
 /**
- * Hook fired by a pi-ai client when the upstream request fails in a way
- * that's rotatable — today that's HTTP 401 (credential is bad) and
- * usage-limit phrasing matched by {@link isUsageLimitError} (Codex's
- * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
- * `resource_exhausted`, …). The two cases need different storage actions:
- *
- * - **usage-limit** → {@link AuthStorage.limits.markReached}. Marks just
- *   the current session's credential as temporarily blocked (honouring
- *   `retry-after` / `resets_at` hints when present) and returns `true` only
- *   when a sibling credential is still available. Burning the credential
- *   with `invalidateCredentialMatching` here would orphan accounts whose
- *   reset window is several hours away — exactly the bug this helper exists
- *   to avoid.
- * - **auth-failure** → {@link AuthStorage.limits.invalidateMatching}.
- *   Suspect/delete the row so it doesn't get re-picked next request.
- *
- * In both branches we return the next `getWithCredential` result (sticky on the
- * same `sessionId`) so the client can transparently retry the pre-emit
- * failure with a fresh credential. Returning `undefined` aborts the retry
- * and surfaces the original error to the caller.
+ * Step (c) for a gateway request: hand the failure to
+ * {@link AuthStorage.limits.rotate}, the same policy local resolvers use. It
+ * blocks a usage-limited credential until its reset, blocks only the requested
+ * model after a model-entitlement denial, blocks an account-policy denial
+ * without suspecting the credential, and invalidates hard auth failures.
+ * The next `getWithCredential` result (sticky on the same `sessionId`) lets the
+ * client retry the pre-emit failure; `undefined` surfaces the original error.
  */
 async function refreshGatewayApiKeyAfterAuthError(
 	storage: AuthStorage,
@@ -348,15 +335,15 @@ async function refreshGatewayApiKeyAfterAuthError(
 						modelKeyOptions(model, signal),
 					);
 					if (!restored) return undefined;
-					const retry = markAfterSiblingWait(restored);
-					if (typeof retry === "string") return { apiKey: retry, afterSiblingWait: true };
-					return retry ?? undefined;
+					return resolveAfterRotation({ switched: true, afterSiblingWait: true }, error, () =>
+						Promise.resolve(restored),
+					);
 				}
 			} catch {
 				if (logContext) logGatewayRecoveryFailure(logContext, credentialId);
 			}
 		}
-		const hintMs = extractProviderRetryHint(provider, message);
+		const hintMs = extractProviderRetryHint(provider, message, model.baseUrl);
 		// A drained prepaid balance has no reset; preserve policy without logging it as an observation.
 		const retryAfterMs =
 			hintMs ??
@@ -369,12 +356,19 @@ async function refreshGatewayApiKeyAfterAuthError(
 			apiKey: oldKey,
 			signal,
 		});
-
 		if (!switched) return undefined;
 		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
 	}
-	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
-	return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+	const rotation = await storage.limits.rotate(provider, sessionId, {
+		error,
+		modelId: model.id,
+		baseUrl: model.baseUrl,
+		apiKey: oldKey,
+		signal,
+	});
+	return resolveAfterRotation(rotation, error, () =>
+		storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal)),
+	);
 }
 
 /** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
@@ -389,8 +383,8 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  * - initial resolve → the credential already resolved for this request.
  * - step (b) `!lastChance` → force-refresh the SAME session-sticky credential
  *   (a peer/broker may have rotated its token out from under our cached copy).
- * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} switches
- *   to a sibling (usage-limit block vs credential invalidation by error class).
+ * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} rotates
+ *   to a sibling through `limits.rotate`.
  *
  * `lastKey` tracks the most recent bearer so the switch step invalidates the
  * credential that actually failed; a retry context's `previousKey` wins, since
