@@ -524,6 +524,38 @@ it("pauses matching reminder watches on an ID-less voluntary report", async () =
 		clock.mockReturnValue(300_000);
 		vi.advanceTimersByTime(600_000);
 		expect(delivery).toHaveBeenCalledTimes(2);
+		const paused = JSON.stringify({
+			state: "progressing",
+			progress: "worked",
+			tried: [],
+			blocker: "",
+			nextAction: "continue",
+			requestId: "paused",
+		});
+		expect(
+			(
+				await hub.sendBound({
+					childSessionId: "child",
+					fromAgentId: "Child",
+					toAgentId: "Parent",
+					assignmentId: ref.assignmentId,
+					checkId: "paused",
+					body: paused,
+				})
+			).outcome,
+		).toBe("injected");
+		expect(
+			(
+				await hub.sendBound({
+					childSessionId: "child",
+					fromAgentId: "Child",
+					toAgentId: "Parent",
+					assignmentId: ref.assignmentId,
+					checkId: "paused",
+					body: paused,
+				})
+			).outcome,
+		).toBe("duplicate");
 	} finally {
 		hub.disposeHome("w1");
 		clock.mockRestore();
