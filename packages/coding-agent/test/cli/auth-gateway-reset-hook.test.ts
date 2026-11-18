@@ -8,7 +8,9 @@ import {
 } from "../../src/cli/auth-gateway-cli";
 import { Settings } from "../../src/config/settings";
 import {
-	cfgClaudeResetsAutoRedeem,
+	cfgClaudeResetsAutoRedeem5h,
+	cfgClaudeResetsAutoRedeemFable,
+	cfgClaudeResetsAutoRedeemWeekly,
 	cfgClaudeResetsKeepCredits,
 	cfgClaudeResetsMinBlockedMinutes,
 } from "../../src/session/settings";
@@ -86,7 +88,9 @@ async function setup(
 	const stored = storage.credentials.list("anthropic")[0];
 	if (!stored || stored.credential.type !== "oauth") throw new Error("expected stored Claude credential");
 	const settings = Settings.isolated();
-	cfgClaudeResetsAutoRedeem.set(settings, autoRedeem);
+	cfgClaudeResetsAutoRedeem5h.set(settings, autoRedeem);
+	cfgClaudeResetsAutoRedeemWeekly.set(settings, autoRedeem);
+	cfgClaudeResetsAutoRedeemFable.set(settings, autoRedeem);
 	cfgClaudeResetsKeepCredits.set(settings, options.keepCredits ?? 0);
 	cfgClaudeResetsMinBlockedMinutes.set(settings, options.minBlockedMinutes ?? 60);
 	if (options.drainFirst) {
@@ -132,12 +136,22 @@ async function setup(
 describe("gateway Claude reset hook", () => {
 	describe("Claude reset banking configuration", () => {
 		it("maps auto-redeem yes to general reset banking", () => {
-			const settings = { autoRedeem: "yes", keepCredits: 2 } as const;
+			const settings = {
+				autoRedeem5h: "yes",
+				autoRedeemWeekly: "yes",
+				autoRedeemFable: "yes",
+				keepCredits: 2,
+			} as const;
 			expect(claudeResetBankingFor(settings)).toEqual({ keepCredits: 2 });
 		});
 
 		it("limits auto-redeem no reset banking to drain-first policies", () => {
-			const settings = { autoRedeem: "no", keepCredits: 1 } as const;
+			const settings = {
+				autoRedeem5h: "no",
+				autoRedeemWeekly: "no",
+				autoRedeemFable: "no",
+				keepCredits: 1,
+			} as const;
 			expect(claudeResetBankingFor(settings)).toEqual({
 				keepCredits: 1,
 				drainFirstOnly: true,
@@ -145,7 +159,12 @@ describe("gateway Claude reset hook", () => {
 		});
 
 		it("does not enable reset banking when auto-redeem is unset", () => {
-			const settings = { autoRedeem: "unset", keepCredits: 0 } as const;
+			const settings = {
+				autoRedeem5h: "unset",
+				autoRedeemWeekly: "unset",
+				autoRedeemFable: "unset",
+				keepCredits: 0,
+			} as const;
 			expect(claudeResetBankingFor(settings)).toBeUndefined();
 		});
 	});
@@ -427,7 +446,9 @@ describe("gateway Claude reset hook", () => {
 			provider: "anthropic",
 		});
 		const settings = Settings.isolated();
-		cfgClaudeResetsAutoRedeem.set(settings, "no");
+		cfgClaudeResetsAutoRedeem5h.set(settings, "no");
+		cfgClaudeResetsAutoRedeemWeekly.set(settings, "no");
+		cfgClaudeResetsAutoRedeemFable.set(settings, "no");
 		const hook = createGatewayClaudeResetHook({ storage, settings, coordinator: coordinator() });
 		const hooked: number[] = [];
 		await runGatewayClaudeResetSweep({

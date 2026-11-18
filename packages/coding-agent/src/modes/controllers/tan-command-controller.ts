@@ -306,10 +306,8 @@ export class TanCommandController {
 							injectContextSwitch();
 							await clone.prompt(trimmedWork, { attribution: "user", images });
 							await clone.waitForIdle();
-							while (clone.hasPendingAsyncWork()) {
-								if (signal.aborted) throw new Error("Aborted while settling descendant work");
-								await untilAborted(signal, clone.settleAsyncWork());
-							}
+							// Descendant work (jobs, child agents) keeps the run open; the tan answers once it ends.
+							if (clone.isRunActive) await untilAborted(signal, clone.waitForRunEnd());
 							return extractAssistantText(clone.getLastAssistantMessage()) || "(no output)";
 						} finally {
 							unsubscribeCompaction();
@@ -333,7 +331,7 @@ export class TanCommandController {
 						}
 					}
 				},
-				{ ownerId, agentId: cloneId },
+				{ ownerId, agentId: cloneId, request: trimmedWork },
 			);
 		} catch (error) {
 			if (cloneFile) await removeCloneSession(cloneFile);

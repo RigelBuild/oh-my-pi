@@ -515,7 +515,7 @@ export function isVersionAlreadyPublished(output: string): boolean {
 	);
 }
 
-export interface PublishJob {
+interface PublishJob {
 	name: string;
 	/** Names of jobs that must publish successfully first; unknown names are ignored. */
 	dependsOn?: readonly string[];

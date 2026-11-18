@@ -1,6 +1,7 @@
 //! pi's in-process extras for the embedded shell: the uutils-style utilities
 //! (`cat`, `grep`, `sed`, `ls`, …) and the process builtins (`ps`, `top`,
-//! `sleep`, `pgrep`, `pkill`, `pidwait`). Hosts run them through [`extras`].
+//! `sleep`, `pgrep`, `pkill`, `pidwait`, `lsof`). Hosts run them through
+//! [`extras`].
 #![cfg_attr(unix, feature(process_setsid))]
 #[cfg(all(test, unix, any(feature = "util.rsync", feature = "util.which")))]
 mod test_support;
@@ -38,10 +39,12 @@ mod locale;
 mod quoting_style;
 /// The shell's `TZ`, shared by the utilities that print local times.
 #[cfg(any(
+	feature = "util.awk",
 	feature = "util.date",
 	feature = "util.du",
 	feature = "util.ls",
 	feature = "util.rsync",
+	feature = "util.tar",
 	feature = "util.touch",
 	feature = "util.uptime"
 ))]
@@ -55,6 +58,8 @@ mod progress;
 // `src/host.rs` for the contract.
 #[cfg(feature = "util.ast-grep")]
 mod ast_grep;
+#[cfg(feature = "util.awk")]
+mod awk;
 #[cfg(feature = "util.b2sum")]
 mod b2sum;
 #[cfg(feature = "util.base32")]
@@ -73,6 +78,8 @@ mod cat;
 /// `sha*sum`, and `b2sum`.
 #[cfg(feature = "util.cksum")]
 mod cksum;
+#[cfg(feature = "util.md5")]
+mod md5;
 #[cfg(feature = "util.md5sum")]
 mod md5sum;
 #[cfg(feature = "util.sha1sum")]
@@ -85,6 +92,8 @@ mod sha256sum;
 mod sha384sum;
 #[cfg(feature = "util.sha512sum")]
 mod sha512sum;
+#[cfg(feature = "util.shasum")]
+mod shasum;
 #[cfg(all(feature = "util.chmod", unix))]
 mod chmod;
 #[cfg(feature = "util.cmp")]
@@ -137,6 +146,11 @@ mod jq;
 mod ln;
 #[cfg(feature = "util.ls")]
 mod ls;
+#[cfg(all(
+	feature = "util.lsof",
+	any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+mod lsof;
 #[cfg(feature = "util.mkdir")]
 mod mkdir;
 #[cfg(feature = "util.mktemp")]
@@ -198,10 +212,14 @@ mod sort;
 mod sponge;
 #[cfg(feature = "util.stat")]
 mod stat;
+#[cfg(feature = "util.strings")]
+mod strings;
 #[cfg(feature = "util.tac")]
 mod tac;
 #[cfg(feature = "util.tail")]
 mod tail;
+#[cfg(all(feature = "util.tar", any(unix, windows)))]
+mod tar;
 #[cfg(feature = "util.tee")]
 mod tee;
 #[cfg(feature = "util.touch")]

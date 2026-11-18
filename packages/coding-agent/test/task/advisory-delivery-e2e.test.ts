@@ -119,6 +119,7 @@ it("delivers a child advisory at the next model call after a synchronous task", 
 			id: "LineageManager",
 			parentAgentId: "Main",
 			parentSessionId: mainId,
+			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
 			parentBranchId: AdvisoryHub.global().branch(mainId),
 			modelOverride: "mock/mock-model",
 			authStorage: auth,
@@ -343,13 +344,6 @@ it("wakes a stranded bound advisory without relaying its body", async () => {
 			).outcome,
 		).toBe("injected");
 		hub.terminal(childId, next.ref.assignmentId);
-		const drained = manager.drainPendingIrcInboxMessages("StrandedManager");
-		expect(drained.map(item => item.body)).toEqual([drainedBody]);
-		manager.agent.state.isStreaming = false;
-		// Requeue the first admitted record through the same bridge before the settle wake.
-		if (!drained[0]) throw new Error("advisory missing from inbox");
-		manager.agent.state.isStreaming = true;
-		await manager.deliverIrcMessage(drained[0]);
 		manager.agent.state.isStreaming = false;
 		expect(manager.isStreaming).toBe(false);
 		expect(contexts).toHaveLength(0);

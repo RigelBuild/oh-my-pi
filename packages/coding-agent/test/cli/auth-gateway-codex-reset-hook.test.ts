@@ -6,7 +6,7 @@ import {
 	type GatewayCodexResetCoordinator,
 } from "../../src/cli/auth-gateway-cli";
 import { Settings } from "../../src/config/settings";
-import { cfgCodexResetsAutoRedeem } from "../../src/session/settings";
+import { cfgCodexResetsAutoRedeem5h, cfgCodexResetsAutoRedeemWeekly } from "../../src/session/settings";
 
 const storages: AuthStorage[] = [];
 afterEach(() => {
@@ -30,7 +30,10 @@ async function setup(enabled = true) {
 	const stored = storage.credentials.list("openai-codex")[0];
 	if (!stored) throw new Error("missing credential");
 	const settings = Settings.isolated();
-	if (enabled) cfgCodexResetsAutoRedeem.set(settings, "yes");
+	if (enabled) {
+		cfgCodexResetsAutoRedeem5h.set(settings, "yes");
+		cfgCodexResetsAutoRedeemWeekly.set(settings, "yes");
+	}
 	const limit = (id: string, usedFraction: number): UsageLimit => ({
 		id,
 		label: id,

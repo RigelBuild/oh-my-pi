@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [18.22.0] - 2026-11-16
+
+### Added
+
+- Added optional picker icons for tooltips and accessible names, plus an option to control the placement of the search interface.
+- Added buttons, menu, and document component kinds, including menu-row action state changes and document text editing, commenting, and uncommenting events.
+
+## [18.18.6] - 2026-11-09
+
+### Added
+
+- `actions.hold` (`TspMenuEntry[]`): what a long press on a touch screen offers, beside `actions.menu`; and `toast`'s `action` / `label` props for a button on the toast
+
 ## [18.18.0] - 2026-11-07
 
 ### Changed

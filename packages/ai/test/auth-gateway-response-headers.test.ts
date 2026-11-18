@@ -131,3 +131,33 @@ describe("auth-gateway diagnostic response headers", () => {
 		}
 	});
 });
+
+describe("auth-gateway caller header passthrough", () => {
+	it("forwards allow-listed caller headers to the upstream provider call", async () => {
+		const gw = await bootGateway();
+		try {
+			gw.mock.push({ content: ["ok"] });
+			const res = await fetch(`${gw.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: "Bearer gw-test-token",
+					"openai-organization": "org-test",
+					"x-stainless-os": "Linux",
+				},
+				body: JSON.stringify({
+					model: "mock/header-model",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(gw.mock.calls[0]?.options?.headers).toMatchObject({
+				"openai-organization": "org-test",
+				"x-stainless-os": "Linux",
+			});
+		} finally {
+			await gw.close();
+		}
+	});
+});

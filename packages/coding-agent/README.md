@@ -15,24 +15,6 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
-## Compiling SDK consumers
-
-Standalone Bun builds that load legacy Pi extensions must include the build plugin and set `PI_COMPILED` at build time:
-
-```ts
-import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
-
-const result = await Bun.build({
-	entrypoints: ["./src/main.ts"],
-	compile: { outfile: "./app" },
-	plugins: [await createLegacyPiVirtualModulePlugin()],
-	define: { "process.env.PI_COMPILED": JSON.stringify("true") },
-});
-if (!result.success) throw new Error(result.logs.map(log => log.message).join("\n"));
-```
-
-The plugin embeds lazy loaders from the installed Pi packages. Keep the SDK and its Pi dependencies on matching release versions, with their exported source files installed.
-
 ## Bash visualization
 
 Embedded-shell calls default to Python-like **Pseudo**; switch to **Raw** for the original command. Syntax appears incrementally as the shell compiles it. Active commands retain their colors while inactive code fades; only failures get `×`. Values appear beside each variable's latest observed setter.

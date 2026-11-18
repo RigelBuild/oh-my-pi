@@ -175,7 +175,8 @@ export type CommandNullability = Assert<
 
 // --- Session events and notifications ---------------------------------------
 
-type ServerEventType = RpcAgentSessionEventFrame["type"];
+/** `message_persisted` is session-internal: `RpcSessionEventForwarder.forward` drops it, so no wire frame carries it. */
+type ServerEventType = Exclude<RpcAgentSessionEventFrame["type"], "message_persisted">;
 export type SessionEventSet = Assert<Same<Wire.RpcAgentEvent["type"], ServerEventType>>;
 export type SessionEvents = Assert<
 	AllTrue<{

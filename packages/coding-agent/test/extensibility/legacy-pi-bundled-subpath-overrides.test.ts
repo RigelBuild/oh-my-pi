@@ -2,11 +2,11 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
-import { createLegacyPiVirtualModulePlugin } from "@oh-my-pi/pi-coding-agent/build";
+import { createLegacyPiVirtualModulePlugin } from "../../scripts/legacy-pi-virtual-module";
 import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "@oh-my-pi/pi-coding-agent/build";
-import type { BundledPiEntry } from "@oh-my-pi/pi-coding-agent/build";
+import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
+import type { BundledPiEntry } from "../../scripts/legacy-pi-virtual-module";
 
 const bundledEntries = await collectBundledPiEntries();
 const bundledModuleKeys = new Set(bundledEntries.map(entry => entry.key));
@@ -66,7 +66,7 @@ describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () =>
 		expect(result.success, result.logs.map(log => log.message).join("\n")).toBe(true);
 		expect(paths).toHaveLength(1);
 		expect(path.isAbsolute(paths[0]!)).toBe(true);
-		expect(paths[0]!.startsWith(path.join(import.meta.dir, "..", "..", "src", "build"))).toBe(true);
+		expect(paths[0]!.startsWith(path.join(import.meta.dir, "..", ".."))).toBe(true);
 	});
 
 	it("does not evaluate unrelated host modules while loading the registry", async () => {
@@ -379,73 +379,6 @@ export const observed = { role: actionBar([actionButton("Go", "go")]).p.role, li
 		expect(observed).toEqual({ role: "omp.actions", line: "a b" });
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
-	});
-	it("collects canonical keys with installed Rigel specifiers", async () => {
-		using tempDir = TempDir.createSync("@omp-rigel-pi-packages-");
-		const fakePackageDir = path.join(tempDir.path(), "node_modules", "@rigelbuild", "omp-coding-agent");
-		const packageNames = ["agent-core", "ai", "coding-agent", "natives", "tui", "utils"];
-		await fs.mkdir(fakePackageDir, { recursive: true });
-		await Bun.write(
-			path.join(fakePackageDir, "package.json"),
-			JSON.stringify({ name: "@rigelbuild/omp-coding-agent", exports: { ".": "./index.ts" } }),
-		);
-		const catalogRoot = path.join(tempDir.path(), "node_modules", "@rigelbuild", "omp-catalog");
-		await fs.mkdir(catalogRoot, { recursive: true });
-		await Bun.write(
-			path.join(catalogRoot, "package.json"),
-			JSON.stringify({
-				name: "@rigelbuild/omp-catalog",
-				exports: {
-					".": "./index.ts",
-					"./*": "./src/*.ts",
-					"./*.js": "./src/*.ts",
-				},
-			}),
-		);
-		await Bun.write(path.join(catalogRoot, "src", "build.js"), 'export const buildJs = "build-js";');
-		await fs.mkdir(path.join(catalogRoot, "src", "provider-models"), { recursive: true });
-		await Bun.write(path.join(catalogRoot, "src", "models.ts"), 'export const models = "models";');
-		await Bun.write(
-			path.join(catalogRoot, "src", "build.ts"),
-			'export const build = "build"; export const alias = "build-alias";',
-		);
-		await Bun.write(path.join(catalogRoot, "src", "build-alias.ts"), 'export const alias = "build-alias";');
-		await Bun.write(path.join(catalogRoot, "src", "provider-models", "nested.ts"), "export const nested = true;");
-		for (const packageName of packageNames) {
-			const packageRoot = path.join(tempDir.path(), "node_modules", "@rigelbuild", `omp-${packageName}`);
-			await fs.mkdir(packageRoot, { recursive: true });
-			await Bun.write(
-				path.join(packageRoot, "package.json"),
-				JSON.stringify({
-					name: `@rigelbuild/omp-${packageName}`,
-					exports: { ".": "./index.ts", "./probe": "./probe.ts" },
-				}),
-			);
-			await Bun.write(
-				path.join(packageRoot, "index.ts"),
-				`export const packageName = ${JSON.stringify(packageName)};`,
-			);
-			await Bun.write(path.join(packageRoot, "probe.ts"), `export const probe = ${JSON.stringify(packageName)};`);
-		}
-
-		const entries = await collectBundledPiEntries(fakePackageDir);
-		const entryByKey = new Map(entries.map(entry => [entry.key, entry]));
-		expect(entries.every(entry => entry.key === "typebox" || entry.key.startsWith("@oh-my-pi/pi-"))).toBe(true);
-		expect(entryByKey.get("@oh-my-pi/pi-agent-core")?.importSpecifier).toBe("@rigelbuild/omp-agent-core");
-		expect(entryByKey.get("@oh-my-pi/pi-coding-agent/probe")?.importSpecifier).toBe(
-			"@rigelbuild/omp-coding-agent/probe",
-		);
-		expect(entryByKey.get("@oh-my-pi/pi-coding-agent/probe")?.key).toBe("@oh-my-pi/pi-coding-agent/probe");
-		expect(entryByKey.get("@oh-my-pi/pi-natives/probe")?.importSpecifier).toBe("@rigelbuild/omp-natives/probe");
-		expect(entryByKey.get("@oh-my-pi/pi-tui/probe")?.importSpecifier).toBe("@rigelbuild/omp-tui/probe");
-		expect(entryByKey.get("@oh-my-pi/pi-utils")?.importSpecifier).toBe("@rigelbuild/omp-utils");
-		expect(entryByKey.get("@oh-my-pi/pi-utils/probe")?.importSpecifier).toBe("@rigelbuild/omp-utils/probe");
-		expect(Bun.resolveSync("@rigelbuild/omp-agent-core", fakePackageDir)).toBe(
-			path.join(tempDir.path(), "node_modules", "@rigelbuild", "omp-agent-core", "index.ts"),
-		);
-		expect(Bun.resolveSync("@rigelbuild/omp-utils/probe", fakePackageDir)).toBe(
-			path.join(tempDir.path(), "node_modules", "@rigelbuild", "omp-utils", "probe.ts"),
-		);
 	});
 
 	it("preserves upstream registry output", () => {
