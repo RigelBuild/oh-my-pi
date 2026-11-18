@@ -192,17 +192,31 @@ rust_shared_library(
         # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
         # x86_64; every shipped darwin addon carries a signature.
         # -install_name: otherwise the addon's id is its sandbox output path.
-        # --version-script (linux): export only the N-API entry point. zig cc
-        # keeps the last version script it is given, so :exports_map replaces
-        # the one rustc writes; every other symbol (src/bundled_libc.rs, the
-        # wasm C API) becomes local and binds within the addon.
         "@platforms//os:macos": [
             "-Clink-arg=-Wl,-undefined,dynamic_lookup",
             "-Clink-arg=-Wl,-adhoc_codesign",
             "-Clink-arg=-Wl,-install_name,@rpath/libpi_natives.dylib",
         ],
-        "@platforms//os:linux": [
-            "-Clink-arg=-Wl,-z,nodelete",
+        "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
+        "//conditions:default": [],
+    }) + select({
+        # --version-script (zig gnu.2.17 and musl only): export only the N-API
+        # entry point. zig cc keeps the last version script it is given, so
+        # :exports_map replaces the one rustc writes; every other symbol
+        # (src/bundled_libc.rs, the wasm C API) becomes local and binds within
+        # the addon. Host gcc/gold links fail with the script (RIG-8526), so it
+        # is keyed on the zig-only _linux-*-libc-gnu217 settings; the public
+        # x86_64-unknown-linux-gnu group also matches host builds.
+        "//bazel/triples:_linux-x86_64-libc-gnu217": [
+            "-Clink-arg=-Wl,--version-script=$(execpath :exports_map)",
+        ],
+        "//bazel/triples:_linux-aarch64-libc-gnu217": [
+            "-Clink-arg=-Wl,--version-script=$(execpath :exports_map)",
+        ],
+        "//bazel/triples:x86_64-unknown-linux-musl": [
+            "-Clink-arg=-Wl,--version-script=$(execpath :exports_map)",
+        ],
+        "//bazel/triples:aarch64-unknown-linux-musl": [
             "-Clink-arg=-Wl,--version-script=$(execpath :exports_map)",
         ],
         "//conditions:default": [],
