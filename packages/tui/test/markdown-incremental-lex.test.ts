@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
-import { clearRenderCache, Markdown, type MarkdownTheme } from "@oh-my-pi/pi-tui/components/markdown";
+import { clearRenderCache, Markdown, type MarkdownTheme, type TableLocks } from "@oh-my-pi/pi-tui/components/markdown";
 import { getMarkdownTheme, getMarkdownThemeWithLinkTargets, theme } from "@oh-my-pi/pi-tui/theme";
 import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import * as latexBlock from "@oh-my-pi/pi-tui/latex-block";
@@ -20,9 +20,9 @@ import { defaultMarkdownTheme } from "./test-themes.js";
 
 const THEME = defaultMarkdownTheme;
 
-function renderCold(text: string, width: number): readonly string[] {
+function renderCold(text: string, width: number, markdownTheme: MarkdownTheme = THEME): readonly string[] {
 	clearRenderCache();
-	const out = new Markdown(text, 0, 0, THEME).render(width);
+	const out = new Markdown(text, 0, 0, markdownTheme).render(width);
 	clearRenderCache();
 	return out;
 }
@@ -38,20 +38,20 @@ function renderColdTransient(text: string, width: number, markdownTheme: Markdow
 
 /** Reveal `full` in `step`-char increments through ONE reused (streaming) instance
  *  and assert each step matches a cold full-lex render of the same prefix. */
-function assertIdenticalGrowth(full: string, width = 60, step = 13): void {
-	const streaming = new Markdown("", 0, 0, THEME);
+function assertIdenticalGrowth(full: string, width = 60, step = 13, markdownTheme: MarkdownTheme = THEME): void {
+	const streaming = new Markdown("", 0, 0, markdownTheme);
 	for (let len = 1; len <= full.length; len += step) {
 		const slice = full.slice(0, len);
 		clearRenderCache();
 		streaming.setText(slice);
 		const streamLines = streaming.render(width);
-		const oracle = renderCold(slice, width);
+		const oracle = renderCold(slice, width, markdownTheme);
 		expect(streamLines).toEqual(oracle);
 	}
 	clearRenderCache();
 	streaming.setText(full);
 	const streamLines = streaming.render(width);
-	expect(streamLines).toEqual(renderCold(full, width));
+	expect(streamLines).toEqual(renderCold(full, width, markdownTheme));
 }
 
 /** Same as {@link assertIdenticalGrowth} but with a TRANSIENT streaming instance,
@@ -514,6 +514,12 @@ describe("Markdown incremental streaming lex (E2)", () => {
 
 	it("transient render-prefix cache: table growing in the tail is byte-identical", () => {
 		assertIdenticalGrowthTransient(TABLE, 60, 7);
+	});
+
+	// A settled stream prefix republished in final mode reuses its frozen rows;
+	// they go to scrollback, so they must match a cold full-fidelity render.
+	it("final-mode growth through a frozen table and highlighted fence is byte-identical", () => {
+		assertIdenticalGrowth(`${TABLE}\n\n${FENCED}`, 60, 7, getMarkdownTheme());
 	});
 
 	it("a width change mid-stream still matches a cold render at the new width", () => {
@@ -1128,4 +1134,85 @@ describe("Markdown OSC 8 tail normalization across streaming appends", () => {
 		streaming.setText(`${truncated}|${ST}`);
 		expect(streaming.render(60)).toEqual(renderCold(`${truncated}|${ST}`, 60));
 	});
+});
+
+describe("Locked streaming tables", () => {
+	const header = "| Key | Value |\n|---|---|\n";
+
+	/** A transient instance streaming `text` with its last table locked. */
+	function lockedStream(text: string, locks: TableLocks): Markdown {
+		const live = new Markdown("", 0, 0, THEME);
+		live.tableLocks = locks;
+		live.transientRenderCache = true;
+		live.setText(text);
+		live.render(60);
+		expect(live.lockOpenTable()).toBe(true);
+		live.render(60);
+		return live;
+	}
+
+	it("keeps the locks of two tables with the same header apart", () => {
+		const locks: TableLocks = new Map();
+		const first = `${header}| a | b |\n\nBetween.\n\n`;
+		const rows = "| longer key here | a much longer value cell here |\n| next | row |\n";
+		lockedStream(`${first}${header}${rows}| x`, locks);
+		// The second table was locked at the widths its rows had, so its final
+		// render matches an unlocked one, and the first table never took its lock.
+		const full = `${first}${header}${rows}`;
+		clearRenderCache();
+		const plain = new Markdown(full, 0, 0, THEME).render(60);
+		clearRenderCache();
+		const locked = new Markdown(full, 0, 0, THEME);
+		locked.tableLocks = locks;
+		expect(locked.render(60)).toEqual(plain);
+	});
+
+	it("waits for a finished body row before locking, so the header alone never sizes the columns", () => {
+		const locks: TableLocks = new Map();
+		const live = new Markdown("", 0, 0, THEME);
+		live.tableLocks = locks;
+		live.transientRenderCache = true;
+		for (const partial of [header, `${header}| a much longer key cell | a`]) {
+			live.setText(partial);
+			live.render(60);
+			expect(live.lockOpenTable()).toBe(false);
+		}
+		const firstRow = `${header}| a much longer key cell | a much longer value cell |\n`;
+		live.setText(`${firstRow}| x`);
+		live.render(60);
+		expect(live.lockOpenTable()).toBe(true);
+		// The lock is filled by the next render, with the first row's widths.
+		live.render(60);
+		clearRenderCache();
+		const firstRowBorder = new Markdown(firstRow, 0, 0, THEME).render(60)[0];
+		// A longer later row would widen the key column of an unlocked render;
+		// the final locked render keeps the widths pinned while streaming.
+		const full = `${firstRow}| a key cell that is longer still | v |\n`;
+		clearRenderCache();
+		expect(new Markdown(full, 0, 0, THEME).render(60)[0]).not.toEqual(firstRowBorder);
+		clearRenderCache();
+		const locked = new Markdown(full, 0, 0, THEME);
+		locked.tableLocks = locks;
+		expect(locked.render(60)[0]).toEqual(firstRowBorder);
+	});
+
+	it("keeps a row with an unresolved reference label out of the stable text", () => {
+		const live = lockedStream(`${header}| a | b |\n| [doc] | d |\n| e`, new Map());
+		// A later `[doc]: url` definition could still turn that cell into a link.
+		const stable = live.getLastRenderStableText();
+		expect(stable).toContain("| a | b |");
+		expect(stable).not.toContain("[doc]");
+	});
+
+	// An ATX heading may be indented up to three spaces.
+	for (const heading of ["## Results", "  ## Results"]) {
+		it(`settles the finished rows of a table written right under a heading (${JSON.stringify(heading)})`, () => {
+			const live = lockedStream(`${heading}\n${header}| a | b |\n| c | d |\n| e`, new Map());
+			// No blank line separates them, but a heading line is finished once it ends.
+			const stable = live.getLastRenderStableText();
+			expect(stable).toStartWith(`${heading}\n`);
+			expect(stable).toContain("| c | d |");
+			expect(stable).not.toContain("| e");
+		});
+	}
 });

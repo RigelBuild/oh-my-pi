@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { $ } from "bun";
 import { resolveCrossBuild } from "../packages/coding-agent/scripts/build-binary";
-import { compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
+import { COMPILED_EXTERNAL_DEPENDENCIES, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
 
 const repoRoot = path.join(import.meta.dir, "..");
 
@@ -25,7 +25,7 @@ describe("Windows release binary target", () => {
 		expect(output).toContain(
 			"DRY RUN Bun.build target=bun-windows-arm64 outfile=packages/coding-agent/binaries/omp-windows-arm64.exe",
 		);
-		expect(output).toContain("external=fastembed,onnxruntime-node");
+		expect(output).toContain(`external=${COMPILED_EXTERNAL_DEPENDENCIES.join(",")}`);
 		expect(output).not.toContain("bun-windows-x64-modern");
 	});
 

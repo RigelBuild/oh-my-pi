@@ -35,11 +35,11 @@ export type UsageRequestDescriptor = {
 	credential: UsageCredential;
 	baseUrl?: string;
 	/**
-	 * Stored row id of the credential this request came from, when it came from
-	 * one. Carried so a report that recovers NO identity of its own still has a
-	 * stable, non-secret discriminator downstream — see the `credentialKey`
-	 * stamp in `UsageService`. Absent for env- and override-derived
-	 * credentials, which have no row.
+	 * Durable storage row id of the credential this probe runs as, when the
+	 * request came from a stored row. Attribution metadata only: deliberately
+	 * excluded from {@link UsageCache.reportKey}/{@link UsageCache.reportsKey},
+	 * which key by credential material so cached reports stay shared across
+	 * row-id changes.
 	 */
 	credentialId?: number;
 };
@@ -97,6 +97,7 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		kiroProfileArn: credential.kiroProfileArn,
 		region: credential.region,
 		inferenceRegion: credential.inferenceRegion,
 		activeOrganizationId: credential.activeOrganizationId,

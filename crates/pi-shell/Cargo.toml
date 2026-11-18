@@ -53,6 +53,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
+xutf.workspace = true
 xxhash-rust.workspace = true
 
 [target.'cfg(unix)'.dependencies]
@@ -71,6 +72,9 @@ name = "frames"
 harness = false
 [[bench]]
 name = "create"
+harness = false
+[[bench]]
+name = "fork"
 harness = false
 # Safepoint overhead needs a second run with `--features no-safepoint-check`.
 [[bench]]

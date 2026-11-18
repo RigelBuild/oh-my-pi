@@ -63,7 +63,6 @@ import {
 	toRestoredQueuedMessage,
 } from "../session/queued-messages";
 import type { SessionEntry } from "../session/session-entries";
-import { sessionApprovalGrantKeys } from "../tools/approval-cache";
 import { isRpcProxy, type RpcServe } from "./rpc";
 import {
 	SESSION_STATE_READERS as read,
@@ -378,7 +377,7 @@ export class SessionPublisher {
 		this.#publishedSource = current;
 		if (extends_) {
 			const added = current.slice(published.length);
-			this.#published = [...current];
+			for (const message of added) published.push(message);
 			this.#bridge.remote.notify("messages", this.#key, { kind: "append", messages: toWireData(added) });
 			return;
 		}
@@ -399,7 +398,7 @@ export class SessionPublisher {
 	 */
 	#entriesDelta(): SessionEntriesDelta | undefined {
 		const manager = this.session.sessionManager;
-		const current = manager.getEntries();
+		const current = manager.getEntriesView();
 		const revision = manager.bodyRevision;
 		const published = this.#entries;
 		const last = published.length - 1;
@@ -408,11 +407,15 @@ export class SessionPublisher {
 			current.length >= published.length &&
 			(published.length === 0 || (current[0] === published[0] && current[last] === published[last]));
 		if (extends_ && current.length === published.length) return undefined;
-		this.#entries = current;
 		this.#entriesRevision = revision;
 		const obfuscator = this.session.obfuscator;
-		if (extends_) return { kind: "append", entries: displayEntries(current.slice(published.length), obfuscator) };
-		return { kind: "replace", entries: displayEntries(current, obfuscator) };
+		if (extends_) {
+			const added = current.slice(published.length);
+			for (const entry of added) published.push(entry);
+			return { kind: "append", entries: displayEntries(added, obfuscator) };
+		}
+		this.#entries = [...current];
+		return { kind: "replace", entries: displayEntries(this.#entries, obfuscator) };
 	}
 
 	#publishView(): void {
@@ -473,7 +476,6 @@ export class SessionPublisher {
 		return {
 			providerSessionId: session.sessionId,
 			sessionName: manager.getSessionName(),
-			seanceSourceArtifactsDir: manager.getSeanceSourceArtifactsDir(),
 			leafId: manager.getLeafId(),
 			agentEffort: session.agent.state.thinkingLevel,
 			tools,
@@ -512,10 +514,6 @@ export class SessionPublisher {
 			todoPhases: toWireData(session.getTodoPhases()),
 			queuedMessages: toWireData(session.getQueuedMessages()),
 			restorableQueue: toWireData({ steering: steering.map(queuedEntry), followUp: followUp.map(queuedEntry) }),
-			approvals: {
-				scopes: session.extensionRunner?.sessionApprovalKeys() ?? [],
-				grants: sessionApprovalGrantKeys(session.settings.getAgentDir(), session.sessionManager.getSessionId()),
-			},
 			ephemeralMaxTokensPreservesRequest: session.ephemeralMaxTokensPreservesRequest(),
 			settings: settingsSource(session.settings),
 		};

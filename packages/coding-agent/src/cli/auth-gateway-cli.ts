@@ -53,7 +53,7 @@ import {
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
-import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -66,21 +66,28 @@ import {
 	REDEEM_RETRY_DEFER_MS,
 	resetPlanSettings,
 } from "../session/codex-auto-reset";
-import { type ClaudeResetBankingSettings, cfgClaudeResets, cfgCodexResets } from "../session/settings";
+import {
+	type ClaudeResetBankingSettings,
+	cfgClaudeResets,
+	cfgCodexResets,
+	resetWindowModes,
+} from "../session/settings";
 import {
 	type AuthBrokerClientConfig,
+	applyUnpausedProviders,
 	loadEffectiveAuthAccountPolicyConfig,
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
-import { runAuthGatewayStdio } from "./auth-gateway-stdio";
+import { GATEWAY_MODEL_KINDS, runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
 export function claudeResetBankingFor(
 	cfg: ClaudeResetBankingSettings,
 ): { keepCredits: number; drainFirstOnly?: true } | undefined {
-	if (cfg.autoRedeem === "yes") return { keepCredits: cfg.keepCredits };
-	if (cfg.autoRedeem === "no") return { keepCredits: cfg.keepCredits, drainFirstOnly: true };
+	const modes = [cfg.autoRedeem5h, cfg.autoRedeemWeekly, cfg.autoRedeemFable];
+	if (modes.includes("yes")) return { keepCredits: cfg.keepCredits };
+	if (modes.includes("no")) return { keepCredits: cfg.keepCredits, drainFirstOnly: true };
 	return undefined;
 }
 
@@ -246,25 +253,6 @@ export function createAuthGatewayClientsReloader(
 		return inFlight;
 	};
 }
-
-/**
- * Catalog kinds the gateway has a route for: chat (`/v1/chat/completions`,
- * `/v1/messages`, `/v1/responses`, `/v1/pi/stream`), judge (`/v1/systemone`),
- * image (`/v1/images/*`), tts (`/v1/audio/speech`), stt
- * (`/v1/audio/transcriptions`), embedding (`/v1/embeddings`), rerank
- * (`/v1/rerank`), video (`/v1/videos/*`). Other kinds (tiny, search) have no
- * wire and stay off the served catalog so `/v1/models` never advertises them.
- */
-const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
-	"chat",
-	"judge",
-	"image",
-	"tts",
-	"stt",
-	"embedding",
-	"rerank",
-	"video",
-];
 
 /** Every registry model of a kind the gateway can route, bundled catalog order within each kind. */
 export function gatewayRoutableModels(registry: ModelRegistry): Model<Api>[] {
@@ -445,8 +433,10 @@ export function createGatewayClaudeResetHook(args: {
 				projectId: credential.projectId,
 				orgId: credential.orgId,
 			});
-			const drainFirstRecovery = cfg.autoRedeem === "no" && policy?.drainFirst === true;
-			if (cfg.autoRedeem !== "yes" && !drainFirstRecovery) return false;
+			const modes = resetWindowModes("anthropic", args.settings);
+			const anyYes = [modes["5h"], modes.weekly, modes.fable].includes("yes");
+			const drainFirstRecovery = modes.weekly === "no" && policy?.drainFirst === true;
+			if (!anyYes && !drainFirstRecovery) return false;
 			let report: UsageReport | null;
 			try {
 				report = await args.storage.usage.report(provider, credential, {
@@ -469,10 +459,7 @@ export function createGatewayClaudeResetHook(args: {
 					trigger: "blocked",
 					provider,
 					modelId,
-					settings: {
-						...resetPlanSettings(cfg),
-						enabled: cfg.autoRedeem === "yes" || drainFirstRecovery,
-					},
+					settings: resetPlanSettings(drainFirstRecovery ? { ...modes, weekly: "yes" } : modes, cfg),
 					reports: statuses.flatMap(status => (status.report ? [status.report] : [])),
 					statuses,
 					permitsCredential: id => id === credentialId,
@@ -575,8 +562,8 @@ export function createGatewayCodexResetHook(args: {
 }): NonNullable<AuthGatewayRouteOptions["onUsageLimit"]> {
 	const now = args.now ?? Date.now;
 	return async ({ provider, credentialId, modelId, signal }) => {
-		const cfg = cfgCodexResets.get(args.settings);
-		if (provider !== "openai-codex" || cfg.autoRedeem !== "yes") return false;
+		const modes = resetWindowModes("openai-codex", args.settings);
+		if (provider !== "openai-codex" || modes.weekly !== "yes") return false;
 		const current = args.coordinator.inFlightByCredential.get(credentialId);
 		if (current) return current;
 		const attempt = (async () => {
@@ -623,7 +610,7 @@ export function createGatewayCodexResetHook(args: {
 					trigger: "blocked",
 					provider,
 					modelId,
-					settings: resetPlanSettings(cfg),
+					settings: resetPlanSettings(modes, cfgCodexResets.get(args.settings)),
 					identity: undefined,
 					reports: overlayLiveResetCredits(
 						[finalReport],
@@ -759,6 +746,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// in sdk.ts. The gateway never touches local SQLite.
 	const accountPool = await loadAuthBrokerAccountPool();
 	const settings = await resolveEffectiveSettings();
+	applyUnpausedProviders(settings);
 	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 	const claudeResetConfig = cfgClaudeResets.get(settings);
 	const resetCoordinator: GatewayClaudeResetCoordinator = {
@@ -1139,12 +1127,13 @@ function pickProbeCandidates(provider: string): Model<Api>[] {
 
 /**
  * Compose the apiKey bytes a provider's chat endpoint expects, given a
- * post-refresh probe credential. Mirrors `getOAuthApiKey` for the providers
- * that require a structured blob; otherwise returns the raw access token /
- * API key.
+ * post-refresh probe credential. A key the provider's `getApiKey` hook built
+ * is sent as-is; otherwise mirrors `getOAuthApiKey` for the providers that
+ * require a structured blob, or returns the raw access token / API key.
  */
 function composeProbeApiKey(provider: string, credential: CompletionProbeInput["credential"]): string {
 	if (credential.type === "api_key") return credential.apiKey;
+	if (credential.apiKey !== undefined) return credential.apiKey;
 	// Structured providers expect a JSON credential blob (`{ token, projectId, … }`) rather than the raw token.
 	if (authPolicyFor(provider)?.apiKeyFormat !== "structured") return credential.accessToken;
 	return JSON.stringify({
@@ -1214,6 +1203,7 @@ export function createStrictCompletionProbe(): CompletionProbe {
 		const oauthIdentity =
 			input.credential.type === "oauth"
 				? {
+						accountId: input.credential.accountId,
 						orgId: input.credential.orgId,
 						region: input.credential.region,
 						inferenceRegion: input.credential.inferenceRegion,
@@ -1275,6 +1265,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 
 	const accountPool = await loadAuthBrokerAccountPool();
 	const settings = await resolveEffectiveSettings();
+	applyUnpausedProviders(settings);
 	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);
