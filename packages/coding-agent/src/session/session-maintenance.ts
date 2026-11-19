@@ -380,6 +380,8 @@ interface SpeculationRun {
 	controller: AbortController;
 	promise: Promise<void>;
 	contextTokensAtStart: number;
+	/** `compaction.models` when the run started; a run from another policy is never armed or applied. */
+	compactionModels: readonly string[];
 	armed?: ArmedSpeculation;
 }
 
@@ -639,8 +641,14 @@ export class SessionMaintenance {
 		{ key: string; length: number; first: AgentMessage | undefined }
 	>();
 	readonly #host: SessionMaintenanceHost;
-	/** Unsubscribes the `compaction.models` listener that cancels a stale speculation ({@link dispose}). */
-	readonly #stopCompactionModelsListener: () => void;
+	/** True when `run` started under the current `compaction.models` policy. */
+	#speculationPolicyCurrent(run: SpeculationRun): boolean {
+		const current = cfgCompactionModels.get(this.#host.settings);
+		return (
+			current.length === run.compactionModels.length &&
+			current.every((selector, i) => selector === run.compactionModels[i])
+		);
+	}
 
 	get #model(): Model | undefined {
 		return this.#host.model();
@@ -670,7 +678,6 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
-		this.#stopCompactionModelsListener = cfgCompactionModels.listen(host.settings, () => this.cancelSpeculation());
 	}
 
 	/** Experimental rollover is safe only when the current effective tool surface can recover its state. */
@@ -735,11 +742,6 @@ export class SessionMaintenance {
 		if (!run) return;
 		this.#speculation = undefined;
 		run.controller.abort();
-	}
-
-	/** Stops the settings listeners this instance registered. Call once, when the owning session disposes. */
-	dispose(): void {
-		this.#stopCompactionModelsListener();
 	}
 
 	/** Assistant timestamp whose post-turn maintenance must be skipped once. */
@@ -2329,7 +2331,8 @@ export class SessionMaintenance {
 		if (contextTokens >= thresholdTokens) return; // real maintenance owns it now
 		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
 		const current = this.#speculation;
-		if (current) {
+		if (current && !this.#speculationPolicyCurrent(current)) this.cancelSpeculation();
+		else if (current) {
 			if (!current.armed) return; // one run at a time
 			// Refresh-on-growth: the armed summary's kept tail grows with every
 			// turn; once the growth exceeds the keep-recent budget, a fresh cut
@@ -2355,7 +2358,12 @@ export class SessionMaintenance {
 	/** Install and launch one background speculation run for `method`. */
 	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
-		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+		const run: SpeculationRun = {
+			controller,
+			promise: Promise.resolve(),
+			contextTokensAtStart: contextTokens,
+			compactionModels: cfgCompactionModels.get(this.#host.settings),
+		};
 		const model = this.#model;
 		// Keyed now: the session can switch before the run settles.
 		const nativeKey = model && this.#nativeSpeculationKey(model);
@@ -2430,7 +2438,11 @@ export class SessionMaintenance {
 			contextWindow - SPECULATION_LEAD_MIN_TOKENS,
 		);
 		if (contextTokens >= graceCapTokens) return false;
-		const run = this.#speculation;
+		let run = this.#speculation;
+		if (run && !this.#speculationPolicyCurrent(run)) {
+			this.cancelSpeculation();
+			run = undefined;
+		}
 		if (run) {
 			if (run.armed) {
 				if (!this.#armedSpeculationValid(run.armed, contextTokens)) {
@@ -2542,6 +2554,10 @@ export class SessionMaintenance {
 			};
 		}
 		if (signal.aborted || this.#speculation !== run) return;
+		if (!this.#speculationPolicyCurrent(run)) {
+			this.cancelSpeculation();
+			return;
+		}
 		run.armed = armed;
 		logger.debug("Speculative compaction armed", {
 			method,
@@ -2656,7 +2672,7 @@ export class SessionMaintenance {
 		const run = this.#speculation;
 		if (!run) return undefined;
 		this.#speculation = undefined;
-		if (!run.armed) {
+		if (!run.armed || !this.#speculationPolicyCurrent(run)) {
 			run.controller.abort();
 			return undefined;
 		}

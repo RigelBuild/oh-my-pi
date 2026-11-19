@@ -965,12 +965,8 @@ export class TurnRecovery {
 		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
 	}
 
-	/**
-	 * Parses provider retry and rate-limit reset hints into a delay. Defaults to the live
-	 * model's provider and endpoint; summary candidates pass their own.
-	 */
-	parseRetryAfterMsFromError(errorMessage: string, provider?: string, baseUrl?: string): number | undefined {
-		if (provider === undefined) return this.#parseRetryAfterMsFromError(errorMessage);
+	/** Parses a failed summary attempt's retry hint with the attempted candidate's provider and endpoint. */
+	parseRetryAfterMsFromError(errorMessage: string, provider: string, baseUrl?: string): number | undefined {
 		return extractProviderRetryHint(provider, errorMessage, baseUrl);
 	}
 
