@@ -380,6 +380,8 @@ interface SpeculationRun {
 	controller: AbortController;
 	promise: Promise<void>;
 	contextTokensAtStart: number;
+	/** `compaction.models` when the run started; a run from another policy is never armed or applied. */
+	compactionModels: readonly string[];
 	armed?: ArmedSpeculation;
 }
 
@@ -525,7 +527,8 @@ export interface SessionMaintenanceHost {
 		message: AssistantMessage,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
-	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
+	/** Retry hint for a failed summary attempt, parsed with the attempted candidate's provider and endpoint. */
+	parseRetryAfterMsFromError(errorMessage: string, provider: string, baseUrl: string | undefined): number | undefined;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
@@ -638,6 +641,14 @@ export class SessionMaintenance {
 		{ key: string; length: number; first: AgentMessage | undefined }
 	>();
 	readonly #host: SessionMaintenanceHost;
+	/** True when `run` started under the current `compaction.models` policy. */
+	#speculationPolicyCurrent(run: SpeculationRun): boolean {
+		const current = cfgCompactionModels.get(this.#host.settings);
+		return (
+			current.length === run.compactionModels.length &&
+			current.every((selector, i) => selector === run.compactionModels[i])
+		);
+	}
 
 	get #model(): Model | undefined {
 		return this.#host.model();
@@ -2320,7 +2331,8 @@ export class SessionMaintenance {
 		if (contextTokens >= thresholdTokens) return; // real maintenance owns it now
 		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
 		const current = this.#speculation;
-		if (current) {
+		if (current && !this.#speculationPolicyCurrent(current)) this.cancelSpeculation();
+		else if (current) {
 			if (!current.armed) return; // one run at a time
 			// Refresh-on-growth: the armed summary's kept tail grows with every
 			// turn; once the growth exceeds the keep-recent budget, a fresh cut
@@ -2346,7 +2358,12 @@ export class SessionMaintenance {
 	/** Install and launch one background speculation run for `method`. */
 	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
-		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+		const run: SpeculationRun = {
+			controller,
+			promise: Promise.resolve(),
+			contextTokensAtStart: contextTokens,
+			compactionModels: cfgCompactionModels.get(this.#host.settings),
+		};
 		const model = this.#model;
 		// Keyed now: the session can switch before the run settles.
 		const nativeKey = model && this.#nativeSpeculationKey(model);
@@ -2421,7 +2438,11 @@ export class SessionMaintenance {
 			contextWindow - SPECULATION_LEAD_MIN_TOKENS,
 		);
 		if (contextTokens >= graceCapTokens) return false;
-		const run = this.#speculation;
+		let run = this.#speculation;
+		if (run && !this.#speculationPolicyCurrent(run)) {
+			this.cancelSpeculation();
+			run = undefined;
+		}
 		if (run) {
 			if (run.armed) {
 				if (!this.#armedSpeculationValid(run.armed, contextTokens)) {
@@ -2533,6 +2554,10 @@ export class SessionMaintenance {
 			};
 		}
 		if (signal.aborted || this.#speculation !== run) return;
+		if (!this.#speculationPolicyCurrent(run)) {
+			this.cancelSpeculation();
+			return;
+		}
 		run.armed = armed;
 		logger.debug("Speculative compaction armed", {
 			method,
@@ -2647,7 +2672,7 @@ export class SessionMaintenance {
 		const run = this.#speculation;
 		if (!run) return undefined;
 		this.#speculation = undefined;
-		if (!run.armed) {
+		if (!run.armed || !this.#speculationPolicyCurrent(run)) {
 			run.controller.abort();
 			return undefined;
 		}
@@ -3892,8 +3917,13 @@ export class SessionMaintenance {
 					}
 					if (autoRetry) {
 						const message = error instanceof Error ? error.message : String(error);
-						const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+						const retryAfterMs = this.#host.parseRetryAfterMsFromError(
+							message,
+							candidate.provider,
+							candidate.baseUrl,
+						);
 						const shouldRetry =
+							!AIError.is(id, AIError.Flag.Timeout) &&
 							autoRetry.enabled &&
 							attempt < autoRetry.maxRetries &&
 							!AIError.is(id, AIError.Flag.ContextOverflow) &&
@@ -6146,7 +6176,11 @@ export class SessionMaintenance {
 								break;
 							}
 
-							const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+							const retryAfterMs = this.#host.parseRetryAfterMsFromError(
+								message,
+								candidate.provider,
+								candidate.baseUrl,
+							);
 							// An input the summarizer cannot fit is deterministic: the same
 							// prompt fails identically every attempt, so the retry budget is
 							// pure latency and the next candidate (a larger window) is the

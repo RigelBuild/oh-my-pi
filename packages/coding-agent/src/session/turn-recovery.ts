@@ -965,9 +965,9 @@ export class TurnRecovery {
 		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
 	}
 
-	/** Parses provider retry and rate-limit reset hints into a delay. */
-	parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		return this.#parseRetryAfterMsFromError(errorMessage);
+	/** Parses a failed summary attempt's retry hint with the attempted candidate's provider and endpoint. */
+	parseRetryAfterMsFromError(errorMessage: string, provider: string, baseUrl?: string): number | undefined {
+		return extractProviderRetryHint(provider, errorMessage, baseUrl);
 	}
 
 	/**
