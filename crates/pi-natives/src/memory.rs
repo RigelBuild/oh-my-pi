@@ -12,7 +12,8 @@
 //! Every compute-bound native job holds a [`NativeWork`] guard: the
 //! [`crate::task`] blocking paths and the edit preview pass. When the last one
 //! drops, a dedicated thread waits for [`QUIET_PERIOD`] without new work and
-//! then trims once. It sleeps on a condition variable in between, so an idle
+//! then trims once, or after [`MAX_DELAY`] if work never pauses that long.
+//! It sleeps on a condition variable in between, so an idle
 //! process does nothing, and a trim never runs while counted jobs are using
 //! the arenas it locks. Long-lived I/O jobs (PTY sessions, overlay mounts) are
 //! not counted, since holding a guard for a whole shell command would block
@@ -111,7 +112,7 @@ impl<T: napi::bindgen_prelude::ToNapiValue> napi::bindgen_prelude::ToNapiValue f
 
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), test))]
 mod allocator {
-	use std::time::Duration;
+	use std::time::{Duration, Instant};
 
 	use parking_lot::{Condvar, Mutex, MutexGuard};
 
@@ -121,23 +122,40 @@ mod allocator {
 	#[cfg(all(target_os = "linux", target_env = "gnu"))]
 	const QUIET_PERIOD: Duration = Duration::from_secs(5);
 
-	/// Running jobs and how much finished work the last trim covered.
-	struct Activity {
-		running:  usize,
-		finished: u64,
-		trimmed:  u64,
+	/// Longest a trim waits after the first finished work it covers, so a
+	/// steady stream of bursts cannot postpone trimming forever.
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	const MAX_DELAY: Duration = Duration::from_secs(30);
+
+	/// Finished work that no trim covers yet: when it first and last finished.
+	#[derive(Clone, Copy)]
+	struct Pending {
+		first: Instant,
+		last:  Instant,
 	}
 
-	impl Activity {
-		/// Work finished since the last trim and none running: the generation a
-		/// trim after the quiet period would cover.
-		const fn pending(&self) -> Option<u64> {
-			if self.running == 0 && self.finished != self.trimmed {
-				Some(self.finished)
-			} else {
-				None
-			}
-		}
+	/// Running jobs and the finished work awaiting a trim.
+	struct Activity {
+		running: usize,
+		pending: Option<Pending>,
+	}
+
+	/// Whether a trim is due at `now`: no job is running, work awaits a trim,
+	/// and either the quiet period has passed since its last finish or the
+	/// delay bound has passed since its first.
+	fn should_trim(activity: &Activity, now: Instant, quiet: Duration, max_delay: Duration) -> bool {
+		activity.running == 0
+			&& activity.pending.is_some_and(|pending| {
+				now.duration_since(pending.last) >= quiet
+					|| now.duration_since(pending.first) >= max_delay
+			})
+	}
+
+	/// When pending work falls due if nothing else finishes: the earlier of
+	/// the quiet period after its last finish and the delay bound after its
+	/// first.
+	fn due_at(pending: Pending, quiet: Duration, max_delay: Duration) -> Instant {
+		(pending.last + quiet).min(pending.first + max_delay)
 	}
 
 	struct Trimmer {
@@ -148,7 +166,7 @@ mod allocator {
 	impl Trimmer {
 		const fn new() -> Self {
 			Self {
-				activity: Mutex::new(Activity { running: 0, finished: 0, trimmed: 0 }),
+				activity: Mutex::new(Activity { running: 0, pending: None }),
 				idle:     Condvar::new(),
 			}
 		}
@@ -170,32 +188,37 @@ mod allocator {
 		}
 
 		fn finish(&self, mut activity: MutexGuard<'_, Activity>) {
-			activity.finished += 1;
+			let now = Instant::now();
+			activity
+				.pending
+				.get_or_insert(Pending { first: now, last: now })
+				.last = now;
 			if activity.running == 0 {
 				self.idle.notify_one();
 			}
 		}
 
-		/// Trim after each quiet period that follows finished work; never
-		/// returns.
+		/// Trim once pending work has been quiet for `quiet`, or `max_delay`
+		/// after its first finish; never returns.
 		///
-		/// Work that ends during the wait restarts it, and work still running
-		/// when it expires defers the trim until that work ends.
-		fn run(&self, quiet: Duration, mut release: impl FnMut()) -> ! {
+		/// Work that ends during the wait restarts the quiet period but not the
+		/// delay bound, so a steady stream still trims. Work still running when
+		/// a trim falls due defers it until that work ends.
+		fn run(&self, quiet: Duration, max_delay: Duration, mut release: impl FnMut()) -> ! {
 			let mut activity = self.activity.lock();
 			loop {
-				let Some(generation) = activity.pending() else {
+				let Some(pending) = activity.pending.filter(|_| activity.running == 0) else {
 					self.idle.wait(&mut activity);
 					continue;
 				};
-				if !self.idle.wait_for(&mut activity, quiet).timed_out() {
-					continue;
+				if should_trim(&activity, Instant::now(), quiet, max_delay) {
+					activity.pending = None;
+					MutexGuard::unlocked(&mut activity, &mut release);
+				} else {
+					self
+						.idle
+						.wait_until(&mut activity, due_at(pending, quiet, max_delay));
 				}
-				if activity.pending() != Some(generation) {
-					continue;
-				}
-				activity.trimmed = generation;
-				MutexGuard::unlocked(&mut activity, &mut release);
 			}
 		}
 	}
@@ -212,7 +235,7 @@ mod allocator {
 			let _ = std::thread::Builder::new()
 				.name("pi-heap-trim".into())
 				.stack_size(64 * 1024)
-				.spawn(|| TRIMMER.run(QUIET_PERIOD, release_unused_pages));
+				.spawn(|| TRIMMER.run(QUIET_PERIOD, MAX_DELAY, release_unused_pages));
 			napi::bindgen_prelude::set_external_release_hook(super::released);
 		});
 		TRIMMER.begin();
@@ -243,19 +266,58 @@ mod allocator {
 
 		use super::*;
 
+		/// A delay bound the tests below never reach.
+		const UNBOUNDED: Duration = Duration::from_secs(3600);
+
 		/// Run a trimmer on its own thread; the thread outlives the test, parked.
-		fn spawn_trimmer(quiet: Duration, release: impl FnMut() + Send + 'static) -> Arc<Trimmer> {
+		fn spawn_trimmer(
+			quiet: Duration,
+			max_delay: Duration,
+			release: impl FnMut() + Send + 'static,
+		) -> Arc<Trimmer> {
 			let trimmer = Arc::new(Trimmer::new());
 			let runner = Arc::clone(&trimmer);
-			std::thread::spawn(move || runner.run(quiet, release));
+			std::thread::spawn(move || runner.run(quiet, max_delay, release));
 			trimmer
+		}
+
+		#[test]
+		fn should_trim_only_when_quiet_or_overdue_and_nothing_runs() {
+			const QUIET: Duration = Duration::from_secs(5);
+			const MAX: Duration = Duration::from_secs(30);
+			let t0 = Instant::now();
+			let at = |secs: u64| t0 + Duration::from_secs(secs);
+			// Work that finished between `first` and `last` seconds, none running.
+			let idle = |first: u64, last: u64| Activity {
+				running: 0,
+				pending: Some(Pending { first: at(first), last: at(last) }),
+			};
+
+			// One finish: due after the quiet period, not before.
+			assert!(!should_trim(&idle(0, 0), at(4), QUIET, MAX));
+			assert!(should_trim(&idle(0, 0), at(5), QUIET, MAX));
+
+			// Finishes every second: the quiet period never elapses, the bound
+			// does.
+			assert!(!should_trim(&idle(0, 29), at(29), QUIET, MAX));
+			assert!(should_trim(&idle(0, 29), at(30), QUIET, MAX));
+			let pending = Pending { first: at(0), last: at(29) };
+			assert_eq!(due_at(pending, QUIET, MAX), at(30));
+
+			// Running work never trims, however overdue.
+			let running = Activity { running: 1, ..idle(0, 0) };
+			assert!(!should_trim(&running, at(600), QUIET, MAX));
+
+			// Nothing pending: nothing to trim.
+			let none = Activity { running: 0, pending: None };
+			assert!(!should_trim(&none, at(600), QUIET, MAX));
 		}
 
 		#[test]
 		fn trims_once_per_quiet_period_after_work_and_never_while_work_runs() {
 			const QUIET: Duration = Duration::from_millis(50);
 			let (trimmed_tx, trimmed) = mpsc::channel();
-			let trimmer = spawn_trimmer(QUIET, move || trimmed_tx.send(()).unwrap());
+			let trimmer = spawn_trimmer(QUIET, UNBOUNDED, move || trimmed_tx.send(()).unwrap());
 
 			// Nothing has run yet, so there is nothing to trim.
 			assert!(trimmed.recv_timeout(QUIET * 4).is_err());
@@ -286,11 +348,79 @@ mod allocator {
 		}
 
 		#[test]
+		fn a_single_finish_then_quiet_trims_after_the_quiet_period() {
+			const QUIET: Duration = Duration::from_millis(50);
+			const MAX: Duration = Duration::from_secs(10);
+			let (trimmed_tx, trimmed) = mpsc::channel();
+			let trimmer = spawn_trimmer(QUIET, MAX, move || {
+				trimmed_tx.send(Instant::now()).unwrap();
+			});
+
+			let started = Instant::now();
+			trimmer.begin();
+			trimmer.end();
+			let trimmed_at = trimmed
+				.recv_timeout(Duration::from_secs(5))
+				.expect("trim after the quiet period");
+			// Due a quiet period after the finish, long before the bound.
+			assert!(trimmed_at.duration_since(started) >= QUIET);
+			assert!(trimmed_at.duration_since(started) < MAX);
+		}
+
+		#[test]
+		fn steady_finishes_with_gaps_trim_by_the_delay_bound() {
+			const QUIET: Duration = Duration::from_secs(1);
+			const MAX: Duration = Duration::from_millis(300);
+			const GAP: Duration = Duration::from_millis(10);
+			let (trimmed_tx, trimmed) = mpsc::channel();
+			let trimmer = spawn_trimmer(QUIET, MAX, move || {
+				trimmed_tx.send(Instant::now()).unwrap();
+			});
+
+			// Each job ends with nothing else running, and the next comes after a
+			// gap well under QUIET, so the quiet period never elapses on its own.
+			let started = Instant::now();
+			let trimmed_at = loop {
+				assert!(started.elapsed() < Duration::from_secs(10), "no trim by the delay bound");
+				trimmer.begin();
+				trimmer.end();
+				if let Ok(at) = trimmed.recv_timeout(GAP) {
+					break at;
+				}
+			};
+			// Due MAX after the first finish, which came after `started`.
+			assert!(trimmed_at.duration_since(started) >= MAX);
+			assert!(trimmed_at.duration_since(started) < MAX + Duration::from_secs(2));
+		}
+
+		#[test]
+		fn work_running_throughout_is_never_trimmed_however_long() {
+			const QUIET: Duration = Duration::from_millis(20);
+			const MAX: Duration = Duration::from_millis(100);
+			let (trimmed_tx, trimmed) = mpsc::channel();
+			let trimmer = spawn_trimmer(QUIET, MAX, move || trimmed_tx.send(()).unwrap());
+
+			// One job runs throughout while finished work piles up well past the
+			// delay bound.
+			trimmer.begin();
+			let started = Instant::now();
+			while started.elapsed() < MAX * 5 {
+				trimmer.begin();
+				trimmer.end();
+				assert!(trimmed.recv_timeout(Duration::from_millis(5)).is_err());
+			}
+			trimmer.end();
+			trimmed
+				.recv_timeout(Duration::from_secs(10))
+				.expect("trim once the job ends");
+		}
+
+		#[test]
 		fn work_during_a_trim_neither_blocks_nor_goes_untrimmed() {
 			const QUIET: Duration = Duration::from_millis(20);
 			let (entered_tx, entered) = mpsc::channel();
 			let (proceed_tx, proceed) = mpsc::channel::<()>();
-			let trimmer = spawn_trimmer(QUIET, move || {
+			let trimmer = spawn_trimmer(QUIET, UNBOUNDED, move || {
 				entered_tx.send(()).unwrap();
 				proceed.recv().unwrap();
 			});
@@ -314,7 +444,7 @@ mod allocator {
 		fn a_result_settled_after_the_trim_is_trimmed_again_but_not_under_running_work() {
 			const QUIET: Duration = Duration::from_millis(50);
 			let (trimmed_tx, trimmed) = mpsc::channel();
-			let trimmer = spawn_trimmer(QUIET, move || trimmed_tx.send(()).unwrap());
+			let trimmer = spawn_trimmer(QUIET, UNBOUNDED, move || trimmed_tx.send(()).unwrap());
 
 			trimmer.begin();
 			trimmer.end();
