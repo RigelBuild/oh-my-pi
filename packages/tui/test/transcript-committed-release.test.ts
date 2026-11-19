@@ -2,7 +2,6 @@ import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test"
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { Lexer, type Token } from "@oh-my-pi/pi-utils/marked";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { ToolExecutionComponent, type ToolExecutionUi } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -24,7 +23,7 @@ import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
 import { editToolRenderer } from "@oh-my-pi/pi-tui/tools/edit";
 import { renderMCPResult, setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
-import { becomesCollectible, collectedOnce } from "./gc";
+import { becomesCollectible } from "./gc";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 
 const frame = { tick: 0, now: 0 };
@@ -705,15 +704,15 @@ describe("committed transcript blocks release render caches", () => {
 		expect(pane.render(30)).toEqual(fresh.render(30));
 	});
 
-	it("collects parsed source from a retired assistant finalized in transient mode", async () => {
-		const parsed: WeakRef<Token>[] = [];
-		const blockTokens = Lexer.prototype.blockTokens;
-		const lexSpy = spyOn(Lexer.prototype, "blockTokens").mockImplementation(function (this: Lexer, source, tokens) {
-			const result = blockTokens.call(this, source, tokens);
-			for (const token of result) {
-				if (token.raw.startsWith("## Frozen reasoning")) parsed.push(new WeakRef(token));
-			}
-			return result;
+	it("releases the parsed prefix tokens of a retired assistant finalized in transient mode", () => {
+		const markdowns = new Set<Markdown>();
+		const render = Markdown.prototype.render;
+		const renderSpy = spyOn(Markdown.prototype, "render").mockImplementation(function (
+			this: Markdown,
+			width: number,
+		) {
+			markdowns.add(this);
+			return render.call(this, width);
 		});
 		const component = new AssistantMessageComponent();
 		const message = assistantMessage("A tool call has closed this segment.");
@@ -726,13 +725,13 @@ describe("committed transcript blocks release render caches", () => {
 		message.stopReason = "toolUse";
 		component.updateContent(message, { transient: true });
 		component.render(80);
+		expect([...markdowns].filter(md => md.holdsStreamPrefixTokens).length).toBeGreaterThan(0);
 		component.markTranscriptBlockFinalized();
 		const transcript = new TranscriptContainer();
 		transcript.addChild(component);
 		const retired = commitAll(transcript, 80);
-		lexSpy.mockRestore();
-		if (parsed.length === 0) throw new Error("expected parsed reasoning tokens");
-		expect(await collectedOnce(parsed)).toBe(parsed.length);
+		renderSpy.mockRestore();
+		expect([...markdowns].filter(md => md.holdsStreamPrefixTokens).length).toBe(0);
 		expect(replay(transcript, 80)).toEqual(retired);
 	});
 

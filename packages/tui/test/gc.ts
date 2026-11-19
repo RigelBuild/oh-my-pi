@@ -26,9 +26,3 @@ export async function becomesCollectible(target: WeakRef<object>, deadlineMs = 3
 	} while (performance.now() < deadline);
 	return false;
 }
-
-/** How many of `targets` are collectible after one full collection; no retry, so the answer is one GC's answer. */
-export async function collectedOnce(targets: readonly WeakRef<object>[]): Promise<number> {
-	await collectGarbage();
-	return targets.filter(target => target.deref() === undefined).length;
-}
