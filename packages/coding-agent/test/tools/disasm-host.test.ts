@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { ptree, readLines, untilAborted } from "@oh-my-pi/pi-utils";
 import { DisasmDatabase } from "../../src/disasm/client";
 import {
@@ -10,6 +10,7 @@ import {
 	DISASM_HOST_WORKER_ARG,
 	type HostConfig,
 	hostReadyPattern,
+	parseHostRequest,
 } from "../../src/disasm/protocol";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../../src/subprocess/worker-client";
 import { createIdaWorkerRuntime } from "../helpers/ida-worker";
@@ -137,4 +138,42 @@ describe("disassembler host retained references", () => {
 		await host.exited();
 		expect(await Bun.file(host.saved).exists()).toBe(false);
 	}, 30_000);
+});
+
+describe("disassembler client connection state", () => {
+	it("reports a disconnected database as not connected in the same tick, before the socket close event", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-disasm-connected-"));
+		const endpoint = ipcEndpoint(dir, "connected");
+		const status = {
+			id: "connected-id",
+			ref: "stub",
+			handle: "stub-handle",
+			references: 0,
+			idbPath: path.join(dir, "stub.i64"),
+			info: { module: "stub", format: "ELF", arch: "x86", bitness: 64 },
+			state: "open",
+			busy: false,
+			lastUsed: 0,
+			current: null,
+			dirty: false,
+		};
+		const server = await IpcServer.listen(endpoint, { framing: "lines" }, connection => {
+			connection.start(
+				line => {
+					const request = parseHostRequest(line);
+					connection.send(JSON.stringify({ id: request.id, ok: true, result: status }));
+				},
+				() => {},
+			);
+		});
+		cleanups.push(async () => {
+			await server.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		});
+		const db = await DisasmDatabase.attach("omp.ida.connected", endpoint, "status");
+		if (!db) throw new Error("fixture host did not accept a connection");
+		expect(db.connected).toBe(true);
+		db.disconnect();
+		expect(db.connected).toBe(false);
+	});
 });

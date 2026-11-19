@@ -133,6 +133,7 @@ class HostConnection {
 	}
 
 	close(): void {
+		this.#open = false;
 		this.#conn.destroy();
 	}
 
