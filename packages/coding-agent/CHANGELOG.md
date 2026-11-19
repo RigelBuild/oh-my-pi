@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ctx.getBackgroundWork()` and the `background_work_changed` event. `jobs` counts running async jobs of every owner on the session's root job manager, and `agents` counts running subagents in the process-wide agent registry that no running job covers, so extensions can react when that count changes. The event fires only on change, and only in the main session; subagent sessions read `ctx.getBackgroundWork()`.
+
 ### Fixed
 
 - Disconnecting a disassembler database now reports it as not connected at once, so a closed reference fails with the reopen hint instead of a host-exited error.

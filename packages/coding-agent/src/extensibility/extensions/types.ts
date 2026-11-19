@@ -790,6 +790,17 @@ export interface ExtensionLiveSession {
 	stop(): Promise<void>;
 }
 
+/** Running background work: async jobs on this session's root job manager, and process-wide running subagents that own no job. */
+export interface BackgroundWork {
+	jobs: number;
+	agents: number;
+}
+
+/** Fired whenever {@link BackgroundWork} changes: a job or subagent starts or ends. Only the main session fires it; subagent sessions receive nothing. */
+export interface BackgroundWorkChangedEvent extends BackgroundWork {
+	type: "background_work_changed";
+}
+
 export interface ExtensionContext {
 	/** Optional advisory transport for this session and its immediate children. */
 	taskAdvisory?: TaskAdvisory;
@@ -801,6 +812,8 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
+	/** Running background work: jobs on this session's root job manager, plus process-wide running subagents not backed by a job. */
+	getBackgroundWork(): BackgroundWork;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
@@ -1734,7 +1747,8 @@ export type ExtensionEvent =
 	| ToolApprovalResolvedEvent
 	| PlanReviewRequestedEvent
 	| PlanReviewResolvedEvent
-	| ModeChangedEvent;
+	| ModeChangedEvent
+	| BackgroundWorkChangedEvent;
 
 // ============================================================================
 // Event Results
@@ -1960,6 +1974,7 @@ export interface ExtensionAPI {
 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
+	on(event: "background_work_changed", handler: ExtensionHandler<BackgroundWorkChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;

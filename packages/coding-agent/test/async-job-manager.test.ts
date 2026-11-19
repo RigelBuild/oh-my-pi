@@ -1091,4 +1091,118 @@ describe("AsyncJobManager", () => {
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
 	});
+
+	test("onJobsChanged fires on register and evict, and unsubscribe stops it", async () => {
+		const manager = new AsyncJobManager({ retentionMs: 60_000 });
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "quick", async () => "done", { ownerId: "Main" });
+		expect(changes).toBeGreaterThan(0);
+
+		await manager.waitForAll();
+		const beforeEvict = changes;
+		expect(manager.evictCompletedJobs({ ownerId: "Main" })).toBe(1);
+		expect(manager.getJob(jobId)).toBeUndefined();
+		expect(changes).toBeGreaterThan(beforeEvict);
+
+		unsubscribe();
+		const afterUnsubscribe = changes;
+		manager.register("bash", "after", async () => "later", { ownerId: "Main" });
+		await manager.waitForAll();
+		expect(changes).toBe(afterUnsubscribe);
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
+
+	test("backgroundJob promotes a foreground job and fires onJobsChanged", async () => {
+		const manager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<string>();
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "promoted", () => gate.promise, { ownerId: "Main", foreground: true });
+		expect(manager.getRunningJobs({ ownerId: "Main" })).toEqual([]);
+		const beforePromote = changes;
+		expect(manager.backgroundJob(jobId)).toBeTrue();
+		expect(changes).toBeGreaterThan(beforePromote);
+		expect(manager.getRunningJobs({ ownerId: "Main" }).map(job => job.id)).toEqual([jobId]);
+		gate.resolve("done");
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
+
+	test("cancel fires onJobsChanged even when the body ignores the abort", async () => {
+		const manager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<string>();
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "ignores-abort", () => gate.promise, { ownerId: "Main" });
+		const beforeCancel = changes;
+		expect(manager.cancel(jobId)).toBe(true);
+		expect(changes).toBeGreaterThan(beforeCancel);
+		expect(manager.getRunningJobs({ ownerId: "Main" })).toEqual([]);
+		gate.resolve("done");
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
+
+	test("cancelAll fires onJobsChanged even when the body ignores the abort", async () => {
+		const manager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<string>();
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "ignores-abort-all", () => gate.promise, { ownerId: "Main" });
+		const beforeCancelAll = changes;
+		manager.cancelAll({ ownerId: "Main" });
+		expect(changes).toBeGreaterThan(beforeCancelAll);
+		expect(manager.getRunningJobs({ ownerId: "Main" })).toEqual([]);
+		expect(manager.getJob(jobId)?.status).toBe("cancelled");
+		gate.resolve("done");
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
+
+	test("markRunning fires onJobsChanged only when it clears a queued flag", async () => {
+		const manager = new AsyncJobManager({});
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const runAndMark = async (queued: boolean): Promise<{ before: number; after: number }> => {
+			const gate = Promise.withResolvers<void>();
+			const marked = Promise.withResolvers<{ before: number; after: number }>();
+			manager.register(
+				"bash",
+				queued ? "queued" : "running",
+				async ({ markRunning }) => {
+					await gate.promise;
+					const before = changes;
+					markRunning();
+					marked.resolve({ before, after: changes });
+					return "done";
+				},
+				{ ownerId: "Main", queued },
+			);
+			gate.resolve();
+			return marked.promise;
+		};
+		// A job that was never queued has no flag to clear, so markRunning must not notify.
+		const plainRun = await runAndMark(false);
+		expect(plainRun.after).toBe(plainRun.before);
+		// A queued job clears its flag here, so the transition must notify.
+		const queuedRun = await runAndMark(true);
+		expect(queuedRun.after).toBeGreaterThan(queuedRun.before);
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
 });

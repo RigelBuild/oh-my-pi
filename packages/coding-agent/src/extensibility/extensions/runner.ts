@@ -73,6 +73,7 @@ import type {
 	ExtensionAgentIdentity,
 	ExtensionAnnotationsAPI,
 	ExtensionAnnotationsFactory,
+	BackgroundWork,
 	ExtensionCommandContext,
 	ExtensionCommandContextActions,
 	ExtensionContext,
@@ -621,6 +622,7 @@ export class ExtensionRunner {
 	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
+	#getBackgroundWorkFn: () => BackgroundWork = () => ({ jobs: 0, agents: 0 });
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -867,11 +869,14 @@ export class ExtensionRunner {
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
 		createAnnotations?: ExtensionAnnotationsFactory,
+		/** Running background work: this session's root job manager plus process-wide running subagents, read live into `ctx.getBackgroundWork()`. */
+		getBackgroundWork?: () => BackgroundWork,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#getBackgroundWorkFn = getBackgroundWork ?? (() => ({ jobs: 0, agents: 0 }));
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
 	}
 
@@ -1048,6 +1053,11 @@ export class ExtensionRunner {
 			return;
 		}
 		await this.emit({ type: "credential_disabled", ...event });
+	}
+
+	/** Forward a change in running background work to `background_work_changed` handlers. */
+	async emitBackgroundWork(work: BackgroundWork): Promise<void> {
+		await this.emit({ type: "background_work_changed", ...work });
 	}
 
 	/**
@@ -1812,6 +1822,7 @@ export class ExtensionRunner {
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
+			getBackgroundWork: () => this.#getBackgroundWorkFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,

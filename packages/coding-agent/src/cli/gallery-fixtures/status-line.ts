@@ -58,6 +58,7 @@ function fakeGaugeSession(tokens: number): AgentSession {
 			getSessionName: () => "gallery",
 		},
 		getAsyncJobSnapshot: () => ({ running: [] }),
+		getBackgroundWork: () => ({ jobs: 0, agents: 0 }),
 		isFastModeActive: () => false,
 		getContextUsage: () => ({ tokens, contextWindow: GAUGE_WINDOW, percent: (tokens / GAUGE_WINDOW) * 100 }),
 		contextUsageRevision: 0,
