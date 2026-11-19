@@ -1170,4 +1170,39 @@ describe("AsyncJobManager", () => {
 		unsubscribe();
 		await manager.dispose({ timeoutMs: 1_000 });
 	});
+
+	test("markRunning fires onJobsChanged only when it clears a queued flag", async () => {
+		const manager = new AsyncJobManager({});
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const runAndMark = async (queued: boolean): Promise<{ before: number; after: number }> => {
+			const gate = Promise.withResolvers<void>();
+			const marked = Promise.withResolvers<{ before: number; after: number }>();
+			manager.register(
+				"bash",
+				queued ? "queued" : "running",
+				async ({ markRunning }) => {
+					await gate.promise;
+					const before = changes;
+					markRunning();
+					marked.resolve({ before, after: changes });
+					return "done";
+				},
+				{ ownerId: "Main", queued },
+			);
+			gate.resolve();
+			return marked.promise;
+		};
+		// A job that was never queued has no flag to clear, so markRunning must not notify.
+		const plainRun = await runAndMark(false);
+		expect(plainRun.after).toBe(plainRun.before);
+		// A queued job clears its flag here, so the transition must notify.
+		const queuedRun = await runAndMark(true);
+		expect(queuedRun.after).toBeGreaterThan(queuedRun.before);
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
 });
