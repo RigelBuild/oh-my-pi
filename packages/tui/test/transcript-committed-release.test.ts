@@ -24,7 +24,7 @@ import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
 import { editToolRenderer } from "@oh-my-pi/pi-tui/tools/edit";
 import { renderMCPResult, setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
-import { becomesCollectible } from "./gc";
+import { becomesCollectible, collectedOnce } from "./gc";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 
 const frame = { tick: 0, now: 0 };
@@ -730,9 +730,9 @@ describe("committed transcript blocks release render caches", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(component);
 		const retired = commitAll(transcript, 80);
-		lexSpy.mockClear();
+		lexSpy.mockRestore();
 		if (parsed.length === 0) throw new Error("expected parsed reasoning tokens");
-		for (const token of parsed) expect(await becomesCollectible(token)).toBe(true);
+		expect(await collectedOnce(parsed)).toBe(parsed.length);
 		expect(replay(transcript, 80)).toEqual(retired);
 	});
 
