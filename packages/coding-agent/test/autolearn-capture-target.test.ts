@@ -55,8 +55,8 @@ describe("auto-learn capture target", () => {
 		expect(capture?.context.tools?.map(tool => tool.name)).toEqual(["manage_skill"]);
 		expect(capture?.options?.reasoning).toBe(Effort.Low);
 		expect(capture?.options?.disableReasoning).toBe(false);
-		// The seat history (user, assistant) followed by the capture nudge as a user message.
-		expect(capture?.context.messages.map(message => message.role)).toEqual(["user", "assistant", "user"]);
+		// The seat history (user, assistant) followed by the capture nudge, which convertToLlm sends as a developer message.
+		expect(capture?.context.messages.map(message => message.role)).toEqual(["user", "assistant", "developer"]);
 	});
 
 	it("runs on the role's model and thinking level with reasoning enabled", async () => {

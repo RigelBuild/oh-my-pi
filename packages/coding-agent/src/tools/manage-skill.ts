@@ -193,7 +193,7 @@ async function writeJournalLesson(
 		}
 		await journal.beforePublish?.(tempPath);
 	} catch (error) {
-		// A crash before publish leaves the temp file for inspection; it never reaches the lesson name.
+		// A failure after the temp file is created (write, sync, beforePublish) leaves it for inspection; a mkdir or open failure leaves none. Either way it never reaches the lesson name.
 		return journalError(`Failed to write lesson: ${String(error)}`, { action: params.action });
 	}
 	try {

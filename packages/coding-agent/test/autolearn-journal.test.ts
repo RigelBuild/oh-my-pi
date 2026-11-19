@@ -1,22 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	cfgAutolearnJournalDir,
-	DEFAULT_AUTOLEARN_SECRET_PATTERNS,
-	resolveAutolearnPath,
-} from "@oh-my-pi/pi-coding-agent/autolearn/settings";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { AutoLearnController } from "@oh-my-pi/pi-coding-agent/autolearn/controller";
+import { DEFAULT_AUTOLEARN_SECRET_PATTERNS } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	compileSecretPatterns,
 	type ManageSkillJournal,
 	ManageSkillTool,
 } from "@oh-my-pi/pi-coding-agent/tools/manage-skill";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 async function managedSnapshot(): Promise<string[]> {
 	return fs.readdir(getManagedSkillsDir(), { recursive: true }).catch(() => []);
@@ -165,20 +169,135 @@ describe("manage_skill journal mode", () => {
 		}
 	});
 
-	it("expands a leading ~ in journalDir to the home directory, not a literal ./~ directory", async () => {
-		const home = os.homedir();
+	it("writes a journal lesson under a ~ journalDir through the SDK capture tool, inside the home directory", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-journal-tilde-home-"));
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(home);
+		const source = `sdk-journal-tilde-${Snowflake.next()}`;
+		registerMockApi(source);
 		const relative = `pi-journal-tilde-${Snowflake.next()}`;
-		const resolved = path.join(home, relative);
+		const auth = createInMemoryAuthStorage();
+		auth.keys.setRuntime("anthropic", "test-key");
 		try {
 			const settings = Settings.isolated({
 				"autolearn.enabled": true,
+				"autolearn.autoContinue": true,
+				"autolearn.minToolCalls": 0,
 				"autolearn.journalDir": `~/${relative}`,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
 			});
-			const dir = resolveAutolearnPath(cfgAutolearnJournalDir.get(settings) ?? "");
-			expect(dir).toBe(resolved);
-			expect(dir.includes("~")).toBe(false);
+			const model = createMockModel({
+				provider: "anthropic",
+				id: "journal-tilde-seat",
+				handler: context => {
+					// Only the capture turn offers manage_skill; it calls it once, then stops.
+					const offered = context.tools?.some(tool => tool.name === "manage_skill") ?? false;
+					const answered = context.messages.some(message => message.role === "toolResult");
+					if (!offered || answered) return { content: ["ok"] };
+					return {
+						content: [
+							{
+								type: "toolCall",
+								name: "manage_skill",
+								arguments: {
+									action: "create",
+									name: "tilde-lesson",
+									description: "Tilde journal",
+									body: "Lesson body.",
+								},
+							},
+						],
+					};
+				},
+			});
+			const { session } = await createAgentSession({
+				cwd: home,
+				agentDir: home,
+				modelRegistry: new ModelRegistry(auth, path.join(home, "models.yml"), { settings }),
+				model,
+				getApiKey: async () => "test-key",
+				sessionManager: SessionManager.inMemory(home),
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				cacheWarming: false,
+			});
+			// Record each capture the controller starts, so the test awaits its real completion, not a poll.
+			const captures: Promise<void>[] = [];
+			const started = Promise.withResolvers<void>();
+			const runCapture = session.runAutolearnCapture.bind(session);
+			session.runAutolearnCapture = capture => {
+				const task = runCapture(capture);
+				captures.push(task);
+				started.resolve();
+				return task;
+			};
+			try {
+				await session.prompt("Record a lesson.");
+				await started.promise;
+				await Promise.all(captures);
+				const journalDir = path.join(home, relative);
+				const lessons = await fs.readdir(journalDir);
+				expect(lessons).toHaveLength(1);
+				expect(await fs.readFile(path.join(journalDir, lessons[0] ?? ""), "utf8")).toContain(
+					'name: "tilde-lesson"',
+				);
+			} finally {
+				await session.dispose();
+			}
 		} finally {
-			await fs.rm(resolved, { recursive: true, force: true });
+			homedirSpy.mockRestore();
+			unregisterCustomApis(source);
+			auth.close();
+			await fs.rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("reads a ~ capturePrompt file under the home directory and captures with its text", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-capture-prompt-home-"));
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(home);
+		const warnSpy = vi.spyOn(logger, "warn");
+		const relative = `capture-prompt-${Snowflake.next()}.md`;
+		await fs.writeFile(path.join(home, relative), "Capture from the tilde prompt.\n");
+		// Either the capture callback gets the file text, or the controller logs a skip; the race reports which.
+		const captured = Promise.withResolvers<string>();
+		const skipped = Promise.withResolvers<string>();
+		warnSpy.mockImplementation((message: string) => skipped.resolve(message));
+		const listeners: Array<(event: AgentSessionEvent) => void> = [];
+		try {
+			const session = {
+				subscribe: (listener: (event: AgentSessionEvent) => void) => {
+					listeners.push(listener);
+					return () => {};
+				},
+				getPlanModeState: () => undefined,
+				getGoalModeState: () => undefined,
+			};
+			new AutoLearnController({
+				session: session as unknown as AgentSession,
+				settings: Settings.isolated({
+					"autolearn.enabled": true,
+					"autolearn.autoContinue": true,
+					"autolearn.minToolCalls": 0,
+					"autolearn.capturePrompt": `~/${relative}`,
+				}),
+				capture: async content => {
+					captured.resolve(content);
+				},
+			});
+			for (const listener of listeners) listener({ type: "agent_end", messages: [] });
+			expect(await Promise.race([captured.promise, skipped.promise])).toBe("Capture from the tilde prompt.");
+		} finally {
+			warnSpy.mockRestore();
+			homedirSpy.mockRestore();
+			await fs.rm(home, { recursive: true, force: true });
 		}
 	});
 
