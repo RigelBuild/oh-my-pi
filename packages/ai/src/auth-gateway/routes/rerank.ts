@@ -64,7 +64,7 @@ export async function handleRerank(
 
 	let account = resolveGatewayAccount(apiKey);
 	let credentialId = apiKey.credentialId;
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: "rerank",
 		model: model.id,

@@ -102,7 +102,10 @@ function quota(
 		result[key] = value;
 		observed = true;
 	}
-	if (observed) logger.info("auth-gateway quota observation", result);
+	if (observed) {
+		if (response.status < 200 || response.status >= 300) logger.info("auth-gateway quota observation", result);
+		else logger.debug("auth-gateway quota observation", result);
+	}
 }
 
 export function logGatewayProviderResponse(
@@ -115,7 +118,8 @@ export function logGatewayProviderResponse(
 	const result = fields(context, response.credentialId, response.status);
 	const retryAfterMs = observedRetryAfterMs(headers);
 	if (retryAfterMs !== undefined) result.retryAfterMs = retryAfterMs;
-	logger.info("auth-gateway provider response", result);
+	if (response.status < 200 || response.status >= 300) logger.info("auth-gateway provider response", result);
+	else logger.debug("auth-gateway provider response", result);
 	if (context.provider === "openai-codex") {
 		// Reuse the provider parser, but reject malformed/out-of-domain observations before its clamping.
 		for (const window of ["primary", "secondary"] as const) {

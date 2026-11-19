@@ -149,7 +149,7 @@ function logVideoRequest(
 	peer: string,
 ): void {
 	const { model } = resolved;
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: `video-${operation}`,
 		model: model.id,
@@ -239,7 +239,7 @@ export async function handleVideoSubmit(
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return codedErrorResponse(apiKey.status, apiKey.type, apiKey.message);
 	let credentialId: number | undefined;
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: "video-submit",
 		model: model.id,

@@ -119,7 +119,7 @@ export async function handleSystemOne(
 		fetch: bootOpts.fetch,
 	});
 
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: "systemone",
 		model: model.id,
