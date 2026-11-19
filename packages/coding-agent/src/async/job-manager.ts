@@ -588,6 +588,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 					signal: abortController.signal,
 					reportProgress,
 					markRunning: () => {
+						if (!job.queued) return;
 						job.queued = false;
 						this.#notifyJobsChanged(id);
 					},

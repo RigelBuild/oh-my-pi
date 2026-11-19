@@ -1114,4 +1114,60 @@ describe("AsyncJobManager", () => {
 		expect(changes).toBe(afterUnsubscribe);
 		await manager.dispose({ timeoutMs: 1_000 });
 	});
+
+	test("backgroundJob promotes a foreground job and fires onJobsChanged", async () => {
+		const manager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<string>();
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "promoted", () => gate.promise, { ownerId: "Main", foreground: true });
+		expect(manager.getRunningJobs({ ownerId: "Main" })).toEqual([]);
+		const beforePromote = changes;
+		expect(manager.backgroundJob(jobId)).toBeTrue();
+		expect(changes).toBeGreaterThan(beforePromote);
+		expect(manager.getRunningJobs({ ownerId: "Main" }).map(job => job.id)).toEqual([jobId]);
+		gate.resolve("done");
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
+
+	test("cancel fires onJobsChanged even when the body ignores the abort", async () => {
+		const manager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<string>();
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "ignores-abort", () => gate.promise, { ownerId: "Main" });
+		const beforeCancel = changes;
+		expect(manager.cancel(jobId)).toBe(true);
+		expect(changes).toBeGreaterThan(beforeCancel);
+		expect(manager.getRunningJobs({ ownerId: "Main" })).toEqual([]);
+		gate.resolve("done");
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
+
+	test("cancelAll fires onJobsChanged even when the body ignores the abort", async () => {
+		const manager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<string>();
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "ignores-abort-all", () => gate.promise, { ownerId: "Main" });
+		const beforeCancelAll = changes;
+		manager.cancelAll({ ownerId: "Main" });
+		expect(changes).toBeGreaterThan(beforeCancelAll);
+		expect(manager.getRunningJobs({ ownerId: "Main" })).toEqual([]);
+		expect(manager.getJob(jobId)?.status).toBe("cancelled");
+		gate.resolve("done");
+		await manager.waitForAll();
+		unsubscribe();
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
 });
