@@ -24,6 +24,7 @@ import {
 	cfgAutolearnCapturePrompt,
 	cfgAutolearnEnabled,
 	cfgAutolearnMinToolCalls,
+	resolveAutolearnPath,
 } from "./settings";
 
 const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
@@ -142,12 +143,13 @@ export class AutoLearnController {
 		this.#startCapture();
 	}
 
-	/** The capture prompt: `autolearn.capturePrompt`'s file text, else the bundled prompt; null skips capture. */
-	async #capturePrompt(): Promise<string | null> {
-		const promptPath = cfgAutolearnCapturePrompt.get(this.#settings);
-		if (!promptPath) return AUTOLEARN_NUDGE_AUTOCONTINUE;
+	/**
+	 * The capture prompt when `autolearn.capturePrompt` is set: the file text, or null when the file is
+	 * empty or unreadable (capture skipped). Unset returns the bundled prompt without touching the disk.
+	 */
+	async #capturePromptFromFile(promptPath: string): Promise<string | null> {
 		try {
-			const text = (await Bun.file(promptPath).text()).trim();
+			const text = (await Bun.file(resolveAutolearnPath(promptPath)).text()).trim();
 			if (text) return text;
 			logger.warn("auto-learn capture skipped: autolearn.capturePrompt is empty", { path: promptPath });
 		} catch (err) {
@@ -158,8 +160,26 @@ export class AutoLearnController {
 
 	#startCapture(): void {
 		this.#captureInFlight = true;
-		void this.#capturePrompt()
-			.then(prompt => (prompt === null ? undefined : this.#capture(prompt)))
+		const promptPath = cfgAutolearnCapturePrompt.get(this.#settings);
+		// Unset: the bundled prompt, captured synchronously (no disk read, no extra microtask).
+		if (!promptPath) {
+			this.#runCapture(() => this.#capture(AUTOLEARN_NUDGE_AUTOCONTINUE));
+			return;
+		}
+		this.#runCapture(() =>
+			this.#capturePromptFromFile(promptPath).then(text => (text === null ? undefined : this.#capture(text))),
+		);
+	}
+
+	/** Settle one capture: log failures, then start the coalesced follow-up if one arrived meanwhile. */
+	#runCapture(run: () => Promise<void> | undefined): void {
+		let pending: Promise<void> | undefined;
+		try {
+			pending = run();
+		} catch (err) {
+			logger.warn("auto-learn capture failed", { err });
+		}
+		void Promise.resolve(pending)
 			.catch(err => {
 				logger.warn("auto-learn capture failed", { err });
 			})

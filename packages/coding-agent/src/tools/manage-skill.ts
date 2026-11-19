@@ -154,8 +154,11 @@ async function writeJournalLesson(
 	const hit = journal.secretPatterns.find(pattern => pattern.test(checked));
 	if (hit) {
 		return journalError(
-			`Refused lesson "${params.name}": it matches secret pattern /${hit.source}/. Remove the credential and retry.`,
-			{ action: params.action, name: params.name, secretPattern: hit.source },
+			`Refused lesson: it matches secret pattern /${hit.source}/. Remove the credential and retry.`,
+			{
+				action: params.action,
+				secretPattern: hit.source,
+			},
 		);
 	}
 	const authored = params.action === "create" && isNameClaimedByAuthoredSkill(sanitizeSkillName(params.name));
@@ -189,15 +192,22 @@ async function writeJournalLesson(
 			await handle.close();
 		}
 		await journal.beforePublish?.(tempPath);
+	} catch (error) {
+		// A crash before publish leaves the temp file for inspection; it never reaches the lesson name.
+		return journalError(`Failed to write lesson: ${String(error)}`, { action: params.action });
+	}
+	try {
 		// link() fails with EEXIST rather than replacing: an existing lesson is never overwritten.
 		await fs.link(tempPath, lessonPath);
 	} catch (error) {
-		return journalError(`Failed to write lesson "${params.name}": ${String(error)}`, {
-			action: params.action,
-			name: params.name,
-		});
+		await fs.rm(tempPath, { force: true }).catch(() => {});
+		return journalError(`Failed to write lesson: ${String(error)}`, { action: params.action });
 	}
-	await fs.rm(tempPath, { force: true });
+	try {
+		await fs.rm(tempPath, { force: true });
+	} catch {
+		// The lesson is already published; a leftover temp file must not fail the tool.
+	}
 	return {
 		content: [{ type: "text", text: `Recorded lesson "${params.name}" (${params.action}) in ${lessonPath}.` }],
 		details: { action: params.action, name: params.name, authored, path: lessonPath },

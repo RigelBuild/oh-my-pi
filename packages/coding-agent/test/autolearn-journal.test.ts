@@ -2,9 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_AUTOLEARN_SECRET_PATTERNS } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
+import {
+	cfgAutolearnJournalDir,
+	DEFAULT_AUTOLEARN_SECRET_PATTERNS,
+	resolveAutolearnPath,
+} from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	compileSecretPatterns,
@@ -86,28 +91,21 @@ describe("manage_skill journal mode", () => {
 		expect(await fs.readdir(journalDir)).toHaveLength(2);
 	});
 
-	it("never overwrites an existing lesson: link() failure is a tool error", async () => {
-		const tool = new ManageSkillTool(undefined, journal);
-		const first = await tool.execute("dup", { action: "create", name: "a", description: "d", body: "first" });
-		expect(first.isError).toBeUndefined();
-		const [lesson] = await fs.readdir(journalDir);
-		// Same session, tool call and second: the second publish targets the same name.
-		const second = await tool.execute("dup", { action: "create", name: "a", description: "d", body: "second" });
-		const files = await fs.readdir(journalDir);
-		if (files.length === 1) {
-			expect(second.isError).toBe(true);
-			expect(await fs.readFile(path.join(journalDir, lesson ?? ""), "utf8")).toContain("first");
-		} else {
-			// The clock crossed a second boundary; force the collision directly.
-			const target = files.find(f => f !== lesson) ?? "";
-			const third = await new ManageSkillTool(undefined, {
-				...journal,
-				beforePublish: async tempPath => {
-					await fs.copyFile(tempPath, path.join(journalDir, target.replace(/\.md$/, "") + ".md"));
-				},
-			}).execute("dup", { action: "create", name: "a", description: "d", body: "third" });
-			expect(third.isError).toBe(true);
-		}
+	it("never overwrites an existing lesson: link() failure is a tool error and leaves no temp file", async () => {
+		// Pre-create the exact lesson name the tool is about to publish, so link() must fail with EEXIST
+		// regardless of the clock. The existing file's content must survive.
+		const existing = path.join(journalDir, "occupied.md");
+		await fs.mkdir(journalDir, { recursive: true });
+		await fs.writeFile(existing, "first");
+		const tool = new ManageSkillTool(undefined, {
+			...journal,
+			beforePublish: async tempPath => {
+				await fs.link(existing, tempPath.replace(/\.tmp-[^/]*$/, ""));
+			},
+		});
+		const result = await tool.execute("dup", { action: "create", name: "a", description: "d", body: "second" });
+		expect(result.isError).toBe(true);
+		expect(await fs.readFile(existing, "utf8")).toBe("first");
 		expect((await fs.readdir(journalDir)).filter(f => f.includes(".tmp-"))).toHaveLength(0);
 	});
 
@@ -124,7 +122,91 @@ describe("manage_skill journal mode", () => {
 		expect(files).toHaveLength(1);
 		expect(files[0]).toMatch(/\.md\.tmp-/);
 	});
+	it("refuses a secret in the lesson name and never echoes the name", async () => {
+		const tool = new ManageSkillTool(undefined, journal);
+		const secret = `ghp_${"B".repeat(36)}`;
+		const result = await tool.execute("call-n", {
+			action: "create",
+			name: `leak-${secret}`,
+			description: "d",
+			body: "clean body",
+		});
+		expect(result.isError).toBe(true);
+		const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(text).toContain("ghp_");
+		expect(text).not.toContain(secret);
+		expect(JSON.stringify(result.details)).not.toContain(secret);
+		expect(
+			await fs.stat(journalDir).then(
+				() => true,
+				() => false,
+			),
+		).toBe(false);
+	});
+	it("writes authored: true when the create name is claimed by an authored skill", async () => {
+		const authored: Skill = {
+			name: "demo",
+			description: "An authored demo skill.",
+			filePath: path.join(journalDir, "authored", "demo", "SKILL.md"),
+			baseDir: path.join(journalDir, "authored", "demo"),
+			source: "native:user",
+			_source: { provider: "native", providerName: "Pi", path: path.join(journalDir, "SKILL.md"), level: "user" },
+		};
+		setActiveSkills([authored]);
+		try {
+			const tool = new ManageSkillTool(undefined, journal);
+			const result = await tool.execute("call-a", { action: "create", name: "demo", description: "d", body: "b" });
+			expect(result.isError).toBeUndefined();
+			expect(result.details).toMatchObject({ authored: true });
+			const [file] = await fs.readdir(journalDir);
+			expect(await fs.readFile(path.join(journalDir, file ?? ""), "utf8")).toContain("authored: true");
+		} finally {
+			resetActiveSkillsForTests();
+		}
+	});
 
+	it("expands a leading ~ in journalDir to the home directory, not a literal ./~ directory", async () => {
+		const home = os.homedir();
+		const relative = `pi-journal-tilde-${Snowflake.next()}`;
+		const resolved = path.join(home, relative);
+		try {
+			const settings = Settings.isolated({
+				"autolearn.enabled": true,
+				"autolearn.journalDir": `~/${relative}`,
+			});
+			const dir = resolveAutolearnPath(cfgAutolearnJournalDir.get(settings) ?? "");
+			expect(dir).toBe(resolved);
+			expect(dir.includes("~")).toBe(false);
+		} finally {
+			await fs.rm(resolved, { recursive: true, force: true });
+		}
+	});
+
+	it("passes task-: the sk- pattern is word-anchored and does not match inside a longer word", async () => {
+		const tool = new ManageSkillTool(undefined, journal);
+		const result = await tool.execute("call-t", {
+			action: "create",
+			name: "task-runner",
+			description: "Runs the task-queue and disk-cleanup and risk-review",
+			body: "Use the task-runner for the disk-check and risk-report.",
+		});
+		expect(result.isError).toBeUndefined();
+	});
+
+	it("refuses an sk- key at a word boundary", async () => {
+		const tool = new ManageSkillTool(undefined, journal);
+		const secret = `sk-${"abc".repeat(10)}`;
+		const result = await tool.execute("call-k", {
+			action: "create",
+			name: "key-note",
+			description: "d",
+			body: `key is ${secret}`,
+		});
+		expect(result.isError).toBe(true);
+		const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(text).toContain("sk-");
+		expect(text).not.toContain(secret);
+	});
 	for (const [label, secret, pattern] of [
 		["GitHub token", `ghp_${"A".repeat(36)}`, "ghp_"],
 		["JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln", "eyJ"],

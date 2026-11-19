@@ -40,7 +40,6 @@ import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-mes
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { syncOpenAIResponsesHistoryTexts } from "@oh-my-pi/pi-ai/utils";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isCredentialScopedModelCacheProvider } from "@oh-my-pi/pi-catalog/provider-models";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
@@ -408,12 +407,13 @@ import {
 	cfgSessionToolGates,
 } from "./tools/settings";
 import { cfgToolsFormat } from "./session/context-settings";
+import { resolveAutolearnCaptureTarget } from "./autolearn/capture-target";
 import {
 	cfgAutolearnCaptureMaxInputTokens,
-	cfgAutolearnCaptureRole,
 	cfgAutolearnEnabled,
 	cfgAutolearnJournalDir,
 	cfgAutolearnSecretPatterns,
+	resolveAutolearnPath,
 } from "./autolearn/settings";
 import { compileSecretPatterns, ManageSkillTool } from "./tools/manage-skill";
 import { cfgBrowserEnabled } from "./tools/browser/settings";
@@ -6735,7 +6735,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					.map(name => session.getToolByName(name))
 					.filter((tool): tool is AgentTool<any> => tool !== undefined);
 				// Journal mode: manage_skill exists only here, on the capture turn, and writes lessons.
-				const journalDir = cfgAutolearnJournalDir.get(settings);
+				const journalDirSetting = cfgAutolearnJournalDir.get(settings);
+				const journalDir = journalDirSetting ? resolveAutolearnPath(journalDirSetting) : undefined;
 				if (journalDir && cfgAutolearnEnabled.get(settings)) {
 					tools.unshift(
 						new ManageSkillTool(undefined, {
@@ -6748,28 +6749,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 				return tools;
 			},
-			resolveCaptureTarget: () => {
-				const role = cfgAutolearnCaptureRole.get(settings)?.trim();
-				if (!role) return undefined;
-				const roleValue = settings.getModelRole(role);
-				if (!roleValue) {
-					logger.warn("auto-learn capture skipped: autolearn.captureRole is not a configured role", { role });
-					return null;
-				}
-				const resolved = resolveModelRoleValue(roleValue, modelRegistry.getAvailable(), { settings });
-				if (!resolved.model) {
-					logger.warn("auto-learn capture skipped: autolearn.captureRole model is unavailable", {
-						role,
-						warning: resolved.warning,
-					});
-					return null;
-				}
-				return {
-					model: resolved.model,
-					thinkingLevel:
-						THINKING_EFFORTS.find(effort => effort === resolved.thinkingLevel) ?? agent.state.thinkingLevel,
-				};
-			},
+			resolveCaptureTarget: () =>
+				resolveAutolearnCaptureTarget(settings, modelRegistry.getAvailable(), agent.state.thinkingLevel),
 			maxInputTokens: cfgAutolearnCaptureMaxInputTokens.get(settings),
 			onPayload,
 			onResponse,

@@ -51,13 +51,12 @@ describe("auto-learn capture target", () => {
 		await run("Automated capture prompt");
 		expect(seat.calls).toHaveLength(2);
 		const capture = seat.calls[1];
-		expect({
-			systemPrompt: capture?.context.systemPrompt,
-			tools: capture?.context.tools?.map(tool => tool.name),
-			messages: capture?.context.messages.map(message => message.role),
-			reasoning: capture?.options?.reasoning,
-			disableReasoning: capture?.options?.disableReasoning,
-		}).toMatchSnapshot();
+		expect(capture?.context.systemPrompt).toEqual(["Primary system prompt"]);
+		expect(capture?.context.tools?.map(tool => tool.name)).toEqual(["manage_skill"]);
+		expect(capture?.options?.reasoning).toBe(Effort.Low);
+		expect(capture?.options?.disableReasoning).toBe(false);
+		// The seat history (user, assistant) followed by the capture nudge as a user message.
+		expect(capture?.context.messages.map(message => message.role)).toEqual(["user", "assistant", "user"]);
 	});
 
 	it("runs on the role's model and thinking level with reasoning enabled", async () => {
