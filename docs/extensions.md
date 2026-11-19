@@ -378,6 +378,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
+- `getBackgroundWork()` returns `{ jobs, agents }`, the running background work. `jobs` is every running async job, of every owner, on this session's root job manager, whose foreground-backed rows are hidden and whose queued rows count; jobs on another root in the same process are not counted. `agents` is every running `sub` ref in the process-wide agent registry that no running job covers (a subagent with a job counts once, as a job). It counts claimed `running` status, so a stale ref whose run ended without terminalizing keeps `agents` above zero until it is cleared; read it at any time, no event needed.
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
@@ -663,6 +664,10 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 ### Mode lifecycle
 
 - `mode_changed` reports `{ previous, state }` (the `ctx.sessionModes.getState()` shape) after a built-in mode change commits, whatever caused it: `ctx.sessionModes.set()`, a slash command, the goal tool, automatic goal completion, or session restore. A session switch reports once, after it settles, with the destination's restored modes. Goal token/time accounting is not part of the state, so it never fires the event. A handler may call `ctx.sessionModes.set()`; a call made while another transition is still running returns `busy` instead of waiting.
+
+### Background work
+
+- `background_work_changed` reports `{ jobs, agents }` (the `ctx.getBackgroundWork()` shape) when either count changes: an async job starts or settles, or a subagent starts running or leaves `running`. It fires on change only, so a notification that leaves both counts as they were fires nothing. Only the main (top-level) session fires it; subagent sessions do not receive the event, but `ctx.getBackgroundWork()` still works in them. Nothing fires at session start, so read `ctx.getBackgroundWork()` on `session_start` for the starting counts. Events arrive in order, but a late delivery can carry a count already superseded; treat the payload as a hint and re-read `ctx.getBackgroundWork()` when the exact current value matters.
 
 ### Subagent lifecycle
 

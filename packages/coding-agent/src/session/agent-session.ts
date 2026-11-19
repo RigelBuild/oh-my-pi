@@ -167,7 +167,7 @@ import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } fr
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { BackgroundWork, CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
@@ -1308,6 +1308,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#adoptedResetMarkers = new Map<string, number>();
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
+	/** Last background-work counts emitted to extensions, to suppress no-op re-emits. */
+	#lastBackgroundWork: BackgroundWork | undefined;
 	#getEvalPreludes: (() => readonly EvalPreludeDefinition[]) | undefined;
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
@@ -2872,6 +2874,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				registry.awaits.onChange(() => this.#scheduleRunCheck()),
 			);
 		}
+		// Background work is process-wide: the root manager's jobs and every running subagent in the
+		// registry. Only the main session reports it; subagents share the same counts and would only
+		// repeat each other's events. Seed the baseline so the first real change is the first emit.
+		if (this.#agentKind === "main") {
+			const manager = this.#asyncJobManager;
+			if (manager) this.#disposers.push(manager.onJobsChanged(() => this.#notifyBackgroundWork()));
+			if (registry) this.#disposers.push(registry.onChange(() => this.#notifyBackgroundWork()));
+			this.#lastBackgroundWork = this.getBackgroundWork();
+		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
 		});
@@ -3662,6 +3673,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
 		const manager = this.#asyncJobManager;
 		return manager ? asyncJobSnapshot(manager, this.#agentId, options) : null;
+	}
+
+	/**
+	 * Process-wide running background work: every running async job of every owner on
+	 * this session's root manager, plus every running `sub` ref in the agent registry
+	 * that no running job covers. A subagent covered by a job (the job's id or agent id)
+	 * is counted once, as a job. The registry is process-wide, so this is not limited
+	 * to this session's tree.
+	 */
+	getBackgroundWork(): BackgroundWork {
+		const manager = this.#asyncJobManager;
+		const registry = this.#agentRegistry;
+		const jobs = manager?.getRunningJobs() ?? [];
+		const covered = new Set<string>();
+		for (const job of jobs) {
+			covered.add(job.id);
+			if (job.agentId) covered.add(job.agentId);
+		}
+		let agents = 0;
+		for (const ref of registry?.list() ?? []) {
+			if (ref.kind !== "sub" || ref.status !== "running" || covered.has(ref.id)) continue;
+			agents++;
+		}
+		return { jobs: jobs.length, agents };
 	}
 
 	/**
@@ -10107,6 +10142,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			openPlanReview: async () => false,
 			getContextUsage: () => this.getContextUsage(),
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
+			getBackgroundWork: () => this.getBackgroundWork(),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });
@@ -13944,6 +13980,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!model || ephemeralMaxTokensRejection(model)) return false;
 		const budgetThinking = model.thinking?.mode === "budget" || model.thinking?.mode === "anthropic-budget-effort";
 		return !budgetThinking || shouldDisableReasoning(this.thinkingLevel);
+	}
+
+	/** Emits `background_work_changed` when the session's background work counts move. */
+	#notifyBackgroundWork(): void {
+		if (this.#isDisposed) return;
+		const work = this.getBackgroundWork();
+		const last = this.#lastBackgroundWork;
+		if (last && last.jobs === work.jobs && last.agents === work.agents) return;
+		this.#lastBackgroundWork = work;
+		// Discard return: any handler error is routed through runner.onError listeners.
+		void this.#extensionRunner?.emitBackgroundWork(work);
 	}
 
 	/**

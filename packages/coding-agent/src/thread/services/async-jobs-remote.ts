@@ -235,6 +235,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return localUnsubscribe(this.#remote.callSync("onJobSettled", listener));
 	}
 
+	onJobsChanged(listener: () => void): () => void {
+		return localUnsubscribe(this.#remote.callSync("onJobsChanged", listener));
+	}
+
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		const local: LocalInputs | undefined =
 			options?.process || options?.widgetInputs

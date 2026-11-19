@@ -101,6 +101,7 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 			getSessionId: () => "gallery-session-id",
 		},
 		getAsyncJobSnapshot: () => ({ running: [] }),
+		getBackgroundWork: () => ({ jobs: 0, agents: 0 }),
 		isFastModeActive: () => options.fastMode ?? false,
 		getContextUsage: () => ({
 			tokens: contextTokens,

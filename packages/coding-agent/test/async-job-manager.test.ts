@@ -1091,4 +1091,27 @@ describe("AsyncJobManager", () => {
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
 	});
+
+	test("onJobsChanged fires on register and evict, and unsubscribe stops it", async () => {
+		const manager = new AsyncJobManager({ retentionMs: 60_000 });
+		let changes = 0;
+		const unsubscribe = manager.onJobsChanged(() => {
+			changes += 1;
+		});
+		const jobId = manager.register("bash", "quick", async () => "done", { ownerId: "Main" });
+		expect(changes).toBeGreaterThan(0);
+
+		await manager.waitForAll();
+		const beforeEvict = changes;
+		expect(manager.evictCompletedJobs({ ownerId: "Main" })).toBe(1);
+		expect(manager.getJob(jobId)).toBeUndefined();
+		expect(changes).toBeGreaterThan(beforeEvict);
+
+		unsubscribe();
+		const afterUnsubscribe = changes;
+		manager.register("bash", "after", async () => "later", { ownerId: "Main" });
+		await manager.waitForAll();
+		expect(changes).toBe(afterUnsubscribe);
+		await manager.dispose({ timeoutMs: 1_000 });
+	});
 });
