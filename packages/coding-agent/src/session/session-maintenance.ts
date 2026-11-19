@@ -525,7 +525,8 @@ export interface SessionMaintenanceHost {
 		message: AssistantMessage,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<CompactionCheckResult>;
-	parseRetryAfterMsFromError(errorMessage: string): number | undefined;
+	/** Retry hint for a failed summary attempt, parsed with the attempted candidate's provider and endpoint. */
+	parseRetryAfterMsFromError(errorMessage: string, provider: string, baseUrl: string | undefined): number | undefined;
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
@@ -3892,8 +3893,13 @@ export class SessionMaintenance {
 					}
 					if (autoRetry) {
 						const message = error instanceof Error ? error.message : String(error);
-						const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+						const retryAfterMs = this.#host.parseRetryAfterMsFromError(
+							message,
+							candidate.provider,
+							candidate.baseUrl,
+						);
 						const shouldRetry =
+							!AIError.is(id, AIError.Flag.Timeout) &&
 							autoRetry.enabled &&
 							attempt < autoRetry.maxRetries &&
 							!AIError.is(id, AIError.Flag.ContextOverflow) &&
@@ -6146,7 +6152,11 @@ export class SessionMaintenance {
 								break;
 							}
 
-							const retryAfterMs = this.#host.parseRetryAfterMsFromError(message);
+							const retryAfterMs = this.#host.parseRetryAfterMsFromError(
+								message,
+								candidate.provider,
+								candidate.baseUrl,
+							);
 							// An input the summarizer cannot fit is deterministic: the same
 							// prompt fails identically every attempt, so the retry budget is
 							// pure latency and the next candidate (a larger window) is the

@@ -3124,7 +3124,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
-			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
+			parseRetryAfterMsFromError: (errorMessage, provider, baseUrl) =>
+				this.#recovery.parseRetryAfterMsFromError(errorMessage, provider, baseUrl),
 			setModelTemporary: async (model, thinkingLevel, options) => {
 				await this.#models.setModelTemporary(model, thinkingLevel, options, "automatic");
 			},
