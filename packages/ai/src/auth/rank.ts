@@ -110,6 +110,11 @@ function compareUsageRankedCandidatePriority(
 	// Paid overage (Codex credits) never renews, so an account serving past its
 	// allowance yields to any sibling whose renewable allowance is left (#13889).
 	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
+	// A model-pinned account keeps its traffic until that window caps, so it outranks the reserve check.
+	if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+	if (left.pinned && right.pinned && left.pinFraction !== right.pinFraction) {
+		return right.pinFraction - left.pinFraction;
+	}
 	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
 	if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 	// Short-window guard: candidates whose primary (e.g. 5h) window is
@@ -118,10 +123,6 @@ function compareUsageRankedCandidatePriority(
 	const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	if (leftHot !== rightHot) return leftHot ? 1 : -1;
-	if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
-	if (left.pinned && right.pinned && left.pinFraction !== right.pinFraction) {
-		return right.pinFraction - left.pinFraction;
-	}
 	if (left.drainFirst !== right.drainFirst) return left.drainFirst ? -1 : 1;
 	// A banked grant replenishes the weekly quota; banked accounts keep the existing drain order.
 	if (left.resetBanked !== right.resetBanked) return left.resetBanked ? -1 : 1;

@@ -4,7 +4,7 @@ import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
-import { isWithinUsageReserve } from "../usage";
+import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import type { SessionAffinity } from "./affinity";
 import { raceSignal } from "./abort";
@@ -104,10 +104,10 @@ export interface CredentialSelectorDeps {
 	claudeResetBanking?: { keepCredits: number; drainFirstOnly?: boolean };
 }
 
-/** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
 /**
  * Used fractions of the request's model-tier weekly windows that are still below
  * their cap, read from the reserve scope so a tier row below 1 stays visible.
+ * A row with no measurable fraction is no data, so it does not count.
  */
 function pinWindowFractions(
 	strategy: CredentialRankingStrategy | undefined,
@@ -116,10 +116,11 @@ function pinWindowFractions(
 ): number[] {
 	return reserveUsageLimits(strategy, report, rankingContext)
 		.filter(limit => limit.scope.tier !== undefined && limit.scope.shared !== true)
-		.map(limit => normalizeUsageFraction(limit))
-		.filter(fraction => fraction < 1);
+		.map(limit => resolveUsedFraction(limit))
+		.filter((fraction): fraction is number => fraction !== undefined && fraction < 1);
 }
 
+/** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
 export class CredentialSelector {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
@@ -648,6 +649,7 @@ export class CredentialSelector {
 			// Pin on the model-scoped weekly window: the most used one still below its cap.
 			const pinUsed = pinned && usage ? pinWindowFractions(strategy, usage, args.rankingContext) : [];
 			const pinFraction = pinUsed.length > 0 ? Math.max(...pinUsed) : 0;
+			const isPinned = pinUsed.length > 0;
 			const reservePct = policy?.reservePct ?? args.defaultReservePct;
 			const reserveFraction =
 				reservePct === undefined || !Number.isFinite(reservePct)
@@ -680,12 +682,13 @@ export class CredentialSelector {
 				resetBanked,
 				inReserve:
 					!resetBanked &&
+					!isPinned &&
 					reserveFraction !== undefined &&
 					remainingFraction !== undefined &&
 					isWithinUsageReserve(remainingFraction, reserveFraction),
 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
 				drainFirst: policy?.drainFirst === true,
-				pinned: pinned && pinUsed.length > 0,
+				pinned: isPinned,
 				pinFraction,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,

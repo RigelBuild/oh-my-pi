@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
+import { matchesPinModel } from "../src/auth/policy";
 
 interface ObservableStore extends AuthCredentialStore {
 	cache: Map<string, { value: string; expiresAtSec: number }>;
@@ -213,5 +214,102 @@ describe("AuthStorage Fable account pinning", () => {
 		await expect(storage.keys.get("anthropic", "s1")).rejects.toThrow(
 			"auth.accountPolicies[0].pinModels requires a usage provider for anthropic",
 		);
+	});
+
+	it("pins only accounts that carry a Fable fraction; an account with no Fable data is not pinned", async () => {
+		const noFable = fableReport("c@example.com", 0.2);
+		noFable.limits = noFable.limits.filter(limit => limit.id !== "anthropic:7d:fable");
+		const storage = await setup(policies(FABLE_PIN), {
+			"oat-1": fableReport("a@example.com", 0.4),
+			"oat-2": fableReport("b@example.com", 0.7),
+			"oat-3": noFable,
+		});
+
+		const key = await storage.keys.get("anthropic", "session-fable-nodata", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-2");
+	});
+
+	it("does not treat an account with no Fable data as pinned, even when it is the least used", async () => {
+		const noFable = fableReport("c@example.com", 0.05);
+		noFable.limits = noFable.limits.filter(limit => limit.id !== "anthropic:7d:fable");
+		const reports = {
+			"oat-1": fableReport("a@example.com", 0.4),
+			"oat-2": fableReport("b@example.com", 0.7),
+			"oat-3": noFable,
+		};
+		const onlyNoDataPinned: AuthAccountPolicies = [
+			{ provider: "anthropic", account: { accountId: "account-3" }, pinModels: FABLE_PIN },
+		];
+		const pinned = await (
+			await setup(onlyNoDataPinned, reports)
+		).keys.get("anthropic", "session-fable-nodata-pinned", { modelId: "claude-fable-5" });
+		const unpinned = await (
+			await setup(policies(undefined), reports)
+		).keys.get("anthropic", "session-fable-nodata-unpinned", { modelId: "claude-fable-5" });
+
+		expect(pinned).toBe(unpinned);
+	});
+
+	it("does not pin an account whose Fable window is at 1.0, even with a live reset", async () => {
+		const storage = await setup(policies(FABLE_PIN), {
+			"oat-1": fableReport("a@example.com", 0.4),
+			"oat-2": fableReport("b@example.com", 1),
+			"oat-3": fableReport("c@example.com", 0.2),
+		});
+
+		const key = await storage.keys.get("anthropic", "session-fable-cap", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-1");
+	});
+
+	it("ranks a pinned account at Fable 0.95 ahead of pinned siblings at 0.2 and 0.1, past the default reserve", async () => {
+		const storage = await setup(policies(FABLE_PIN), {
+			"oat-1": fableReport("a@example.com", 0.95),
+			"oat-2": fableReport("b@example.com", 0.2),
+			"oat-3": fableReport("c@example.com", 0.1),
+		});
+
+		const key = await storage.keys.get("anthropic", "session-fable-reserve", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-1");
+	});
+
+	it("ranks a pinned account ahead of an unpinned sibling that is otherwise preferred", async () => {
+		const pinnedOnlyFirst: AuthAccountPolicies = [
+			{ provider: "anthropic", account: { accountId: "account-2" }, pinModels: FABLE_PIN },
+		];
+		const storage = await setup(pinnedOnlyFirst, {
+			"oat-1": fableReport("a@example.com", 0.1),
+			"oat-2": fableReport("b@example.com", 0.6),
+			"oat-3": fableReport("c@example.com", 0.05),
+		});
+
+		const key = await storage.keys.get("anthropic", "session-fable-mixed", { modelId: "claude-fable-5" });
+
+		expect(key).toBe("oat-2");
+	});
+
+	it("matches pinModels globs as anchored patterns, not substrings", async () => {
+		const storage = await setup(policies(["claude-fable-*"]), {
+			"oat-1": fableReport("a@example.com", 0.4),
+			"oat-2": fableReport("b@example.com", 0.7),
+			"oat-3": fableReport("c@example.com", 0.2),
+		});
+
+		const substring = await storage.keys.get("anthropic", "session-fable-anchor", { modelId: "x-claude-fable-1" });
+		const anchored = await storage.keys.get("anthropic", "session-fable-anchor-ok", { modelId: "claude-fable-1" });
+
+		expect(anchored).toBe("oat-2");
+		expect(substring).not.toBe("oat-2");
+	});
+});
+
+describe("matchesPinModel", () => {
+	it("matches the whole model id, not a substring", () => {
+		expect(matchesPinModel("claude-fable-*", "claude-fable-5")).toBe(true);
+		expect(matchesPinModel("claude-fable-*", "x-claude-fable-1")).toBe(false);
+		expect(matchesPinModel("claude-fable-*", "claude-fable-1-extra-suffix-x")).toBe(true);
+		expect(matchesPinModel("claude-fable-5", "claude-fable-5-extra")).toBe(false);
 	});
 });

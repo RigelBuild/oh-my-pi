@@ -10,17 +10,26 @@ import type {
 } from "./types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "./types";
 
-function isNonEmptyStringArray(value: unknown): value is string[] {
+/** Whether `value` is an array of non-empty strings: the shape `pinModels` and similar lists take. */
+export function isNonEmptyStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every(item => typeof item === "string" && item.length > 0);
 }
 
+/** Anchored RegExp per `pinModels` glob, compiled once; a glob is operator config and reused on every selection. */
+const pinGlobCache = new Map<string, RegExp>();
+
 /** Whether `modelId` matches an anchored `*` glob from `pinModels`. */
 export function matchesPinModel(pattern: string, modelId: string): boolean {
-	const source = pattern
-		.split("*")
-		.map(part => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-		.join(".*");
-	return new RegExp(`^${source}$`).test(modelId);
+	let compiled = pinGlobCache.get(pattern);
+	if (compiled === undefined) {
+		const source = pattern
+			.split("*")
+			.map(part => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+			.join(".*");
+		compiled = new RegExp(`^${source}$`);
+		pinGlobCache.set(pattern, compiled);
+	}
+	return compiled.test(modelId);
 }
 
 /** Whether every identity field set on `selector` matches `identity`. */

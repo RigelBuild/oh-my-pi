@@ -25,6 +25,7 @@ import {
 	DEFAULT_USAGE_RESERVE_PCT,
 	SqliteAuthCredentialStore,
 } from "../auth-storage";
+import { isNonEmptyStringArray } from "../auth/policy";
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError } from "./client";
 import { type AuthBrokerAccountPool, type AuthBrokerProviderPool, RemoteAuthCredentialStore } from "./remote-store";
@@ -107,10 +108,6 @@ function readDottedValue(record: Record<string, unknown>, dottedKey: string): un
 function readDottedString(record: Record<string, unknown>, dottedKey: string): string | undefined {
 	const value = readDottedValue(record, dottedKey);
 	return typeof value === "string" ? value : undefined;
-}
-
-function isNonEmptyStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every(item => typeof item === "string" && item.length > 0);
 }
 
 function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
