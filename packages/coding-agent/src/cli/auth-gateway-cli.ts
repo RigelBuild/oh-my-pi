@@ -55,6 +55,7 @@ import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
+import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { cfgDisabledProviders, cfgModelProviderOrder } from "../config/model-settings";
@@ -714,6 +715,10 @@ export async function loadApiKeyLimitModelClasses(
 	return classes;
 }
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+	// The gateway is a long-running headless service: route structured logs to
+	// stdout so a process supervisor (k8s) captures them, and skip the rotating
+	// file the TUI default would have used.
+	setLoggerTransports({ console: true, file: false });
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
 		throw new Error(
