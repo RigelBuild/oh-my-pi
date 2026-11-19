@@ -88,7 +88,7 @@ export async function handleSpeech(
 
 	let account = resolveGatewayAccount(apiKey);
 	let credentialId = apiKey.credentialId;
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: "speech",
 		model: model.id,

@@ -174,7 +174,7 @@ async function handleImages(
 	let account = resolveGatewayAccount(apiKey);
 	let credentialId = apiKey.credentialId;
 
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: "images",
 		model: model.id,

@@ -943,7 +943,7 @@ async function runFailoverLoop(
 				`${requestId}:a${attempt}`,
 			);
 			const knownFollower = async (): Promise<Model<Api> | undefined> => follower;
-			logger.info("auth-gateway request", {
+			logger.debug("auth-gateway request", {
 				requestId,
 				format: route.label,
 				model: answering.id,
@@ -1220,7 +1220,7 @@ async function handleFormatEndpoint(
 		gatewayLogContext(requestId, caller, route.label, model.provider, model.id),
 	);
 
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: route.label,
 		model: model.id,
@@ -1506,7 +1506,7 @@ async function handlePiNative(
 		gatewayLogContext(requestId, caller, "pi-native", model.provider, model.id),
 	);
 
-	logger.info("auth-gateway request", {
+	logger.debug("auth-gateway request", {
 		requestId,
 		format: "pi-native",
 		model: model.id,
