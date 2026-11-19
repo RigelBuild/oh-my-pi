@@ -115,6 +115,8 @@ mod allocator {
 	use std::time::{Duration, Instant};
 
 	use parking_lot::{Condvar, Mutex, MutexGuard};
+	#[cfg(test)]
+	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	/// Quiet time after the last job before trimming: long enough to skip the
 	/// gaps inside a burst of tool calls, short enough to trim while the agent
@@ -161,6 +163,10 @@ mod allocator {
 	struct Trimmer {
 		activity: Mutex<Activity>,
 		idle:     Condvar,
+		#[cfg(test)]
+		passes:   AtomicUsize,
+		#[cfg(test)]
+		parks:    AtomicUsize,
 	}
 
 	impl Trimmer {
@@ -168,7 +174,23 @@ mod allocator {
 			Self {
 				activity: Mutex::new(Activity { running: 0, pending: None }),
 				idle:     Condvar::new(),
+				#[cfg(test)]
+				passes:   AtomicUsize::new(0),
+				#[cfg(test)]
+				parks:    AtomicUsize::new(0),
 			}
+		}
+
+		/// Loop passes of `run`, read by the busy-spin test.
+		#[cfg(test)]
+		fn passes(&self) -> usize {
+			self.passes.load(Ordering::Relaxed)
+		}
+
+		/// Loop parks of `run`, read by the busy-spin test.
+		#[cfg(test)]
+		fn parks(&self) -> usize {
+			self.parks.load(Ordering::Relaxed)
 		}
 
 		fn begin(&self) {
@@ -207,7 +229,11 @@ mod allocator {
 		fn run(&self, quiet: Duration, max_delay: Duration, mut release: impl FnMut()) -> ! {
 			let mut activity = self.activity.lock();
 			loop {
+				#[cfg(test)]
+				self.passes.fetch_add(1, Ordering::Relaxed);
 				let Some(pending) = activity.pending.filter(|_| activity.running == 0) else {
+					#[cfg(test)]
+					self.parks.fetch_add(1, Ordering::Relaxed);
 					self.idle.wait(&mut activity);
 					continue;
 				};
@@ -461,6 +487,52 @@ mod allocator {
 			trimmer.begin();
 			trimmer.settled();
 			assert!(trimmed.recv_timeout(QUIET * 4).is_err());
+			trimmer.end();
+			trimmed
+				.recv_timeout(Duration::from_secs(10))
+				.expect("trim once the job ends");
+		}
+
+		// A woken trimmer must park again while a counted job runs past the
+		// delay bound. A busy-spinning trimmer keeps passing the loop; a correct
+		// one passes once for the wake, then parks. Counted in passes and parks,
+		// never in elapsed time.
+		#[test]
+		fn a_counted_job_past_the_delay_bound_parks_the_trimmer() {
+			const MAX: Duration = Duration::from_millis(1);
+			// The wake and the park after it, plus slack. A spin exceeds this at once.
+			const MAX_PASSES: usize = 4;
+			// Hang guard only: a trimmer that neither parks nor spins fails here.
+			const HANG: Duration = Duration::from_secs(10);
+			let (trimmed_tx, trimmed) = mpsc::channel();
+			let trimmer = spawn_trimmer(MAX, MAX, move || trimmed_tx.send(()).unwrap());
+
+			// Under the lock: the job is counted and its finished work is already
+			// past the delay bound. The woken trimmer cannot run until the lock drops.
+			let overdue = Instant::now() - MAX * 2;
+			let (passes_before, parks_before) = {
+				let mut activity = trimmer.activity.lock();
+				activity.running += 1;
+				activity.pending = Some(Pending { first: overdue, last: overdue });
+				let before = (trimmer.passes(), trimmer.parks());
+				trimmer.idle.notify_one();
+				before
+			};
+
+			let started = Instant::now();
+			loop {
+				if trimmer.passes() - passes_before > MAX_PASSES || trimmer.parks() > parks_before {
+					break;
+				}
+				assert!(started.elapsed() < HANG, "trimmer neither parked nor spun");
+				std::thread::yield_now();
+			}
+			let passes = trimmer.passes() - passes_before;
+			assert!(
+				passes <= MAX_PASSES,
+				"trimmer looped {passes} times while a counted job ran past MAX_DELAY",
+			);
+
 			trimmer.end();
 			trimmed
 				.recv_timeout(Duration::from_secs(10))
