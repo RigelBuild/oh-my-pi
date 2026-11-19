@@ -12,7 +12,9 @@ test("credential selection logs at info while per-request detail logs at debug",
 	const capture = await captureLogs();
 	const storage = await AuthStorage.create(":memory:", { usageProviderResolver: () => undefined });
 	storage.keys.setRuntime("mock", secret.apiA);
-	const model = createMockModel({ handler: { content: [secret.response] } });
+	const model = createMockModel({
+		handler: { content: [secret.response], responseHeaders: { "x-a": "1" }, responseStatus: 200 },
+	});
 	const router = createAuthGatewayRouter({ storage, resolveModel: () => model });
 	try {
 		const response = await router.route(
