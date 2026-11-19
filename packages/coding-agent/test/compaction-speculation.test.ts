@@ -90,6 +90,7 @@ describe("async speculative compaction", () => {
 				focus: string,
 				options?: { autoTriggered?: boolean; signal?: AbortSignal },
 			) => Promise<{ document: string } | undefined>;
+			parseRetryAfterMsFromError?: (errorMessage: string, provider?: string, baseUrl?: string) => number | undefined;
 		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
@@ -169,10 +170,12 @@ describe("async speculative compaction", () => {
 			removeAssistantMessageFromActiveContext: () => {},
 			dropPersistedAssistantTurn: async () => undefined,
 			runRecoveryCompactionWithRollback: async () => ({ continuationScheduled: false }),
-			parseRetryAfterMsFromError: (errorMessage: string) => {
-				const match = /retry-after-ms=(\d+)/.exec(errorMessage);
-				return match ? Number(match[1]) : undefined;
-			},
+			parseRetryAfterMsFromError:
+				options.parseRetryAfterMsFromError ??
+				((errorMessage: string, provider?: string) => {
+					const match = /retry-after-ms=(\d+)/.exec(errorMessage);
+					return match && (provider === undefined || provider === model.provider) ? Number(match[1]) : undefined;
+				}),
 			setModelTemporary: async () => {},
 			abort: async () => {},
 			abortHandoff: () => {},
@@ -317,6 +320,171 @@ describe("async speculative compaction", () => {
 		await waitForState("idle");
 
 		expect(compactSpy).toHaveBeenCalledTimes(2);
+		expect(attemptedModels).toEqual([
+			`${model.provider}/${model.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(waitSpy).not.toHaveBeenCalled();
+	});
+
+	it("scopes a summary retry hint to the failing candidate's provider, not the live model's", async () => {
+		const fallbackModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime(fallbackModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, fallbackModel]);
+		cfgCompactionModels.override(maintenanceSettings, [`${fallbackModel.provider}/${fallbackModel.id}`]);
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 1);
+		cfgRetryMaxRetries.set(maintenanceSettings, 1);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 1);
+		cfgCompactionRetryMaxDelayMs.override(maintenanceSettings, 300_000);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const parseSpy = vi.fn((errorMessage: string, provider?: string) => {
+			const match = /retry-after-ms=(\d+)/.exec(errorMessage);
+			return match && provider === fallbackModel.provider ? Number(match[1]) : undefined;
+		});
+		maintenance = createMaintenance({ methodOrder: ["soft"], parseRetryAfterMsFromError: parseSpy });
+		let attempts = 0;
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			if (++attempts === 1) {
+				throw new AIError.ProviderHttpError("service temporarily unavailable retry-after-ms=60000", 503);
+			}
+			return {
+				summary: "candidate retry summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		// The hint names the google candidate, so the candidate's own parser supplies the 60s wait.
+		expect(parseSpy).toHaveBeenCalledWith(expect.any(String), fallbackModel.provider, fallbackModel.baseUrl);
+		expect(waitSpy.mock.calls.map(([delay]) => delay)).toContain(60_000);
+	});
+
+	it("stops speculative retry and fallback once the run is cancelled mid-backoff", async () => {
+		const fallbackModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime(fallbackModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, fallbackModel]);
+		cfgCompactionModels.override(maintenanceSettings, [
+			`${model.provider}/${model.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 1);
+		cfgRetryMaxRetries.set(maintenanceSettings, 3);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 3);
+		cfgCompactionRetryMaxDelayMs.override(maintenanceSettings, 300_000);
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			throw new AIError.ProviderHttpError("service temporarily unavailable", 503);
+		});
+		// The first backoff wait cancels the run, the way a user interrupt or a superseding pass would.
+		const waitSpy = mockSchedulerWaitWithClock();
+		waitSpy.mockImplementationOnce(async () => {
+			maintenance.cancelSpeculation();
+			throw new DOMException("The operation was aborted.", "AbortError");
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("idle");
+
+		// Cancelled after the first failed attempt: no second attempt on the same model and no fallback.
+		expect(attemptedModels).toEqual([`${model.provider}/${model.id}`]);
+	});
+
+	it("invalidates a pending speculation when the compaction model policy changes", async () => {
+		const fallbackModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime(fallbackModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, fallbackModel]);
+		cfgCompactionModels.override(maintenanceSettings, [`${model.provider}/${model.id}`]);
+		const release = Promise.withResolvers<void>();
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			await release.promise;
+			return {
+				summary: "stale policy summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("running");
+		// The operator swaps the summary models while the speculation is still in flight.
+		cfgCompactionModels.override(maintenanceSettings, [`${fallbackModel.provider}/${fallbackModel.id}`]);
+		release.resolve();
+		await maintenance.speculationCompletion;
+
+		// Speculation built under the old model policy must not arm once the policy changed.
+		expect(maintenance.speculationState).toBe("idle");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("exhausts every explicit summary candidate before reporting failure and never falls back to the active model", async () => {
+		const explicitA = getBundledModel("google", "gemini-2.5-flash");
+		const explicitB = getBundledModel("openai", "gpt-5");
+		if (!explicitA || !explicitB) throw new Error("Expected bundled explicit summary models");
+		authStorage.keys.setRuntime(explicitA.provider, "test-key");
+		authStorage.keys.setRuntime(explicitB.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, explicitA, explicitB]);
+		maintenance = createMaintenance({
+			methodOrder: ["soft"],
+			models: [`${explicitA.provider}/${explicitA.id}`, `${explicitB.provider}/${explicitB.id}`],
+		});
+		cfgRetryEnabled.set(maintenanceSettings, false);
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			throw new AIError.ProviderHttpError("service temporarily unavailable", 503);
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("idle");
+
+		// Both explicit candidates are tried in order; the implicit active model is never restored.
+		expect(attemptedModels).toEqual([
+			`${explicitA.provider}/${explicitA.id}`,
+			`${explicitB.provider}/${explicitB.id}`,
+		]);
+	});
+
+	it("does not retry a speculative candidate that timed out; it advances to the next candidate", async () => {
+		const fallbackModel = getBundledModel("google", "gemini-2.5-flash");
+		if (!fallbackModel) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime(fallbackModel.provider, "test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model, fallbackModel]);
+		cfgCompactionModels.override(maintenanceSettings, [
+			`${model.provider}/${model.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		cfgRetryEnabled.set(maintenanceSettings, true);
+		cfgRetryBaseDelayMs.set(maintenanceSettings, 1);
+		cfgRetryMaxRetries.set(maintenanceSettings, 3);
+		cfgCompactionMaxRetries.override(maintenanceSettings, 3);
+		cfgCompactionRetryMaxDelayMs.override(maintenanceSettings, 300_000);
+		const waitSpy = mockSchedulerWaitWithClock();
+		const attemptedModels: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			attemptedModels.push(`${candidate.provider}/${candidate.id}`);
+			if (candidate.id === model.id) {
+				throw new AIError.ProviderHttpError("upstream request timed out", 504);
+			}
+			return {
+				summary: "fallback summary",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+			};
+		});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		// A timeout is terminal for its candidate: no same-model retry, no backoff wait.
 		expect(attemptedModels).toEqual([
 			`${model.provider}/${model.id}`,
 			`${fallbackModel.provider}/${fallbackModel.id}`,
