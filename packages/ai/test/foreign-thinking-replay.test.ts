@@ -197,3 +197,62 @@ describe("foreignThinkingReplay", () => {
 		expect(wire).toContain(THINKING);
 	});
 });
+
+/** A redacted reasoning payload the GPT turn carries alongside its thinking block. */
+const REDACTED = "FOREIGN-GPT-REDACTED-PAYLOAD";
+
+/** The GPT turn of a fallback conversation: thinking, redacted thinking, then visible text. */
+function gptFallbackTurn(): AssistantMessage {
+	return {
+		...gptTurn(),
+		content: [
+			{ type: "thinking", thinking: THINKING, thinkingSignature: "rs_gpt_opaque_signature" },
+			{ type: "redactedThinking", data: REDACTED },
+			{ type: "text", text: VISIBLE },
+		],
+	};
+}
+
+const fallbackContext: Context = {
+	messages: [userTurn, gptFallbackTurn(), { role: "user", content: "next", timestamp: 1 }],
+};
+
+type WireBlock = { type: string; text?: string };
+
+/** Sends the GPT-to-Claude fallback turn through streamSimple; returns the wire body and the assistant turn's blocks. */
+async function fallbackWire(
+	foreignThinkingReplay: "demote" | "drop",
+): Promise<{ wire: string; assistantBlocks: WireBlock[] }> {
+	const bodies: unknown[] = [];
+	await streamSimple(claudeAnthropic(), fallbackContext, {
+		apiKey: "k",
+		fetch: captureFetch(bodies),
+		foreignThinkingReplay,
+	}).result();
+	const body = bodies[0] as { messages: Array<{ role: string; content: WireBlock[] | string }> };
+	const assistant = body.messages.find(message => message.role === "assistant");
+	const assistantBlocks = assistant && Array.isArray(assistant.content) ? assistant.content : [];
+	return { wire: JSON.stringify(body), assistantBlocks };
+}
+
+describe("foreignThinkingReplay: GPT to Claude fallback turn (RIG-10349)", () => {
+	it("drop sends no thinking or redacted_thinking block and no GPT reasoning text to Claude", async () => {
+		const { wire, assistantBlocks } = await fallbackWire("drop");
+		expect(assistantBlocks.some(block => block.type === "thinking" || block.type === "redacted_thinking")).toBe(
+			false,
+		);
+		expect(wire).not.toContain(THINKING);
+		expect(wire).not.toContain(REDACTED);
+		expect(wire).toContain(VISIBLE);
+	});
+
+	it("control: demote keeps the GPT reasoning as a text block, so the drop test can fail", async () => {
+		const { assistantBlocks } = await fallbackWire("demote");
+		expect(assistantBlocks.some(block => block.type === "thinking" || block.type === "redacted_thinking")).toBe(
+			false,
+		);
+		expect(assistantBlocks.some(block => block.type === "text" && block.text?.includes(THINKING) === true)).toBe(
+			true,
+		);
+	});
+});
