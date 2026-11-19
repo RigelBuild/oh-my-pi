@@ -2834,6 +2834,14 @@ export class Markdown implements Component {
 		this.invalidate();
 	}
 
+	/**
+	 * @internal Whether the frozen streaming lex prefix still holds its block tokens.
+	 * Tests read it to check that a retired block released them.
+	 */
+	get holdsStreamPrefixTokens(): boolean {
+		return this.#streamPrefixTokens !== undefined;
+	}
+
 	// Lex `text` into block tokens, reusing the frozen stable prefix when the text
 	// only grew (the streaming path). Falls back to a full lex whenever the prefix
 	// is no longer a prefix (non-append edit), the text carries reference-link
