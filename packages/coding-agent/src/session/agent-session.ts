@@ -3133,6 +3133,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			abortHandoff: () => this.abortHandoff(),
 		};
 		this.#maintenance = new SessionMaintenance(maintenanceHost);
+		this.addDisposer(() => this.#maintenance.dispose());
 		this.addDisposer(
 			this.agent.addBeforeModelCallHook((_signal, context) =>
 				this.#maintenance.renderArchiveForModel(context.messages),

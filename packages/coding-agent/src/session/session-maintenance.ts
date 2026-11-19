@@ -639,6 +639,8 @@ export class SessionMaintenance {
 		{ key: string; length: number; first: AgentMessage | undefined }
 	>();
 	readonly #host: SessionMaintenanceHost;
+	/** Unsubscribes the `compaction.models` listener that cancels a stale speculation ({@link dispose}). */
+	readonly #stopCompactionModelsListener: () => void;
 
 	get #model(): Model | undefined {
 		return this.#host.model();
@@ -668,6 +670,7 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+		this.#stopCompactionModelsListener = cfgCompactionModels.listen(host.settings, () => this.cancelSpeculation());
 	}
 
 	/** Experimental rollover is safe only when the current effective tool surface can recover its state. */
@@ -732,6 +735,11 @@ export class SessionMaintenance {
 		if (!run) return;
 		this.#speculation = undefined;
 		run.controller.abort();
+	}
+
+	/** Stops the settings listeners this instance registered. Call once, when the owning session disposes. */
+	dispose(): void {
+		this.#stopCompactionModelsListener();
 	}
 
 	/** Assistant timestamp whose post-turn maintenance must be skipped once. */
