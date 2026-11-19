@@ -80,6 +80,7 @@ import {
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { GATEWAY_MODEL_KINDS, runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
@@ -403,15 +404,15 @@ export interface GatewayClaudeResetCoordinator {
 	inFlightByCredential: Map<number, Promise<boolean>>;
 }
 
-function hasUsableExhaustedClaudeWeeklyReset(report: UsageReport | null | undefined): boolean {
-	const weekly = report?.limits.find(limit => limit.id === "anthropic:7d");
+function hasUsableExhaustedClaudeWeeklyReset(report: UsageReport | null | undefined, windowId: string): boolean {
+	const weekly = report?.limits.find(limit => limit.id === windowId);
 	const exhausted = weekly?.status === "exhausted" || (weekly ? (resolveUsedFraction(weekly) ?? 0) >= 0.999 : false);
 	const credits = report?.resetCredits;
 	return (
 		exhausted &&
 		credits?.eligible === true &&
 		(credits.redeemableCount ?? credits.availableCount) >= 1 &&
-		credits.credits?.some(credit => credit.usable === true && credit.clears?.includes("anthropic:7d")) === true
+		credits.credits?.some(credit => credit.usable === true && credit.clears?.includes(windowId)) === true
 	);
 }
 
@@ -448,7 +449,10 @@ export function createGatewayClaudeResetHook(args: {
 				logger.info("auth-gateway Claude usage check failed", { credentialId, error: String(error) });
 				return false;
 			}
-			if (!hasUsableExhaustedClaudeWeeklyReset(report)) return false;
+			// A Fable request is served by the Fable weekly window only, so only a Fable reset helps it.
+			const weeklyWindow =
+				classifyModel("anthropic", modelId ?? "").family === "fable" ? "anthropic:7d:fable" : "anthropic:7d";
+			if (!hasUsableExhaustedClaudeWeeklyReset(report, weeklyWindow)) return false;
 			let actions: ClaudeResetAction[] = [];
 			try {
 				const statuses = await args.storage.resets.list({
@@ -468,9 +472,21 @@ export function createGatewayClaudeResetHook(args: {
 					deferredUntilByKey: args.coordinator.deferredUntilByKey,
 					lastAttemptAtByAccount: args.coordinator.lastAttemptAtByAccount,
 				});
-				actions = plan.actions.filter(
-					action => action.target.credentialId === credentialId && action.blockedWindows?.includes("anthropic:7d"),
-				);
+				const grantClears = (creditId: string | undefined): readonly string[] =>
+					statuses.flatMap(status => status.credits).find(credit => credit.id === creditId)?.clears ?? [];
+				actions = plan.actions.filter(action => {
+					if (action.target.credentialId !== credentialId || !action.blockedWindows?.includes(weeklyWindow)) {
+						return false;
+					}
+					if (weeklyWindow !== "anthropic:7d:fable") return true;
+					if (!grantClears(action.target.creditId).includes("anthropic:7d")) return true;
+					logger.info("auth-gateway Fable block has no Fable reset; the selected grant is not a Fable grant", {
+						credentialId,
+						creditId: action.target.creditId,
+						grantKind: "full-week",
+					});
+					return false;
+				});
 			} catch (error) {
 				logger.info("auth-gateway Claude reset planning failed", { credentialId, error: String(error) });
 				return false;
@@ -535,7 +551,7 @@ export async function runGatewayClaudeResetSweep(args: {
 	args.signal.throwIfAborted();
 	for (const status of statuses) {
 		args.signal.throwIfAborted();
-		if (!hasUsableExhaustedClaudeWeeklyReset(status.report)) continue;
+		if (!hasUsableExhaustedClaudeWeeklyReset(status.report, "anthropic:7d")) continue;
 		await args.hook({
 			provider: "anthropic",
 			credentialId: status.credentialId,

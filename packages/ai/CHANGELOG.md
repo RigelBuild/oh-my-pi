@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pinModels` to `auth.accountPolicies`: anchored model-id globs (for example `claude-fable-*`) keep matching requests on one account. Among unblocked accounts, the one whose model-scoped weekly window is most used but still below its cap ranks first, so traffic stays on it until that window caps.
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

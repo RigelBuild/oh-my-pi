@@ -10,6 +10,19 @@ import type {
 } from "./types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "./types";
 
+function isNonEmptyStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string" && item.length > 0);
+}
+
+/** Whether `modelId` matches an anchored `*` glob from `pinModels`. */
+export function matchesPinModel(pattern: string, modelId: string): boolean {
+	const source = pattern
+		.split("*")
+		.map(part => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+		.join(".*");
+	return new RegExp(`^${source}$`).test(modelId);
+}
+
 /** Whether every identity field set on `selector` matches `identity`. */
 export function matchesAuthAccountSelector(selector: AuthAccountSelector, identity: OAuthAccountIdentity): boolean {
 	return (
@@ -99,6 +112,9 @@ export class AccountPolicies {
 			if (policy.drainFirst !== undefined && typeof policy.drainFirst !== "boolean") {
 				throw new AIError.ConfigurationError(`${path}.drainFirst must be a boolean`);
 			}
+			if (policy.pinModels !== undefined && !isNonEmptyStringArray(policy.pinModels)) {
+				throw new AIError.ConfigurationError(`${path}.pinModels must be an array of non-empty strings`);
+			}
 			if (policy.reclaimAbovePct !== undefined) {
 				const reservePct = policy.reservePct ?? defaultReservePct;
 				if (
@@ -116,7 +132,7 @@ export class AccountPolicies {
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
 		if (canFetchUsage) return;
-		for (const field of ["reservePct", "reclaimAbovePct", "drainFirst"] as const) {
+		for (const field of ["reservePct", "reclaimAbovePct", "drainFirst", "pinModels"] as const) {
 			const policyIndex = this.#accountPolicies.findIndex(
 				policy =>
 					policy.provider === provider &&

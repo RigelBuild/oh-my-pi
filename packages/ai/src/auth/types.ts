@@ -72,6 +72,12 @@ export interface AuthAccountPolicy {
 	readonly reclaimAbovePct?: number;
 	/** Rank this account ahead of other unblocked, non-hot accounts. */
 	readonly drainFirst?: boolean;
+	/**
+	 * Anchored model-id globs (`*` matches any run of characters). A request whose
+	 * model matches keeps traffic on one account: among unblocked accounts, the one
+	 * whose model-scoped weekly window is most used but still below its cap ranks first.
+	 */
+	readonly pinModels?: readonly string[];
 }
 
 /** Read-only set of per-account routing policies. */

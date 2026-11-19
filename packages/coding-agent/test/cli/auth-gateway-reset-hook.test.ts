@@ -465,3 +465,131 @@ describe("gateway Claude reset hook", () => {
 		expect(redeem.mock.calls[0]?.[0].target.credentialId).toBe(drainId);
 	});
 });
+
+describe("gateway Claude reset hook for Fable pins", () => {
+	function fableUsage(exhaustedFable: boolean): UsageReport {
+		return {
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [
+				limit("anthropic:5h", 0.2),
+				limit("anthropic:7d", 0.2),
+				{
+					id: "anthropic:7d:fable",
+					label: "Claude 7 Day (Fable)",
+					scope: { provider: "anthropic", windowId: "7d", tier: "fable" },
+					window: { id: "7d", label: "7 Day", resetsAt: Date.now() + 90 * 60_000 },
+					amount: {
+						unit: "percent",
+						used: exhaustedFable ? 100 : 40,
+						limit: 100,
+						usedFraction: exhaustedFable ? 1 : 0.4,
+						remainingFraction: exhaustedFable ? 0 : 0.6,
+					},
+					status: exhaustedFable ? "exhausted" : "ok",
+				},
+			],
+			metadata: { accountId: "acct-cedar", email: "cedar@example.com" },
+			resetCredits: {
+				availableCount: 1,
+				redeemableCount: 1,
+				eligible: true,
+				nextCreditId: "fable-grant",
+				credits: [
+					{
+						id: "fable-grant",
+						program: "cedar_ember",
+						usable: true,
+						remainingCount: 1,
+						clears: ["anthropic:7d:fable"],
+						blocking: ["anthropic:7d:fable"],
+					},
+				],
+			},
+		};
+	}
+
+	async function setupFable(grantClears: string[]) {
+		const storage = await AuthStorage.create(":memory:");
+		storages.push(storage);
+		const credential = {
+			type: "oauth" as const,
+			access: "access-cedar",
+			refresh: "refresh-cedar",
+			expires: Date.now() + 60 * 60_000,
+			accountId: "acct-cedar",
+			email: "cedar@example.com",
+		};
+		await storage.credentials.set("anthropic", [credential]);
+		const stored = storage.credentials.list("anthropic")[0];
+		if (!stored || stored.credential.type !== "oauth") throw new Error("expected stored Claude credential");
+		const settings = Settings.isolated();
+		cfgClaudeResetsAutoRedeemFable.set(settings, "yes");
+		cfgClaudeResetsKeepCredits.set(settings, 0);
+		cfgClaudeResetsMinBlockedMinutes.set(settings, 60);
+		const usage = fableUsage(true);
+		const statuses = [
+			{
+				...status(usage, grantClears),
+				credentialId: stored.id,
+				credits: [
+					{
+						id: "fable-grant",
+						program: "cedar_ember",
+						usable: true,
+						remainingCount: 1,
+						clears: grantClears,
+						blocking: grantClears,
+					},
+				],
+				nextCreditId: "fable-grant",
+			},
+		];
+		spyOn(storage.usage, "report").mockResolvedValue(usage);
+		spyOn(storage.resets, "list").mockResolvedValue(statuses);
+		const redeem = spyOn(storage.resets, "redeem").mockResolvedValue({
+			ok: true,
+			code: "reset",
+			provider: "anthropic",
+		});
+		const hook = createGatewayClaudeResetHook({ storage, settings, coordinator: coordinator() });
+		return { hook, redeem, credentialId: stored.id };
+	}
+
+	it("redeems a Fable launch grant when a Fable-model request hits an exhausted Fable window", async () => {
+		const { hook, redeem, credentialId } = await setupFable(["anthropic:7d:fable"]);
+		const result = await hook({
+			provider: "anthropic",
+			credentialId,
+			modelId: "claude-fable-5",
+			signal: new AbortController().signal,
+		});
+		expect(result).toBe(true);
+		expect(redeem).toHaveBeenCalledTimes(1);
+		expect(redeem.mock.calls[0]?.[0].target).toMatchObject({ credentialId, creditId: "fable-grant" });
+	});
+
+	it("does not spend a full-week grant for an exhausted Fable window", async () => {
+		const { hook, redeem, credentialId } = await setupFable(["anthropic:7d", "anthropic:7d:fable"]);
+		const result = await hook({
+			provider: "anthropic",
+			credentialId,
+			modelId: "claude-fable-5",
+			signal: new AbortController().signal,
+		});
+		expect(result).toBe(false);
+		expect(redeem).not.toHaveBeenCalled();
+	});
+
+	it("treats a non-Fable selected grant as no Fable reset and does not redeem it", async () => {
+		const { hook, redeem, credentialId } = await setupFable(["anthropic:7d"]);
+		const result = await hook({
+			provider: "anthropic",
+			credentialId,
+			modelId: "claude-fable-5",
+			signal: new AbortController().signal,
+		});
+		expect(result).toBe(false);
+		expect(redeem).not.toHaveBeenCalled();
+	});
+});

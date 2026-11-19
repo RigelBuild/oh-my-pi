@@ -54,6 +54,10 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
 	usageMeasured: boolean;
 	planPriority: number;
 	drainFirst: boolean;
+	/** Model-pinned account: ranks first, with the highest model-window fraction still below its cap leading. */
+	pinned: boolean;
+	/** Used fraction of the model-scoped window that a pinned account is held on, below 1. */
+	pinFraction: number;
 	secondaryUsed: number;
 	secondaryRequiredDrain: number;
 	primaryUsed: number;
@@ -114,6 +118,10 @@ function compareUsageRankedCandidatePriority(
 	const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
 	if (leftHot !== rightHot) return leftHot ? 1 : -1;
+	if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+	if (left.pinned && right.pinned && left.pinFraction !== right.pinFraction) {
+		return right.pinFraction - left.pinFraction;
+	}
 	if (left.drainFirst !== right.drainFirst) return left.drainFirst ? -1 : 1;
 	// A banked grant replenishes the weekly quota; banked accounts keep the existing drain order.
 	if (left.resetBanked !== right.resetBanked) return left.resetBanked ? -1 : 1;

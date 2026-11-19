@@ -274,6 +274,18 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				yaml: [
 					"auth:",
 					"  accountPolicies:",
+					"    - provider: anthropic",
+					"      account:",
+					"        accountId: acct-pin",
+					"      pinModels: claude-fable-*",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].pinModels must be an array of non-empty strings",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
 					'    - provider: " openai-codex"',
 					"      account:",
 					"        email: preferred@example.com",

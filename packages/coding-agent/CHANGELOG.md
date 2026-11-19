@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Claude auth gateway redeems a Fable launch reset when a Fable-model request hits an exhausted Fable weekly window. A full-week reset is never spent for a Fable block, and a selected grant that is not a Fable grant is logged and skipped.
+
 ### Fixed
 
 - Disconnecting a disassembler database now reports it as not connected at once, so a closed reference fails with the reopen hint instead of a host-exited error.
