@@ -1,0 +1,31 @@
+name: Agent prompt pattern gate
+
+# Fails when an agent prompt asks the model to show its reasoning (RIG-10290).
+# The scanner imports only Bun builtins, so the job skips `bun install`.
+# No paths filter: the check must post on every PR, as in ci.yml.
+
+on:
+  pull_request:
+    branches: [rigel-release, main, omp2]
+  push:
+    branches: [rigel-release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  agent-prompt-pattern:
+    name: Agent prompt pattern gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+      - name: Scan agent prompts for reasoning wording
+        run: bun scripts/agent-prompt-pattern-gate.ts
