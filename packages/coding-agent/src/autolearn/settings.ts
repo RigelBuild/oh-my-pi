@@ -71,7 +71,7 @@ export const DEFAULT_AUTOLEARN_SECRET_PATTERNS: readonly string[] = [
 	"github_pat_",
 	"glpat-",
 	"lin_api_",
-	"\\bsk-",
+	"(?<![A-Za-z0-9])sk-",
 	"xox[abp]-",
 	"AKIA",
 	"AIza",

@@ -301,13 +301,13 @@ describe("manage_skill journal mode", () => {
 		}
 	});
 
-	it("passes task-: the sk- pattern is word-anchored and does not match inside a longer word", async () => {
+	it("passes task- and disk-: sk- inside a longer word is not a key", async () => {
 		const tool = new ManageSkillTool(undefined, journal);
 		const result = await tool.execute("call-t", {
 			action: "create",
 			name: "task-runner",
-			description: "Runs the task-queue and disk-cleanup and risk-review",
-			body: "Use the task-runner for the disk-check and risk-report.",
+			description: "Runs the task-queue, disk-cleanup, risk-review and flask-deploy steps",
+			body: "Use the task-runner for the disk-check, the desk-lamp and the risk-report.",
 		});
 		expect(result.isError).toBeUndefined();
 	});
@@ -318,6 +318,20 @@ describe("manage_skill journal mode", () => {
 		const result = await tool.execute("call-k", {
 			action: "create",
 			name: "key-note",
+			description: "d",
+			body: `key is ${secret}`,
+		});
+		expect(result.isError).toBe(true);
+		const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(text).toContain("sk-");
+		expect(text).not.toContain(secret);
+	});
+	it("refuses an sk- key after an underscore", async () => {
+		const tool = new ManageSkillTool(undefined, journal);
+		const secret = `my_sk-${"abc".repeat(10)}`;
+		const result = await tool.execute("call-u", {
+			action: "create",
+			name: "env-note",
 			description: "d",
 			body: `key is ${secret}`,
 		});
