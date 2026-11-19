@@ -63,6 +63,7 @@ import type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	BeforeSubagentSpawnEvent,
+	ArtifactTextEventResult,
 	BeforeSubagentSpawnEventResult,
 	CompactOptions,
 	ContextEvent,
@@ -2757,5 +2758,33 @@ export class ExtensionRunner {
 		}
 
 		return chosen;
+	}
+
+	/**
+	 * Runs `artifact_text` handlers over text about to be written to a bash original-output
+	 * artifact. The last defined `text` wins; with no handlers the text is returned unchanged.
+	 */
+	async redactArtifactText(text: string): Promise<string> {
+		if (!this.hasHandlers("artifact_text")) return text;
+		const ctx = this.createContext();
+		let current = text;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("artifact_text");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				const handlerResult = (await this.#runHandlerWithTimeout(
+					handler,
+					{ type: "artifact_text", text: current },
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+				)) as ArtifactTextEventResult | undefined;
+				if (handlerResult?.text !== undefined) current = handlerResult.text;
+			}
+		}
+
+		return current;
 	}
 }

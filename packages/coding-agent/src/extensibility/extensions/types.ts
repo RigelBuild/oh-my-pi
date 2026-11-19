@@ -1252,6 +1252,19 @@ export interface BeforeSubagentSpawnEvent {
 	spawnKey?: string;
 }
 
+/** Fired before a bash original-output artifact is written; handlers return the text to store. */
+export interface ArtifactTextEvent {
+	type: "artifact_text";
+	/** Text about to be written to the artifact file. */
+	text: string;
+}
+
+/** Replacement text for an {@link ArtifactTextEvent}. */
+export interface ArtifactTextEventResult {
+	/** Text to write in place of the event's text. */
+	text?: string;
+}
+
 export type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -1714,6 +1727,7 @@ export type ExtensionEvent =
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| BeforeSubagentSpawnEvent
+	| ArtifactTextEvent
 	| AgentStartEvent
 	| AgentEndEvent
 	| SessionStopEvent
@@ -1943,6 +1957,7 @@ export interface ExtensionAPI {
 		event: "before_subagent_spawn",
 		handler: ExtensionHandler<BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult>,
 	): void;
+	on(event: "artifact_text", handler: ExtensionHandler<ArtifactTextEvent, ArtifactTextEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;

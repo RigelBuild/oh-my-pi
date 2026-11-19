@@ -436,7 +436,8 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 	try {
 		const alloc = await session.allocateOutputArtifact?.("bash-original");
 		if (!alloc?.path || !alloc.id) return undefined;
-		await Bun.write(alloc.path, originalText);
+		const text = session.redactArtifactText ? await session.redactArtifactText(originalText) : originalText;
+		await Bun.write(alloc.path, text);
 		return alloc.id;
 	} catch {
 		return undefined;

@@ -468,6 +468,11 @@ export interface ToolSession {
 		event: BeforeSubagentSpawnEvent,
 		signal?: AbortSignal,
 	): Promise<BeforeSubagentSpawnEventResult | undefined>;
+	/**
+	 * Redacts text before it is written to a bash original-output artifact, through the session's
+	 * `artifact_text` extension handlers. Absent when the embedder has no extension runner.
+	 */
+	redactArtifactText?(text: string): Promise<string>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */

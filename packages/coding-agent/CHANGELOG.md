@@ -9,6 +9,7 @@
 ### Fixed
 
 - Disconnecting a disassembler database now reports it as not connected at once, so a closed reference fails with the reopen hint instead of a host-exited error.
+- Fixed bash original-output artifacts (`*.bash-original.log` spills of minimized output) being written unredacted, so secrets an extension masks in the tool result still reached disk; the artifact text now passes through the new `artifact_text` extension event before it is written
 
 ## [18.22.2] - 2026-11-18
 
