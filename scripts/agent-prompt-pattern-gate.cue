@@ -22,7 +22,7 @@ package gate
 
 config: #Config & {
 	globs: [
-		"packages/**/prompts/**/*.md",
+		"packages/**/prompts/**",
 		"crates/*/prompts/**",
 		"python/*/src/prompts/**",
 		"packages/{ai,coding-agent,tui}/src/**/*.md",
