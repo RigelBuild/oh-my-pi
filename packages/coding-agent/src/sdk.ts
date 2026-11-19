@@ -15,6 +15,7 @@ import {
 	resolveTelemetry,
 	type StreamFn,
 	ThinkingLevel,
+	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
@@ -39,6 +40,7 @@ import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-mes
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { syncOpenAIResponsesHistoryTexts } from "@oh-my-pi/pi-ai/utils";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isCredentialScopedModelCacheProvider } from "@oh-my-pi/pi-catalog/provider-models";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
@@ -406,7 +408,14 @@ import {
 	cfgSessionToolGates,
 } from "./tools/settings";
 import { cfgToolsFormat } from "./session/context-settings";
-import { cfgAutolearnEnabled } from "./autolearn/settings";
+import {
+	cfgAutolearnCaptureMaxInputTokens,
+	cfgAutolearnCaptureRole,
+	cfgAutolearnEnabled,
+	cfgAutolearnJournalDir,
+	cfgAutolearnSecretPatterns,
+} from "./autolearn/settings";
+import { compileSecretPatterns, ManageSkillTool } from "./tools/manage-skill";
 import { cfgBrowserEnabled } from "./tools/browser/settings";
 import {
 	cfgDefaultThinkingLevel,
@@ -1864,6 +1873,64 @@ export interface AutoLearnCaptureRunnerOptions {
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	createSessionId?: () => string;
+	/**
+	 * The model and thinking level the capture runs on (`autolearn.captureRole`). `null` skips the capture;
+	 * `undefined` (no role configured) keeps the seat's model. A role never falls back to the seat's model.
+	 */
+	resolveCaptureTarget?: () => { model: Model; thinkingLevel?: Effort } | null | undefined;
+	/** Replay above this many tokens is sent as a digest that fits it (`autolearn.captureMaxInputTokens`). */
+	maxInputTokens?: number;
+}
+
+/** Split `messages` into tool groups: each starts at a non-tool-result message and owns the results that follow. */
+function captureToolGroups(messages: readonly AgentMessage[]): AgentMessage[][] {
+	const groups: AgentMessage[][] = [];
+	for (const message of messages) {
+		const last = groups.at(-1);
+		if (message.role === "toolResult" && last) last.push(message);
+		else groups.push([message]);
+	}
+	return groups;
+}
+
+/**
+ * The replay as a digest within `budget` tokens: the first user message, the latest compaction summary, and the
+ * newest whole tool groups that fit. A tool call is never split from its results.
+ */
+export function buildCaptureDigest(
+	messages: readonly AgentMessage[],
+	budget: number,
+	countMessage: (message: AgentMessage) => number,
+): AgentMessage[] {
+	const firstUser = messages.find(message => message.role === "user");
+	let summary: AgentMessage | undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i]?.role === "compactionSummary") {
+			summary = messages[i];
+			break;
+		}
+	}
+	const head: AgentMessage[] = [];
+	let used = 0;
+	for (const message of [firstUser, summary]) {
+		if (!message) continue;
+		const tokens = countMessage(message);
+		if (used + tokens > budget) continue;
+		head.push(message);
+		used += tokens;
+	}
+	const pinned = new Set(head);
+	const groups = captureToolGroups(messages.filter(message => !pinned.has(message)));
+	const tail: AgentMessage[][] = [];
+	for (let i = groups.length - 1; i >= 0; i--) {
+		const group = groups[i];
+		if (!group || group[0]?.role === "toolResult") break;
+		const tokens = group.reduce((sum, message) => sum + countMessage(message), 0);
+		if (used + tokens > budget) break;
+		tail.unshift(group);
+		used += tokens;
+	}
+	return [...head, ...tail.flat()];
 }
 
 /** A tool the provider runs itself (a refused copy could not stop it); resolved headers can switch one on. */
@@ -1880,11 +1947,15 @@ export function createAutoLearnCaptureRunner(
 		if (captureTools.length === 0 || signal?.aborted) return;
 		// One snapshot of the source turn before any await: the primary keeps running while a capture is built.
 		const source = options.sourceAgent.state;
-		const sourceModel = source.model;
-		if (!sourceModel) return;
+		const seatModel = source.model;
+		if (!seatModel) return;
+		const target = options.resolveCaptureTarget?.();
+		if (target === null) return;
+		const sourceModel = target?.model ?? seatModel;
 		const sourceSystemPrompt = [...source.systemPrompt];
-		const sourceThinkingLevel = source.thinkingLevel;
-		const sourceDisableReasoning = source.disableReasoning;
+		const sourceThinkingLevel: Effort | undefined = target?.thinkingLevel ?? source.thinkingLevel;
+		// A capture role always reasons at its own level; the seat keeps its own setting.
+		const sourceDisableReasoning = target ? false : source.disableReasoning;
 		const sourceTools = [...source.tools];
 		const sourceMessages = [...source.messages];
 		const sourceSentToolDefinitions = options.sourceAgent.copySentToolDefinitions();
@@ -1904,7 +1975,7 @@ export function createAutoLearnCaptureRunner(
 		const stripInheritedReasoning =
 			captureModel.api === "openai-responses" ||
 			(captureModel.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0");
-		const captureMessages = sourceMessages.map((message): AgentMessage => {
+		const replayMessages = sourceMessages.map((message): AgentMessage => {
 			if (message.role === "assistant") {
 				let content = message.content;
 				if (
@@ -1929,6 +2000,30 @@ export function createAutoLearnCaptureRunner(
 			}
 			return message;
 		});
+		const captureMessage: CustomMessage = {
+			role: "custom",
+			customType: "autolearn-nudge",
+			content,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		let captureMessages = replayMessages;
+		const maxInputTokens = options.maxInputTokens;
+		if (maxInputTokens !== undefined && maxInputTokens > 0) {
+			const tokenizer = new Tokenizer(captureModel);
+			const fixed =
+				tokenizer.countTokens(sourceSystemPrompt) +
+				tokenizer.countMessage(captureMessage) +
+				tokenizer.countTokens(
+					sourceTools.map(tool => `${tool.name}\n${tool.description}\n${JSON.stringify(tool.parameters)}`),
+				);
+			if (fixed + tokenizer.countMessages(replayMessages) > maxInputTokens) {
+				captureMessages = buildCaptureDigest(replayMessages, maxInputTokens - fixed, message =>
+					tokenizer.countMessage(message),
+				);
+			}
+		}
 		const captureAgent = options.createAgent({
 			initialState: {
 				systemPrompt: sourceSystemPrompt,
@@ -1953,14 +2048,6 @@ export function createAutoLearnCaptureRunner(
 			onResponse: options.onResponse,
 		});
 		captureAgent.setMetadataResolver(provider => options.sourceAgent.metadataForProvider(provider));
-		const captureMessage: CustomMessage = {
-			role: "custom",
-			customType: "autolearn-nudge",
-			content,
-			display: false,
-			attribution: "agent",
-			timestamp: Date.now(),
-		};
 		const abortCapture = () => captureAgent.abort(signal?.reason);
 		signal?.addEventListener("abort", abortCapture, { once: true });
 		try {
@@ -6643,10 +6730,47 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
 			primaryPromptCacheKey: model => session.getPromptCacheKeyForModel(model),
-			captureTools: () =>
-				(["manage_skill", "learn"] as const)
+			captureTools: () => {
+				const tools: AgentTool<any>[] = (["manage_skill", "learn"] as const)
 					.map(name => session.getToolByName(name))
-					.filter((tool): tool is AgentTool => tool !== undefined),
+					.filter((tool): tool is AgentTool<any> => tool !== undefined);
+				// Journal mode: manage_skill exists only here, on the capture turn, and writes lessons.
+				const journalDir = cfgAutolearnJournalDir.get(settings);
+				if (journalDir && cfgAutolearnEnabled.get(settings)) {
+					tools.unshift(
+						new ManageSkillTool(undefined, {
+							journalDir,
+							secretPatterns: compileSecretPatterns(cfgAutolearnSecretPatterns.get(settings)),
+							sessionId: sessionManager.getSessionId(),
+							cwd: sessionManager.getCwd(),
+						}),
+					);
+				}
+				return tools;
+			},
+			resolveCaptureTarget: () => {
+				const role = cfgAutolearnCaptureRole.get(settings)?.trim();
+				if (!role) return undefined;
+				const roleValue = settings.getModelRole(role);
+				if (!roleValue) {
+					logger.warn("auto-learn capture skipped: autolearn.captureRole is not a configured role", { role });
+					return null;
+				}
+				const resolved = resolveModelRoleValue(roleValue, modelRegistry.getAvailable(), { settings });
+				if (!resolved.model) {
+					logger.warn("auto-learn capture skipped: autolearn.captureRole model is unavailable", {
+						role,
+						warning: resolved.warning,
+					});
+					return null;
+				}
+				return {
+					model: resolved.model,
+					thinkingLevel:
+						THINKING_EFFORTS.find(effort => effort === resolved.thinkingLevel) ?? agent.state.thinkingLevel,
+				};
+			},
+			maxInputTokens: cfgAutolearnCaptureMaxInputTokens.get(settings),
 			onPayload,
 			onResponse,
 			createAgent: captureOptions => {

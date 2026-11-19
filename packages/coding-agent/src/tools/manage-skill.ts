@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
@@ -11,7 +12,7 @@ import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import manageSkillDescription from "../prompts/tools/manage-skill.md" with { type: "text" };
 import type { ToolSession } from ".";
 
-import { cfgAutolearnEnabled } from "../autolearn/settings";
+import { cfgAutolearnEnabled, cfgAutolearnJournalDir } from "../autolearn/settings";
 
 const manageSkillSchema = type({
 	action: "'create' | 'update' | 'delete'",
@@ -47,14 +48,23 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 	readonly loadMode = "essential" as const;
 	readonly summary = "Create, update, or delete an isolated managed skill";
 
-	constructor(private readonly refreshSkills?: () => Promise<void>) {}
+	constructor(
+		private readonly refreshSkills?: () => Promise<void>,
+		private readonly journal?: ManageSkillJournal,
+	) {}
 
+	/**
+	 * Main-turn registration. Journal mode registers nothing here: the tool exists only on the
+	 * capture turn (built by the capture wiring), so the main turn has no tool and no guidance.
+	 */
 	static createIf(session: ToolSession): ManageSkillTool | null {
 		if (!cfgAutolearnEnabled.get(session.settings)) return null;
+		if (cfgAutolearnJournalDir.get(session.settings)) return null;
 		return new ManageSkillTool(session.refreshSkills);
 	}
 
-	async execute(_id: string, params: ManageSkillParams): Promise<AgentToolResult> {
+	async execute(id: string, params: ManageSkillParams): Promise<AgentToolResult> {
+		if (this.journal) return writeJournalLesson(this.journal, id, params);
 		if (params.action === "delete") {
 			await deleteManagedSkill(params.name);
 			await this.refreshSkills?.();
@@ -101,4 +111,95 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 			details: { action: params.action, name: params.name },
 		};
 	}
+}
+
+/** Journal-only mode: every call becomes one lesson file; managed skills are never touched. */
+export interface ManageSkillJournal {
+	journalDir: string;
+	secretPatterns: readonly RegExp[];
+	sessionId: string;
+	cwd: string;
+	/** Injection point between the temp write and the publishing link(); tests only. */
+	beforePublish?: (tempPath: string) => Promise<void>;
+}
+
+/** Compile `autolearn.secretPatterns` entries; an invalid expression matches literally. */
+export function compileSecretPatterns(patterns: readonly string[]): RegExp[] {
+	return patterns.map(pattern => {
+		try {
+			return new RegExp(pattern);
+		} catch {
+			return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+		}
+	});
+}
+
+/** Front matter value as a JSON string: YAML reads it as a quoted scalar, newlines stay escaped. */
+function frontMatterValue(value: string | boolean): string {
+	return typeof value === "boolean" ? String(value) : JSON.stringify(value);
+}
+
+function journalError(text: string, details: Record<string, unknown>): AgentToolResult {
+	return { content: [{ type: "text", text }], isError: true, details };
+}
+
+async function writeJournalLesson(
+	journal: ManageSkillJournal,
+	toolCallId: string,
+	params: ManageSkillParams,
+): Promise<AgentToolResult> {
+	const body = params.body ?? "";
+	// Secret check before any write: on a match, not even a temp file exists. Name the pattern, never the value.
+	const checked = `${params.name}\n${params.description ?? ""}\n${body}`;
+	const hit = journal.secretPatterns.find(pattern => pattern.test(checked));
+	if (hit) {
+		return journalError(
+			`Refused lesson "${params.name}": it matches secret pattern /${hit.source}/. Remove the credential and retry.`,
+			{ action: params.action, name: params.name, secretPattern: hit.source },
+		);
+	}
+	const authored = params.action === "create" && isNameClaimedByAuthoredSkill(sanitizeSkillName(params.name));
+	const frontMatter = [
+		"---",
+		`session: ${frontMatterValue(journal.sessionId)}`,
+		`tool_call: ${frontMatterValue(toolCallId)}`,
+		`cwd: ${frontMatterValue(journal.cwd)}`,
+		`action: ${params.action}`,
+		`name: ${frontMatterValue(params.name)}`,
+		`authored: ${frontMatterValue(authored)}`,
+		`description: ${frontMatterValue(params.description ?? "")}`,
+		"---",
+		"",
+	].join("\n");
+	// Compact UTC stamp YYYYMMDDTHHMMSSZ.
+	const stamp = new Date()
+		.toISOString()
+		.replace(/[-:]/g, "")
+		.replace(/\.\d{3}Z$/, "Z");
+	const fileId = `${stamp}-${journal.sessionId}-${toolCallId}`.replace(/[^A-Za-z0-9._-]/g, "_");
+	const lessonPath = path.join(journal.journalDir, `${fileId}.md`);
+	const tempPath = `${lessonPath}.tmp-${Bun.randomUUIDv7()}`;
+	try {
+		await fs.mkdir(journal.journalDir, { recursive: true });
+		const handle = await fs.open(tempPath, "wx");
+		try {
+			await handle.writeFile(`${frontMatter}${body}\n`);
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		await journal.beforePublish?.(tempPath);
+		// link() fails with EEXIST rather than replacing: an existing lesson is never overwritten.
+		await fs.link(tempPath, lessonPath);
+	} catch (error) {
+		return journalError(`Failed to write lesson "${params.name}": ${String(error)}`, {
+			action: params.action,
+			name: params.name,
+		});
+	}
+	await fs.rm(tempPath, { force: true });
+	return {
+		content: [{ type: "text", text: `Recorded lesson "${params.name}" (${params.action}) in ${lessonPath}.` }],
+		details: { action: params.action, name: params.name, authored, path: lessonPath },
+	};
 }

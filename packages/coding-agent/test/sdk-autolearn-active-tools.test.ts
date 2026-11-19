@@ -99,6 +99,25 @@ describe("createAgentSession auto-learn tool activation", () => {
 		expect(names).not.toContain("manage_skill");
 	});
 
+	it("journal mode keeps manage_skill and its guidance off the main turn", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"autolearn.enabled": true,
+				"autolearn.journalDir": path.join(registryDir, "journal"),
+			}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			...noDiscoveryOptions(),
+			toolNames: ["read"],
+		});
+		sessions.push(session);
+		expect(session.getActiveToolNames()).not.toContain("manage_skill");
+		expect(session.systemPrompt.join("\n")).not.toContain("Auto-Learn");
+	});
+
 	it("activates checkpoint and rewind when only rewind is in an explicit toolNames list", async () => {
 		const { session } = await createAgentSession({
 			cwd: registryDir,
