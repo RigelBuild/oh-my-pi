@@ -22,13 +22,16 @@ package gate
 
 config: #Config & {
 	globs: [
-		"packages/*/src/prompts/**",
+		"packages/**/prompts/**/*.md",
+		"crates/*/prompts/**",
+		"python/*/src/prompts/**",
+		"packages/{ai,coding-agent,tui}/src/**/*.md",
 		"packages/coding-agent/src/extensibility/custom-commands/bundled/**",
-		".omp/skills/**/SKILL.md",
-		"docs/skills/**/SKILL.md",
+		".omp/commands/*.md",
+		".omp/skills/**/*.md",
 		"AGENTS.md",
 	]
-	excludeGlobs: ["**/node_modules/**", "packages/catalog/src/compat/rules/**"]
+	excludeGlobs: ["**/node_modules/**", "**/test/**", "**/fixtures/**", "packages/catalog/src/compat/rules/**"]
 	pattern: #"(?i)reasoning|chain of thought|chain-of-thought|thinking process|your thought process|explain (your|how you)|walk (me )?through (your|how)|show your work|step[- ]by[- ]step|think (out loud|aloud)|internal monologue|scratchpad"#
 	configKeys: [
 		#"(?i)^\s*["']?(?:reasonin[g]_effort|thinking[-_]level|thinkingLevel|disableReasoning)["']?\s*:"#,
