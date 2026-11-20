@@ -112,11 +112,11 @@ impl<T: napi::bindgen_prelude::ToNapiValue> napi::bindgen_prelude::ToNapiValue f
 
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), test))]
 mod allocator {
+	#[cfg(test)]
+	use std::sync::atomic::{AtomicUsize, Ordering};
 	use std::time::{Duration, Instant};
 
 	use parking_lot::{Condvar, Mutex, MutexGuard};
-	#[cfg(test)]
-	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	/// Quiet time after the last job before trimming: long enough to skip the
 	/// gaps inside a burst of tool calls, short enough to trim while the agent
@@ -172,12 +172,12 @@ mod allocator {
 	impl Trimmer {
 		const fn new() -> Self {
 			Self {
-				activity: Mutex::new(Activity { running: 0, pending: None }),
-				idle:     Condvar::new(),
+				activity:            Mutex::new(Activity { running: 0, pending: None }),
+				idle:                Condvar::new(),
 				#[cfg(test)]
-				passes:   AtomicUsize::new(0),
+				passes:              AtomicUsize::new(0),
 				#[cfg(test)]
-				parks:    AtomicUsize::new(0),
+				parks:               AtomicUsize::new(0),
 			}
 		}
 
@@ -500,7 +500,8 @@ mod allocator {
 		#[test]
 		fn a_counted_job_past_the_delay_bound_parks_the_trimmer() {
 			const MAX: Duration = Duration::from_millis(1);
-			// The wake and the park after it, plus slack. A spin exceeds this at once.
+			// The wake and the park after it, plus slack. A spin exceeds this at
+			// once.
 			const MAX_PASSES: usize = 4;
 			// Hang guard only: a trimmer that neither parks nor spins fails here.
 			const HANG: Duration = Duration::from_secs(10);
@@ -508,7 +509,8 @@ mod allocator {
 			let trimmer = spawn_trimmer(MAX, MAX, move || trimmed_tx.send(()).unwrap());
 
 			// Under the lock: the job is counted and its finished work is already
-			// past the delay bound. The woken trimmer cannot run until the lock drops.
+			// past the delay bound. The woken trimmer cannot run until the lock
+			// drops.
 			let overdue = Instant::now() - MAX * 2;
 			let (passes_before, parks_before) = {
 				let mut activity = trimmer.activity.lock();
