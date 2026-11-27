@@ -117,6 +117,22 @@ describe("IRC", () => {
 		expect(JSON.stringify(result)).not.toContain(body);
 	});
 
+	it.each([
+		{ assignmentId: "", checkId: "check" },
+		{ assignmentId: "", checkId: undefined },
+		{ assignmentId: undefined, checkId: "check" },
+		{ assignmentId: undefined, checkId: "" },
+		{ assignmentId: "assignment", checkId: "" },
+	])("rejects partial advisory fields: %o", async fields => {
+		const result = await executeSend(
+			{ registry, senderId: "Child", childSessionId: "child" },
+			{ to: "Parent", message: "not a report", ...fields },
+		);
+
+		expect(result.isError).toBe(true);
+		expect(JSON.stringify(result.content)).toContain("Advisory assignment is unavailable.");
+	});
+
 	it("emits reply state to a waiter without relaying it to main", async () => {
 		AdvisoryHub.resetGlobalForTests();
 		const hub = AdvisoryHub.main();

@@ -9,6 +9,7 @@
 ### Fixed
 
 - Disconnecting a disassembler database now reports it as not connected at once, so a closed reference fails with the reopen hint instead of a host-exited error.
+- Empty advisory identity fields no longer prevent a plain `agent://` message from reaching its recipient.
 
 ## [18.22.2] - 2026-11-18
 

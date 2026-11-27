@@ -6,7 +6,7 @@ import { AdvisoryHub } from "../../src/task/advisory-hub";
 import type { ToolSession } from "../../src/tools";
 import { WriteTool } from "../../src/tools/write";
 
-it("routes tagged writes and excludes invalid report bodies from errors", async () => {
+it("routes bound replies through the advisory hub and excludes invalid report bodies from errors", async () => {
 	AgentRegistry.resetGlobalForTests();
 	AdvisoryHub.resetGlobalForTests();
 	const registry = AgentRegistry.global();
