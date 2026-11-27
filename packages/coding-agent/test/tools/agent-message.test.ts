@@ -74,6 +74,20 @@ describe("write agent:// messaging", () => {
 		]);
 	});
 
+	it("sends a plain redirect when both advisory fields are empty", async () => {
+		registerPeer("Scout");
+		const result = await new WriteTool(makeSession()).execute("send", {
+			path: "agent://Scout",
+			content: "plain redirect",
+			assignmentId: "",
+			checkId: "",
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(result.content).toEqual([{ type: "text", text: "Delivered to Scout." }]);
+		expect(received.get("Scout")?.map(message => message.body)).toEqual(["plain redirect"]);
+	});
+
 	it("broadcasts to live peers without reviving parked agents", async () => {
 		registerPeer("Scout");
 		registerPeer("Reviewer", "idle");

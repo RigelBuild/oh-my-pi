@@ -40,7 +40,9 @@ export async function executeSend(
 		return coordinationErrorResult("A non-empty message is required.", { op: "send", from: senderId });
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
-	if (params.assignmentId !== undefined || params.checkId !== undefined) {
+	const hasAdvisoryFields = params.assignmentId !== undefined || params.checkId !== undefined;
+	const isEmptyAdvisoryFields = params.assignmentId === "" && params.checkId === "";
+	if (hasAdvisoryFields && !isEmptyAdvisoryFields) {
 		if (
 			!params.assignmentId ||
 			Buffer.byteLength(params.assignmentId) > 128 ||
